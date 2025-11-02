@@ -5,5 +5,4 @@ edition = "2024"
 
 [dependencies]
 microlp = "0.2.11"
-serde = { version = "1.0.228", features = ["derive"] }
 thiserror = "2.0.17"
