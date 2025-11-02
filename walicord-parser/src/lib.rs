@@ -240,7 +240,19 @@ pub fn parse_program<'a>(
                         defined_groups.insert(decl.name);
                     }
                     Statement::Payment(p) => {
-                        if !defined_members.contains(p.payee) && !defined_groups.contains(p.payee) {
+                        if p.payer != "MEMBERS"
+                            && !defined_members.contains(p.payer)
+                            && !defined_groups.contains(p.payer)
+                        {
+                            return Err(ParseError::UndefinedMember {
+                                name: p.payer.to_string(),
+                                line: idx + 1,
+                            });
+                        }
+                        if p.payee != "MEMBERS"
+                            && !defined_members.contains(p.payee)
+                            && !defined_groups.contains(p.payee)
+                        {
                             return Err(ParseError::UndefinedMember {
                                 name: p.payee.to_string(),
                                 line: idx + 1,
