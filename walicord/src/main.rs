@@ -76,7 +76,7 @@ impl CommandKind {
 
     fn undefined_member_error(&self, line: usize, name: &str, members: &[&str]) -> String {
         format!(
-            "{}中にエラーが発生しました: 行 {line} に未定義のメンバー「{name}」が使用されています。\n現在のメンバー: [{members:?}]",
+            "{}中にエラーが発生しました: 行 {line} に未定義のメンバー「{name}」が使用されています。\n現在のメンバー: {members:?}",
             self.context_label()
         )
     }
@@ -282,9 +282,8 @@ impl<'a> Handler<'a> {
             }
             ProcessingOutcome::UndefinedMember { name, line } => {
                 self.react(ctx, msg, '❎').await;
-                let member_list = members.join(", ");
                 let error_msg = format!(
-                    "エラー: 行 {line} に未定義のメンバー「{name}」が使用されています。\nチャンネルtopicのMEMBERS宣言で定義してください。\n現在のメンバー: [{member_list}]"
+                    "エラー: 行 {line} に未定義のメンバー「{name}」が使用されています。\nチャンネルtopicのMEMBERS宣言で定義してください。\n現在のメンバー: {members:?}"
                 );
                 self.reply(ctx, msg, format!("{} {error_msg}", msg.author.mention()))
                     .await;
