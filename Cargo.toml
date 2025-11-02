@@ -1,0 +1,8 @@
+[workspace]
+members = [
+    "walicord", "walicord-calc", "walicord-parser"
+]
+resolver = "3"
+
+[workspace.lints.clippy]
+uninlined_format_args = "deny"

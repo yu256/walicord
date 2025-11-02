@@ -1,0 +1,5 @@
+imports_granularity = "Crate"
+reorder_imports = true
+reorder_modules = true
+merge_derives = true
+format_generated_files = false
