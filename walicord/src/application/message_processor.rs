@@ -92,29 +92,51 @@ impl<'a> MessageProcessor<'a> {
         // Process payments
         for stmt in &program.statements {
             if let Statement::Payment(payment) = stmt {
-                // Expand payer to members (if it's a group)
-                let payer_members = groups.get(&payment.payer).map_or_else(
-                    || Either::Left(iter::once(payment.payer)),
-                    |v| Either::Right(v.iter().copied()),
-                );
+                fn expand_members<'a>(
+                    member: &'a str,
+                    groups: &'a HashMap<&str, &[&str]>,
+                    all_members: &'a [&'a str],
+                ) -> impl ExactSizeIterator<Item = &'a str> {
+                    if member == "MEMBERS" {
+                        Either::Right(all_members.iter().copied())
+                    } else {
+                        groups.get(member).map_or_else(
+                            || Either::Left(iter::once(member)),
+                            |v| Either::Right(v.iter().copied()),
+                        )
+                    }
+                }
 
-                // Expand payee to members (if it's a group)
-                let payee_members = groups.get(&payment.payee).map_or_else(
-                    || Either::Left(iter::once(payment.payee)),
-                    |v| Either::Right(v.iter().copied()),
-                );
+                let payer_members = expand_members(payment.payer, &groups, program.members);
+                let payee_members = expand_members(payment.payee, &groups, program.members);
 
                 let total_payers = payer_members.len() as u64;
                 let total_payees = payee_members.len() as u64;
-                let amount_per_payer = payment.amount / total_payers;
-                let amount_per_payee = payment.amount / total_payees;
 
-                for payer_member in payer_members {
-                    *balances.get_mut(payer_member).unwrap() += amount_per_payer as i64;
+                if total_payers > 0 {
+                    let amount_per_payer = payment.amount / total_payers;
+                    let remainder_payer = payment.amount % total_payers;
+
+                    for (i, payer_member) in payer_members.enumerate() {
+                        let mut paid_amount = amount_per_payer;
+                        if (i as u64) < remainder_payer {
+                            paid_amount += 1;
+                        }
+                        *balances.get_mut(payer_member).unwrap() += paid_amount as i64;
+                    }
                 }
 
-                for payee_member in payee_members {
-                    *balances.get_mut(payee_member).unwrap() -= amount_per_payee as i64;
+                if total_payees > 0 {
+                    let amount_per_payee = payment.amount / total_payees;
+                    let remainder_payee = payment.amount % total_payees;
+
+                    for (i, payee_member) in payee_members.enumerate() {
+                        let mut received_amount = amount_per_payee;
+                        if (i as u64) < remainder_payee {
+                            received_amount += 1;
+                        }
+                        *balances.get_mut(payee_member).unwrap() -= received_amount as i64;
+                    }
                 }
             }
         }
