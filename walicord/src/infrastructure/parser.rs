@@ -13,7 +13,7 @@ impl ProgramParser for WalicordProgramParser {
         &self,
         members: &'a [&'a str],
         content: &'a str,
-    ) -> Result<Program<'a>, ProgramParseError> {
+    ) -> Result<Program<'a>, ProgramParseError<'a>> {
         match parse_program(members, content) {
             Ok(program) => {
                 let walicord_parser::Program {

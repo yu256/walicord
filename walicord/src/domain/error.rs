@@ -1,5 +1,5 @@
-pub enum ProgramParseError {
+pub enum ProgramParseError<'a> {
     MissingMembersDeclaration,
-    UndefinedMember { name: String, line: usize },
+    UndefinedMember { name: &'a str, line: usize },
     SyntaxError(String),
 }

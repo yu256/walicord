@@ -11,7 +11,7 @@ use nom::{
 use std::{borrow::Cow, collections::HashSet};
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum SetOp<'a> {
+enum SetOp<'a> {
     Push(&'a str),
     Union,
     Intersection,
@@ -28,12 +28,8 @@ impl<'a> SetExpr<'a> {
         Self { ops: Vec::new() }
     }
 
-    pub fn push(&mut self, op: SetOp<'a>) {
+    fn push(&mut self, op: SetOp<'a>) {
         self.ops.push(op);
-    }
-
-    pub fn ops(&self) -> &[SetOp<'a>] {
-        &self.ops
     }
 
     pub fn referenced_names(&self) -> impl Iterator<Item = &'a str> + '_ {
@@ -158,11 +154,11 @@ pub struct Program<'a> {
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 #[error("Parse error: {0}")]
-pub enum ParseError {
+pub enum ParseError<'a> {
     NoMembersDeclaration(#[from] NoMembersDeclarationError),
     #[error("Undefined member '{name}' at line {line}.")]
     UndefinedMember {
-        name: String,
+        name: &'a str,
         line: usize,
     },
     SyntaxError(String),
@@ -398,7 +394,7 @@ fn statement(input: &str) -> IResult<&str, Statement<'_>> {
 pub fn parse_program<'a>(
     members_decl: &'a [&'a str],
     input: &'a str,
-) -> Result<Program<'a>, ParseError> {
+) -> Result<Program<'a>, ParseError<'a>> {
     let defined_members: HashSet<&str> = members_decl.iter().copied().collect();
     let mut defined_groups: HashSet<&str> = HashSet::new();
 
@@ -428,7 +424,7 @@ pub fn parse_program<'a>(
                             }
                             if !defined_members.contains(name) && !defined_groups.contains(name) {
                                 return Err(ParseError::UndefinedMember {
-                                    name: name.to_string(),
+                                    name,
                                     line: idx + 1,
                                 });
                             }
@@ -442,7 +438,7 @@ pub fn parse_program<'a>(
                             }
                             if !defined_members.contains(name) && !defined_groups.contains(name) {
                                 return Err(ParseError::UndefinedMember {
-                                    name: name.to_string(),
+                                    name,
                                     line: idx + 1,
                                 });
                             }

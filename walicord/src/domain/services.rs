@@ -5,5 +5,5 @@ pub trait ProgramParser: Send + Sync {
         &self,
         members: &'a [&'a str],
         content: &'a str,
-    ) -> Result<Program<'a>, ProgramParseError>;
+    ) -> Result<Program<'a>, ProgramParseError<'a>>;
 }

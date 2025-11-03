@@ -14,7 +14,7 @@ pub struct MessageProcessor<'a> {
 pub enum ProcessingOutcome<'a> {
     Success(Program<'a>),
     MissingMembersDeclaration,
-    UndefinedMember { name: String, line: usize },
+    UndefinedMember { name: &'a str, line: usize },
     SyntaxError { message: String },
 }
 
@@ -109,7 +109,10 @@ impl<'a> MessageProcessor<'a> {
         &self,
         members: &'b [&'b str],
         content: &'b str,
-    ) -> ProcessingOutcome<'b> {
+    ) -> ProcessingOutcome<'b>
+    where
+        'a: 'b,
+    {
         match self.parser.parse(members, content) {
             Ok(program) => ProcessingOutcome::Success(program),
             Err(ProgramParseError::MissingMembersDeclaration) => {
@@ -126,30 +129,23 @@ impl<'a> MessageProcessor<'a> {
 
     pub fn format_variables_response(&self, program: Program) -> String {
         let mut reply = String::with_capacity(512);
-        reply.push_str("**MEMBERS**\n");
-        reply.push_str("```\n");
-        reply.push_str(&program.members.join(", "));
-        reply.push_str("\n```\n");
+        let _ = writeln!(&mut reply, "`MEMBERS` := {}", program.members.join(", "));
+        reply.push('\n');
 
-        let declarations: Vec<_> = program
-            .statements
-            .iter()
-            .filter_map(|s| match s {
-                Statement::Declaration(d) => Some(d),
-                _ => None,
-            })
-            .collect();
+        let declarations = program.statements.iter().filter_map(|s| match s {
+            Statement::Declaration(d) => Some(d),
+            _ => None,
+        });
 
-        if !declarations.is_empty() {
-            reply.push_str("\n**GROUPS**\n");
-            for decl in declarations {
-                let listing = if decl.members.is_empty() {
-                    "[empty]".to_string()
-                } else {
-                    decl.members.join(", ")
-                };
-                let _ = writeln!(&mut reply, "- `{}` := {listing}", decl.name);
-            }
+        for decl in declarations {
+            let tmp;
+            let listing = if decl.members.is_empty() {
+                "[empty]"
+            } else {
+                tmp = decl.members.join(", ");
+                &tmp
+            };
+            let _ = writeln!(&mut reply, "- `{}` := {listing}", decl.name);
         }
 
         reply
