@@ -4,5 +4,5 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-microlp = "0.2.11"
+good_lp = { version = "1.14.0", features = ["microlp"], default-features = false }
 thiserror = "2.0.17"

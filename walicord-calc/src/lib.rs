@@ -2,7 +2,7 @@
 
 mod model;
 
-use microlp::{ComparisonOp, OptimizationDirection, Problem, Variable};
+use good_lp::{Expression, Solution, SolverModel, Variable, default_solver, variable, variables};
 use thiserror::Error;
 
 pub use model::{PersonBalance, SettlementResult};
@@ -26,69 +26,71 @@ pub fn minimize_transactions<'a>(
         return Err(SettlementError::ImbalancedTotal(total));
     }
 
-    let mut problem = Problem::new(OptimizationDirection::Minimize);
+    let mut vars = variables!();
 
-    // Create variables: how_much[i][j] = amount paid from i to j (non-negative)
-    // who_pays[i][j] = binary variable (1 if i pays j, 0 otherwise)
-    let mut how_much: Vec<Vec<Option<Variable>>> = vec![vec![None; n]; n];
-    let mut who_pays: Vec<Vec<Option<Variable>>> = vec![vec![None; n]; n];
-
+    let mut index_map = vec![vec![None; n]; n];
+    let expected_pairs = n.saturating_mul(n.saturating_sub(1));
+    let mut pairs = Vec::with_capacity(expected_pairs);
     for i in 0..n {
         for j in 0..n {
-            if i != j {
-                // add_var(objective_coefficient, (lower_bound, upper_bound))
-                how_much[i][j] = Some(problem.add_var(beta, (0.0, f64::INFINITY)));
-                who_pays[i][j] = Some(problem.add_var(alpha, (0.0, 1.0)));
+            if i == j {
+                continue;
             }
+            let idx = pairs.len();
+            index_map[i][j] = Some(idx);
+            pairs.push((i, j));
         }
     }
 
+    let mut how_much: Vec<Variable> = Vec::with_capacity(pairs.len());
+    let mut who_pays: Vec<Variable> = Vec::with_capacity(pairs.len());
+    let mut objective = Expression::with_capacity(pairs.len() * 2);
+
+    for _ in 0..pairs.len() {
+        let flow_var = vars.add(variable().min(0.0));
+        objective.add_mul(beta, flow_var);
+        how_much.push(flow_var);
+
+        let binary_var = vars.add(variable().binary());
+        objective.add_mul(alpha, binary_var);
+        who_pays.push(binary_var);
+    }
+
     let big_m = 1_000_000_000.0;
+    let mut problem = vars.minimise(objective).using(default_solver);
 
     // Constraint: how_much[i][j] <= big_m * who_pays[i][j]
-    for i in 0..n {
-        for j in 0..n {
-            if i != j
-                && let (Some(hm), Some(wp)) = (how_much[i][j], who_pays[i][j])
-            {
-                problem.add_constraint([(hm, 1.0), (wp, -big_m)], ComparisonOp::Le, 0.0);
-            }
-        }
+    for (&hm, &wp) in how_much.iter().zip(&who_pays) {
+        problem = problem.with((hm - big_m * wp).leq(0.0));
     }
 
     // Balance constraints: inflow - outflow = balance
     for i in 0..n {
-        let mut constraint = vec![];
-        for (j, _) in how_much.iter().enumerate().take(n) {
-            if i != j {
-                if let Some(hm_ji) = how_much[j][i] {
-                    constraint.push((hm_ji, 1.0)); // inflow
-                }
-                if let Some(hm_ij) = how_much[i][j] {
-                    constraint.push((hm_ij, -1.0)); // outflow
-                }
+        let mut constraint = Expression::default();
+        for j in 0..n {
+            if let Some(idx) = index_map[j][i] {
+                constraint.add_mul(1.0, how_much[idx]); // inflow
+            }
+            if let Some(idx) = index_map[i][j] {
+                constraint.add_mul(-1.0, how_much[idx]); // outflow
             }
         }
-        problem.add_constraint(&constraint, ComparisonOp::Eq, people[i].balance as f64);
+        problem = problem.with(constraint.eq(people[i].balance as f64));
     }
 
-    let solution = problem.solve().map_err(|_| SettlementError::NoSolution)?;
+    let Ok(solution) = problem.solve() else {
+        return Err(SettlementError::NoSolution);
+    };
 
-    let mut results = Vec::new();
-    for i in 0..n {
-        for j in 0..n {
-            if i != j
-                && let Some(hm) = how_much[i][j]
-            {
-                let amount = solution[hm].round() as i64;
-                if amount > 0 {
-                    results.push(SettlementResult {
-                        from: people[i].name,
-                        to: people[j].name,
-                        amount,
-                    });
-                }
-            }
+    let mut results = Vec::with_capacity(pairs.len());
+    for (idx, &(i, j)) in pairs.iter().enumerate() {
+        let amount = solution.value(how_much[idx]).round() as i64;
+        if amount > 0 {
+            results.push(SettlementResult {
+                from: people[i].name,
+                to: people[j].name,
+                amount,
+            });
         }
     }
 

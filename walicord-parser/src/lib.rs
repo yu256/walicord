@@ -86,7 +86,7 @@ impl<'a> SetExpr<'a> {
                     }
                 }
                 if is_wrapped {
-                    result = result[1..result.len()-1].to_string();
+                    result = result[1..result.len() - 1].to_string();
                 }
             }
             Some(result)
@@ -436,17 +436,11 @@ pub fn parse_program<'a>(
                         defined_groups.insert(decl.name);
                     }
                     Statement::Payment(p) => {
-                        for name in p
-                            .payer
-                            .referenced_names()
-                            .chain(p.payee.referenced_names())
-                        {
+                        for name in p.payer.referenced_names().chain(p.payee.referenced_names()) {
                             if name == "MEMBERS" {
                                 continue;
                             }
-                            if !defined_members.contains(name)
-                                && !defined_groups.contains(name)
-                            {
+                            if !defined_members.contains(name) && !defined_groups.contains(name) {
                                 return Err(ParseError::UndefinedMember {
                                     name: name.to_string(),
                                     line: idx + 1,

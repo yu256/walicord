@@ -204,7 +204,7 @@ impl<'a> MessageProcessor<'a> {
         person_balances.sort_by_key(|p| p.name);
 
         // Calculate settlement
-        let settlements = minimize_transactions(&person_balances, 1.0, 0.0)
+        let settlements = minimize_transactions(&person_balances, 1.0, 0.001)
             .map_err(|e| format!("清算の計算に失敗しました: {e}"))?;
 
         // Format response

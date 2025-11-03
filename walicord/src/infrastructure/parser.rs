@@ -3,7 +3,7 @@ use crate::domain::{
     model::{Payment, Statement},
 };
 use std::collections::{HashMap, HashSet};
-use walicord_parser::{ParseError, parse_program, Statement as ParserStatement};
+use walicord_parser::{ParseError, Statement as ParserStatement, parse_program};
 
 #[derive(Default)]
 pub struct WalicordProgramParser;
@@ -66,7 +66,11 @@ impl ProgramParser for WalicordProgramParser {
                             }));
                         }
                         ParserStatement::Payment(parser_payment) => {
-                            let walicord_parser::Payment { amount, payer, payee } = parser_payment;
+                            let walicord_parser::Payment {
+                                amount,
+                                payer,
+                                payee,
+                            } = parser_payment;
                             domain_statements.push(Statement::Payment(Payment {
                                 amount,
                                 payer,
