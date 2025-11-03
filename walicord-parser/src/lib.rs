@@ -124,8 +124,8 @@ pub struct Declaration<'a> {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Payment<'a> {
     pub amount: u64,
-    pub payer: &'a str,
-    pub payee: &'a str,
+    pub payer: SetExpr<'a>,
+    pub payee: SetExpr<'a>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -304,8 +304,8 @@ fn to(input: &str) -> IResult<&str, &str> {
 // {payer} が {payee} に {amount}貸した
 fn payment_lender_subject_ja(input: &str) -> IResult<&str, Payment<'_>> {
     (
-        identifier, // payer
-        sp, ga, sp, identifier, // payee
+        set_expr, // payer
+        sp, ga, sp, set_expr, // payee
         sp, ni, sp, yen, // amount
         sp, lent,
     )
@@ -320,9 +320,9 @@ fn payment_lender_subject_ja(input: &str) -> IResult<&str, Payment<'_>> {
 // {payer} lent {amount} to {payee}
 fn payment_lender_subject_en(input: &str) -> IResult<&str, Payment<'_>> {
     (
-        identifier, // payer
+        set_expr, // payer
         sp, lent, sp, yen, // amount
-        sp, to, sp, identifier, // payee
+        sp, to, sp, set_expr, // payee
     )
         .map(|(payer, _, _, _, amount, _, _, _, payee)| Payment {
             amount,
@@ -335,8 +335,8 @@ fn payment_lender_subject_en(input: &str) -> IResult<&str, Payment<'_>> {
 // {payee} が {payer} から {amount}借りた
 fn payment_borrower_subject_ja(input: &str) -> IResult<&str, Payment<'_>> {
     (
-        identifier, // payee
-        sp, ga, sp, identifier, // payer
+        set_expr, // payee
+        sp, ga, sp, set_expr, // payer
         sp, from, // "から"
         sp, yen, // amount
         sp, borrowed,
@@ -351,7 +351,7 @@ fn payment_borrower_subject_ja(input: &str) -> IResult<&str, Payment<'_>> {
 
 // payee borrowed amount from payer
 fn payment_borrower_subject_en(input: &str) -> IResult<&str, Payment<'_>> {
-    (identifier, sp, borrowed, sp, yen, sp, from, sp, identifier)
+    (set_expr, sp, borrowed, sp, yen, sp, from, sp, set_expr)
         .map(|(payee, _, _, _, amount, _, _, _, payer)| Payment {
             amount,
             payer,
@@ -420,23 +420,22 @@ pub fn parse_program<'a>(
                         defined_groups.insert(decl.name);
                     }
                     Statement::Payment(p) => {
-                        if p.payer != "MEMBERS"
-                            && !defined_members.contains(p.payer)
-                            && !defined_groups.contains(p.payer)
+                        for name in p
+                            .payer
+                            .referenced_names()
+                            .chain(p.payee.referenced_names())
                         {
-                            return Err(ParseError::UndefinedMember {
-                                name: p.payer.to_string(),
-                                line: idx + 1,
-                            });
-                        }
-                        if p.payee != "MEMBERS"
-                            && !defined_members.contains(p.payee)
-                            && !defined_groups.contains(p.payee)
-                        {
-                            return Err(ParseError::UndefinedMember {
-                                name: p.payee.to_string(),
-                                line: idx + 1,
-                            });
+                            if name == "MEMBERS" {
+                                continue;
+                            }
+                            if !defined_members.contains(name)
+                                && !defined_groups.contains(name)
+                            {
+                                return Err(ParseError::UndefinedMember {
+                                    name: name.to_string(),
+                                    line: idx + 1,
+                                });
+                            }
                         }
                     }
                 }

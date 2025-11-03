@@ -1,3 +1,5 @@
+use walicord_parser::SetExpr;
+
 pub struct Declaration<'a> {
     pub name: &'a str,
     pub members: Vec<&'a str>,
@@ -5,8 +7,8 @@ pub struct Declaration<'a> {
 
 pub struct Payment<'a> {
     pub amount: u64,
-    pub payer: &'a str,
-    pub payee: &'a str,
+    pub payer: SetExpr<'a>,
+    pub payee: SetExpr<'a>,
 }
 
 pub enum Statement<'a> {

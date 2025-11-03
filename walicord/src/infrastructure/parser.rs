@@ -3,7 +3,7 @@ use crate::domain::{
     model::{Payment, Statement},
 };
 use std::collections::{HashMap, HashSet};
-use walicord_parser::{ParseError, parse_program};
+use walicord_parser::{ParseError, parse_program, Statement as ParserStatement};
 
 #[derive(Default)]
 pub struct WalicordProgramParser;
@@ -32,7 +32,7 @@ impl ProgramParser for WalicordProgramParser {
 
                 for stmt in statements {
                     match stmt {
-                        walicord_parser::Statement::Declaration(decl) => {
+                        ParserStatement::Declaration(decl) => {
                             let Some(result_set_cow) = decl.expression.evaluate(&|name| {
                                 evaluated_groups.get(name).or_else(|| base_sets.get(name))
                             }) else {
@@ -65,11 +65,12 @@ impl ProgramParser for WalicordProgramParser {
                                 members: members_vec,
                             }));
                         }
-                        walicord_parser::Statement::Payment(p) => {
+                        ParserStatement::Payment(parser_payment) => {
+                            let walicord_parser::Payment { amount, payer, payee } = parser_payment;
                             domain_statements.push(Statement::Payment(Payment {
-                                amount: p.amount,
-                                payer: p.payer,
-                                payee: p.payee,
+                                amount,
+                                payer,
+                                payee,
                             }));
                         }
                     }
