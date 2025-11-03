@@ -1,7 +1,10 @@
 use crate::domain::{Program, ProgramParseError, ProgramParser, model::Statement};
-use either::Either;
-use std::{collections::HashMap, iter};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt::Write as _,
+};
 use walicord_calc::{PersonBalance, minimize_transactions};
+use walicord_parser::SetExpr;
 
 #[derive(Clone, Copy)]
 pub struct MessageProcessor<'a> {
@@ -13,6 +16,88 @@ pub enum ProcessingOutcome<'a> {
     MissingMembersDeclaration,
     UndefinedMember { name: String, line: usize },
     SyntaxError { message: String },
+}
+
+struct SetEnvironment<'a> {
+    order: &'a [&'a str],
+    order_lookup: HashSet<&'a str>,
+    sets: HashMap<&'a str, HashSet<&'a str>>,
+}
+
+impl<'a> SetEnvironment<'a> {
+    fn new(order: &'a [&'a str]) -> Self {
+        let order_lookup: HashSet<&str> = order.iter().copied().collect();
+
+        let mut sets: HashMap<&str, HashSet<&str>> = order
+            .iter()
+            .copied()
+            .map(|member| (member, HashSet::from([member])))
+            .collect();
+        sets.insert("MEMBERS", order_lookup.clone());
+
+        Self {
+            order,
+            order_lookup,
+            sets,
+        }
+    }
+
+    fn insert_group<I>(&mut self, name: &'a str, members: I)
+    where
+        I: IntoIterator<Item = &'a str>,
+    {
+        self.sets.insert(name, members.into_iter().collect());
+    }
+
+    fn resolve_members(&self, expr: &SetExpr<'a>) -> Option<Vec<&'a str>> {
+        let result = expr.evaluate(&|name| self.sets.get(name))?;
+        Some(self.order_members(result.as_ref()))
+    }
+
+    fn order_members(&self, set: &HashSet<&'a str>) -> Vec<&'a str> {
+        let mut ordered: Vec<&str> = self
+            .order
+            .iter()
+            .copied()
+            .filter(|member| set.contains(member))
+            .collect();
+
+        if ordered.len() == set.len() {
+            return ordered;
+        }
+
+        let mut extras: Vec<&str> = set
+            .iter()
+            .copied()
+            .filter(|member| !self.order_lookup.contains(member))
+            .collect();
+        extras.sort_unstable();
+        ordered.extend(extras);
+        ordered
+    }
+}
+
+fn distribute<'a>(
+    balances: &mut HashMap<&'a str, i64>,
+    members: &[&'a str],
+    amount: u64,
+    direction: i64,
+) {
+    if members.is_empty() {
+        return;
+    }
+
+    let len = members.len() as u64;
+    let base = amount / len;
+    let remainder = (amount % len) as usize;
+
+    for (idx, &member) in members.iter().enumerate() {
+        let mut share = base;
+        if idx < remainder {
+            share += 1;
+        }
+        *balances.entry(member).or_insert(0) += direction * share as i64;
+    }
 }
 
 impl<'a> MessageProcessor<'a> {
@@ -40,7 +125,7 @@ impl<'a> MessageProcessor<'a> {
     }
 
     pub fn format_variables_response(&self, program: Program) -> String {
-        let mut reply = String::new();
+        let mut reply = String::with_capacity(512);
         reply.push_str("**MEMBERS**\n");
         reply.push_str("```\n");
         reply.push_str(&program.members.join(", "));
@@ -58,11 +143,12 @@ impl<'a> MessageProcessor<'a> {
         if !declarations.is_empty() {
             reply.push_str("\n**GROUPS**\n");
             for decl in declarations {
-                reply.push_str(&format!(
-                    "- `{}` := {}\n",
-                    decl.name,
+                let listing = if decl.members.is_empty() {
+                    "[empty]".to_string()
+                } else {
                     decl.members.join(", ")
-                ));
+                };
+                let _ = writeln!(&mut reply, "- `{}` := {listing}", decl.name);
             }
         }
 
@@ -70,73 +156,33 @@ impl<'a> MessageProcessor<'a> {
     }
 
     pub fn calculate_balances<'b>(&self, program: &'b Program) -> HashMap<&'b str, i64> {
-        let mut balances: HashMap<&str, i64> = HashMap::new();
+        let mut balances: HashMap<&str, i64> = program
+            .members
+            .iter()
+            .copied()
+            .map(|member| (member, 0))
+            .collect();
 
-        // Initialize all members with balance 0
-        for member in program.members {
-            balances.insert(member, 0);
-        }
+        let mut set_env = SetEnvironment::new(program.members);
 
-        // Build group definitions
-        let mut groups: HashMap<&str, &[&str]> = HashMap::new();
         for stmt in &program.statements {
-            if let Statement::Declaration(decl) = stmt {
-                groups.insert(decl.name, &decl.members);
-                // Initialize group members with balance 0 if not already present
-                for member in &decl.members {
-                    balances.entry(member).or_insert(0);
-                }
-            }
-        }
-
-        // Process payments
-        for stmt in &program.statements {
-            if let Statement::Payment(payment) = stmt {
-                fn expand_members<'a>(
-                    member: &'a str,
-                    groups: &'a HashMap<&str, &[&str]>,
-                    all_members: &'a [&'a str],
-                ) -> impl ExactSizeIterator<Item = &'a str> {
-                    if member == "MEMBERS" {
-                        Either::Right(all_members.iter().copied())
-                    } else {
-                        groups.get(member).map_or_else(
-                            || Either::Left(iter::once(member)),
-                            |v| Either::Right(v.iter().copied()),
-                        )
+            match stmt {
+                Statement::Declaration(decl) => {
+                    for &member in &decl.members {
+                        balances.entry(member).or_insert(0);
                     }
+                    set_env.insert_group(decl.name, decl.members.iter().copied());
                 }
+                Statement::Payment(payment) => {
+                    let Some(payer_members) = set_env.resolve_members(&payment.payer) else {
+                        continue;
+                    };
+                    let Some(payee_members) = set_env.resolve_members(&payment.payee) else {
+                        continue;
+                    };
 
-                let payer_members = expand_members(payment.payer, &groups, program.members);
-                let payee_members = expand_members(payment.payee, &groups, program.members);
-
-                let total_payers = payer_members.len() as u64;
-                let total_payees = payee_members.len() as u64;
-
-                if total_payers > 0 {
-                    let amount_per_payer = payment.amount / total_payers;
-                    let remainder_payer = payment.amount % total_payers;
-
-                    for (i, payer_member) in payer_members.enumerate() {
-                        let mut paid_amount = amount_per_payer;
-                        if (i as u64) < remainder_payer {
-                            paid_amount += 1;
-                        }
-                        *balances.get_mut(payer_member).unwrap() += paid_amount as i64;
-                    }
-                }
-
-                if total_payees > 0 {
-                    let amount_per_payee = payment.amount / total_payees;
-                    let remainder_payee = payment.amount % total_payees;
-
-                    for (i, payee_member) in payee_members.enumerate() {
-                        let mut received_amount = amount_per_payee;
-                        if (i as u64) < remainder_payee {
-                            received_amount += 1;
-                        }
-                        *balances.get_mut(payee_member).unwrap() -= received_amount as i64;
-                    }
+                    distribute(&mut balances, &payer_members, payment.amount, 1);
+                    distribute(&mut balances, &payee_members, payment.amount, -1);
                 }
             }
         }
@@ -162,23 +208,22 @@ impl<'a> MessageProcessor<'a> {
             .map_err(|e| format!("清算の計算に失敗しました: {e}"))?;
 
         // Format response
-        let mut reply = String::new();
-        use std::fmt::Write;
+        let mut reply = String::with_capacity(1024);
+
         reply.push_str("## 💰 割り勘計算結果\n\n");
 
         // Balance table
         reply.push_str("### 各メンバーの収支\n");
         reply.push_str("```\n");
-        writeln!(&mut reply, "{:<15} | {:>10}", "メンバー", "収支").unwrap();
-        writeln!(&mut reply, "{:-<15}-+-{:-<10}", "", "").unwrap();
+        let _ = writeln!(&mut reply, "{:<15} | {:>10}", "メンバー", "収支");
+        let _ = writeln!(&mut reply, "{:-<15}-+-{:-<10}", "", "");
         for person in &person_balances {
             let sign = if person.balance >= 0 { "+" } else { "" };
-            writeln!(
+            let _ = writeln!(
                 &mut reply,
                 "{:<15} | {sign:>9}{}",
                 person.name, person.balance
-            )
-            .unwrap();
+            );
         }
         reply.push_str("```\n\n");
 
@@ -188,20 +233,18 @@ impl<'a> MessageProcessor<'a> {
         } else {
             reply.push_str("### 精算方法\n");
             reply.push_str("```\n");
-            writeln!(
+            let _ = writeln!(
                 &mut reply,
                 "{:<15} -> {:<15} | {:>10}",
                 "支払人", "受取人", "金額"
-            )
-            .unwrap();
-            writeln!(&mut reply, "{:-<15}----{:-<15}-+-{:-<10}", "", "", "").unwrap();
+            );
+            let _ = writeln!(&mut reply, "{:-<15}----{:-<15}-+-{:-<10}", "", "", "");
             for settlement in &settlements {
-                writeln!(
+                let _ = writeln!(
                     &mut reply,
                     "{:<15} -> {:<15} | {:>10}",
                     settlement.from, settlement.to, settlement.amount
-                )
-                .unwrap();
+                );
             }
             reply.push_str("```\n");
         }
