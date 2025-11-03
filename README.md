@@ -17,7 +17,7 @@ Discord上で共有経費を追跡し、グループメンバー間の最適な�
 - **serenity**: Discord APIクライアント
 - **tokio**: 非同期ランタイム
 - **nom**: DSLパーサー
-- **microlp**: 線形計画法ソルバー
+- **good_lp**: 混合整数線形計画問題ソルバー
 - **dashmap**: 並行HashMap
 - **tracing**: 構造化ログ
 - **indexmap**: 順序保持HashMap
