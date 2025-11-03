@@ -1,6 +1,6 @@
 use crate::domain::{Program, ProgramParseError, ProgramParser, model::Statement};
 use either::Either;
-use std::{collections::HashMap, iter};
+use std::{collections::HashMap, fmt::Write as _, iter};
 use walicord_calc::{PersonBalance, minimize_transactions};
 
 #[derive(Clone, Copy)]
@@ -40,7 +40,7 @@ impl<'a> MessageProcessor<'a> {
     }
 
     pub fn format_variables_response(&self, program: Program) -> String {
-        let mut reply = String::new();
+        let mut reply = String::with_capacity(512);
         reply.push_str("**MEMBERS**\n");
         reply.push_str("```\n");
         reply.push_str(&program.members.join(", "));
@@ -58,11 +58,12 @@ impl<'a> MessageProcessor<'a> {
         if !declarations.is_empty() {
             reply.push_str("\n**GROUPS**\n");
             for decl in declarations {
-                reply.push_str(&format!(
-                    "- `{}` := {}\n",
-                    decl.name,
+                let listing = if decl.members.is_empty() {
+                    "[empty]".to_string()
+                } else {
                     decl.members.join(", ")
-                ));
+                };
+                let _ = writeln!(&mut reply, "- `{}` := {listing}\n", decl.name);
             }
         }
 
@@ -162,23 +163,22 @@ impl<'a> MessageProcessor<'a> {
             .map_err(|e| format!("清算の計算に失敗しました: {e}"))?;
 
         // Format response
-        let mut reply = String::new();
-        use std::fmt::Write;
+        let mut reply = String::with_capacity(1024);
+
         reply.push_str("## 💰 割り勘計算結果\n\n");
 
         // Balance table
         reply.push_str("### 各メンバーの収支\n");
         reply.push_str("```\n");
-        writeln!(&mut reply, "{:<15} | {:>10}", "メンバー", "収支").unwrap();
-        writeln!(&mut reply, "{:-<15}-+-{:-<10}", "", "").unwrap();
+        let _ = writeln!(&mut reply, "{:<15} | {:>10}", "メンバー", "収支");
+        let _ = writeln!(&mut reply, "{:-<15}-+-{:-<10}", "", "");
         for person in &person_balances {
             let sign = if person.balance >= 0 { "+" } else { "" };
-            writeln!(
+            let _ = writeln!(
                 &mut reply,
                 "{:<15} | {sign:>9}{}",
                 person.name, person.balance
-            )
-            .unwrap();
+            );
         }
         reply.push_str("```\n\n");
 
@@ -188,20 +188,18 @@ impl<'a> MessageProcessor<'a> {
         } else {
             reply.push_str("### 精算方法\n");
             reply.push_str("```\n");
-            writeln!(
+            let _ = writeln!(
                 &mut reply,
                 "{:<15} -> {:<15} | {:>10}",
                 "支払人", "受取人", "金額"
-            )
-            .unwrap();
-            writeln!(&mut reply, "{:-<15}----{:-<15}-+-{:-<10}", "", "", "").unwrap();
+            );
+            let _ = writeln!(&mut reply, "{:-<15}----{:-<15}-+-{:-<10}", "", "", "");
             for settlement in &settlements {
-                writeln!(
+                let _ = writeln!(
                     &mut reply,
                     "{:<15} -> {:<15} | {:>10}",
                     settlement.from, settlement.to, settlement.amount
-                )
-                .unwrap();
+                );
             }
             reply.push_str("```\n");
         }

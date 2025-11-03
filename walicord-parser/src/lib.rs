@@ -8,12 +8,117 @@ use nom::{
     combinator::opt,
     multi::separated_list1,
 };
-use std::collections::HashSet;
+use std::{borrow::Cow, collections::HashSet};
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum SetOp<'a> {
+    Push(&'a str),
+    Union,
+    Intersection,
+    Difference,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct SetExpr<'a> {
+    ops: Vec<SetOp<'a>>,
+}
+
+impl<'a> SetExpr<'a> {
+    pub fn new() -> Self {
+        Self { ops: Vec::new() }
+    }
+
+    pub fn push(&mut self, op: SetOp<'a>) {
+        self.ops.push(op);
+    }
+
+    pub fn ops(&self) -> &[SetOp<'a>] {
+        &self.ops
+    }
+
+    pub fn referenced_names(&self) -> impl Iterator<Item = &'a str> + '_ {
+        self.ops.iter().filter_map(|op| match op {
+            SetOp::Push(name) => Some(*name),
+            _ => None,
+        })
+    }
+
+    pub fn to_infix_string(&self) -> Option<String> {
+        let mut stack: Vec<String> = Vec::new();
+
+        for op in &self.ops {
+            match op {
+                SetOp::Push(name) => stack.push((*name).to_string()),
+                SetOp::Union => {
+                    let b = stack.pop()?;
+                    let a = stack.pop()?;
+                    stack.push(format!("({a} ∪ {b})"));
+                }
+                SetOp::Intersection => {
+                    let b = stack.pop()?;
+                    let a = stack.pop()?;
+                    stack.push(format!("({a} ∩ {b})"));
+                }
+                SetOp::Difference => {
+                    let b = stack.pop()?;
+                    let a = stack.pop()?;
+                    stack.push(format!("({a} - {b})"));
+                }
+            }
+        }
+
+        if stack.len() == 1 {
+            let mut result = stack.pop()?;
+            if result.starts_with('(') && result.ends_with(')') && result.len() > 1 {
+                result.pop();
+                result.remove(0);
+            }
+            Some(result)
+        } else {
+            None
+        }
+    }
+
+    // Evaluate the RPN expression given a function to resolve names to sets
+    pub fn evaluate<'b, F>(&self, resolver: &F) -> Option<Cow<'b, HashSet<&'a str>>>
+    where
+        'a: 'b,
+        F: Fn(&str) -> Option<&'b HashSet<&'a str>>,
+    {
+        let mut stack: Vec<Cow<'b, HashSet<&'a str>>> = Vec::with_capacity(self.ops.len());
+
+        for op in &self.ops {
+            match op {
+                SetOp::Push(name) => {
+                    let set = resolver(name)?;
+                    stack.push(Cow::Borrowed(set));
+                }
+                SetOp::Union => {
+                    let b = stack.pop()?;
+                    let a = stack.pop()?;
+                    stack.push(Cow::Owned(a.union(&b).copied().collect()));
+                }
+                SetOp::Intersection => {
+                    let b = stack.pop()?;
+                    let a = stack.pop()?;
+                    stack.push(Cow::Owned(a.intersection(&b).copied().collect()));
+                }
+                SetOp::Difference => {
+                    let b = stack.pop()?;
+                    let a = stack.pop()?;
+                    stack.push(Cow::Owned(a.difference(&b).copied().collect()));
+                }
+            }
+        }
+
+        if stack.len() == 1 { stack.pop() } else { None }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Declaration<'a> {
     pub name: &'a str,
-    pub members: Vec<&'a str>,
+    pub expression: SetExpr<'a>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -83,10 +188,76 @@ fn members_declaration(input: &str) -> IResult<&str, Vec<&str>> {
         .parse(input)
 }
 
-// name := member1, member2
+// Parse a primary expression: either an identifier or a parenthesized expression
+fn set_primary(input: &str) -> IResult<&str, SetExpr<'_>> {
+    alt((
+        (char('('), sp, set_expr, sp, char(')')).map(|(_, _, expr, _, _)| expr),
+        identifier.map(|name| {
+            let mut expr = SetExpr::new();
+            expr.push(SetOp::Push(name));
+            expr
+        }),
+    ))
+    .parse(input)
+}
+
+// Parse difference operations (highest precedence after primary)
+fn set_difference(input: &str) -> IResult<&str, SetExpr<'_>> {
+    (
+        set_primary,
+        nom::multi::many0((sp, tag("-"), sp, set_primary)),
+    )
+        .map(|(first, ops)| {
+            ops.into_iter().fold(first, |mut acc, (_, _, _, right)| {
+                // Merge right's ops into acc, then add Difference op
+                acc.ops.extend(right.ops);
+                acc.push(SetOp::Difference);
+                acc
+            })
+        })
+        .parse(input)
+}
+
+// Parse intersection operations (middle precedence)
+fn set_intersection(input: &str) -> IResult<&str, SetExpr<'_>> {
+    (
+        set_difference,
+        nom::multi::many0((sp, tag("∩"), sp, set_difference)),
+    )
+        .map(|(first, ops)| {
+            ops.into_iter().fold(first, |mut acc, (_, _, _, right)| {
+                acc.ops.extend(right.ops);
+                acc.push(SetOp::Intersection);
+                acc
+            })
+        })
+        .parse(input)
+}
+
+// Parse union operations (lowest precedence)
+fn set_expr(input: &str) -> IResult<&str, SetExpr<'_>> {
+    (
+        set_intersection,
+        nom::multi::many0((sp, union_token, sp, set_intersection)),
+    )
+        .map(|(first, ops)| {
+            ops.into_iter().fold(first, |mut acc, (_, _, _, right)| {
+                acc.ops.extend(right.ops);
+                acc.push(SetOp::Union);
+                acc
+            })
+        })
+        .parse(input)
+}
+
+fn union_token(input: &str) -> IResult<&str, &str> {
+    alt((tag("∪"), tag(","), tag("，"))).parse(input)
+}
+
+// name := expression (e.g., name := (A ∪ B) ∩ C)
 fn declaration(input: &str) -> IResult<&str, Declaration<'_>> {
-    (identifier, sp, tag(":="), sp, members_list)
-        .map(|(name, _, _, _, members)| Declaration { name, members })
+    (identifier, sp, tag(":="), sp, set_expr)
+        .map(|(name, _, _, _, expression)| Declaration { name, expression })
         .parse(input)
 }
 
@@ -224,15 +395,24 @@ pub fn parse_program<'a>(
         }
 
         match statement(trimmed) {
-            Ok((_, stmt)) => {
+            Ok((rest, stmt)) => {
+                if !rest.trim().is_empty() {
+                    return Err(ParseError::SyntaxError(format!(
+                        "行 {}: 構文エラー - 解析されていない入力: {}",
+                        idx + 1,
+                        rest.trim()
+                    )));
+                }
                 match &stmt {
                     Statement::Declaration(decl) => {
-                        // Check if all members in the declaration are defined
-                        for member in &decl.members {
-                            if !defined_members.contains(member) && !defined_groups.contains(member)
-                            {
+                        // Check if all referenced names in the declaration are defined
+                        for name in decl.expression.referenced_names() {
+                            if name == "MEMBERS" {
+                                continue;
+                            }
+                            if !defined_members.contains(name) && !defined_groups.contains(name) {
                                 return Err(ParseError::UndefinedMember {
-                                    name: member.to_string(),
+                                    name: name.to_string(),
                                     line: idx + 1,
                                 });
                             }
@@ -290,4 +470,116 @@ pub fn extract_members_from_topic(topic: &str) -> Result<Vec<&str>, NoMembersDec
         }
     }
     Err(NoMembersDeclarationError)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_simple_name() {
+        let input = "A";
+        let (_, expr) = set_expr(input).unwrap();
+        assert_eq!(expr.ops, vec![SetOp::Push("A")]);
+    }
+
+    #[test]
+    fn test_union() {
+        let input = "A ∪ B";
+        let (_, expr) = set_expr(input).unwrap();
+        assert_eq!(
+            expr.ops,
+            vec![SetOp::Push("A"), SetOp::Push("B"), SetOp::Union]
+        );
+    }
+
+    #[test]
+    fn test_union_with_comma() {
+        let input = "A, B";
+        let (_, expr) = set_expr(input).unwrap();
+        assert_eq!(
+            expr.ops,
+            vec![SetOp::Push("A"), SetOp::Push("B"), SetOp::Union]
+        );
+    }
+
+    #[test]
+    fn test_intersection() {
+        let input = "A ∩ B";
+        let (_, expr) = set_expr(input).unwrap();
+        assert_eq!(
+            expr.ops,
+            vec![SetOp::Push("A"), SetOp::Push("B"), SetOp::Intersection]
+        );
+    }
+
+    #[test]
+    fn test_difference() {
+        let input = "A - B";
+        let (_, expr) = set_expr(input).unwrap();
+        assert_eq!(
+            expr.ops,
+            vec![SetOp::Push("A"), SetOp::Push("B"), SetOp::Difference]
+        );
+    }
+
+    #[test]
+    fn test_complex_expression() {
+        // (A ∪ B) ∩ C
+        let input = "(A ∪ B) ∩ C";
+        let (_, expr) = set_expr(input).unwrap();
+        assert_eq!(
+            expr.ops,
+            vec![
+                SetOp::Push("A"),
+                SetOp::Push("B"),
+                SetOp::Union,
+                SetOp::Push("C"),
+                SetOp::Intersection
+            ]
+        );
+    }
+
+    #[test]
+    fn test_infix_string() {
+        let input = "(A ∪ B) ∩ C";
+        let (_, expr) = set_expr(input).unwrap();
+        let infix = expr.to_infix_string().unwrap();
+        assert_eq!(infix, "(A ∪ B) ∩ C");
+
+        let input2 = "A - B ∪ C";
+        let (_, expr2) = set_expr(input2).unwrap();
+        let infix2 = expr2.to_infix_string().unwrap();
+        assert_eq!(infix2, "(A - B) ∪ C");
+    }
+
+    #[test]
+    fn test_evaluation() {
+        use std::collections::HashMap;
+
+        let mut sets = HashMap::new();
+        sets.insert("A", HashSet::from(["1", "2", "3"]));
+        sets.insert("B", HashSet::from(["2", "3", "4"]));
+        sets.insert("C", HashSet::from(["3", "4", "5"]));
+
+        let resolver = |name: &str| sets.get(name);
+
+        // A ∪ B = {1, 2, 3, 4}
+        let input = "A ∪ B";
+        let (_, expr) = set_expr(input).unwrap();
+        let result = expr.evaluate(&resolver).unwrap();
+        assert_eq!(result, Cow::Owned(HashSet::from(["1", "2", "3", "4"])));
+
+        // (A ∪ B) ∩ C = {3, 4}
+        let input = "(A ∪ B) ∩ C";
+        let (_, expr) = set_expr(input).unwrap();
+        let result = expr.evaluate(&resolver).unwrap();
+        assert_eq!(result, Cow::Owned(HashSet::from(["3", "4"])));
+
+        // A - B = {1}
+        let input = "A - B";
+        let (_, expr) = set_expr(input).unwrap();
+        let result = expr.evaluate(&resolver).unwrap();
+        assert_eq!(result, Cow::Owned(HashSet::from(["1"])));
+    }
 }
