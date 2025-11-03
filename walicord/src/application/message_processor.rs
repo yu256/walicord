@@ -89,11 +89,11 @@ fn distribute<'a>(
 
     let len = members.len() as u64;
     let base = amount / len;
-    let remainder = amount % len;
+    let remainder = (amount % len) as usize;
 
     for (idx, &member) in members.iter().enumerate() {
         let mut share = base;
-        if (idx as u64) < remainder {
+        if idx < remainder {
             share += 1;
         }
         *balances.entry(member).or_insert(0) += direction * share as i64;
