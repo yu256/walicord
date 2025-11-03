@@ -69,9 +69,25 @@ impl<'a> SetExpr<'a> {
 
         if stack.len() == 1 {
             let mut result = stack.pop()?;
+            // Only strip the outermost parentheses if they wrap the entire expression
             if result.starts_with('(') && result.ends_with(')') && result.len() > 1 {
-                result.pop();
-                result.remove(0);
+                let mut depth = 0;
+                let mut is_wrapped = true;
+                for (i, c) in result.chars().enumerate() {
+                    if c == '(' {
+                        depth += 1;
+                    } else if c == ')' {
+                        depth -= 1;
+                        // If we reach depth 0 before the last char, it's not fully wrapped
+                        if depth == 0 && i != result.len() - 1 {
+                            is_wrapped = false;
+                            break;
+                        }
+                    }
+                }
+                if is_wrapped {
+                    result = result[1..result.len()-1].to_string();
+                }
             }
             Some(result)
         } else {
