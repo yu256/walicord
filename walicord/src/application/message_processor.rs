@@ -148,7 +148,7 @@ impl<'a> MessageProcessor<'a> {
                 } else {
                     decl.members.join(", ")
                 };
-                let _ = writeln!(&mut reply, "- `{}` := {listing}\n", decl.name);
+                let _ = writeln!(&mut reply, "- `{}` := {listing}", decl.name);
             }
         }
 
