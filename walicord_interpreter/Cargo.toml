@@ -1,0 +1,8 @@
+[package]
+name = "walicord_interpreter"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+walicord_core = { path = "../walicord_core" }
+walicord-parser = { path = "../walicord-parser" }

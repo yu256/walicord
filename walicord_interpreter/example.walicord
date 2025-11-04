@@ -1,0 +1,12 @@
+MEMBERS := Alice, Bob, Carol, Dave
+
+FRIENDS := Alice, Bob
+TEAM_B := Carol, Dave
+LONERS := MEMBERS - FRIENDS
+
+TEAM_B borrowed ¥4000 from FRIENDS
+Alice lent 500 to Dave
+LONERS borrowed 1200yen from Bob
+
+!variables
+!evaluate

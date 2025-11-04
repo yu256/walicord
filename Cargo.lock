@@ -2020,6 +2020,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "walicord_interpreter"
+version = "0.1.0"
+dependencies = [
+ "walicord-parser",
+ "walicord_core",
+]
+
+[[package]]
 name = "walkdir"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

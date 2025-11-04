@@ -3,6 +3,7 @@ members = [
     "walicord",
     "walicord-calc",
     "walicord_core",
+    "walicord_interpreter",
     "walicord-parser"
 ]
 resolver = "3"
