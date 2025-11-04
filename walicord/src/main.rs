@@ -1,17 +1,10 @@
 #![warn(clippy::uninlined_format_args)]
 
-mod application;
-mod domain;
 mod infrastructure;
 
-use application::{MessageProcessor, ProcessingOutcome};
 use dashmap::DashMap;
-use domain::model::{Command as ProgramCommand, Statement};
 use indexmap::IndexMap;
-use infrastructure::{
-    discord::{ChannelError, DiscordChannelService},
-    parser::WalicordProgramParser,
-};
+use infrastructure::discord::{ChannelError, DiscordChannelService};
 use serenity::{
     all::MessageId,
     async_trait,
@@ -23,6 +16,11 @@ use serenity::{
     prelude::*,
 };
 use std::env;
+use walicord_core::{
+    application::{MessageProcessor, ProcessingOutcome},
+    domain::model::{Command as ProgramCommand, Statement},
+    infrastructure::parser::WalicordProgramParser,
+};
 use walicord_parser::extract_members_from_topic;
 
 fn load_target_channel_ids() -> Vec<ChannelId> {
@@ -121,13 +119,12 @@ impl<'a> Handler<'a> {
             }
             Err(MembersError::MissingDeclaration) => {
                 self.react(ctx, msg, '❎').await;
-                self
-                    .reply(
-                        ctx,
-                        msg,
-                        format!("{} エラー: {MISSING_MEMBERS_MESSAGE}", msg.author.mention()),
-                    )
-                    .await;
+                self.reply(
+                    ctx,
+                    msg,
+                    format!("{} エラー: {MISSING_MEMBERS_MESSAGE}", msg.author.mention()),
+                )
+                .await;
                 return false;
             }
         };
@@ -136,13 +133,12 @@ impl<'a> Handler<'a> {
             Ok(members) => members,
             Err(_) => {
                 self.react(ctx, msg, '❎').await;
-                self
-                    .reply(
-                        ctx,
-                        msg,
-                        format!("{} エラー: {MISSING_MEMBERS_MESSAGE}", msg.author.mention()),
-                    )
-                    .await;
+                self.reply(
+                    ctx,
+                    msg,
+                    format!("{} エラー: {MISSING_MEMBERS_MESSAGE}", msg.author.mention()),
+                )
+                .await;
                 return false;
             }
         };
@@ -217,13 +213,12 @@ impl<'a> Handler<'a> {
             }
             ProcessingOutcome::MissingMembersDeclaration => {
                 self.react(ctx, msg, '❎').await;
-                self
-                    .reply(
-                        ctx,
-                        msg,
-                        format!("{} エラー: {MISSING_MEMBERS_MESSAGE}", msg.author.mention()),
-                    )
-                    .await;
+                self.reply(
+                    ctx,
+                    msg,
+                    format!("{} エラー: {MISSING_MEMBERS_MESSAGE}", msg.author.mention()),
+                )
+                .await;
                 false
             }
             ProcessingOutcome::UndefinedMember { name, line } => {

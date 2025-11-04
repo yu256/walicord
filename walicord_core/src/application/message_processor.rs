@@ -190,7 +190,6 @@ impl<'a> MessageProcessor<'a> {
     pub fn format_settlement_response(&self, program: &Program) -> Result<String, String> {
         let balances = self.calculate_balances(program);
 
-        // Convert to PersonBalance format
         let mut person_balances: Vec<PersonBalance> = balances
             .iter()
             .map(|(name, balance)| PersonBalance {
@@ -200,16 +199,13 @@ impl<'a> MessageProcessor<'a> {
             .collect();
         person_balances.sort_by_key(|p| p.name);
 
-        // Calculate settlement
         let settlements = minimize_transactions(&person_balances, 1.0, 0.001)
             .map_err(|e| format!("清算の計算に失敗しました: {e}"))?;
 
-        // Format response
         let mut reply = String::with_capacity(1024);
 
         reply.push_str("## 💰 割り勘計算結果\n\n");
 
-        // Balance table
         reply.push_str("### 各メンバーの収支\n");
         reply.push_str("```\n");
         let _ = writeln!(&mut reply, "{:<15} | {:>10}", "メンバー", "収支");
@@ -224,7 +220,6 @@ impl<'a> MessageProcessor<'a> {
         }
         reply.push_str("```\n\n");
 
-        // Settlement table
         if settlements.is_empty() {
             reply.push_str("### ✅ 精算済み\n全員の収支がゼロです。\n");
         } else {

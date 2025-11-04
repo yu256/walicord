@@ -3,7 +3,9 @@ use crate::domain::{
     model::{Command, Payment, Statement},
 };
 use std::collections::{HashMap, HashSet};
-use walicord_parser::{Command as ParserCommand, ParseError, Statement as ParserStatement, parse_program};
+use walicord_parser::{
+    Command as ParserCommand, ParseError, Statement as ParserStatement, parse_program,
+};
 
 #[derive(Default)]
 pub struct WalicordProgramParser;

@@ -1,6 +1,9 @@
 [workspace]
 members = [
-    "walicord", "walicord-calc", "walicord-parser"
+    "walicord",
+    "walicord-calc",
+    "walicord_core",
+    "walicord-parser"
 ]
 resolver = "3"
 
