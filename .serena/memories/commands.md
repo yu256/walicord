@@ -11,6 +11,14 @@ cargo run -p walicord
 - `!variables`: Displays the current state of variables and groups.
 - `!evaluate`: Calculates and displays the final settlement of debts.
 
+### Running the interpreter
+
+To run the interpreter, you can use the following command:
+
+```sh
+cargo run --package walicord_interpreter -- <file.walicord>
+```
+
 ### Development Commands
 
 - **Testing:** `cargo test`
