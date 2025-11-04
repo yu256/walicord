@@ -1991,8 +1991,8 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "walicord-core",
  "walicord-parser",
- "walicord_core",
 ]
 
 [[package]]
@@ -2004,15 +2004,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "walicord-parser"
-version = "0.1.0"
-dependencies = [
- "nom",
- "thiserror 2.0.17",
-]
-
-[[package]]
-name = "walicord_core"
+name = "walicord-core"
 version = "0.1.0"
 dependencies = [
  "walicord-calc",
@@ -2020,11 +2012,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "walicord_interpreter"
+name = "walicord-interpreter"
 version = "0.1.0"
 dependencies = [
+ "walicord-core",
  "walicord-parser",
- "walicord_core",
+]
+
+[[package]]
+name = "walicord-parser"
+version = "0.1.0"
+dependencies = [
+ "nom",
+ "thiserror 2.0.17",
 ]
 
 [[package]]

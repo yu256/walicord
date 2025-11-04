@@ -24,24 +24,22 @@ Discord上で共有経費を追跡し、グループメンバー間の最適な�
 
 ## プロジェクト構成
 
-## プロジェクト構成
-
 このプロジェクトは5つのクレートで構成されるRustワークスペースです:
 
 - **walicord**: Discord APIとの連携を担当するメインのDiscordボットアプリケーション
-- **walicord_core**: 通貨の解析や計算といった中核ロジック
+- **walicord-core**: 通貨の解析や計算といった中核ロジック
 - **walicord-parser**: DSLパーサーライブラリ
 - **walicord-calc**: 債務決済最適化ライブラリ
-- **walicord_interpreter**: `.walicord`スクリプトを実行するためのコマンドラインツール
+- **walicord-interpreter**: `.walicord`スクリプトを実行するためのコマンドラインツール
 
-## `walicord_interpreter`
+## `walicord-interpreter`
 
-`walicord_interpreter`は、Discordを介さずに`walicord`のコアロジックをテストしたり、スクリプトとして実行したりするためのコマンドラインツールです。
+`walicord-interpreter`は、Discordを介さずに`walicord`のコアロジックをテストしたり、スクリプトとして実行したりするためのコマンドラインツールです。
 
 ### 使い方
 
 ```sh
-cargo run --package walicord_interpreter -- <file.walicord>
+cargo run --package walicord-interpreter -- <file.walicord>
 ```
 
 ### `.walicord` ファイルフォーマット

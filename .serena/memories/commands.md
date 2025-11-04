@@ -16,7 +16,7 @@ cargo run -p walicord
 To run the interpreter, you can use the following command:
 
 ```sh
-cargo run --package walicord_interpreter -- <file.walicord>
+cargo run --package walicord-interpreter -- <file.walicord>
 ```
 
 ### Development Commands
