@@ -6,7 +6,7 @@ mod infrastructure;
 
 use application::{MessageProcessor, ProcessingOutcome};
 use dashmap::DashMap;
-use domain::Program;
+use domain::model::{Command as ProgramCommand, Statement};
 use indexmap::IndexMap;
 use infrastructure::{
     discord::{ChannelError, DiscordChannelService},
@@ -37,57 +37,8 @@ fn load_target_channel_ids() -> Vec<ChannelId> {
         .collect()
 }
 
-const VARIABLES_COMMAND: &str = "!variables";
-const EVALUATE_COMMAND: &str = "!evaluate";
 const MISSING_MEMBERS_MESSAGE: &str =
     "チャンネルのtopicに `MEMBERS := ...` の宣言が見つかりません。";
-
-enum CommandKind {
-    Variables,
-    Evaluate,
-}
-
-impl CommandKind {
-    fn from_message(content: &str) -> Option<Self> {
-        match content.split_whitespace().next()? {
-            VARIABLES_COMMAND => Some(Self::Variables),
-            EVALUATE_COMMAND => Some(Self::Evaluate),
-            _ => None,
-        }
-    }
-
-    fn context_label(&self) -> &'static str {
-        match self {
-            Self::Variables => "変数の解析",
-            Self::Evaluate => "割り勘計算",
-        }
-    }
-
-    fn success_reply<'a>(
-        &self,
-        processor: MessageProcessor<'a>,
-        program: Program<'a>,
-    ) -> Result<String, String> {
-        match self {
-            Self::Variables => Ok(processor.format_variables_response(program)),
-            Self::Evaluate => processor.format_settlement_response(program),
-        }
-    }
-
-    fn undefined_member_error(&self, line: usize, name: &str, members: &[&str]) -> String {
-        format!(
-            "{}中にエラーが発生しました: 行 {line} に未定義のメンバー「{name}」が使用されています。\n現在のメンバー: {members:?}",
-            self.context_label()
-        )
-    }
-
-    fn syntax_error_message(&self, message: &str) -> String {
-        format!(
-            "{}中にエラーが発生しました: {message}",
-            self.context_label()
-        )
-    }
-}
 
 enum MembersError {
     Channel(ChannelError),
@@ -161,59 +112,6 @@ impl<'a> Handler<'a> {
         }
     }
 
-    async fn handle_command(&self, ctx: &Context, msg: &Message, command: CommandKind) {
-        let topic = match self.fetch_topic(ctx, msg.channel_id).await {
-            Ok(topic) => topic,
-            Err(MembersError::Channel(err)) => {
-                self.reply(
-                    ctx,
-                    msg,
-                    format!("チャンネル情報の取得に失敗しました: {err}"),
-                )
-                .await;
-                return;
-            }
-            Err(MembersError::MissingDeclaration) => {
-                self.reply(ctx, msg, MISSING_MEMBERS_MESSAGE).await;
-                return;
-            }
-        };
-
-        let members = match extract_members_from_topic(&topic) {
-            Ok(members) => members,
-            Err(_) => {
-                self.reply(ctx, msg, MISSING_MEMBERS_MESSAGE).await;
-                return;
-            }
-        };
-
-        let combined_content = self.get_combined_content(&msg.channel_id);
-
-        match self.processor.parse_program(&members, &combined_content) {
-            ProcessingOutcome::Success(program) => {
-                match command.success_reply(self.processor, program) {
-                    Ok(reply) => self.reply(ctx, msg, reply).await,
-                    Err(err_msg) => self.reply(ctx, msg, err_msg).await,
-                }
-            }
-            ProcessingOutcome::MissingMembersDeclaration => {
-                self.reply(ctx, msg, MISSING_MEMBERS_MESSAGE).await;
-            }
-            ProcessingOutcome::UndefinedMember { name, line } => {
-                self.reply(
-                    ctx,
-                    msg,
-                    command.undefined_member_error(line, &name, &members),
-                )
-                .await;
-            }
-            ProcessingOutcome::SyntaxError { message } => {
-                self.reply(ctx, msg, command.syntax_error_message(&message))
-                    .await;
-            }
-        }
-    }
-
     async fn process_program_message(&self, ctx: &Context, msg: &Message) -> bool {
         let topic = match self.fetch_topic(ctx, msg.channel_id).await {
             Ok(topic) => topic,
@@ -227,10 +125,7 @@ impl<'a> Handler<'a> {
                     .reply(
                         ctx,
                         msg,
-                        format!(
-                            "{} エラー: チャンネルのtopicに `MEMBERS := メンバー1, メンバー2, ...` の宣言が必要です。",
-                            msg.author.mention()
-                        ),
+                        format!("{} エラー: {MISSING_MEMBERS_MESSAGE}", msg.author.mention()),
                     )
                     .await;
                 return false;
@@ -245,26 +140,80 @@ impl<'a> Handler<'a> {
                     .reply(
                         ctx,
                         msg,
-                        format!(
-                            "{} エラー: チャンネルのtopicに `MEMBERS := メンバー1, メンバー2, ...` の宣言が必要です。",
-                            msg.author.mention()
-                        ),
+                        format!("{} エラー: {MISSING_MEMBERS_MESSAGE}", msg.author.mention()),
                     )
                     .await;
                 return false;
             }
         };
+        let existing_content = self.get_combined_content(&msg.channel_id);
 
-        let mut content = self.get_combined_content(&msg.channel_id);
+        let previous_statement_count = if existing_content.is_empty() {
+            0
+        } else {
+            match self.processor.parse_program(&members, &existing_content) {
+                ProcessingOutcome::Success(program) => program.statements.len(),
+                ProcessingOutcome::MissingMembersDeclaration
+                | ProcessingOutcome::UndefinedMember { .. }
+                | ProcessingOutcome::SyntaxError { .. } => 0,
+            }
+        };
+
+        let mut content = existing_content;
         if !content.is_empty() {
             content.push('\n');
         }
         content.push_str(&msg.content);
 
         match self.processor.parse_program(&members, &content) {
-            ProcessingOutcome::Success(_) => {
-                self.react(ctx, msg, '✅').await;
-                true
+            ProcessingOutcome::Success(program) => {
+                let mut commands: Vec<ProgramCommand> = Vec::new();
+                let mut has_effect_statement = false;
+                let mut should_store = false;
+
+                {
+                    let new_statements = if program.statements.len() >= previous_statement_count {
+                        &program.statements[previous_statement_count..]
+                    } else {
+                        &[]
+                    };
+
+                    if !new_statements.is_empty() {
+                        should_store = true;
+                    }
+
+                    for stmt in new_statements {
+                        match stmt {
+                            Statement::Declaration(_) | Statement::Payment(_) => {
+                                has_effect_statement = true;
+                            }
+                            Statement::Command(command) => {
+                                commands.push(*command);
+                            }
+                        }
+                    }
+                }
+
+                if has_effect_statement {
+                    self.react(ctx, msg, '✅').await;
+                }
+
+                for command in commands {
+                    match command {
+                        ProgramCommand::Variables => {
+                            let reply = self.processor.format_variables_response(&program);
+                            self.reply(ctx, msg, reply).await;
+                        }
+                        ProgramCommand::Evaluate => {
+                            match self.processor.format_settlement_response(&program) {
+                                Ok(reply) => self.reply(ctx, msg, reply).await,
+                                Err(err_msg) => self.reply(ctx, msg, err_msg).await,
+                            }
+                        }
+                    }
+                }
+
+                should_store
             }
             ProcessingOutcome::MissingMembersDeclaration => {
                 self.react(ctx, msg, '❎').await;
@@ -272,10 +221,7 @@ impl<'a> Handler<'a> {
                     .reply(
                         ctx,
                         msg,
-                        format!(
-                            "{} エラー: チャンネルのtopicに `MEMBERS := メンバー1, メンバー2, ...` の宣言が必要です。",
-                            msg.author.mention()
-                        ),
+                        format!("{} エラー: {MISSING_MEMBERS_MESSAGE}", msg.author.mention()),
                     )
                     .await;
                 false
@@ -319,11 +265,6 @@ impl EventHandler for Handler<'_> {
         }
 
         if !self.is_target_channel(msg.channel_id) {
-            return;
-        }
-
-        if let Some(command) = CommandKind::from_message(&msg.content) {
-            self.handle_command(&ctx, &msg, command).await;
             return;
         }
 

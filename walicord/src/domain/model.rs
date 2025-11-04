@@ -11,9 +11,16 @@ pub struct Payment<'a> {
     pub payee: SetExpr<'a>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Command {
+    Variables,
+    Evaluate,
+}
+
 pub enum Statement<'a> {
     Declaration(Declaration<'a>),
     Payment(Payment<'a>),
+    Command(Command),
 }
 
 pub struct Program<'a> {

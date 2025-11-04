@@ -127,7 +127,7 @@ impl<'a> MessageProcessor<'a> {
         }
     }
 
-    pub fn format_variables_response(&self, program: Program) -> String {
+    pub fn format_variables_response(&self, program: &Program) -> String {
         let mut reply = String::with_capacity(512);
         let _ = writeln!(&mut reply, "`MEMBERS` := {}", program.members.join(", "));
         reply.push('\n');
@@ -180,14 +180,15 @@ impl<'a> MessageProcessor<'a> {
                     distribute(&mut balances, &payer_members, payment.amount, 1);
                     distribute(&mut balances, &payee_members, payment.amount, -1);
                 }
+                Statement::Command(_) => {}
             }
         }
 
         balances
     }
 
-    pub fn format_settlement_response(&self, program: Program) -> Result<String, String> {
-        let balances = self.calculate_balances(&program);
+    pub fn format_settlement_response(&self, program: &Program) -> Result<String, String> {
+        let balances = self.calculate_balances(program);
 
         // Convert to PersonBalance format
         let mut person_balances: Vec<PersonBalance> = balances

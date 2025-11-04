@@ -1,9 +1,9 @@
 use crate::domain::{
     Declaration, Program, ProgramParseError, ProgramParser,
-    model::{Payment, Statement},
+    model::{Command, Payment, Statement},
 };
 use std::collections::{HashMap, HashSet};
-use walicord_parser::{ParseError, Statement as ParserStatement, parse_program};
+use walicord_parser::{Command as ParserCommand, ParseError, Statement as ParserStatement, parse_program};
 
 #[derive(Default)]
 pub struct WalicordProgramParser;
@@ -76,6 +76,13 @@ impl ProgramParser for WalicordProgramParser {
                                 payer,
                                 payee,
                             }));
+                        }
+                        ParserStatement::Command(parser_command) => {
+                            let command = match parser_command {
+                                ParserCommand::Variables => Command::Variables,
+                                ParserCommand::Evaluate => Command::Evaluate,
+                            };
+                            domain_statements.push(Statement::Command(command));
                         }
                     }
                 }

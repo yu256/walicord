@@ -3,7 +3,7 @@
 use nom::{
     IResult, Parser,
     branch::alt,
-    bytes::complete::{tag, take_while, take_while1},
+    bytes::complete::{tag, tag_no_case, take_while, take_while1},
     character::complete::{char, u64},
     combinator::opt,
     multi::separated_list1,
@@ -69,7 +69,7 @@ impl<'a> SetExpr<'a> {
             if result.starts_with('(') && result.ends_with(')') && result.len() > 1 {
                 let mut depth = 0;
                 let mut is_wrapped = true;
-                for (i, c) in result.chars().enumerate() {
+                for (i, c) in result.char_indices() {
                     if c == '(' {
                         depth += 1;
                     } else if c == ')' {
@@ -140,10 +140,17 @@ pub struct Payment<'a> {
     pub payee: SetExpr<'a>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Command {
+    Variables,
+    Evaluate,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Statement<'a> {
     Declaration(Declaration<'a>),
     Payment(Payment<'a>),
+    Command(Command),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -382,10 +389,19 @@ fn payment(input: &str) -> IResult<&str, Payment<'_>> {
     .parse(input)
 }
 
+fn command(input: &str) -> IResult<&str, Command> {
+    alt((
+        tag_no_case("!variables").map(|_| Command::Variables),
+        tag_no_case("!evaluate").map(|_| Command::Evaluate),
+    ))
+    .parse(input)
+}
+
 fn statement(input: &str) -> IResult<&str, Statement<'_>> {
     alt((
         declaration.map(Statement::Declaration),
         payment.map(Statement::Payment),
+        command.map(Statement::Command),
     ))
     .parse(input)
 }
@@ -444,6 +460,7 @@ pub fn parse_program<'a>(
                             }
                         }
                     }
+                    Statement::Command(_) => {}
                 }
                 statements.push(stmt);
             }
@@ -586,5 +603,19 @@ mod tests {
         let (_, expr) = set_expr(input).unwrap();
         let result = expr.evaluate(&resolver).unwrap();
         assert_eq!(result, Cow::Owned(HashSet::from(["1"])));
+    }
+
+    #[test]
+    fn test_parse_variables_command() {
+        let input = "!variables";
+        let (_, stmt) = statement(input).unwrap();
+        assert_eq!(stmt, Statement::Command(Command::Variables));
+    }
+
+    #[test]
+    fn test_parse_evaluate_command() {
+        let input = "!evaluate";
+        let (_, stmt) = statement(input).unwrap();
+        assert_eq!(stmt, Statement::Command(Command::Evaluate));
     }
 }

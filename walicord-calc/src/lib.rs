@@ -31,13 +31,13 @@ pub fn minimize_transactions<'a>(
     let mut index_map = vec![vec![None; n]; n];
     let expected_pairs = n.saturating_mul(n.saturating_sub(1));
     let mut pairs = Vec::with_capacity(expected_pairs);
-    for i in 0..n {
-        for j in 0..n {
+    for (i, row) in index_map.iter_mut().enumerate() {
+        for (j, slot) in row.iter_mut().enumerate() {
             if i == j {
                 continue;
             }
             let idx = pairs.len();
-            index_map[i][j] = Some(idx);
+            *slot = Some(idx);
             pairs.push((i, j));
         }
     }
@@ -65,17 +65,19 @@ pub fn minimize_transactions<'a>(
     }
 
     // Balance constraints: inflow - outflow = balance
-    for i in 0..n {
+    for (i, person) in people.iter().enumerate() {
         let mut constraint = Expression::default();
-        for j in 0..n {
-            if let Some(idx) = index_map[j][i] {
-                constraint.add_mul(1.0, how_much[idx]); // inflow
+        for row in &index_map {
+            if let Some(Some(idx)) = row.get(i) {
+                constraint.add_mul(1.0, how_much[*idx]); // inflow
             }
-            if let Some(idx) = index_map[i][j] {
+        }
+        for &maybe_idx in &index_map[i] {
+            if let Some(idx) = maybe_idx {
                 constraint.add_mul(-1.0, how_much[idx]); // outflow
             }
         }
-        problem = problem.with(constraint.eq(people[i].balance as f64));
+        problem = problem.with(constraint.eq(person.balance as f64));
     }
 
     let Ok(solution) = problem.solve() else {
