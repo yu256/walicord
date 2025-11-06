@@ -376,9 +376,10 @@ fn settle_selected_members<'a>(
                 }
             }
             if let Some(member_balance) = balances.get_mut(member) {
-                *member_balance -= transferred;
                 if remaining == 0 {
                     *member_balance = 0;
+                } else {
+                    *member_balance -= transferred;
                 }
             }
             debug_assert_eq!(remaining, 0);
@@ -402,9 +403,10 @@ fn settle_selected_members<'a>(
                 }
             }
             if let Some(member_balance) = balances.get_mut(member) {
-                *member_balance += transferred;
                 if remaining == 0 {
                     *member_balance = 0;
+                } else {
+                    *member_balance += transferred;
                 }
             }
             debug_assert_eq!(remaining, 0);
