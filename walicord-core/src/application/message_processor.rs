@@ -1,4 +1,7 @@
-use crate::domain::{Program, ProgramParseError, ProgramParser, model::Statement};
+use crate::domain::{
+    Program, ProgramParseError, ProgramParser,
+    model::{Command, Statement},
+};
 use std::{
     collections::{HashMap, HashSet},
     fmt::Write as _,
@@ -128,16 +131,34 @@ impl<'a> MessageProcessor<'a> {
     }
 
     pub fn format_variables_response(&self, program: &Program) -> String {
+        self.format_variables_response_from_slice(program.members, &program.statements)
+    }
+
+    pub fn format_variables_response_for_prefix(
+        &self,
+        program: &Program,
+        prefix_len: usize,
+    ) -> String {
+        let prefix_len = prefix_len.min(program.statements.len());
+        self.format_variables_response_from_slice(
+            program.members,
+            &program.statements[..prefix_len],
+        )
+    }
+
+    fn format_variables_response_from_slice(
+        &self,
+        members: &[&str],
+        statements: &[Statement<'_>],
+    ) -> String {
         let mut reply = String::with_capacity(512);
-        let _ = writeln!(&mut reply, "`MEMBERS` := {}", program.members.join(", "));
+        let _ = writeln!(&mut reply, "`MEMBERS` := {}", members.join(", "));
         reply.push('\n');
 
-        let declarations = program.statements.iter().filter_map(|s| match s {
+        for decl in statements.iter().filter_map(|s| match s {
             Statement::Declaration(d) => Some(d),
             _ => None,
-        });
-
-        for decl in declarations {
+        }) {
             let tmp;
             let listing = if decl.members.is_empty() {
                 "[empty]"
@@ -151,17 +172,39 @@ impl<'a> MessageProcessor<'a> {
         reply
     }
 
-    pub fn calculate_balances<'b>(&self, program: &'b Program) -> HashMap<&'b str, i64> {
-        let mut balances: HashMap<&str, i64> = program
-            .members
-            .iter()
-            .copied()
-            .map(|member| (member, 0))
-            .collect();
+    pub fn calculate_balances<'b>(&self, program: &'b Program<'b>) -> HashMap<&'b str, i64>
+    where
+        'a: 'b,
+    {
+        self.calculate_balances_from_slice(program.members, &program.statements)
+    }
 
-        let mut set_env = SetEnvironment::new(program.members);
+    pub fn calculate_balances_for_prefix<'b>(
+        &self,
+        program: &'b Program<'b>,
+        prefix_len: usize,
+    ) -> HashMap<&'b str, i64>
+    where
+        'a: 'b,
+    {
+        let prefix_len = prefix_len.min(program.statements.len());
+        self.calculate_balances_from_slice(program.members, &program.statements[..prefix_len])
+    }
 
-        for stmt in &program.statements {
+    fn calculate_balances_from_slice<'b>(
+        &self,
+        members: &'b [&'b str],
+        statements: &[Statement<'b>],
+    ) -> HashMap<&'b str, i64>
+    where
+        'a: 'b,
+    {
+        let mut balances: HashMap<&'b str, i64> =
+            members.iter().copied().map(|member| (member, 0)).collect();
+
+        let mut set_env = SetEnvironment::new(members);
+
+        for stmt in statements {
             match stmt {
                 Statement::Declaration(decl) => {
                     for &member in &decl.members {
@@ -180,7 +223,17 @@ impl<'a> MessageProcessor<'a> {
                     distribute(&mut balances, &payer_members, payment.amount, 1);
                     distribute(&mut balances, &payee_members, payment.amount, -1);
                 }
-                Statement::Command(_) => {}
+                Statement::Command(command) => match command {
+                    Command::Variables | Command::Evaluate => {}
+                    Command::SettleUp(expr) => {
+                        if let Some(settle_members) = set_env.resolve_members(expr)
+                            && !settle_members.is_empty()
+                        {
+                            let participants = build_participant_order(members, &balances);
+                            settle_selected_members(&mut balances, &participants, &settle_members);
+                        }
+                    }
+                },
             }
         }
 
@@ -188,7 +241,27 @@ impl<'a> MessageProcessor<'a> {
     }
 
     pub fn format_settlement_response(&self, program: &Program) -> Result<String, String> {
-        let balances = self.calculate_balances(program);
+        self.format_settlement_response_from_slice(program.members, &program.statements)
+    }
+
+    pub fn format_settlement_response_for_prefix(
+        &self,
+        program: &Program,
+        prefix_len: usize,
+    ) -> Result<String, String> {
+        let prefix_len = prefix_len.min(program.statements.len());
+        self.format_settlement_response_from_slice(
+            program.members,
+            &program.statements[..prefix_len],
+        )
+    }
+
+    fn format_settlement_response_from_slice(
+        &self,
+        members: &[&str],
+        statements: &[Statement<'_>],
+    ) -> Result<String, String> {
+        let balances = self.calculate_balances_from_slice(members, statements);
 
         let mut person_balances: Vec<PersonBalance> = balances
             .iter()
@@ -242,5 +315,167 @@ impl<'a> MessageProcessor<'a> {
         }
 
         Ok(reply)
+    }
+}
+
+fn build_participant_order<'a>(
+    base_members: &'a [&'a str],
+    balances: &HashMap<&'a str, i64>,
+) -> Vec<&'a str> {
+    let mut order = Vec::with_capacity(base_members.len() + balances.len());
+    let mut seen: HashSet<&'a str> = HashSet::new();
+
+    for &member in base_members {
+        if balances.contains_key(member) && seen.insert(member) {
+            order.push(member);
+        }
+    }
+
+    let mut extras: Vec<&'a str> = balances
+        .keys()
+        .copied()
+        .filter(|member| seen.insert(*member))
+        .collect();
+    extras.sort_unstable();
+    order.extend(extras);
+    order
+}
+
+fn settle_selected_members<'a>(
+    balances: &mut HashMap<&'a str, i64>,
+    participants: &[&'a str],
+    settle_members: &[&'a str],
+) {
+    for &member in settle_members {
+        let balance = match balances.get(member).copied() {
+            Some(b) => b,
+            None => continue,
+        };
+
+        if balance == 0 {
+            continue;
+        }
+
+        if balance > 0 {
+            let mut remaining = balance;
+            let mut transferred = 0;
+            for &other in participants {
+                if other == member {
+                    continue;
+                }
+                if let Some(other_balance) = balances.get_mut(other)
+                    && *other_balance < 0
+                {
+                    let transfer = remaining.min(-*other_balance);
+                    *other_balance += transfer;
+                    remaining -= transfer;
+                    transferred += transfer;
+                    if remaining == 0 {
+                        break;
+                    }
+                }
+            }
+            if let Some(member_balance) = balances.get_mut(member) {
+                if remaining == 0 {
+                    *member_balance = 0;
+                } else {
+                    *member_balance -= transferred;
+                }
+            }
+            debug_assert_eq!(remaining, 0);
+        } else {
+            let mut remaining = -balance;
+            let mut transferred = 0;
+            for &other in participants {
+                if other == member {
+                    continue;
+                }
+                if let Some(other_balance) = balances.get_mut(other)
+                    && *other_balance > 0
+                {
+                    let transfer = remaining.min(*other_balance);
+                    *other_balance -= transfer;
+                    remaining -= transfer;
+                    transferred += transfer;
+                    if remaining == 0 {
+                        break;
+                    }
+                }
+            }
+            if let Some(member_balance) = balances.get_mut(member) {
+                if remaining == 0 {
+                    *member_balance = 0;
+                } else {
+                    *member_balance += transferred;
+                }
+            }
+            debug_assert_eq!(remaining, 0);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::infrastructure::parser::WalicordProgramParser;
+
+    #[test]
+    fn settle_up_resets_balances_for_selected_members() {
+        let parser = WalicordProgramParser;
+        let processor = MessageProcessor::new(&parser);
+        let members = ["A", "B"];
+        let content = "A lent 100 to B\n!確定 A";
+
+        let program = match processor.parse_program(&members, content) {
+            ProcessingOutcome::Success(program) => program,
+            ProcessingOutcome::MissingMembersDeclaration => {
+                panic!("missing members declaration")
+            }
+            ProcessingOutcome::UndefinedMember { name, line } => {
+                panic!("undefined member {name} at line {line}")
+            }
+            ProcessingOutcome::SyntaxError { message } => {
+                panic!("syntax error: {message}")
+            }
+        };
+
+        let pre_balances = processor.calculate_balances_for_prefix(&program, 1);
+        assert_eq!(pre_balances.get("A"), Some(&100));
+        assert_eq!(pre_balances.get("B"), Some(&-100));
+
+        let post_balances = processor.calculate_balances(&program);
+        assert_eq!(post_balances.get("A"), Some(&0));
+        assert_eq!(post_balances.get("B"), Some(&0));
+    }
+
+    #[test]
+    fn settle_up_keeps_other_members_balances() {
+        let parser = WalicordProgramParser;
+        let processor = MessageProcessor::new(&parser);
+        let members = ["A", "B", "C"];
+        let content = "A lent 60 to C\nB lent 100 to C\n!確定 A";
+
+        let program = match processor.parse_program(&members, content) {
+            ProcessingOutcome::Success(program) => program,
+            ProcessingOutcome::MissingMembersDeclaration => {
+                panic!("missing members declaration")
+            }
+            ProcessingOutcome::UndefinedMember { name, line } => {
+                panic!("undefined member {name} at line {line}")
+            }
+            ProcessingOutcome::SyntaxError { message } => {
+                panic!("syntax error: {message}")
+            }
+        };
+
+        let pre_balances = processor.calculate_balances_for_prefix(&program, 2);
+        assert_eq!(pre_balances.get("A"), Some(&60));
+        assert_eq!(pre_balances.get("B"), Some(&100));
+        assert_eq!(pre_balances.get("C"), Some(&-160));
+
+        let post_balances = processor.calculate_balances(&program);
+        assert_eq!(post_balances.get("A"), Some(&0));
+        assert_eq!(post_balances.get("B"), Some(&100));
+        assert_eq!(post_balances.get("C"), Some(&-100));
     }
 }

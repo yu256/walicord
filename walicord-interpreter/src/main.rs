@@ -1,7 +1,4 @@
-use std::borrow::Cow;
-use std::env;
-use std::fs;
-use std::process;
+use std::{borrow::Cow, env, fs, process};
 
 use walicord_core::{
     application::{MessageProcessor, ProcessingOutcome},
@@ -31,7 +28,7 @@ fn run() -> CliResult<()> {
 
     let processor = MessageProcessor::new(&WalicordProgramParser);
 
-    let program = match processor.parse_program(&members, &program_content) {
+    let program = match processor.parse_program(&members, program_content) {
         ProcessingOutcome::Success(program) => program,
         ProcessingOutcome::MissingMembersDeclaration => {
             return Err("Program is missing MEMBERS declaration".into());
@@ -53,21 +50,32 @@ fn print_program_output<'a>(
 ) -> CliResult<()> {
     let mut printed = false;
 
-    for statement in &program.statements {
+    for (index, statement) in program.statements.iter().enumerate() {
         if let Statement::Command(command) = statement {
             match command {
                 ProgramCommand::Variables => {
-                    let output = processor.format_variables_response(program);
+                    let output = processor.format_variables_response_for_prefix(program, index);
                     println!("{output}");
                     printed = true;
                 }
-                ProgramCommand::Evaluate => match processor.format_settlement_response(program) {
-                    Ok(output) => {
-                        println!("{output}");
-                        printed = true;
+                ProgramCommand::Evaluate => {
+                    match processor.format_settlement_response_for_prefix(program, index) {
+                        Ok(output) => {
+                            println!("{output}");
+                            printed = true;
+                        }
+                        Err(message) => return Err(message.into()),
                     }
-                    Err(message) => return Err(message.into()),
-                },
+                }
+                ProgramCommand::SettleUp(_) => {
+                    match processor.format_settlement_response_for_prefix(program, index) {
+                        Ok(output) => {
+                            println!("{output}");
+                            printed = true;
+                        }
+                        Err(message) => return Err(message.into()),
+                    }
+                }
             }
         }
     }

@@ -83,6 +83,7 @@ impl ProgramParser for WalicordProgramParser {
                             let command = match parser_command {
                                 ParserCommand::Variables => Command::Variables,
                                 ParserCommand::Evaluate => Command::Evaluate,
+                                ParserCommand::SettleUp(expr) => Command::SettleUp(expr),
                             };
                             domain_statements.push(Statement::Command(command));
                         }

@@ -163,7 +163,7 @@ impl<'a> Handler<'a> {
 
         match self.processor.parse_program(&members, &content) {
             ProcessingOutcome::Success(program) => {
-                let mut commands: Vec<ProgramCommand> = Vec::new();
+                let mut commands: Vec<(usize, ProgramCommand)> = Vec::new();
                 let mut has_effect_statement = false;
                 let mut should_store = false;
 
@@ -178,13 +178,17 @@ impl<'a> Handler<'a> {
                         should_store = true;
                     }
 
-                    for stmt in new_statements {
+                    for (offset, stmt) in new_statements.iter().enumerate() {
+                        let stmt_index = previous_statement_count + offset;
                         match stmt {
                             Statement::Declaration(_) | Statement::Payment(_) => {
                                 has_effect_statement = true;
                             }
                             Statement::Command(command) => {
-                                commands.push(*command);
+                                if matches!(command, ProgramCommand::SettleUp(_)) {
+                                    has_effect_statement = true;
+                                }
+                                commands.push((stmt_index, command.clone()));
                             }
                         }
                     }
@@ -194,14 +198,28 @@ impl<'a> Handler<'a> {
                     self.react(ctx, msg, '✅').await;
                 }
 
-                for command in commands {
+                for (stmt_index, command) in commands {
                     match command {
                         ProgramCommand::Variables => {
-                            let reply = self.processor.format_variables_response(&program);
+                            let reply = self
+                                .processor
+                                .format_variables_response_for_prefix(&program, stmt_index);
                             self.reply(ctx, msg, reply).await;
                         }
                         ProgramCommand::Evaluate => {
-                            match self.processor.format_settlement_response(&program) {
+                            match self
+                                .processor
+                                .format_settlement_response_for_prefix(&program, stmt_index)
+                            {
+                                Ok(reply) => self.reply(ctx, msg, reply).await,
+                                Err(err_msg) => self.reply(ctx, msg, err_msg).await,
+                            }
+                        }
+                        ProgramCommand::SettleUp(_) => {
+                            match self
+                                .processor
+                                .format_settlement_response_for_prefix(&program, stmt_index)
+                            {
                                 Ok(reply) => self.reply(ctx, msg, reply).await,
                                 Err(err_msg) => self.reply(ctx, msg, err_msg).await,
                             }
@@ -310,25 +328,26 @@ async fn main() {
     let target_channel = load_target_channel_ids();
     let processor = MessageProcessor::new(&WalicordProgramParser);
 
-    let mut handles = Vec::new();
+    let handles: Vec<tokio::task::JoinHandle<()>> = target_channel
+        .into_iter()
+        .map(|channel_id| {
+            let handler = Handler::new(Some(channel_id), DiscordChannelService, processor);
 
-    for channel_id in target_channel {
-        let handler = Handler::new(Some(channel_id), DiscordChannelService, processor);
+            tokio::spawn({
+                let client_builder = Client::builder(&token, intents);
+                async move {
+                    let mut client = client_builder
+                        .event_handler(handler)
+                        .await
+                        .expect("Failed to create client");
 
-        handles.push(tokio::spawn({
-            let client_builder = Client::builder(&token, intents);
-            async move {
-                let mut client = client_builder
-                    .event_handler(handler)
-                    .await
-                    .expect("Failed to create client");
-
-                if let Err(why) = client.start().await {
-                    tracing::error!("Client error: {:?}", why);
+                    if let Err(why) = client.start().await {
+                        tracing::error!("Client error: {:?}", why);
+                    }
                 }
-            }
-        }));
-    }
+            })
+        })
+        .collect();
 
     for handle in handles {
         let _ = handle.await;
