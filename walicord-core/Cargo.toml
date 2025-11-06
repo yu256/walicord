@@ -6,3 +6,8 @@ edition = "2024"
 [dependencies]
 walicord-calc = { path = "../walicord-calc" }
 walicord-parser = { path = "../walicord-parser" }
+
+[features]
+default = ["microlp"]
+microlp = ["walicord-calc/microlp"]
+coin_cbc = ["walicord-calc/coin_cbc"]
