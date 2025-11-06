@@ -140,17 +140,18 @@ pub struct Payment<'a> {
     pub payee: SetExpr<'a>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Command {
+#[derive(Debug, Clone, PartialEq)]
+pub enum Command<'a> {
     Variables,
     Evaluate,
+    SettleUp(SetExpr<'a>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Statement<'a> {
     Declaration(Declaration<'a>),
     Payment(Payment<'a>),
-    Command(Command),
+    Command(Command<'a>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -389,10 +390,16 @@ fn payment(input: &str) -> IResult<&str, Payment<'_>> {
     .parse(input)
 }
 
-fn command(input: &str) -> IResult<&str, Command> {
+fn command(input: &str) -> IResult<&str, Command<'_>> {
     alt((
         tag_no_case("!variables").map(|_| Command::Variables),
         tag_no_case("!evaluate").map(|_| Command::Evaluate),
+        (
+            alt((tag_no_case("!settleup"), tag_no_case("!確定"))),
+            sp,
+            set_expr,
+        )
+            .map(|(_, _, expr)| Command::SettleUp(expr)),
     ))
     .parse(input)
 }
@@ -617,5 +624,16 @@ mod tests {
         let input = "!evaluate";
         let (_, stmt) = statement(input).unwrap();
         assert_eq!(stmt, Statement::Command(Command::Evaluate));
+    }
+
+    #[test]
+    fn test_parse_kakutei_command() {
+        let input = "!確定 MEMBERS - A";
+        let (_, stmt) = statement(input).unwrap();
+        let mut expected_expr = SetExpr::new();
+        expected_expr.push(SetOp::Push("MEMBERS"));
+        expected_expr.push(SetOp::Push("A"));
+        expected_expr.push(SetOp::Difference);
+        assert_eq!(stmt, Statement::Command(Command::SettleUp(expected_expr)));
     }
 }
