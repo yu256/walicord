@@ -11,7 +11,7 @@ use serenity::{
     model::{
         channel::{Message, ReactionType},
         gateway::Ready,
-        id::ChannelId,
+        id::{ChannelId, GuildId},
     },
     prelude::*,
 };
@@ -311,6 +311,56 @@ impl EventHandler for Handler<'_> {
             }
             Err(e) => {
                 tracing::error!("Failed to fetch initial messages: {:?}", e);
+            }
+        }
+    }
+
+    async fn message_delete(
+        &self,
+        _ctx: Context,
+        channel_id: ChannelId,
+        deleted_message_id: MessageId,
+        _guild_id: Option<GuildId>,
+    ) {
+        if !self.is_target_channel(channel_id) {
+            return;
+        }
+
+        if let Some(mut messages) = self.message_cache.get_mut(&channel_id) {
+            let should_remove_channel = {
+                messages.shift_remove(&deleted_message_id);
+                messages.is_empty()
+            };
+
+            if should_remove_channel {
+                drop(messages);
+                self.message_cache.remove(&channel_id);
+            }
+        }
+    }
+
+    async fn message_delete_bulk(
+        &self,
+        _ctx: Context,
+        channel_id: ChannelId,
+        deleted_message_ids: Vec<MessageId>,
+        _guild_id: Option<GuildId>,
+    ) {
+        if !self.is_target_channel(channel_id) {
+            return;
+        }
+
+        if let Some(mut messages) = self.message_cache.get_mut(&channel_id) {
+            let should_remove_channel = {
+                for message_id in deleted_message_ids {
+                    messages.shift_remove(&message_id);
+                }
+                messages.is_empty()
+            };
+
+            if should_remove_channel {
+                drop(messages);
+                self.message_cache.remove(&channel_id);
             }
         }
     }
