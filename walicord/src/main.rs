@@ -10,7 +10,6 @@ use serenity::{
     async_trait,
     model::{
         channel::{Message, ReactionType},
-        event::MessageUpdateEvent,
         gateway::Ready,
         id::{ChannelId, GuildId},
     },
@@ -111,12 +110,7 @@ impl<'a> Handler<'a> {
         }
     }
 
-    async fn process_program_message(
-        &self,
-        ctx: &Context,
-        msg: &Message,
-        previous_message_content: Option<&str>,
-    ) -> bool {
+    async fn process_program_message(&self, ctx: &Context, msg: &Message) -> bool {
         let topic = match self.fetch_topic(ctx, msg.channel_id).await {
             Ok(topic) => topic,
             Err(MembersError::Channel(err)) => {
@@ -150,20 +144,7 @@ impl<'a> Handler<'a> {
         };
         let existing_content = self.get_combined_content(&msg.channel_id);
 
-        let previous_statement_count = if let Some(old_content) = previous_message_content {
-            let mut previous_content = existing_content.clone();
-            if !previous_content.is_empty() {
-                previous_content.push('\n');
-            }
-            previous_content.push_str(old_content);
-
-            match self.processor.parse_program(&members, &previous_content) {
-                ProcessingOutcome::Success(program) => program.statements.len(),
-                ProcessingOutcome::MissingMembersDeclaration
-                | ProcessingOutcome::UndefinedMember { .. }
-                | ProcessingOutcome::SyntaxError { .. } => 0,
-            }
-        } else if existing_content.is_empty() {
+        let previous_statement_count = if existing_content.is_empty() {
             0
         } else {
             match self.processor.parse_program(&members, &existing_content) {
@@ -300,7 +281,7 @@ impl EventHandler for Handler<'_> {
             return;
         }
 
-        if self.process_program_message(&ctx, &msg, None).await {
+        if self.process_program_message(&ctx, &msg).await {
             self.message_cache
                 .entry(msg.channel_id)
                 .or_default()
@@ -331,87 +312,6 @@ impl EventHandler for Handler<'_> {
             Err(e) => {
                 tracing::error!("Failed to fetch initial messages: {:?}", e);
             }
-        }
-    }
-
-    async fn message_update(
-        &self,
-        ctx: Context,
-        old_if_available: Option<Message>,
-        new: Option<Message>,
-        event: MessageUpdateEvent,
-    ) {
-        let channel_id = event.channel_id;
-        if !self.is_target_channel(channel_id) {
-            return;
-        }
-
-        let mut remove_channel = false;
-        let cached_old_content = self
-            .message_cache
-            .get(&channel_id)
-            .and_then(|messages| messages.get(&event.id).map(|m| m.content.clone()));
-
-        if let Some(mut messages) = self.message_cache.get_mut(&channel_id) {
-            messages.shift_remove(&event.id);
-            if messages.is_empty() {
-                remove_channel = true;
-            }
-        }
-
-        let message = match new {
-            Some(msg) => msg,
-            None => match ctx.http.get_message(channel_id, event.id).await {
-                Ok(msg) => msg,
-                Err(err) => {
-                    tracing::error!(
-                        "Failed to fetch updated message {} in channel {}: {:?}",
-                        event.id,
-                        channel_id,
-                        err
-                    );
-                    if remove_channel {
-                        self.message_cache.remove(&channel_id);
-                    }
-                    return;
-                }
-            },
-        };
-
-        if message.author.bot {
-            if remove_channel {
-                self.message_cache.remove(&channel_id);
-            }
-            return;
-        }
-
-        if message
-            .reactions
-            .iter()
-            .any(|r| matches!(&r.reaction_type, ReactionType::Unicode(s) if s == "❎" && r.me))
-        {
-            if remove_channel {
-                self.message_cache.remove(&channel_id);
-            }
-            return;
-        }
-
-        let previous_message_content = old_if_available
-            .as_ref()
-            .map(|m| m.content.as_str())
-            .or(cached_old_content.as_deref());
-
-        let should_store = self
-            .process_program_message(&ctx, &message, previous_message_content)
-            .await;
-
-        if should_store {
-            self.message_cache
-                .entry(channel_id)
-                .or_default()
-                .insert(message.id, message);
-        } else if remove_channel {
-            self.message_cache.remove(&channel_id);
         }
     }
 
