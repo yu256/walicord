@@ -473,6 +473,7 @@ fn settle_selected_members<'a>(
     settle_members: &[&'a str],
 ) -> Vec<Transfer<'a>> {
     let mut transfers: Vec<Transfer<'a>> = Vec::new();
+    let settle_lookup: HashSet<&'a str> = settle_members.iter().copied().collect();
 
     for &member in settle_members {
         let balance = match balances.get(member).copied() {
@@ -487,7 +488,8 @@ fn settle_selected_members<'a>(
         if balance > 0 {
             let mut remaining = balance;
             let mut transferred = 0;
-            for &other in participants {
+
+            for &other in settle_members {
                 if other == member {
                     continue;
                 }
@@ -510,6 +512,33 @@ fn settle_selected_members<'a>(
                     }
                 }
             }
+
+            if remaining > 0 {
+                for &other in participants {
+                    if other == member || settle_lookup.contains(other) {
+                        continue;
+                    }
+                    if let Some(other_balance) = balances.get_mut(other)
+                        && *other_balance < 0
+                    {
+                        let transfer = remaining.min(-*other_balance);
+                        if transfer > 0 {
+                            *other_balance += transfer;
+                            remaining -= transfer;
+                            transferred += transfer;
+                            transfers.push(Transfer {
+                                from: other,
+                                to: member,
+                                amount: transfer,
+                            });
+                        }
+                        if remaining == 0 {
+                            break;
+                        }
+                    }
+                }
+            }
+
             if let Some(member_balance) = balances.get_mut(member) {
                 if remaining == 0 {
                     *member_balance = 0;
@@ -521,7 +550,8 @@ fn settle_selected_members<'a>(
         } else {
             let mut remaining = -balance;
             let mut transferred = 0;
-            for &other in participants {
+
+            for &other in settle_members {
                 if other == member {
                     continue;
                 }
@@ -544,6 +574,33 @@ fn settle_selected_members<'a>(
                     }
                 }
             }
+
+            if remaining > 0 {
+                for &other in participants {
+                    if other == member || settle_lookup.contains(other) {
+                        continue;
+                    }
+                    if let Some(other_balance) = balances.get_mut(other)
+                        && *other_balance > 0
+                    {
+                        let transfer = remaining.min(*other_balance);
+                        if transfer > 0 {
+                            *other_balance -= transfer;
+                            remaining -= transfer;
+                            transferred += transfer;
+                            transfers.push(Transfer {
+                                from: member,
+                                to: other,
+                                amount: transfer,
+                            });
+                        }
+                        if remaining == 0 {
+                            break;
+                        }
+                    }
+                }
+            }
+
             if let Some(member_balance) = balances.get_mut(member) {
                 if remaining == 0 {
                     *member_balance = 0;
@@ -698,5 +755,36 @@ mod tests {
         assert!(compact.contains("C->A|60"));
         assert!(response.contains("### その他の精算方法"));
         assert!(compact.contains("C->B|40"));
+    }
+
+    #[test]
+    fn settle_up_prefers_internal_transfers() {
+        let parser = WalicordProgramParser;
+        let processor = MessageProcessor::new(&parser);
+        let members = ["A", "D", "C", "B"];
+        let content = "A lent 40 to D\nC lent 60 to D\nC lent 40 to B\n!確定 A, B";
+
+        let program = match processor.parse_program(&members, content) {
+            ProcessingOutcome::Success(program) => program,
+            ProcessingOutcome::MissingMembersDeclaration => {
+                panic!("missing members declaration")
+            }
+            ProcessingOutcome::UndefinedMember { name, line } => {
+                panic!("undefined member {name} at line {line}")
+            }
+            ProcessingOutcome::SyntaxError { message } => {
+                panic!("syntax error: {message}")
+            }
+        };
+
+        let last_index = program.statements.len().saturating_sub(1);
+        let response = processor
+            .format_settlement_response_for_prefix(&program, last_index)
+            .expect("response generation failed");
+
+        let compact = response.replace(' ', "");
+        assert!(compact.contains("B->A|40"), "{response}");
+        assert!(compact.contains("D->C|100"), "{response}");
+        assert!(!compact.contains("C->B|40"), "{response}");
     }
 }
