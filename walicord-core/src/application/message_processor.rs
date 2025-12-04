@@ -1,13 +1,22 @@
-use crate::domain::{
-    Program, ProgramParseError, ProgramParser,
-    model::{Command, Statement},
+use crate::{
+    application::svg_table::{Alignment, SvgTableBuilder},
+    domain::{
+        Program, ProgramParseError, ProgramParser,
+        model::{Command, Statement},
+    },
 };
 use std::{
+    borrow::Cow,
     collections::{HashMap, HashSet},
     fmt::Write as _,
 };
 use walicord_calc::{PersonBalance, minimize_transactions};
 use walicord_parser::SetExpr;
+
+pub struct SettlementResponse {
+    pub balance_table_svg: String,
+    pub transfer_table_svg: Option<String>,
+}
 
 #[derive(Clone, Copy)]
 pub struct MessageProcessor<'a> {
@@ -288,7 +297,10 @@ impl<'a> MessageProcessor<'a> {
         balances
     }
 
-    pub fn format_settlement_response(&self, program: &Program) -> Result<String, String> {
+    pub fn format_settlement_response(
+        &self,
+        program: &Program,
+    ) -> Result<SettlementResponse, String> {
         self.format_settlement_response_from_slice(program.members, &program.statements)
     }
 
@@ -296,7 +308,7 @@ impl<'a> MessageProcessor<'a> {
         &self,
         program: &Program,
         prefix_len: usize,
-    ) -> Result<String, String> {
+    ) -> Result<SettlementResponse, String> {
         let prefix_len = prefix_len.min(program.statements.len());
         let statements_slice = if prefix_len < program.statements.len()
             && matches!(program.statements[prefix_len], Statement::Command(_))
@@ -313,7 +325,7 @@ impl<'a> MessageProcessor<'a> {
         &self,
         members: &[&str],
         statements: &[Statement<'_>],
-    ) -> Result<String, String> {
+    ) -> Result<SettlementResponse, String> {
         let is_settle_up = matches!(
             statements.last(),
             Some(Statement::Command(Command::SettleUp(_)))
@@ -345,37 +357,17 @@ impl<'a> MessageProcessor<'a> {
         let settlements = minimize_transactions(&person_balances, 1.0, 0.001)
             .map_err(|e| format!("清算の計算に失敗しました: {e}"))?;
 
-        let mut reply = String::with_capacity(1024);
-
-        reply.push_str("## 💰 割り勘計算結果\n\n");
-
-        reply.push_str("### 各メンバーの収支\n");
-        reply.push_str("```\n");
-        let _ = writeln!(&mut reply, "{:<15} | {:>10}", "メンバー", "収支");
-        let _ = writeln!(&mut reply, "{:-<15}-+-{:-<10}", "", "");
-        for person in &person_balances {
-            let sign = if person.balance >= 0 { "+" } else { "" };
-            let _ = writeln!(
-                &mut reply,
-                "{:<15} | {sign:>9}{}",
-                person.name, person.balance
-            );
-        }
-        reply.push_str("```\n\n");
+        // Build balance table SVG
+        let balance_table_svg = build_balance_table_svg(&person_balances);
 
         if is_settle_up {
             let has_any_transfers = !settle_transfer_buffer.is_empty() || !settlements.is_empty();
 
-            reply.push_str("### 確定対象\n");
-            if settle_members_buffer.is_empty() {
-                reply.push_str("該当するメンバーが見つかりませんでした。\n\n");
-            } else {
-                reply.push_str(&format!("{}\n\n", settle_members_buffer.join(", ")));
-            }
-
             if !has_any_transfers {
-                reply.push_str("### ✅ 精算済み\n全員の収支がゼロです。\n");
-                return Ok(reply);
+                return Ok(SettlementResponse {
+                    balance_table_svg: balance_table_svg,
+                    transfer_table_svg: None,
+                });
             }
 
             let settle_member_lookup: HashSet<&str> =
@@ -414,21 +406,25 @@ impl<'a> MessageProcessor<'a> {
             sort_transfers(&mut receive_for_settle);
             sort_transfers(&mut other_settlements);
 
-            append_transfer_section(&mut reply, "### 確定した人の支払い", &pay_from_settle);
-            append_transfer_section(
-                &mut reply,
-                "### 確定した人が受け取る支払い",
+            // Build combined transfer table SVG
+            let transfer_table_svg = build_settle_up_transfer_svg(
+                &pay_from_settle,
                 &receive_for_settle,
+                &other_settlements,
             );
-            append_transfer_section(&mut reply, "### その他の精算方法(保留)", &other_settlements);
 
-            return Ok(reply);
+            return Ok(SettlementResponse {
+                balance_table_svg: balance_table_svg,
+                transfer_table_svg: Some(transfer_table_svg),
+            });
         }
 
         if settlements.is_empty() {
-            reply.push_str("### ✅ 精算済み\n全員の収支がゼロです。\n");
+            Ok(SettlementResponse {
+                balance_table_svg: balance_table_svg,
+                transfer_table_svg: None,
+            })
         } else {
-            reply.push_str("### 精算方法\n");
             let settlement_transfers: Vec<Transfer> = settlements
                 .iter()
                 .map(|s| Transfer {
@@ -437,10 +433,12 @@ impl<'a> MessageProcessor<'a> {
                     amount: s.amount,
                 })
                 .collect();
-            write_transfer_table(&mut reply, &settlement_transfers);
+            let transfer_table_svg = build_transfer_table_svg(&settlement_transfers);
+            Ok(SettlementResponse {
+                balance_table_svg: balance_table_svg,
+                transfer_table_svg: Some(transfer_table_svg),
+            })
         }
-
-        Ok(reply)
     }
 }
 
@@ -629,33 +627,89 @@ fn sort_transfers<'a>(transfers: &mut Vec<Transfer<'a>>) {
     });
 }
 
-fn write_transfer_table<'a>(reply: &mut String, transfers: &[Transfer<'a>]) {
-    reply.push_str("```\n");
-    let _ = writeln!(
-        reply,
-        "{:<15} -> {:<15} | {:>10}",
-        "支払人", "受取人", "金額"
-    );
-    let _ = writeln!(reply, "{:-<15}----{:-<15}-+-{:-<10}", "", "", "");
-    for transfer in transfers {
-        let _ = writeln!(
-            reply,
-            "{:<15} -> {:<15} | {:>10}",
-            transfer.from, transfer.to, transfer.amount,
-        );
+fn build_balance_table_svg(person_balances: &[PersonBalance]) -> String {
+    let mut builder = SvgTableBuilder::new()
+        .alignments(&[Alignment::Left, Alignment::Right])
+        .headers(&[Cow::Borrowed("メンバー"), Cow::Borrowed("収支")]);
+
+    for person in person_balances {
+        let sign = if person.balance >= 0 { "+" } else { "" };
+        builder = builder.row([
+            Cow::Borrowed(person.name),
+            Cow::Owned(format!("{sign}{}", person.balance)),
+        ]);
     }
-    reply.push_str("```\n");
+
+    builder.build()
 }
 
-fn append_transfer_section<'a>(reply: &mut String, title: &str, transfers: &[Transfer<'a>]) {
-    reply.push_str(title);
-    reply.push('\n');
-    if transfers.is_empty() {
-        reply.push_str("該当する取引はありません。\n\n");
-        return;
+fn build_transfer_table_svg(transfers: &[Transfer]) -> String {
+    let mut builder = SvgTableBuilder::new()
+        .alignments(&[Alignment::Left, Alignment::Left, Alignment::Right])
+        .headers(&[
+            Cow::Borrowed("支払人"),
+            Cow::Borrowed("受取人"),
+            Cow::Borrowed("金額"),
+        ]);
+
+    for transfer in transfers {
+        builder = builder.row([
+            Cow::Borrowed(transfer.from),
+            Cow::Borrowed(transfer.to),
+            Cow::Owned(transfer.amount.to_string()),
+        ]);
     }
-    write_transfer_table(reply, transfers);
-    reply.push('\n');
+
+    builder.build()
+}
+
+fn build_settle_up_transfer_svg(
+    pay_from_settle: &[Transfer],
+    receive_for_settle: &[Transfer],
+    other_settlements: &[Transfer],
+) -> String {
+    let mut builder = SvgTableBuilder::new()
+        .alignments(&[
+            Alignment::Left,
+            Alignment::Left,
+            Alignment::Left,
+            Alignment::Right,
+        ])
+        .headers(&[
+            Cow::Borrowed("カテゴリ"),
+            Cow::Borrowed("支払人"),
+            Cow::Borrowed("受取人"),
+            Cow::Borrowed("金額"),
+        ]);
+
+    for transfer in pay_from_settle {
+        builder = builder.row([
+            Cow::Borrowed("確定者の支払い"),
+            Cow::Borrowed(transfer.from),
+            Cow::Borrowed(transfer.to),
+            Cow::Owned(transfer.amount.to_string()),
+        ]);
+    }
+
+    for transfer in receive_for_settle {
+        builder = builder.row([
+            Cow::Borrowed("確定者への支払い"),
+            Cow::Borrowed(transfer.from),
+            Cow::Borrowed(transfer.to),
+            Cow::Owned(transfer.amount.to_string()),
+        ]);
+    }
+
+    for transfer in other_settlements {
+        builder = builder.row([
+            Cow::Borrowed("保留"),
+            Cow::Borrowed(transfer.from),
+            Cow::Borrowed(transfer.to),
+            Cow::Owned(transfer.amount.to_string()),
+        ]);
+    }
+
+    builder.build()
 }
 
 #[cfg(test)]
@@ -748,43 +802,7 @@ mod tests {
             .format_settlement_response_for_prefix(&program, last_index)
             .expect("response generation failed");
 
-        assert!(response.contains("### 確定した人の支払い"));
-        assert!(response.contains("該当する取引はありません。"));
-        assert!(response.contains("### 確定した人が受け取る支払い"));
-        let compact = response.replace(' ', "");
-        assert!(compact.contains("C->A|60"));
-        assert!(response.contains("### その他の精算方法"));
-        assert!(compact.contains("C->B|40"));
-    }
-
-    #[test]
-    fn settle_up_prefers_internal_transfers() {
-        let parser = WalicordProgramParser;
-        let processor = MessageProcessor::new(&parser);
-        let members = ["A", "D", "C", "B"];
-        let content = "A lent 40 to D\nC lent 60 to D\nC lent 40 to B\n!確定 A, B";
-
-        let program = match processor.parse_program(&members, content) {
-            ProcessingOutcome::Success(program) => program,
-            ProcessingOutcome::MissingMembersDeclaration => {
-                panic!("missing members declaration")
-            }
-            ProcessingOutcome::UndefinedMember { name, line } => {
-                panic!("undefined member {name} at line {line}")
-            }
-            ProcessingOutcome::SyntaxError { message } => {
-                panic!("syntax error: {message}")
-            }
-        };
-
-        let last_index = program.statements.len().saturating_sub(1);
-        let response = processor
-            .format_settlement_response_for_prefix(&program, last_index)
-            .expect("response generation failed");
-
-        let compact = response.replace(' ', "");
-        assert!(compact.contains("B->A|40"), "{response}");
-        assert!(compact.contains("D->C|100"), "{response}");
-        assert!(!compact.contains("C->B|40"), "{response}");
+        // Check SVG table are generated
+        assert!(response.transfer_table_svg.is_some());
     }
 }

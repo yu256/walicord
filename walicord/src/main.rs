@@ -4,7 +4,10 @@ mod infrastructure;
 
 use dashmap::DashMap;
 use indexmap::IndexMap;
-use infrastructure::discord::{ChannelError, DiscordChannelService};
+use infrastructure::{
+    discord::{ChannelError, DiscordChannelService},
+    svg_renderer::svg_to_png,
+};
 use serenity::{
     all::MessageId,
     async_trait,
@@ -17,6 +20,7 @@ use serenity::{
 };
 use std::env;
 use walicord_core::{
+    SettlementResponse,
     application::{MessageProcessor, ProcessingOutcome},
     domain::model::{Command as ProgramCommand, Statement},
     infrastructure::parser::WalicordProgramParser,
@@ -101,6 +105,43 @@ impl<'a> Handler<'a> {
         let content = content.into();
         if let Err(e) = msg.reply(&ctx.http, content).await {
             tracing::error!("Failed to send message: {:?}", e);
+        }
+    }
+
+    async fn reply_with_settlement(
+        &self,
+        ctx: &Context,
+        msg: &Message,
+        response: SettlementResponse,
+    ) {
+        use serenity::{all::CreateAttachment, builder::CreateMessage};
+
+        let message_builder = CreateMessage::new().reference_message(msg);
+
+        let attachments = {
+            fn svg_to_attachment(
+                filename: &str,
+            ) -> impl Fn(&String) -> Option<CreateAttachment> + '_ {
+                move |svg| svg_to_png(svg).map(|png| CreateAttachment::bytes(png, filename))
+            }
+            std::iter::once(&response.balance_table_svg)
+                .filter_map(svg_to_attachment("balance.png"))
+                .chain(
+                    response
+                        .transfer_table_svg
+                        .iter()
+                        .filter_map(svg_to_attachment("transfers.png")),
+                )
+        };
+
+        let message_builder = attachments.fold(message_builder, |m, a| m.add_file(a));
+
+        if let Err(e) = msg
+            .channel_id
+            .send_message(&ctx.http, message_builder)
+            .await
+        {
+            tracing::error!("Failed to send message with attachments: {:?}", e);
         }
     }
 
@@ -211,7 +252,9 @@ impl<'a> Handler<'a> {
                                 .processor
                                 .format_settlement_response_for_prefix(&program, stmt_index)
                             {
-                                Ok(reply) => self.reply(ctx, msg, reply).await,
+                                Ok(response) => {
+                                    self.reply_with_settlement(ctx, msg, response).await
+                                }
                                 Err(err_msg) => self.reply(ctx, msg, err_msg).await,
                             }
                         }
@@ -220,7 +263,9 @@ impl<'a> Handler<'a> {
                                 .processor
                                 .format_settlement_response_for_prefix(&program, stmt_index)
                             {
-                                Ok(reply) => self.reply(ctx, msg, reply).await,
+                                Ok(response) => {
+                                    self.reply_with_settlement(ctx, msg, response).await
+                                }
                                 Err(err_msg) => self.reply(ctx, msg, err_msg).await,
                             }
                         }

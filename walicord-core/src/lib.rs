@@ -4,5 +4,5 @@ pub mod application;
 pub mod domain;
 pub mod infrastructure;
 
-pub use application::{MessageProcessor, ProcessingOutcome};
+pub use application::{MessageProcessor, ProcessingOutcome, SettlementResponse};
 pub use domain::{Declaration, Program, ProgramParseError};
