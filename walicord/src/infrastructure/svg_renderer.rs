@@ -6,6 +6,13 @@ static OPTIONS: LazyLock<Options> = LazyLock::new(|| {
     let mut fontdb = resvg::usvg::fontdb::Database::new();
     fontdb.load_system_fonts();
 
+    // Set generic font family fallbacks
+    fontdb.set_sans_serif_family("Arial");
+    fontdb.set_serif_family("Times New Roman");
+    fontdb.set_monospace_family("Consolas");
+    fontdb.set_cursive_family("Comic Sans MS");
+    fontdb.set_fantasy_family("Impact");
+
     Options {
         fontdb: std::sync::Arc::new(fontdb),
         ..Options::default()
