@@ -9,7 +9,7 @@ const ROW_BG_EVEN: &str = "#f7fafc";
 const ROW_BG_ODD: &str = "#edf2f7";
 const ROW_TEXT: &str = "#1a202c";
 const BORDER_COLOR: &str = "#cbd5e0";
-const FONT_FAMILY: &str = "system-ui, -apple-system, sans-serif";
+const FONT_FAMILY: &str = "Arial, sans-serif";
 const CHAR_WIDTH: f32 = 8.5;
 
 #[derive(Default)]
