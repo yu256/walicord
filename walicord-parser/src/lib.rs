@@ -3,17 +3,16 @@
 mod i18n;
 
 use nom::{
+    IResult, Parser,
     branch::alt,
     bytes::complete::{tag, tag_no_case, take_while, take_while1},
     character::complete::{char, u64},
     combinator::opt,
     multi::separated_list1,
-    IResult, Parser,
 };
-use std::{borrow::Cow, collections::HashSet};
 
 #[derive(Debug, Clone, PartialEq)]
-enum SetOp<'a> {
+pub enum SetOp<'a> {
     Push(&'a str),
     Union,
     Intersection,
@@ -32,6 +31,10 @@ impl<'a> SetExpr<'a> {
 
     fn push(&mut self, op: SetOp<'a>) {
         self.ops.push(op);
+    }
+
+    pub fn ops(&self) -> &[SetOp<'a>] {
+        &self.ops
     }
 
     pub fn referenced_names(&self) -> impl Iterator<Item = &'a str> + '_ {
@@ -67,70 +70,34 @@ impl<'a> SetExpr<'a> {
 
         if stack.len() == 1 {
             let mut result = stack.pop()?;
-            // Only strip the outermost parentheses if they wrap the entire expression
-            if result.starts_with('(') && result.ends_with(')') && result.len() > 1 {
-                let mut depth = 0;
-                let mut is_wrapped = true;
-                for (i, c) in result.char_indices() {
-                    if c == '(' {
-                        depth += 1;
-                    } else if c == ')' {
-                        depth -= 1;
-                        // If we reach depth 0 before the last char, it's not fully wrapped
-                        if depth == 0 && i != result.len() - 1 {
-                            is_wrapped = false;
-                            break;
-                        }
-                    }
-                }
-                if is_wrapped {
-                    result = result[1..result.len() - 1].to_string();
-                }
+            if is_fully_wrapped(&result) {
+                result = result[1..result.len() - 1].to_string();
             }
             Some(result)
         } else {
             None
         }
     }
+}
 
-    // Evaluate the RPN expression given a function to resolve names to sets
-    pub fn evaluate<'b, F>(&self, resolver: &F) -> Option<Cow<'b, HashSet<&'a str>>>
-    where
-        'a: 'b,
-        F: Fn(&str) -> Option<&'b HashSet<&'a str>>,
-    {
-        let mut stack: Vec<Cow<'b, HashSet<&'a str>>> = Vec::with_capacity(self.ops.len());
+fn is_fully_wrapped(value: &str) -> bool {
+    if !value.starts_with('(') || !value.ends_with(')') || value.len() <= 1 {
+        return false;
+    }
 
-        for op in &self.ops {
-            match op {
-                SetOp::Push(name) => {
-                    let set = resolver(name)?;
-                    stack.push(Cow::Borrowed(set));
-                }
-                SetOp::Union => {
-                    let b = stack.pop()?;
-                    let a = stack.pop()?;
-                    stack.push(Cow::Owned(a.union(&b).copied().collect()));
-                }
-                SetOp::Intersection => {
-                    let b = stack.pop()?;
-                    let a = stack.pop()?;
-                    stack.push(Cow::Owned(a.intersection(&b).copied().collect()));
-                }
-                SetOp::Difference => {
-                    let b = stack.pop()?;
-                    let a = stack.pop()?;
-                    stack.push(Cow::Owned(a.difference(&b).copied().collect()));
-                }
+    let mut depth = 0;
+    for (i, c) in value.char_indices() {
+        if c == '(' {
+            depth += 1;
+        } else if c == ')' {
+            depth -= 1;
+            if depth == 0 && i != value.len() - 1 {
+                return false;
             }
         }
-
-        if stack.len() == 1 {
-            stack.pop()
-        } else {
-            None
-        }
     }
+
+    depth == 0
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -161,9 +128,15 @@ pub enum Statement<'a> {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct StatementWithLine<'a> {
+    pub line: usize,
+    pub statement: Statement<'a>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct Program<'a> {
     pub members_decl: &'a [&'a str],
-    pub statements: Vec<Statement<'a>>,
+    pub statements: Vec<StatementWithLine<'a>>,
 }
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
@@ -424,9 +397,6 @@ pub fn parse_program<'a>(
     members_decl: &'a [&'a str],
     input: &'a str,
 ) -> Result<Program<'a>, ParseError<'a>> {
-    let defined_members: HashSet<&str> = members_decl.iter().copied().collect();
-    let mut defined_groups: HashSet<&str> = HashSet::new();
-
     let mut statements = Vec::new();
 
     for (idx, line) in input.lines().enumerate() {
@@ -443,38 +413,10 @@ pub fn parse_program<'a>(
                         rest.trim(),
                     )));
                 }
-                match &stmt {
-                    Statement::Declaration(decl) => {
-                        // Check if all referenced names in the declaration are defined
-                        for name in decl.expression.referenced_names() {
-                            if name == "MEMBERS" {
-                                continue;
-                            }
-                            if !defined_members.contains(name) && !defined_groups.contains(name) {
-                                return Err(ParseError::UndefinedMember {
-                                    name,
-                                    line: idx + 1,
-                                });
-                            }
-                        }
-                        defined_groups.insert(decl.name);
-                    }
-                    Statement::Payment(p) => {
-                        for name in p.payer.referenced_names().chain(p.payee.referenced_names()) {
-                            if name == "MEMBERS" {
-                                continue;
-                            }
-                            if !defined_members.contains(name) && !defined_groups.contains(name) {
-                                return Err(ParseError::UndefinedMember {
-                                    name,
-                                    line: idx + 1,
-                                });
-                            }
-                        }
-                    }
-                    Statement::Command(_) => {}
-                }
-                statements.push(stmt);
+                statements.push(StatementWithLine {
+                    line: idx + 1,
+                    statement: stmt,
+                });
             }
             Err(e) => {
                 return Err(ParseError::SyntaxError(i18n::line_syntax_error(idx + 1, e)));
@@ -506,112 +448,50 @@ pub fn extract_members_from_topic(topic: &str) -> Result<Vec<&str>, NoMembersDec
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
-    #[test]
-    fn test_simple_name() {
-        let input = "A";
+    #[rstest]
+    #[case("A", &[SetOp::Push("A")])]
+    #[case(
+        "A ∪ B",
+        &[SetOp::Push("A"), SetOp::Push("B"), SetOp::Union]
+    )]
+    #[case(
+        "A, B",
+        &[SetOp::Push("A"), SetOp::Push("B"), SetOp::Union]
+    )]
+    #[case(
+        "A ∩ B",
+        &[SetOp::Push("A"), SetOp::Push("B"), SetOp::Intersection]
+    )]
+    #[case(
+        "A - B",
+        &[SetOp::Push("A"), SetOp::Push("B"), SetOp::Difference]
+    )]
+    #[case(
+        "(A ∪ B) ∩ C",
+        &[
+            SetOp::Push("A"),
+            SetOp::Push("B"),
+            SetOp::Union,
+            SetOp::Push("C"),
+            SetOp::Intersection
+        ]
+    )]
+    fn test_set_expr_ops(#[case] input: &str, #[case] expected: &'static [SetOp<'static>]) {
         let (_, expr) = set_expr(input).unwrap();
-        assert_eq!(expr.ops, vec![SetOp::Push("A")]);
+        assert_eq!(&expr.ops, expected);
     }
 
-    #[test]
-    fn test_union() {
-        let input = "A ∪ B";
-        let (_, expr) = set_expr(input).unwrap();
-        assert_eq!(
-            expr.ops,
-            vec![SetOp::Push("A"), SetOp::Push("B"), SetOp::Union]
-        );
-    }
-
-    #[test]
-    fn test_union_with_comma() {
-        let input = "A, B";
-        let (_, expr) = set_expr(input).unwrap();
-        assert_eq!(
-            expr.ops,
-            vec![SetOp::Push("A"), SetOp::Push("B"), SetOp::Union]
-        );
-    }
-
-    #[test]
-    fn test_intersection() {
-        let input = "A ∩ B";
-        let (_, expr) = set_expr(input).unwrap();
-        assert_eq!(
-            expr.ops,
-            vec![SetOp::Push("A"), SetOp::Push("B"), SetOp::Intersection]
-        );
-    }
-
-    #[test]
-    fn test_difference() {
-        let input = "A - B";
-        let (_, expr) = set_expr(input).unwrap();
-        assert_eq!(
-            expr.ops,
-            vec![SetOp::Push("A"), SetOp::Push("B"), SetOp::Difference]
-        );
-    }
-
-    #[test]
-    fn test_complex_expression() {
-        // (A ∪ B) ∩ C
-        let input = "(A ∪ B) ∩ C";
-        let (_, expr) = set_expr(input).unwrap();
-        assert_eq!(
-            expr.ops,
-            vec![
-                SetOp::Push("A"),
-                SetOp::Push("B"),
-                SetOp::Union,
-                SetOp::Push("C"),
-                SetOp::Intersection
-            ]
-        );
-    }
-
-    #[test]
-    fn test_infix_string() {
-        let input = "(A ∪ B) ∩ C";
+    #[rstest]
+    #[case("(A ∪ B) ∩ C", "(A ∪ B) ∩ C")]
+    #[case("A - B ∪ C", "(A - B) ∪ C")]
+    #[case("A", "A")]
+    #[case("A ∪ (B ∩ C)", "A ∪ (B ∩ C)")]
+    fn test_infix_string(#[case] input: &str, #[case] expected: &str) {
         let (_, expr) = set_expr(input).unwrap();
         let infix = expr.to_infix_string().unwrap();
-        assert_eq!(infix, "(A ∪ B) ∩ C");
-
-        let input2 = "A - B ∪ C";
-        let (_, expr2) = set_expr(input2).unwrap();
-        let infix2 = expr2.to_infix_string().unwrap();
-        assert_eq!(infix2, "(A - B) ∪ C");
-    }
-
-    #[test]
-    fn test_evaluation() {
-        use std::collections::HashMap;
-
-        let mut sets = HashMap::new();
-        sets.insert("A", HashSet::from(["1", "2", "3"]));
-        sets.insert("B", HashSet::from(["2", "3", "4"]));
-        sets.insert("C", HashSet::from(["3", "4", "5"]));
-
-        let resolver = |name: &str| sets.get(name);
-
-        // A ∪ B = {1, 2, 3, 4}
-        let input = "A ∪ B";
-        let (_, expr) = set_expr(input).unwrap();
-        let result = expr.evaluate(&resolver).unwrap();
-        assert_eq!(result, Cow::Owned(HashSet::from(["1", "2", "3", "4"])));
-
-        // (A ∪ B) ∩ C = {3, 4}
-        let input = "(A ∪ B) ∩ C";
-        let (_, expr) = set_expr(input).unwrap();
-        let result = expr.evaluate(&resolver).unwrap();
-        assert_eq!(result, Cow::Owned(HashSet::from(["3", "4"])));
-
-        // A - B = {1}
-        let input = "A - B";
-        let (_, expr) = set_expr(input).unwrap();
-        let result = expr.evaluate(&resolver).unwrap();
-        assert_eq!(result, Cow::Owned(HashSet::from(["1"])));
+        assert_eq!(infix, expected);
     }
 
     #[test]

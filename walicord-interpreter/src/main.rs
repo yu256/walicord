@@ -1,14 +1,27 @@
 use std::{borrow::Cow, env, fs, process};
 
-use walicord_core::{
-    application::{MessageProcessor, ProcessingOutcome},
-    domain::model::{Command as ProgramCommand, Program, Statement},
-    infrastructure::parser::WalicordProgramParser,
-    SettlementView,
+use walicord_application::{
+    Command as ProgramCommand, MessageProcessor, ProcessingOutcome, Script, ScriptStatement,
+    SettlementOptimizationError,
 };
+use walicord_infrastructure::{WalicordProgramParser, WalicordSettlementOptimizer};
 use walicord_parser::extract_members_from_topic;
+use walicord_presentation::{SettlementPresenter, SettlementView, VariablesPresenter};
 
 type CliResult<T> = Result<T, Cow<'static, str>>;
+
+fn format_settlement_error(err: SettlementOptimizationError) -> Cow<'static, str> {
+    match err {
+        SettlementOptimizationError::ImbalancedTotal(total) => format!(
+            "{} (total: {total})",
+            walicord_i18n::SETTLEMENT_CALCULATION_FAILED
+        )
+        .into(),
+        SettlementOptimizationError::NoSolution => {
+            walicord_i18n::SETTLEMENT_CALCULATION_FAILED.into()
+        }
+    }
+}
 
 fn main() {
     if let Err(err) = run() {
@@ -27,7 +40,7 @@ fn run() -> CliResult<()> {
 
     let (members, program_content) = parse_members_first_line(&source)?;
 
-    let processor = MessageProcessor::new(&WalicordProgramParser);
+    let processor = MessageProcessor::new(&WalicordProgramParser, &WalicordSettlementOptimizer);
 
     let program = match processor.parse_program(&members, program_content) {
         ProcessingOutcome::Success(program) => program,
@@ -36,6 +49,9 @@ fn run() -> CliResult<()> {
         }
         ProcessingOutcome::UndefinedMember { name, line } => {
             return Err(format!("Undefined member '{name}' at line {line}").into());
+        }
+        ProcessingOutcome::FailedToEvaluateGroup { name } => {
+            return Err(walicord_i18n::failed_to_evaluate_group(name).into());
         }
         ProcessingOutcome::SyntaxError { message } => {
             return Err(format!("Syntax error: {message}").into());
@@ -57,34 +73,36 @@ fn print_settlement_view(response: &SettlementView) {
 
 fn print_program_output<'a>(
     processor: &MessageProcessor<'a>,
-    program: &Program<'a>,
+    program: &Script<'a>,
 ) -> CliResult<()> {
     let mut printed = false;
 
-    for (index, statement) in program.statements.iter().enumerate() {
-        if let Statement::Command(command) = statement {
+    for (index, statement) in program.statements().iter().enumerate() {
+        if let ScriptStatement::Command(command) = &statement.statement {
             match command {
                 ProgramCommand::Variables => {
-                    let output = processor.format_variables_response_for_prefix(program, index);
+                    let output = VariablesPresenter::render_for_prefix(program, index);
                     println!("{output}");
                     printed = true;
                 }
                 ProgramCommand::Evaluate => {
-                    match processor.format_settlement_response_for_prefix(program, index) {
+                    match processor.build_settlement_result_for_prefix(program, index) {
                         Ok(response) => {
-                            print_settlement_view(&response);
+                            let view = SettlementPresenter::render(&response);
+                            print_settlement_view(&view);
                             printed = true;
                         }
-                        Err(message) => return Err(message.into()),
+                        Err(err) => return Err(format_settlement_error(err)),
                     }
                 }
                 ProgramCommand::SettleUp(_) => {
-                    match processor.format_settlement_response_for_prefix(program, index) {
+                    match processor.build_settlement_result_for_prefix(program, index) {
                         Ok(response) => {
-                            print_settlement_view(&response);
+                            let view = SettlementPresenter::render(&response);
+                            print_settlement_view(&view);
                             printed = true;
                         }
-                        Err(message) => return Err(message.into()),
+                        Err(err) => return Err(format_settlement_error(err)),
                     }
                 }
             }
@@ -92,9 +110,12 @@ fn print_program_output<'a>(
     }
 
     if !printed {
-        match processor.format_settlement_response(program) {
-            Ok(response) => print_settlement_view(&response),
-            Err(message) => return Err(message.into()),
+        match processor.build_settlement_result(program) {
+            Ok(response) => {
+                let view = SettlementPresenter::render(&response);
+                print_settlement_view(&view);
+            }
+            Err(err) => return Err(format_settlement_error(err)),
         }
     }
 

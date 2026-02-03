@@ -1,10 +1,14 @@
 [workspace]
 members = [
     "walicord",
+    "walicord-application",
     "walicord-calc",
-    "walicord-core",
+    "walicord-domain",
+    "walicord-i18n",
+    "walicord-infrastructure",
     "walicord-interpreter",
-    "walicord-parser"
+    "walicord-parser",
+    "walicord-presentation"
 ]
 resolver = "3"
 

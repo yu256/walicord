@@ -2,7 +2,7 @@
 
 mod model;
 
-use good_lp::{default_solver, variable, variables, Expression, Solution, SolverModel, Variable};
+use good_lp::{Expression, Solution, SolverModel, Variable, default_solver, variable, variables};
 use thiserror::Error;
 
 pub use model::{Payment, PersonBalance};
@@ -16,17 +16,19 @@ pub enum SettlementError {
 }
 
 pub fn minimize_transactions<'a>(
-    people: &'a [PersonBalance<'a>],
+    people: impl IntoIterator<Item = PersonBalance<'a>>,
     alpha: f64,
     beta: f64,
 ) -> Result<Vec<Payment<'a>>, SettlementError> {
-    let n = people.len();
+    let people: Vec<PersonBalance<'a>> = people.into_iter().collect();
     let total: i64 = people.iter().map(|p| p.balance).sum();
     if total != 0 {
         return Err(SettlementError::ImbalancedTotal(total));
     }
 
     let mut vars = variables!();
+
+    let n = people.len();
 
     let mut index_map = vec![vec![None; n]; n];
     let expected_pairs = n.saturating_mul(n.saturating_sub(1));

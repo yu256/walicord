@@ -1,7 +1,6 @@
 #[cfg(all(feature = "ja", feature = "en"))]
 compile_error!("Cannot enable both 'ja' and 'en' features at the same time");
 
-// Simple string constants (no formatting needed)
 #[cfg(feature = "ja")]
 pub mod strings {
     pub const MEMBER: &str = "メンバー";
@@ -52,7 +51,6 @@ pub mod strings {
 
 pub use strings::*;
 
-// Functions for dynamic formatting
 #[cfg(feature = "ja")]
 pub fn failed_to_evaluate_group(name: impl std::fmt::Display) -> String {
     format!("グループ '{}' の評価に失敗しました", name)

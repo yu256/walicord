@@ -1,0 +1,11 @@
+[package]
+name = "walicord-application"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+walicord-domain = { path = "../walicord-domain" }
+
+[dev-dependencies]
+rstest = "0.26.1"
+walicord-infrastructure = { path = "../walicord-infrastructure" }

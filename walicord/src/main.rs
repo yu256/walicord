@@ -19,13 +19,13 @@ use serenity::{
     prelude::*,
 };
 use std::env;
-use walicord_core::{
-    SettlementView,
-    application::{MessageProcessor, ProcessingOutcome},
-    domain::model::{Command as ProgramCommand, Statement},
-    infrastructure::parser::WalicordProgramParser,
+use walicord_application::{
+    Command as ProgramCommand, MessageProcessor, ProcessingOutcome, ScriptStatement,
+    SettlementOptimizationError,
 };
+use walicord_infrastructure::{WalicordProgramParser, WalicordSettlementOptimizer};
 use walicord_parser::extract_members_from_topic;
+use walicord_presentation::{SettlementPresenter, SettlementView, VariablesPresenter};
 
 fn load_target_channel_ids() -> Vec<ChannelId> {
     let var = env::var("TARGET_CHANNEL_IDS");
@@ -39,7 +39,21 @@ fn load_target_channel_ids() -> Vec<ChannelId> {
         .collect()
 }
 
-const MISSING_MEMBERS_MESSAGE: &str = walicord_core::i18n::MISSING_MEMBERS_DECLARATION;
+const MISSING_MEMBERS_MESSAGE: &str = walicord_i18n::MISSING_MEMBERS_DECLARATION;
+
+fn format_settlement_error(err: SettlementOptimizationError) -> String {
+    match err {
+        SettlementOptimizationError::ImbalancedTotal(total) => {
+            format!(
+                "{} (total: {total})",
+                walicord_i18n::SETTLEMENT_CALCULATION_FAILED
+            )
+        }
+        SettlementOptimizationError::NoSolution => {
+            walicord_i18n::SETTLEMENT_CALCULATION_FAILED.to_string()
+        }
+    }
+}
 
 enum MembersError {
     Channel(ChannelError),
@@ -107,12 +121,7 @@ impl<'a> Handler<'a> {
         }
     }
 
-    async fn reply_with_settlement(
-        &self,
-        ctx: &Context,
-        msg: &Message,
-        response: SettlementView,
-    ) {
+    async fn reply_with_settlement(&self, ctx: &Context, msg: &Message, response: SettlementView) {
         use serenity::{all::CreateAttachment, builder::CreateMessage};
 
         let message_builder = CreateMessage::new().reference_message(msg);
@@ -188,9 +197,10 @@ impl<'a> Handler<'a> {
             0
         } else {
             match self.processor.parse_program(&members, &existing_content) {
-                ProcessingOutcome::Success(program) => program.statements.len(),
+                ProcessingOutcome::Success(program) => program.statements().len(),
                 ProcessingOutcome::MissingMembersDeclaration
                 | ProcessingOutcome::UndefinedMember { .. }
+                | ProcessingOutcome::FailedToEvaluateGroup { .. }
                 | ProcessingOutcome::SyntaxError { .. } => 0,
             }
         };
@@ -208,8 +218,9 @@ impl<'a> Handler<'a> {
                 let mut should_store = false;
 
                 {
-                    let new_statements = if program.statements.len() >= previous_statement_count {
-                        &program.statements[previous_statement_count..]
+                    let statements = program.statements();
+                    let new_statements = if statements.len() >= previous_statement_count {
+                        &statements[previous_statement_count..]
                     } else {
                         &[]
                     };
@@ -220,11 +231,11 @@ impl<'a> Handler<'a> {
 
                     for (offset, stmt) in new_statements.iter().enumerate() {
                         let stmt_index = previous_statement_count + offset;
-                        match stmt {
-                            Statement::Declaration(_) | Statement::Payment(_) => {
+                        match &stmt.statement {
+                            ScriptStatement::Domain(_) => {
                                 has_effect_statement = true;
                             }
-                            Statement::Command(command) => {
+                            ScriptStatement::Command(command) => {
                                 if matches!(command, ProgramCommand::SettleUp(_)) {
                                     has_effect_statement = true;
                                 }
@@ -241,31 +252,35 @@ impl<'a> Handler<'a> {
                 for (stmt_index, command) in commands {
                     match command {
                         ProgramCommand::Variables => {
-                            let reply = self
-                                .processor
-                                .format_variables_response_for_prefix(&program, stmt_index);
+                            let reply = VariablesPresenter::render_for_prefix(&program, stmt_index);
                             self.reply(ctx, msg, reply).await;
                         }
                         ProgramCommand::Evaluate => {
                             match self
                                 .processor
-                                .format_settlement_response_for_prefix(&program, stmt_index)
+                                .build_settlement_result_for_prefix(&program, stmt_index)
                             {
                                 Ok(response) => {
-                                    self.reply_with_settlement(ctx, msg, response).await
+                                    let view = SettlementPresenter::render(&response);
+                                    self.reply_with_settlement(ctx, msg, view).await
                                 }
-                                Err(err_msg) => self.reply(ctx, msg, err_msg).await,
+                                Err(err) => {
+                                    self.reply(ctx, msg, format_settlement_error(err)).await
+                                }
                             }
                         }
                         ProgramCommand::SettleUp(_) => {
                             match self
                                 .processor
-                                .format_settlement_response_for_prefix(&program, stmt_index)
+                                .build_settlement_result_for_prefix(&program, stmt_index)
                             {
                                 Ok(response) => {
-                                    self.reply_with_settlement(ctx, msg, response).await
+                                    let view = SettlementPresenter::render(&response);
+                                    self.reply_with_settlement(ctx, msg, view).await
                                 }
-                                Err(err_msg) => self.reply(ctx, msg, err_msg).await,
+                                Err(err) => {
+                                    self.reply(ctx, msg, format_settlement_error(err)).await
+                                }
                             }
                         }
                     }
@@ -290,6 +305,20 @@ impl<'a> Handler<'a> {
                 );
                 self.reply(ctx, msg, format!("{} {error_msg}", msg.author.mention()))
                     .await;
+                false
+            }
+            ProcessingOutcome::FailedToEvaluateGroup { name } => {
+                self.react(ctx, msg, '❎').await;
+                self.reply(
+                    ctx,
+                    msg,
+                    format!(
+                        "{} {}",
+                        msg.author.mention(),
+                        walicord_i18n::failed_to_evaluate_group(name)
+                    ),
+                )
+                .await;
                 false
             }
             ProcessingOutcome::SyntaxError { message } => {
@@ -420,7 +449,7 @@ async fn main() {
         GatewayIntents::GUILD_MESSAGES | GatewayIntents::MESSAGE_CONTENT | GatewayIntents::GUILDS;
 
     let target_channel = load_target_channel_ids();
-    let processor = MessageProcessor::new(&WalicordProgramParser);
+    let processor = MessageProcessor::new(&WalicordProgramParser, &WalicordSettlementOptimizer);
 
     let handles: Vec<tokio::task::JoinHandle<()>> = target_channel
         .into_iter()

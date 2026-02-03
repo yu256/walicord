@@ -1,19 +1,5 @@
+use crate::model::{Money, Settlement, Transfer};
 use std::collections::{HashMap, HashSet};
-
-/// Transfer information for settlement processing
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Transfer<'a> {
-    pub from: &'a str,
-    pub to: &'a str,
-    pub amount: i64,
-}
-
-/// Result of settlement processing
-#[derive(Debug, PartialEq)]
-pub struct Settlement<'a> {
-    pub new_balances: HashMap<&'a str, i64>,
-    pub transfers: Vec<Transfer<'a>>,
-}
 
 /// Settlement calculation service
 pub struct SettlementCalculator;
@@ -32,7 +18,7 @@ impl SettlementCalculator {
     /// New balances after settlement and transfer list
     pub fn calculate<'a>(
         &self,
-        balances: HashMap<&'a str, i64>,
+        balances: HashMap<&'a str, Money>,
         participants: &[&'a str],
         settle_members: &[&'a str],
     ) -> Settlement<'a> {
@@ -42,29 +28,28 @@ impl SettlementCalculator {
 
         for &member in settle_members {
             let balance = match working_balances.get(member).copied() {
-                Some(b) if b != 0 => b,
+                Some(b) if !b.is_zero() => b,
                 _ => continue,
             };
 
-            let (from_member, to_member, target_sign) = if balance > 0 {
-                (true, false, -1) // Receive: look for negative balances
+            let (from_member, to_member, target_sign) = if balance.amount() > 0 {
+                (true, false, -1)
             } else {
-                (false, true, 1) // Pay: look for positive balances
+                (false, true, 1)
             };
 
             let mut remaining = balance.abs();
             let mut transferred = 0;
 
-            // Try to settle with other settle members first
             for &other in settle_members {
                 if other == member {
                     continue;
                 }
                 if let Some(other_balance) = working_balances.get_mut(other) {
                     let can_transfer = if target_sign < 0 {
-                        *other_balance < 0
+                        other_balance.amount() < 0
                     } else {
-                        *other_balance > 0
+                        other_balance.amount() > 0
                     };
                     if !can_transfer {
                         continue;
@@ -73,13 +58,13 @@ impl SettlementCalculator {
                     let available = other_balance.abs();
                     let amount = remaining.min(available);
                     if amount > 0 {
-                        *other_balance -= target_sign * amount;
+                        *other_balance -= Money::from_i64(target_sign * amount);
                         remaining -= amount;
                         transferred += amount;
                         transfers.push(Transfer {
                             from: if from_member { member } else { other },
                             to: if to_member { member } else { other },
-                            amount,
+                            amount: Money::from_i64(amount),
                         });
                     }
                     if remaining == 0 {
@@ -88,7 +73,6 @@ impl SettlementCalculator {
                 }
             }
 
-            // Then try with other participants
             if remaining > 0 {
                 for &other in participants {
                     if other == member || settle_lookup.contains(other) {
@@ -96,9 +80,9 @@ impl SettlementCalculator {
                     }
                     if let Some(other_balance) = working_balances.get_mut(other) {
                         let can_transfer = if target_sign < 0 {
-                            *other_balance < 0
+                            other_balance.amount() < 0
                         } else {
-                            *other_balance > 0
+                            other_balance.amount() > 0
                         };
                         if !can_transfer {
                             continue;
@@ -107,13 +91,13 @@ impl SettlementCalculator {
                         let available = other_balance.abs();
                         let amount = remaining.min(available);
                         if amount > 0 {
-                            *other_balance -= target_sign * amount;
+                            *other_balance -= Money::from_i64(target_sign * amount);
                             remaining -= amount;
                             transferred += amount;
                             transfers.push(Transfer {
                                 from: if from_member { member } else { other },
                                 to: if to_member { member } else { other },
-                                amount,
+                                amount: Money::from_i64(amount),
                             });
                         }
                         if remaining == 0 {
@@ -123,12 +107,11 @@ impl SettlementCalculator {
                 }
             }
 
-            // Update member's balance
             if let Some(member_balance) = working_balances.get_mut(member) {
                 *member_balance = if remaining == 0 {
-                    0
+                    Money::zero()
                 } else {
-                    balance.signum() * (balance.abs() - transferred)
+                    Money::from_i64(balance.signum() * (balance.abs() - transferred))
                 };
             }
             debug_assert_eq!(remaining, 0);
@@ -154,46 +137,62 @@ mod tests {
 
     #[rstest]
     #[case::simple_positive_balance(
-        HashMap::from([("A", 100), ("B", -100)]),
+        HashMap::from([("A", Money::from_i64(100)), ("B", Money::from_i64(-100))]),
         &["A", "B"],
         &["A"],
-        HashMap::from([("A", 0), ("B", 0)]),
+        HashMap::from([("A", Money::zero()), ("B", Money::zero())]),
         vec![("A", "B", 100)]
     )]
     #[case::simple_negative_balance(
-        HashMap::from([("A", -100), ("B", 100)]),
+        HashMap::from([("A", Money::from_i64(-100)), ("B", Money::from_i64(100))]),
         &["A", "B"],
         &["A"],
-        HashMap::from([("A", 0), ("B", 0)]),
+        HashMap::from([("A", Money::zero()), ("B", Money::zero())]),
         vec![("B", "A", 100)]
     )]
     #[case::zero_balance(
-        HashMap::from([("A", 0), ("B", 0)]),
+        HashMap::from([("A", Money::zero()), ("B", Money::zero())]),
         &["A", "B"],
         &["A"],
-        HashMap::from([("A", 0), ("B", 0)]),
+        HashMap::from([("A", Money::zero()), ("B", Money::zero())]),
         vec![]
     )]
     #[case::multiple_settle_members(
-        HashMap::from([("A", 100), ("B", 100), ("C", -200)]),
+        HashMap::from([
+            ("A", Money::from_i64(100)),
+            ("B", Money::from_i64(100)),
+            ("C", Money::from_i64(-200)),
+        ]),
         &["A", "B", "C"],
         &["A", "B"],
-        HashMap::from([("A", 0), ("B", 0), ("C", 0)]),
+        HashMap::from([
+            ("A", Money::zero()),
+            ("B", Money::zero()),
+            ("C", Money::zero()),
+        ]),
         vec![("A", "C", 100), ("B", "C", 100)]
     )]
     #[case::cross_group_transfer(
-        HashMap::from([("A", 100), ("B", -50), ("C", -50)]),
+        HashMap::from([
+            ("A", Money::from_i64(100)),
+            ("B", Money::from_i64(-50)),
+            ("C", Money::from_i64(-50)),
+        ]),
         &["A", "B", "C"],
         &["A"],
-        HashMap::from([("A", 0), ("B", 0), ("C", 0)]),
+        HashMap::from([
+            ("A", Money::zero()),
+            ("B", Money::zero()),
+            ("C", Money::zero()),
+        ]),
         vec![("A", "B", 50), ("A", "C", 50)]
     )]
     fn settlement_calculator_cases(
         calculator: SettlementCalculator,
-        #[case] balances: HashMap<&str, i64>,
+        #[case] balances: HashMap<&str, Money>,
         #[case] participants: &[&str],
         #[case] settle_members: &[&str],
-        #[case] expected_balances: HashMap<&str, i64>,
+        #[case] expected_balances: HashMap<&str, Money>,
         #[case] expected_transfers: Vec<(&str, &str, i64)>,
     ) {
         let result = calculator.calculate(balances, participants, settle_members);
@@ -202,7 +201,11 @@ mod tests {
 
         let expected: Vec<Transfer> = expected_transfers
             .into_iter()
-            .map(|(from, to, amount)| Transfer { from, to, amount })
+            .map(|(from, to, amount)| Transfer {
+                from,
+                to,
+                amount: Money::from_i64(amount),
+            })
             .collect();
         assert_eq!(result.transfers, expected);
     }

@@ -3,12 +3,12 @@ compile_error!("Cannot enable both 'ja' and 'en' features at the same time");
 
 #[cfg(feature = "ja")]
 pub fn line_syntax_error(line: usize, error: impl std::fmt::Display) -> String {
-    format!("行 {}: 構文エラー - {}", line, error)
+    format!("行 {line}: 構文エラー - {error}")
 }
 
 #[cfg(feature = "ja")]
 pub fn line_syntax_error_unparsed(line: usize, input: impl std::fmt::Display) -> String {
-    format!("行 {}: 構文エラー - 解析されていない入力: {}", line, input)
+    format!("行 {line}: 構文エラー - 解析されていない入力: {input}")
 }
 
 #[cfg(feature = "en")]

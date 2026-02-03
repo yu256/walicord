@@ -4,10 +4,16 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-walicord-core = { path = "../walicord-core" }
+walicord-application = { path = "../walicord-application" }
+walicord-domain = { path = "../walicord-domain" }
+walicord-infrastructure = { path = "../walicord-infrastructure" }
+walicord-i18n = { path = "../walicord-i18n" }
 walicord-parser = { path = "../walicord-parser" }
+walicord-presentation = { path = "../walicord-presentation" }
 
 [features]
-default = ["microlp"]
-microlp = ["walicord-core/microlp"]
-coin_cbc = ["walicord-core/coin_cbc"]
+default = ["microlp", "ja"]
+microlp = ["walicord-infrastructure/microlp"]
+coin_cbc = ["walicord-infrastructure/coin_cbc"]
+ja = ["walicord-infrastructure/ja", "walicord-i18n/ja", "walicord-parser/ja"]
+en = ["walicord-infrastructure/en", "walicord-i18n/en", "walicord-parser/en"]

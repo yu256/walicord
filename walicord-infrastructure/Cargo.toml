@@ -1,13 +1,16 @@
 [package]
-name = "walicord-core"
+name = "walicord-infrastructure"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-walicord-calc = { path = "../walicord-calc" }
+walicord-application = { path = "../walicord-application" }
+walicord-domain = { path = "../walicord-domain" }
 walicord-parser = { path = "../walicord-parser" }
+walicord-calc = { path = "../walicord-calc" }
 
 [dev-dependencies]
+proptest = "1.9.0"
 rstest = "0.26.1"
 
 [features]
