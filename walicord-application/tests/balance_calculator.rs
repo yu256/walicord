@@ -132,6 +132,11 @@ fn settle_up_pre_and_post_balances(
     "B lent 100 to A\nC lent 50 to A\n!settleup A",
     &[("A", 0)],
 )]
+#[case::zero_balance_member_no_change(
+    &["A", "B", "C"],
+    "A lent 100 to B\n!settleup C",
+    &[("A", 100), ("B", -100), ("C", 0)],
+)]
 #[case::multiple_members(
     &["A", "B", "C", "D"],
     "A lent 100 to C\nB lent 100 to C\nD lent 50 to A\n!settleup A, B",

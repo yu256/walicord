@@ -187,6 +187,20 @@ mod tests {
         ]),
         vec![("A", "B", 50), ("A", "C", 50)]
     )]
+    #[case::empty_settle_members(
+        HashMap::from([("A", Money::from_i64(100)), ("B", Money::from_i64(-100))]),
+        &["A", "B"],
+        &[],
+        HashMap::from([("A", Money::from_i64(100)), ("B", Money::from_i64(-100))]),
+        vec![]
+    )]
+    #[case::missing_balance_member(
+        HashMap::from([("A", Money::from_i64(100)), ("B", Money::from_i64(-100))]),
+        &["A", "B", "C"],
+        &["A", "C"],
+        HashMap::from([("A", Money::zero()), ("B", Money::zero())]),
+        vec![("A", "B", 100)]
+    )]
     fn settlement_calculator_cases(
         calculator: SettlementCalculator,
         #[case] balances: HashMap<&str, Money>,

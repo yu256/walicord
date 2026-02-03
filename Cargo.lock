@@ -2641,6 +2641,8 @@ name = "walicord-calc"
 version = "0.1.0"
 dependencies = [
  "good_lp",
+ "proptest",
+ "rstest",
  "thiserror 2.0.17",
 ]
 
