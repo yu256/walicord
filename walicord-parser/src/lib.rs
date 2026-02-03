@@ -1,12 +1,14 @@
 #![warn(clippy::uninlined_format_args)]
 
+mod i18n;
+
 use nom::{
-    IResult, Parser,
     branch::alt,
     bytes::complete::{tag, tag_no_case, take_while, take_while1},
     character::complete::{char, u64},
     combinator::opt,
     multi::separated_list1,
+    IResult, Parser,
 };
 use std::{borrow::Cow, collections::HashSet};
 
@@ -123,7 +125,11 @@ impl<'a> SetExpr<'a> {
             }
         }
 
-        if stack.len() == 1 { stack.pop() } else { None }
+        if stack.len() == 1 {
+            stack.pop()
+        } else {
+            None
+        }
     }
 }
 
@@ -321,7 +327,7 @@ fn to(input: &str) -> IResult<&str, &str> {
     alt((tag("to"), tag("TO"))).parse(input)
 }
 
-// {payer} が {payee} に {amount}貸した
+// {payer} ga {payee} ni {amount} lent (Japanese grammar pattern)
 fn payment_lender_subject_ja(input: &str) -> IResult<&str, Payment<'_>> {
     (
         set_expr, // payer
@@ -352,12 +358,12 @@ fn payment_lender_subject_en(input: &str) -> IResult<&str, Payment<'_>> {
         .parse(input)
 }
 
-// {payee} が {payer} から {amount}借りた
+// {payee} ga {payer} kara {amount} borrowed (Japanese grammar pattern)
 fn payment_borrower_subject_ja(input: &str) -> IResult<&str, Payment<'_>> {
     (
         set_expr, // payee
         sp, ga, sp, set_expr, // payer
-        sp, from, // "から"
+        sp, from, // "kara" in Japanese
         sp, yen, // amount
         sp, borrowed,
     )
@@ -432,10 +438,9 @@ pub fn parse_program<'a>(
         match statement(trimmed) {
             Ok((rest, stmt)) => {
                 if !rest.trim().is_empty() {
-                    return Err(ParseError::SyntaxError(format!(
-                        "行 {}: 構文エラー - 解析されていない入力: {}",
+                    return Err(ParseError::SyntaxError(i18n::line_syntax_error_unparsed(
                         idx + 1,
-                        rest.trim()
+                        rest.trim(),
                     )));
                 }
                 match &stmt {
@@ -472,10 +477,7 @@ pub fn parse_program<'a>(
                 statements.push(stmt);
             }
             Err(e) => {
-                return Err(ParseError::SyntaxError(format!(
-                    "行 {}: 構文エラー - {e}",
-                    idx + 1
-                )));
+                return Err(ParseError::SyntaxError(i18n::line_syntax_error(idx + 1, e)));
             }
         }
     }
@@ -628,7 +630,7 @@ mod tests {
 
     #[test]
     fn test_parse_kakutei_command() {
-        let input = "!確定 MEMBERS - A";
+        let input = "!settleup MEMBERS - A";
         let (_, stmt) = statement(input).unwrap();
         let mut expected_expr = SetExpr::new();
         expected_expr.push(SetOp::Push("MEMBERS"));

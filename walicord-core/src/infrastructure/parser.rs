@@ -1,10 +1,13 @@
-use crate::domain::{
-    Declaration, Program, ProgramParseError, ProgramParser,
-    model::{Command, Payment, Statement},
+use crate::{
+    domain::{
+        model::{Command, Payment, Statement},
+        Declaration, Program, ProgramParseError, ProgramParser,
+    },
+    i18n,
 };
 use std::collections::{HashMap, HashSet};
 use walicord_parser::{
-    Command as ParserCommand, ParseError, Statement as ParserStatement, parse_program,
+    parse_program, Command as ParserCommand, ParseError, Statement as ParserStatement,
 };
 
 #[derive(Default)]
@@ -38,10 +41,9 @@ impl ProgramParser for WalicordProgramParser {
                             let Some(result_set_cow) = decl.expression.evaluate(&|name| {
                                 evaluated_groups.get(name).or_else(|| base_sets.get(name))
                             }) else {
-                                return Err(ProgramParseError::SyntaxError(format!(
-                                    "グループ '{}' の評価に失敗しました",
-                                    decl.name
-                                )));
+                                return Err(ProgramParseError::SyntaxError(
+                                    i18n::failed_to_evaluate_group(decl.name),
+                                ));
                             };
 
                             let result_set_owned = result_set_cow.into_owned();

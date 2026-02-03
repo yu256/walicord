@@ -4,6 +4,7 @@ use walicord_core::{
     application::{MessageProcessor, ProcessingOutcome},
     domain::model::{Command as ProgramCommand, Program, Statement},
     infrastructure::parser::WalicordProgramParser,
+    SettlementView,
 };
 use walicord_parser::extract_members_from_topic;
 
@@ -44,6 +45,16 @@ fn run() -> CliResult<()> {
     print_program_output(&processor, &program)
 }
 
+fn print_settlement_view(response: &SettlementView) {
+    println!("\n--- Balance Table SVG ---");
+    println!("{}", response.balance_table_svg);
+
+    if let Some(ref svg) = response.transfer_table_svg {
+        println!("\n--- Transfer Table SVG ---");
+        println!("{svg}");
+    }
+}
+
 fn print_program_output<'a>(
     processor: &MessageProcessor<'a>,
     program: &Program<'a>,
@@ -60,8 +71,8 @@ fn print_program_output<'a>(
                 }
                 ProgramCommand::Evaluate => {
                     match processor.format_settlement_response_for_prefix(program, index) {
-                        Ok(output) => {
-                            println!("{output}");
+                        Ok(response) => {
+                            print_settlement_view(&response);
                             printed = true;
                         }
                         Err(message) => return Err(message.into()),
@@ -69,8 +80,8 @@ fn print_program_output<'a>(
                 }
                 ProgramCommand::SettleUp(_) => {
                     match processor.format_settlement_response_for_prefix(program, index) {
-                        Ok(output) => {
-                            println!("{output}");
+                        Ok(response) => {
+                            print_settlement_view(&response);
                             printed = true;
                         }
                         Err(message) => return Err(message.into()),
@@ -82,7 +93,7 @@ fn print_program_output<'a>(
 
     if !printed {
         match processor.format_settlement_response(program) {
-            Ok(output) => println!("{output}"),
+            Ok(response) => print_settlement_view(&response),
             Err(message) => return Err(message.into()),
         }
     }

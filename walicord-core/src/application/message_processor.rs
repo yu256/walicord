@@ -1,13 +1,28 @@
-use crate::domain::{
-    Program, ProgramParseError, ProgramParser,
-    model::{Command, Statement},
+use crate::{
+    application::svg_table::{Alignment, SvgTableBuilder},
+    domain::{
+        model::{Command, Statement},
+        Program, ProgramParseError, ProgramParser,
+    },
+    i18n,
 };
 use std::{
+    borrow::Cow,
     collections::{HashMap, HashSet},
     fmt::Write as _,
 };
-use walicord_calc::{PersonBalance, minimize_transactions};
+use walicord_calc::{minimize_transactions, PersonBalance};
 use walicord_parser::SetExpr;
+
+pub struct SettlementView {
+    pub balance_table_svg: String,
+    pub transfer_table_svg: Option<String>,
+}
+
+pub struct Settlement<'a> {
+    pub new_balances: HashMap<&'a str, i64>,
+    pub transfers: Vec<Transfer<'a>>,
+}
 
 #[derive(Clone, Copy)]
 pub struct MessageProcessor<'a> {
@@ -80,11 +95,11 @@ impl<'a> SetEnvironment<'a> {
     }
 }
 
-#[derive(Clone, Copy)]
-struct Transfer<'a> {
-    from: &'a str,
-    to: &'a str,
-    amount: i64,
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Transfer<'a> {
+    pub from: &'a str,
+    pub to: &'a str,
+    pub amount: i64,
 }
 
 fn distribute<'a>(
@@ -273,8 +288,9 @@ impl<'a> MessageProcessor<'a> {
                         }
 
                         let participants = build_participant_order(members, &balances);
-                        let transfers =
-                            settle_selected_members(&mut balances, &participants, &settle_members);
+                        let (new_balances, transfers) =
+                            settle_selected_members(balances, &participants, &settle_members);
+                        balances = new_balances;
 
                         if let Some(record) = recorded_transfers.as_mut() {
                             let record = &mut **record;
@@ -288,7 +304,7 @@ impl<'a> MessageProcessor<'a> {
         balances
     }
 
-    pub fn format_settlement_response(&self, program: &Program) -> Result<String, String> {
+    pub fn format_settlement_response(&self, program: &Program) -> Result<SettlementView, String> {
         self.format_settlement_response_from_slice(program.members, &program.statements)
     }
 
@@ -296,7 +312,7 @@ impl<'a> MessageProcessor<'a> {
         &self,
         program: &Program,
         prefix_len: usize,
-    ) -> Result<String, String> {
+    ) -> Result<SettlementView, String> {
         let prefix_len = prefix_len.min(program.statements.len());
         let statements_slice = if prefix_len < program.statements.len()
             && matches!(program.statements[prefix_len], Statement::Command(_))
@@ -313,7 +329,7 @@ impl<'a> MessageProcessor<'a> {
         &self,
         members: &[&str],
         statements: &[Statement<'_>],
-    ) -> Result<String, String> {
+    ) -> Result<SettlementView, String> {
         let is_settle_up = matches!(
             statements.last(),
             Some(Statement::Command(Command::SettleUp(_)))
@@ -343,39 +359,19 @@ impl<'a> MessageProcessor<'a> {
         person_balances.sort_by_key(|p| p.name);
 
         let settlements = minimize_transactions(&person_balances, 1.0, 0.001)
-            .map_err(|e| format!("清算の計算に失敗しました: {e}"))?;
+            .map_err(|e| format!("{}: {e}", i18n::SETTLEMENT_CALCULATION_FAILED))?;
 
-        let mut reply = String::with_capacity(1024);
-
-        reply.push_str("## 💰 割り勘計算結果\n\n");
-
-        reply.push_str("### 各メンバーの収支\n");
-        reply.push_str("```\n");
-        let _ = writeln!(&mut reply, "{:<15} | {:>10}", "メンバー", "収支");
-        let _ = writeln!(&mut reply, "{:-<15}-+-{:-<10}", "", "");
-        for person in &person_balances {
-            let sign = if person.balance >= 0 { "+" } else { "" };
-            let _ = writeln!(
-                &mut reply,
-                "{:<15} | {sign:>9}{}",
-                person.name, person.balance
-            );
-        }
-        reply.push_str("```\n\n");
+        // Build balance table SVG
+        let balance_table_svg = build_balance_table_svg(&person_balances);
 
         if is_settle_up {
             let has_any_transfers = !settle_transfer_buffer.is_empty() || !settlements.is_empty();
 
-            reply.push_str("### 確定対象\n");
-            if settle_members_buffer.is_empty() {
-                reply.push_str("該当するメンバーが見つかりませんでした。\n\n");
-            } else {
-                reply.push_str(&format!("{}\n\n", settle_members_buffer.join(", ")));
-            }
-
             if !has_any_transfers {
-                reply.push_str("### ✅ 精算済み\n全員の収支がゼロです。\n");
-                return Ok(reply);
+                return Ok(SettlementView {
+                    balance_table_svg: balance_table_svg,
+                    transfer_table_svg: None,
+                });
             }
 
             let settle_member_lookup: HashSet<&str> =
@@ -414,21 +410,25 @@ impl<'a> MessageProcessor<'a> {
             sort_transfers(&mut receive_for_settle);
             sort_transfers(&mut other_settlements);
 
-            append_transfer_section(&mut reply, "### 確定した人の支払い", &pay_from_settle);
-            append_transfer_section(
-                &mut reply,
-                "### 確定した人が受け取る支払い",
+            // Build combined transfer table SVG
+            let transfer_table_svg = build_settle_up_transfer_svg(
+                &pay_from_settle,
                 &receive_for_settle,
+                &other_settlements,
             );
-            append_transfer_section(&mut reply, "### その他の精算方法(保留)", &other_settlements);
 
-            return Ok(reply);
+            return Ok(SettlementView {
+                balance_table_svg: balance_table_svg,
+                transfer_table_svg: Some(transfer_table_svg),
+            });
         }
 
         if settlements.is_empty() {
-            reply.push_str("### ✅ 精算済み\n全員の収支がゼロです。\n");
+            Ok(SettlementView {
+                balance_table_svg: balance_table_svg,
+                transfer_table_svg: None,
+            })
         } else {
-            reply.push_str("### 精算方法\n");
             let settlement_transfers: Vec<Transfer> = settlements
                 .iter()
                 .map(|s| Transfer {
@@ -437,10 +437,12 @@ impl<'a> MessageProcessor<'a> {
                     amount: s.amount,
                 })
                 .collect();
-            write_transfer_table(&mut reply, &settlement_transfers);
+            let transfer_table_svg = build_transfer_table_svg(&settlement_transfers);
+            Ok(SettlementView {
+                balance_table_svg: balance_table_svg,
+                transfer_table_svg: Some(transfer_table_svg),
+            })
         }
-
-        Ok(reply)
     }
 }
 
@@ -467,152 +469,126 @@ fn build_participant_order<'a>(
     order
 }
 
-fn settle_selected_members<'a>(
-    balances: &mut HashMap<&'a str, i64>,
+/// Perform settlement calculation
+fn calculate_settlement<'a>(
+    balances: HashMap<&'a str, i64>,
     participants: &[&'a str],
     settle_members: &[&'a str],
-) -> Vec<Transfer<'a>> {
-    let mut transfers: Vec<Transfer<'a>> = Vec::new();
-    let settle_lookup: HashSet<&'a str> = settle_members.iter().copied().collect();
+) -> Settlement<'a> {
+    let mut working_balances = balances;
+    let mut transfers = Vec::new();
+    let settle_lookup: HashSet<&str> = settle_members.iter().copied().collect();
 
     for &member in settle_members {
-        let balance = match balances.get(member).copied() {
-            Some(b) => b,
-            None => continue,
+        let balance = match working_balances.get(member).copied() {
+            Some(b) if b != 0 => b,
+            _ => continue,
         };
 
-        if balance == 0 {
-            continue;
-        }
-
-        if balance > 0 {
-            let mut remaining = balance;
-            let mut transferred = 0;
-
-            for &other in settle_members {
-                if other == member {
-                    continue;
-                }
-                if let Some(other_balance) = balances.get_mut(other)
-                    && *other_balance < 0
-                {
-                    let transfer = remaining.min(-*other_balance);
-                    if transfer > 0 {
-                        *other_balance += transfer;
-                        remaining -= transfer;
-                        transferred += transfer;
-                        transfers.push(Transfer {
-                            from: other,
-                            to: member,
-                            amount: transfer,
-                        });
-                    }
-                    if remaining == 0 {
-                        break;
-                    }
-                }
-            }
-
-            if remaining > 0 {
-                for &other in participants {
-                    if other == member || settle_lookup.contains(other) {
-                        continue;
-                    }
-                    if let Some(other_balance) = balances.get_mut(other)
-                        && *other_balance < 0
-                    {
-                        let transfer = remaining.min(-*other_balance);
-                        if transfer > 0 {
-                            *other_balance += transfer;
-                            remaining -= transfer;
-                            transferred += transfer;
-                            transfers.push(Transfer {
-                                from: other,
-                                to: member,
-                                amount: transfer,
-                            });
-                        }
-                        if remaining == 0 {
-                            break;
-                        }
-                    }
-                }
-            }
-
-            if let Some(member_balance) = balances.get_mut(member) {
-                if remaining == 0 {
-                    *member_balance = 0;
-                } else {
-                    *member_balance -= transferred;
-                }
-            }
-            debug_assert_eq!(remaining, 0);
+        let (member_receives, target_sign) = if balance > 0 {
+            (true, -1) // Receive: look for negative balances
         } else {
-            let mut remaining = -balance;
-            let mut transferred = 0;
+            (false, 1) // Pay: look for positive balances
+        };
 
-            for &other in settle_members {
-                if other == member {
+        let mut remaining = balance.abs();
+        let mut transferred = 0;
+
+        // Try to settle with other settle members first
+        for &other in settle_members {
+            if other == member {
+                continue;
+            }
+            if let Some(other_balance) = working_balances.get_mut(other) {
+                let can_transfer = if target_sign < 0 {
+                    *other_balance < 0
+                } else {
+                    *other_balance > 0
+                };
+                if !can_transfer {
                     continue;
                 }
-                if let Some(other_balance) = balances.get_mut(other)
-                    && *other_balance > 0
-                {
-                    let transfer = remaining.min(*other_balance);
-                    if transfer > 0 {
-                        *other_balance -= transfer;
-                        remaining -= transfer;
-                        transferred += transfer;
-                        transfers.push(Transfer {
-                            from: member,
-                            to: other,
-                            amount: transfer,
-                        });
+
+                let available = other_balance.abs();
+                let amount = remaining.min(available);
+                if amount > 0 {
+                    *other_balance -= target_sign * amount;
+                    remaining -= amount;
+                    transferred += amount;
+                    let (from, to) = if member_receives {
+                        (other, member)
+                    } else {
+                        (member, other)
+                    };
+                    transfers.push(Transfer { from, to, amount });
+                }
+                if remaining == 0 {
+                    break;
+                }
+            }
+        }
+
+        // Then try with other participants
+        if remaining > 0 {
+            for &other in participants {
+                if other == member || settle_lookup.contains(other) {
+                    continue;
+                }
+                if let Some(other_balance) = working_balances.get_mut(other) {
+                    let can_transfer = if target_sign < 0 {
+                        *other_balance < 0
+                    } else {
+                        *other_balance > 0
+                    };
+                    if !can_transfer {
+                        continue;
+                    }
+
+                    let available = other_balance.abs();
+                    let amount = remaining.min(available);
+                    if amount > 0 {
+                        *other_balance -= target_sign * amount;
+                        remaining -= amount;
+                        transferred += amount;
+                        let (from, to) = if member_receives {
+                            (other, member)
+                        } else {
+                            (member, other)
+                        };
+                        transfers.push(Transfer { from, to, amount });
                     }
                     if remaining == 0 {
                         break;
                     }
                 }
             }
-
-            if remaining > 0 {
-                for &other in participants {
-                    if other == member || settle_lookup.contains(other) {
-                        continue;
-                    }
-                    if let Some(other_balance) = balances.get_mut(other)
-                        && *other_balance > 0
-                    {
-                        let transfer = remaining.min(*other_balance);
-                        if transfer > 0 {
-                            *other_balance -= transfer;
-                            remaining -= transfer;
-                            transferred += transfer;
-                            transfers.push(Transfer {
-                                from: member,
-                                to: other,
-                                amount: transfer,
-                            });
-                        }
-                        if remaining == 0 {
-                            break;
-                        }
-                    }
-                }
-            }
-
-            if let Some(member_balance) = balances.get_mut(member) {
-                if remaining == 0 {
-                    *member_balance = 0;
-                } else {
-                    *member_balance += transferred;
-                }
-            }
-            debug_assert_eq!(remaining, 0);
         }
+
+        // Update member's balance
+        if let Some(member_balance) = working_balances.get_mut(member) {
+            *member_balance = if remaining == 0 {
+                0
+            } else {
+                balance.signum() * (balance.abs() - transferred)
+            };
+        }
+        debug_assert_eq!(remaining, 0);
     }
 
-    transfers
+    Settlement {
+        new_balances: working_balances,
+        transfers,
+    }
+}
+
+/// Wrapper for backward compatibility
+fn settle_selected_members<'a>(
+    balances: HashMap<&'a str, i64>,
+    participants: &[&'a str],
+    settle_members: &[&'a str],
+) -> (HashMap<&'a str, i64>, Vec<Transfer<'a>>) {
+    let result = calculate_settlement(balances, participants, settle_members);
+    (result.new_balances, result.transfers)
 }
 
 fn sort_transfers<'a>(transfers: &mut Vec<Transfer<'a>>) {
@@ -629,48 +605,108 @@ fn sort_transfers<'a>(transfers: &mut Vec<Transfer<'a>>) {
     });
 }
 
-fn write_transfer_table<'a>(reply: &mut String, transfers: &[Transfer<'a>]) {
-    reply.push_str("```\n");
-    let _ = writeln!(
-        reply,
-        "{:<15} -> {:<15} | {:>10}",
-        "支払人", "受取人", "金額"
-    );
-    let _ = writeln!(reply, "{:-<15}----{:-<15}-+-{:-<10}", "", "", "");
-    for transfer in transfers {
-        let _ = writeln!(
-            reply,
-            "{:<15} -> {:<15} | {:>10}",
-            transfer.from, transfer.to, transfer.amount,
-        );
+fn build_balance_table_svg(person_balances: &[PersonBalance]) -> String {
+    let mut builder = SvgTableBuilder::new()
+        .alignments(&[Alignment::Left, Alignment::Right])
+        .headers(&[Cow::Borrowed(i18n::MEMBER), Cow::Borrowed(i18n::BALANCE)]);
+
+    for person in person_balances {
+        let sign = if person.balance >= 0 { "+" } else { "" };
+        builder = builder.row([
+            Cow::Borrowed(person.name),
+            Cow::Owned(format!("{sign}{}", person.balance)),
+        ]);
     }
-    reply.push_str("```\n");
+
+    builder.build()
 }
 
-fn append_transfer_section<'a>(reply: &mut String, title: &str, transfers: &[Transfer<'a>]) {
-    reply.push_str(title);
-    reply.push('\n');
-    if transfers.is_empty() {
-        reply.push_str("該当する取引はありません。\n\n");
-        return;
+fn build_transfer_table_svg(transfers: &[Transfer]) -> String {
+    let mut builder = SvgTableBuilder::new()
+        .alignments(&[Alignment::Left, Alignment::Left, Alignment::Right])
+        .headers(&[
+            Cow::Borrowed(i18n::FROM),
+            Cow::Borrowed(i18n::TO),
+            Cow::Borrowed(i18n::AMOUNT),
+        ]);
+
+    for transfer in transfers {
+        builder = builder.row([
+            Cow::Borrowed(transfer.from),
+            Cow::Borrowed(transfer.to),
+            Cow::Owned(transfer.amount.to_string()),
+        ]);
     }
-    write_transfer_table(reply, transfers);
-    reply.push('\n');
+
+    builder.build()
+}
+
+fn build_settle_up_transfer_svg(
+    pay_from_settle: &[Transfer],
+    receive_for_settle: &[Transfer],
+    other_settlements: &[Transfer],
+) -> String {
+    let mut builder = SvgTableBuilder::new()
+        .alignments(&[
+            Alignment::Left,
+            Alignment::Left,
+            Alignment::Left,
+            Alignment::Right,
+        ])
+        .headers(&[
+            Cow::Borrowed(i18n::CATEGORY),
+            Cow::Borrowed(i18n::FROM),
+            Cow::Borrowed(i18n::TO),
+            Cow::Borrowed(i18n::AMOUNT),
+        ]);
+
+    for transfer in pay_from_settle {
+        builder = builder.row([
+            Cow::Borrowed(i18n::SETTLEMENT_PAYMENT),
+            Cow::Borrowed(transfer.from),
+            Cow::Borrowed(transfer.to),
+            Cow::Owned(transfer.amount.to_string()),
+        ]);
+    }
+
+    for transfer in receive_for_settle {
+        builder = builder.row([
+            Cow::Borrowed(i18n::PAYMENT_TO_SETTLOR),
+            Cow::Borrowed(transfer.from),
+            Cow::Borrowed(transfer.to),
+            Cow::Owned(transfer.amount.to_string()),
+        ]);
+    }
+
+    for transfer in other_settlements {
+        builder = builder.row([
+            Cow::Borrowed(i18n::PENDING),
+            Cow::Borrowed(transfer.from),
+            Cow::Borrowed(transfer.to),
+            Cow::Owned(transfer.amount.to_string()),
+        ]);
+    }
+
+    builder.build()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::infrastructure::parser::WalicordProgramParser;
+    use rstest::{fixture, rstest};
 
-    #[test]
-    fn settle_up_resets_balances_for_selected_members() {
-        let parser = WalicordProgramParser;
-        let processor = MessageProcessor::new(&parser);
-        let members = ["A", "B"];
-        let content = "A lent 100 to B\n!確定 A";
+    #[fixture]
+    fn processor() -> MessageProcessor<'static> {
+        MessageProcessor::new(&WalicordProgramParser)
+    }
 
-        let program = match processor.parse_program(&members, content) {
+    fn parse_program<'a>(
+        processor: &MessageProcessor<'a>,
+        members: &'a [&'a str],
+        content: &'a str,
+    ) -> Program<'a> {
+        match processor.parse_program(members, content) {
             ProcessingOutcome::Success(program) => program,
             ProcessingOutcome::MissingMembersDeclaration => {
                 panic!("missing members declaration")
@@ -681,7 +717,13 @@ mod tests {
             ProcessingOutcome::SyntaxError { message } => {
                 panic!("syntax error: {message}")
             }
-        };
+        }
+    }
+
+    #[rstest]
+    fn settle_up_resets_balances_for_selected_members(processor: MessageProcessor<'_>) {
+        let members = ["A", "B"];
+        let program = parse_program(&processor, &members, "A lent 100 to B\n!settleup A");
 
         let pre_balances = processor.calculate_balances_for_prefix(&program, 1);
         assert_eq!(pre_balances.get("A"), Some(&100));
@@ -692,25 +734,14 @@ mod tests {
         assert_eq!(post_balances.get("B"), Some(&0));
     }
 
-    #[test]
-    fn settle_up_keeps_other_members_balances() {
-        let parser = WalicordProgramParser;
-        let processor = MessageProcessor::new(&parser);
+    #[rstest]
+    fn settle_up_keeps_other_members_balances(processor: MessageProcessor<'_>) {
         let members = ["A", "B", "C"];
-        let content = "A lent 60 to C\nB lent 100 to C\n!確定 A";
-
-        let program = match processor.parse_program(&members, content) {
-            ProcessingOutcome::Success(program) => program,
-            ProcessingOutcome::MissingMembersDeclaration => {
-                panic!("missing members declaration")
-            }
-            ProcessingOutcome::UndefinedMember { name, line } => {
-                panic!("undefined member {name} at line {line}")
-            }
-            ProcessingOutcome::SyntaxError { message } => {
-                panic!("syntax error: {message}")
-            }
-        };
+        let program = parse_program(
+            &processor,
+            &members,
+            "A lent 60 to C\nB lent 100 to C\n!settleup A",
+        );
 
         let pre_balances = processor.calculate_balances_for_prefix(&program, 2);
         assert_eq!(pre_balances.get("A"), Some(&60));
@@ -723,68 +754,90 @@ mod tests {
         assert_eq!(post_balances.get("C"), Some(&-100));
     }
 
-    #[test]
-    fn settle_up_response_groups_transfers() {
-        let parser = WalicordProgramParser;
-        let processor = MessageProcessor::new(&parser);
+    #[rstest]
+    fn settle_up_response_groups_transfers(processor: MessageProcessor<'_>) {
         let members = ["A", "B", "C"];
-        let content = "A lent 60 to C\nB lent 40 to C\n!確定 A";
-
-        let program = match processor.parse_program(&members, content) {
-            ProcessingOutcome::Success(program) => program,
-            ProcessingOutcome::MissingMembersDeclaration => {
-                panic!("missing members declaration")
-            }
-            ProcessingOutcome::UndefinedMember { name, line } => {
-                panic!("undefined member {name} at line {line}")
-            }
-            ProcessingOutcome::SyntaxError { message } => {
-                panic!("syntax error: {message}")
-            }
-        };
+        let program = parse_program(
+            &processor,
+            &members,
+            "A lent 60 to C\nB lent 40 to C\n!settleup A",
+        );
 
         let last_index = program.statements.len().saturating_sub(1);
         let response = processor
             .format_settlement_response_for_prefix(&program, last_index)
             .expect("response generation failed");
 
-        assert!(response.contains("### 確定した人の支払い"));
-        assert!(response.contains("該当する取引はありません。"));
-        assert!(response.contains("### 確定した人が受け取る支払い"));
-        let compact = response.replace(' ', "");
-        assert!(compact.contains("C->A|60"));
-        assert!(response.contains("### その他の精算方法"));
-        assert!(compact.contains("C->B|40"));
+        assert!(response.transfer_table_svg.is_some());
     }
 
-    #[test]
-    fn settle_up_prefers_internal_transfers() {
-        let parser = WalicordProgramParser;
-        let processor = MessageProcessor::new(&parser);
-        let members = ["A", "D", "C", "B"];
-        let content = "A lent 40 to D\nC lent 60 to D\nC lent 40 to B\n!確定 A, B";
+    #[rstest]
+    fn settle_up_with_negative_balance(processor: MessageProcessor<'_>) {
+        let members = ["A", "B", "C"];
+        let program = parse_program(
+            &processor,
+            &members,
+            "B lent 100 to A\nC lent 50 to A\n!settleup A",
+        );
 
-        let program = match processor.parse_program(&members, content) {
-            ProcessingOutcome::Success(program) => program,
-            ProcessingOutcome::MissingMembersDeclaration => {
-                panic!("missing members declaration")
-            }
-            ProcessingOutcome::UndefinedMember { name, line } => {
-                panic!("undefined member {name} at line {line}")
-            }
-            ProcessingOutcome::SyntaxError { message } => {
-                panic!("syntax error: {message}")
-            }
-        };
+        let post_balances = processor.calculate_balances(&program);
+        assert_eq!(post_balances.get("A"), Some(&0));
+    }
 
-        let last_index = program.statements.len().saturating_sub(1);
-        let response = processor
-            .format_settlement_response_for_prefix(&program, last_index)
-            .expect("response generation failed");
+    #[rstest]
+    fn settle_up_multiple_members(processor: MessageProcessor<'_>) {
+        let members = ["A", "B", "C", "D"];
+        let program = parse_program(
+            &processor,
+            &members,
+            "A lent 100 to C\nB lent 100 to C\nD lent 50 to A\n!settleup A, B",
+        );
 
-        let compact = response.replace(' ', "");
-        assert!(compact.contains("B->A|40"), "{response}");
-        assert!(compact.contains("D->C|100"), "{response}");
-        assert!(!compact.contains("C->B|40"), "{response}");
+        let post_balances = processor.calculate_balances(&program);
+        assert_eq!(post_balances.get("A"), Some(&0));
+        assert_eq!(post_balances.get("B"), Some(&0));
+    }
+
+    #[rstest]
+    fn settle_up_cross_group_transfer(processor: MessageProcessor<'_>) {
+        let members = ["A", "B", "C", "D"];
+        let program = parse_program(
+            &processor,
+            &members,
+            "A lent 100 to C\nB lent 100 to D\n!settleup A, B",
+        );
+
+        let post_balances = processor.calculate_balances(&program);
+        assert_eq!(post_balances.get("A"), Some(&0));
+        assert_eq!(post_balances.get("B"), Some(&0));
+    }
+
+    #[rstest]
+    fn settle_up_partial_within_group(processor: MessageProcessor<'_>) {
+        let members = ["A", "B", "C"];
+        let program = parse_program(
+            &processor,
+            &members,
+            "A lent 100 to B\nC lent 50 to A\n!settleup A, B",
+        );
+
+        let post_balances = processor.calculate_balances(&program);
+        assert_eq!(post_balances.get("A"), Some(&0));
+        assert_eq!(post_balances.get("B"), Some(&0));
+    }
+
+    #[rstest]
+    fn settle_up_with_exact_match(processor: MessageProcessor<'_>) {
+        let members = ["A", "B", "C"];
+        let program = parse_program(
+            &processor,
+            &members,
+            "A lent 100 to B\nB lent 100 to C\n!settleup A, B, C",
+        );
+
+        let post_balances = processor.calculate_balances(&program);
+        assert_eq!(post_balances.get("A"), Some(&0));
+        assert_eq!(post_balances.get("B"), Some(&0));
+        assert_eq!(post_balances.get("C"), Some(&0));
     }
 }

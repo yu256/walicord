@@ -5,8 +5,7 @@ pub struct PersonBalance<'a> {
     pub balance: i64,
 }
 
-/// Optimization result: who pays how much to whom
-pub struct SettlementResult<'a> {
+pub struct Payment<'a> {
     pub from: &'a str,
     pub to: &'a str,
     pub amount: i64,

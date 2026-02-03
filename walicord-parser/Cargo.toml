@@ -6,3 +6,8 @@ edition = "2024"
 [dependencies]
 nom = "8.0.0"
 thiserror = "2.0.17"
+
+[features]
+default = ["ja"]
+ja = []
+en = []

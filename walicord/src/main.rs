@@ -4,7 +4,10 @@ mod infrastructure;
 
 use dashmap::DashMap;
 use indexmap::IndexMap;
-use infrastructure::discord::{ChannelError, DiscordChannelService};
+use infrastructure::{
+    discord::{ChannelError, DiscordChannelService},
+    svg_renderer::svg_to_png,
+};
 use serenity::{
     all::MessageId,
     async_trait,
@@ -17,6 +20,7 @@ use serenity::{
 };
 use std::env;
 use walicord_core::{
+    SettlementView,
     application::{MessageProcessor, ProcessingOutcome},
     domain::model::{Command as ProgramCommand, Statement},
     infrastructure::parser::WalicordProgramParser,
@@ -35,8 +39,7 @@ fn load_target_channel_ids() -> Vec<ChannelId> {
         .collect()
 }
 
-const MISSING_MEMBERS_MESSAGE: &str =
-    "チャンネルのtopicに `MEMBERS := ...` の宣言が見つかりません。";
+const MISSING_MEMBERS_MESSAGE: &str = walicord_core::i18n::MISSING_MEMBERS_DECLARATION;
 
 enum MembersError {
     Channel(ChannelError),
@@ -104,6 +107,43 @@ impl<'a> Handler<'a> {
         }
     }
 
+    async fn reply_with_settlement(
+        &self,
+        ctx: &Context,
+        msg: &Message,
+        response: SettlementView,
+    ) {
+        use serenity::{all::CreateAttachment, builder::CreateMessage};
+
+        let message_builder = CreateMessage::new().reference_message(msg);
+
+        let attachments = {
+            fn svg_to_attachment(
+                filename: &str,
+            ) -> impl Fn(&String) -> Option<CreateAttachment> + '_ {
+                move |svg| svg_to_png(svg).map(|png| CreateAttachment::bytes(png, filename))
+            }
+            std::iter::once(&response.balance_table_svg)
+                .filter_map(svg_to_attachment("balance.png"))
+                .chain(
+                    response
+                        .transfer_table_svg
+                        .iter()
+                        .filter_map(svg_to_attachment("transfers.png")),
+                )
+        };
+
+        let message_builder = attachments.fold(message_builder, |m, a| m.add_file(a));
+
+        if let Err(e) = msg
+            .channel_id
+            .send_message(&ctx.http, message_builder)
+            .await
+        {
+            tracing::error!("Failed to send message with attachments: {:?}", e);
+        }
+    }
+
     async fn react(&self, ctx: &Context, msg: &Message, emoji: char) {
         if let Err(e) = msg.react(ctx, emoji).await {
             tracing::error!("Failed to add reaction: {:?}", e);
@@ -122,7 +162,7 @@ impl<'a> Handler<'a> {
                 self.reply(
                     ctx,
                     msg,
-                    format!("{} エラー: {MISSING_MEMBERS_MESSAGE}", msg.author.mention()),
+                    format!("{} Error: {MISSING_MEMBERS_MESSAGE}", msg.author.mention()),
                 )
                 .await;
                 return false;
@@ -136,7 +176,7 @@ impl<'a> Handler<'a> {
                 self.reply(
                     ctx,
                     msg,
-                    format!("{} エラー: {MISSING_MEMBERS_MESSAGE}", msg.author.mention()),
+                    format!("{} Error: {MISSING_MEMBERS_MESSAGE}", msg.author.mention()),
                 )
                 .await;
                 return false;
@@ -211,7 +251,9 @@ impl<'a> Handler<'a> {
                                 .processor
                                 .format_settlement_response_for_prefix(&program, stmt_index)
                             {
-                                Ok(reply) => self.reply(ctx, msg, reply).await,
+                                Ok(response) => {
+                                    self.reply_with_settlement(ctx, msg, response).await
+                                }
                                 Err(err_msg) => self.reply(ctx, msg, err_msg).await,
                             }
                         }
@@ -220,7 +262,9 @@ impl<'a> Handler<'a> {
                                 .processor
                                 .format_settlement_response_for_prefix(&program, stmt_index)
                             {
-                                Ok(reply) => self.reply(ctx, msg, reply).await,
+                                Ok(response) => {
+                                    self.reply_with_settlement(ctx, msg, response).await
+                                }
                                 Err(err_msg) => self.reply(ctx, msg, err_msg).await,
                             }
                         }
@@ -234,7 +278,7 @@ impl<'a> Handler<'a> {
                 self.reply(
                     ctx,
                     msg,
-                    format!("{} エラー: {MISSING_MEMBERS_MESSAGE}", msg.author.mention()),
+                    format!("{} Error: {MISSING_MEMBERS_MESSAGE}", msg.author.mention()),
                 )
                 .await;
                 false
@@ -242,7 +286,7 @@ impl<'a> Handler<'a> {
             ProcessingOutcome::UndefinedMember { name, line } => {
                 self.react(ctx, msg, '❎').await;
                 let error_msg = format!(
-                    "エラー: 行 {line} に未定義のメンバー「{name}」が使用されています。\nチャンネルtopicのMEMBERS宣言で定義してください。\n現在のメンバー: {members:?}"
+                    "Error: Undefined member '{name}' is used at line {line}.\nPlease define it in the channel topic MEMBERS declaration.\nCurrent members: {members:?}"
                 );
                 self.reply(ctx, msg, format!("{} {error_msg}", msg.author.mention()))
                     .await;
@@ -253,7 +297,7 @@ impl<'a> Handler<'a> {
                 self.reply(
                     ctx,
                     msg,
-                    format!("{} 構文エラー: {message}", msg.author.mention()),
+                    format!("{} Syntax error: {message}", msg.author.mention()),
                 )
                 .await;
                 false
