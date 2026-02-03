@@ -10,7 +10,8 @@ Discord上で共有経費を追跡し、グループメンバー間の最適な�
 - **債務決済の最適化**: 線形計画法を使用した決済取引の最小化
 - **変数表示**: `!variables` コマンドで定義されたグループとそのメンバーを表示
 - **複数チャンネル対応**: 複数のDiscordチャンネルで同時に動作可能
-- **決済コマンド**: `!settleup` / `!確定` で特定メンバーの決済プラン計算
+- **決済コマンド**: `!settleup` / `!確定` で特定メンバー集合の決済を即時反映
+- **画像出力**: 残高表と決済プランをPNGで返信
 
 ## 技術スタック
 
@@ -28,17 +29,21 @@ Discord上で共有経費を追跡し、グループメンバー間の最適な�
 
 ## プロジェクト構成
 
-このプロジェクトは5つのクレートで構成されるRustワークスペースです:
+このプロジェクトは9つのクレートで構成されるRustワークスペースです:
 
 - **walicord**: Discord APIとの連携を担当するメインのDiscordボットアプリケーション
-- **walicord-core**: 通貨の解析や計算といった中核ロジック
+- **walicord-application**: メッセージ処理やユースケースをまとめるアプリケーション層
+- **walicord-domain**: 残高計算や決済ロジックのドメインモデル
 - **walicord-parser**: DSLパーサーライブラリ
 - **walicord-calc**: 債務決済最適化ライブラリ
+- **walicord-infrastructure**: パーサーと最適化ソルバーのアダプタ
+- **walicord-presentation**: 残高表と決済表のSVG/テキスト出力
+- **walicord-i18n**: 表示メッセージのローカライズ
 - **walicord-interpreter**: `.walicord`スクリプトを実行するためのコマンドラインツール
 
 ## `walicord-interpreter`
 
-`walicord-interpreter`は、Discordを介さずに`walicord`のコアロジックをテストしたり、スクリプトとして実行したりするためのコマンドラインツールです。
+`walicord-interpreter`は、Discordを介さずに`walicord`のコアロジックをテストしたり、スクリプトとして実行したりするためのコマンドラインツールです。結果はSVGテキストとして標準出力に出力されます。
 
 ### 使い方
 
@@ -74,6 +79,30 @@ C lent 500 to group1
    ```
 3. `cargo run --release`で実行
 
+### 言語切り替え（features）
+
+デフォルトは日本語です。英語のみを使いたい場合は`en`を指定します。
+
+```sh
+cargo run --release --features en
+```
+
+日本語のみを明示する場合は`ja`を指定します。
+
+```sh
+cargo run --release --features ja
+```
+
+`walicord-interpreter`も同じfeaturesを使用できます。
+
+```sh
+cargo run --package walicord-interpreter --features en -- <file.walicord>
+```
+
+### Unix系での依存関係
+
+PNG出力のため、Unix系環境では`fontconfig`が必要になることがあります。日本語表示を安定させたい場合は`Noto Sans CJK JP`の導入を推奨します。
+
 ## 使い方
 
 1. Discordチャンネルのトピックにメンバーを定義:
@@ -87,7 +116,7 @@ C lent 500 to group1
    ```
 3. `!variables` コマンドで現在のグループとメンバーの定義を確認
 4. `!evaluate` コマンドで決済プランを計算
-5. `!settleup` または `!確定` コマンドで特定のメンバーの決済計算:
+5. `!settleup` または `!確定` コマンドで特定のメンバー集合の決済計算:
    ```
    !settleup MEMBERS - Alice
    !確定 MEMBERS - Bob
@@ -105,7 +134,7 @@ MEMBERS := name1, name2, name3
 
 ### 文の種類
 
-DSLには2種類のステートメントがあります:
+DSLには3種類のステートメントがあります:
 
 ### 1. グループ宣言
 
@@ -146,6 +175,18 @@ group_name := member1, member2
 {payee} borrowed {amount} from {payer}
 ```
 
+### 3. コマンド
+
+```
+!variables
+!evaluate
+!settleup MEMBERS - Alice
+```
+
+- `!variables`: グループとメンバー定義の一覧を表示
+- `!evaluate`: 現在までの記録を元に決済プランを計算
+- `!settleup` / `!確定`: 指定メンバー集合の決済を即時反映し、その結果を表示
+
 ### 識別子のルール
 
 識別子(メンバー名、グループ名)には以下の文字が使用できます:
@@ -184,27 +225,6 @@ DSLは日本語と英語の両方をサポートしています:
 | から   | から               | from, FROM          |
 | 貸した | 貸した、かした     | lent, LENT          |
 | に     | に                 | to, TO              |
-
-### コマンド
-
-以下のコマンドが使用できます:
-
-#### `!variables`
-
-現在のグループとメンバーの定義を表示します。
-
-#### `!evaluate`
-
-記録された全取引に基づく各メンバーの純残高と最適化された決済プランを計算・表示します。
-
-#### `!settleup` / `!確定`
-
-特定のメンバー集合に対して決済プランを計算します。セット演算子を使用して対象メンバーを指定できます:
-
-```
-!settleup MEMBERS - Alice
-!確定 MEMBERS - Bob
-```
 
 ### バリデーションルール
 
