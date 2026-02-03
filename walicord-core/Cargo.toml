@@ -7,7 +7,12 @@ edition = "2024"
 walicord-calc = { path = "../walicord-calc" }
 walicord-parser = { path = "../walicord-parser" }
 
+[dev-dependencies]
+rstest = "0.26.1"
+
 [features]
-default = ["microlp"]
+default = ["microlp", "ja"]
 microlp = ["walicord-calc/microlp"]
 coin_cbc = ["walicord-calc/coin_cbc"]
+ja = ["walicord-parser/ja"]
+en = ["walicord-parser/en"]

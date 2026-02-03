@@ -20,7 +20,7 @@ use serenity::{
 };
 use std::env;
 use walicord_core::{
-    SettlementResponse,
+    SettlementView,
     application::{MessageProcessor, ProcessingOutcome},
     domain::model::{Command as ProgramCommand, Statement},
     infrastructure::parser::WalicordProgramParser,
@@ -39,8 +39,7 @@ fn load_target_channel_ids() -> Vec<ChannelId> {
         .collect()
 }
 
-const MISSING_MEMBERS_MESSAGE: &str =
-    "チャンネルのtopicに `MEMBERS := ...` の宣言が見つかりません。";
+const MISSING_MEMBERS_MESSAGE: &str = walicord_core::i18n::MISSING_MEMBERS_DECLARATION;
 
 enum MembersError {
     Channel(ChannelError),
@@ -112,7 +111,7 @@ impl<'a> Handler<'a> {
         &self,
         ctx: &Context,
         msg: &Message,
-        response: SettlementResponse,
+        response: SettlementView,
     ) {
         use serenity::{all::CreateAttachment, builder::CreateMessage};
 
@@ -163,7 +162,7 @@ impl<'a> Handler<'a> {
                 self.reply(
                     ctx,
                     msg,
-                    format!("{} エラー: {MISSING_MEMBERS_MESSAGE}", msg.author.mention()),
+                    format!("{} Error: {MISSING_MEMBERS_MESSAGE}", msg.author.mention()),
                 )
                 .await;
                 return false;
@@ -177,7 +176,7 @@ impl<'a> Handler<'a> {
                 self.reply(
                     ctx,
                     msg,
-                    format!("{} エラー: {MISSING_MEMBERS_MESSAGE}", msg.author.mention()),
+                    format!("{} Error: {MISSING_MEMBERS_MESSAGE}", msg.author.mention()),
                 )
                 .await;
                 return false;
@@ -279,7 +278,7 @@ impl<'a> Handler<'a> {
                 self.reply(
                     ctx,
                     msg,
-                    format!("{} エラー: {MISSING_MEMBERS_MESSAGE}", msg.author.mention()),
+                    format!("{} Error: {MISSING_MEMBERS_MESSAGE}", msg.author.mention()),
                 )
                 .await;
                 false
@@ -287,7 +286,7 @@ impl<'a> Handler<'a> {
             ProcessingOutcome::UndefinedMember { name, line } => {
                 self.react(ctx, msg, '❎').await;
                 let error_msg = format!(
-                    "エラー: 行 {line} に未定義のメンバー「{name}」が使用されています。\nチャンネルtopicのMEMBERS宣言で定義してください。\n現在のメンバー: {members:?}"
+                    "Error: Undefined member '{name}' is used at line {line}.\nPlease define it in the channel topic MEMBERS declaration.\nCurrent members: {members:?}"
                 );
                 self.reply(ctx, msg, format!("{} {error_msg}", msg.author.mention()))
                     .await;
@@ -298,7 +297,7 @@ impl<'a> Handler<'a> {
                 self.reply(
                     ctx,
                     msg,
-                    format!("{} 構文エラー: {message}", msg.author.mention()),
+                    format!("{} Syntax error: {message}", msg.author.mention()),
                 )
                 .await;
                 false

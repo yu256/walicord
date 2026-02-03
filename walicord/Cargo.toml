@@ -18,6 +18,8 @@ resvg = "0.45"
 tiny-skia = "0.11"
 
 [features]
-default = ["microlp"]
+default = ["microlp", "ja"]
 microlp = ["walicord-core/microlp"]
 coin_cbc = ["walicord-core/coin_cbc"]
+ja = ["walicord-core/ja"]
+en = ["walicord-core/en"]

@@ -1,10 +1,10 @@
 use std::{borrow::Cow, env, fs, process};
 
 use walicord_core::{
-    SettlementResponse,
     application::{MessageProcessor, ProcessingOutcome},
     domain::model::{Command as ProgramCommand, Program, Statement},
     infrastructure::parser::WalicordProgramParser,
+    SettlementView,
 };
 use walicord_parser::extract_members_from_topic;
 
@@ -45,7 +45,7 @@ fn run() -> CliResult<()> {
     print_program_output(&processor, &program)
 }
 
-fn print_settlement_response(response: &SettlementResponse) {
+fn print_settlement_view(response: &SettlementView) {
     println!("\n--- Balance Table SVG ---");
     println!("{}", response.balance_table_svg);
 
@@ -72,7 +72,7 @@ fn print_program_output<'a>(
                 ProgramCommand::Evaluate => {
                     match processor.format_settlement_response_for_prefix(program, index) {
                         Ok(response) => {
-                            print_settlement_response(&response);
+                            print_settlement_view(&response);
                             printed = true;
                         }
                         Err(message) => return Err(message.into()),
@@ -81,7 +81,7 @@ fn print_program_output<'a>(
                 ProgramCommand::SettleUp(_) => {
                     match processor.format_settlement_response_for_prefix(program, index) {
                         Ok(response) => {
-                            print_settlement_response(&response);
+                            print_settlement_view(&response);
                             printed = true;
                         }
                         Err(message) => return Err(message.into()),
@@ -93,7 +93,7 @@ fn print_program_output<'a>(
 
     if !printed {
         match processor.format_settlement_response(program) {
-            Ok(response) => print_settlement_response(&response),
+            Ok(response) => print_settlement_view(&response),
             Err(message) => return Err(message.into()),
         }
     }

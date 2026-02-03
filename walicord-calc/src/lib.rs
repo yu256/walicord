@@ -2,10 +2,10 @@
 
 mod model;
 
-use good_lp::{Expression, Solution, SolverModel, Variable, default_solver, variable, variables};
+use good_lp::{default_solver, variable, variables, Expression, Solution, SolverModel, Variable};
 use thiserror::Error;
 
-pub use model::{PersonBalance, SettlementResult};
+pub use model::{Payment, PersonBalance};
 
 #[derive(Debug, Error)]
 pub enum SettlementError {
@@ -19,7 +19,7 @@ pub fn minimize_transactions<'a>(
     people: &'a [PersonBalance<'a>],
     alpha: f64,
     beta: f64,
-) -> Result<Vec<SettlementResult<'a>>, SettlementError> {
+) -> Result<Vec<Payment<'a>>, SettlementError> {
     let n = people.len();
     let total: i64 = people.iter().map(|p| p.balance).sum();
     if total != 0 {
@@ -88,7 +88,7 @@ pub fn minimize_transactions<'a>(
     for (idx, &(i, j)) in pairs.iter().enumerate() {
         let amount = solution.value(how_much[idx]).round() as i64;
         if amount > 0 {
-            results.push(SettlementResult {
+            results.push(Payment {
                 from: people[i].name,
                 to: people[j].name,
                 amount,

@@ -2,7 +2,8 @@
 
 pub mod application;
 pub mod domain;
+pub mod i18n;
 pub mod infrastructure;
 
-pub use application::{MessageProcessor, ProcessingOutcome, SettlementResponse};
+pub use application::{MessageProcessor, ProcessingOutcome, SettlementView};
 pub use domain::{Declaration, Program, ProgramParseError};
