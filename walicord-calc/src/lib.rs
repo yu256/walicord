@@ -2,7 +2,7 @@
 
 mod model;
 
-use good_lp::{default_solver, variable, variables, Expression, Solution, SolverModel, Variable};
+use good_lp::{Expression, Solution, SolverModel, Variable, default_solver, variable, variables};
 use thiserror::Error;
 
 pub use model::{Payment, PersonBalance};
@@ -106,7 +106,7 @@ pub fn minimize_transactions<'a>(
 
 #[cfg(test)]
 mod tests {
-    use super::{minimize_transactions, Payment, PersonBalance, SettlementError};
+    use super::{Payment, PersonBalance, SettlementError, minimize_transactions};
     use proptest::prelude::*;
     use rstest::rstest;
     use std::collections::HashMap;

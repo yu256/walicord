@@ -1,10 +1,28 @@
-use walicord_domain::{MemberSetExpr, Money, Statement, Transfer};
+use walicord_domain::{Declaration, MemberSetExpr, Money, Transfer};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command<'a> {
     Variables,
     Evaluate,
     SettleUp(MemberSetExpr<'a>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum AmountExpr {
+    Literal(Money),
+    ReceiptRef { index: usize },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Payment<'a> {
+    pub amount: AmountExpr,
+    pub payer: MemberSetExpr<'a>,
+    pub payee: MemberSetExpr<'a>,
+}
+
+pub enum Statement<'a> {
+    Declaration(Declaration<'a>),
+    Payment(Payment<'a>),
 }
 
 pub enum ScriptStatement<'a> {

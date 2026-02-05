@@ -116,7 +116,9 @@ fn settle_up_pre_and_post_balances(
 ) {
     let program = parse_program_from_content(members, content);
 
-    let pre_balances = processor.calculate_balances_for_prefix(&program, prefix_len);
+    let pre_balances = processor
+        .calculate_balances_for_prefix(&program, prefix_len)
+        .expect("balance calculation failed");
     assert_balances(&pre_balances, expected_pre);
 
     let result = processor

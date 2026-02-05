@@ -1,7 +1,7 @@
 use std::fmt::Write as _;
 
-use walicord_application::{Script, ScriptStatement, ScriptStatementWithLine};
-use walicord_domain::{MemberSetResolver, Statement};
+use walicord_application::{Script, ScriptStatement, ScriptStatementWithLine, Statement};
+use walicord_domain::MemberSetResolver;
 
 pub struct VariablesPresenter;
 

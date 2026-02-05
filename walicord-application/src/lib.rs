@@ -4,10 +4,16 @@ pub mod error;
 pub mod message_processor;
 pub mod model;
 pub mod ports;
+pub mod receipt;
 
-pub use error::{ProgramParseError, SettlementOptimizationError};
+pub use error::{
+    ProgramParseError, ReceiptOcrError, ReceiptResolveError, SettlementBuildError,
+    SettlementOptimizationError,
+};
 pub use message_processor::{MessageProcessor, ProcessingOutcome, SettlementResult};
 pub use model::{
-    Command, PersonBalance, Script, ScriptStatement, ScriptStatementWithLine, SettleUpContext,
+    AmountExpr, Command, Payment, PersonBalance, Script, ScriptStatement, ScriptStatementWithLine,
+    SettleUpContext, Statement,
 };
-pub use ports::{ProgramParser, SettlementOptimizer};
+pub use ports::{ProgramParser, ReceiptOcr, SettlementOptimizer};
+pub use receipt::{ReceiptAttachment, ReceiptContext};

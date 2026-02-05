@@ -1,10 +1,12 @@
 use crate::{
+    ReceiptResolveError, SettlementBuildError,
     error::ProgramParseError,
     model::{
         Command, PersonBalance, Script, ScriptStatement, ScriptStatementWithLine, SettleUpContext,
+        Statement,
     },
-    ports::{ProgramParser, SettlementOptimizer},
-    SettlementOptimizationError,
+    ports::{ProgramParser, ReceiptOcr, SettlementOptimizer},
+    receipt::{ReceiptContext, resolve_amount},
 };
 use std::collections::HashMap;
 use walicord_domain::{BalanceAccumulator, Money, SettleUpPolicy, Transfer};
@@ -64,54 +66,118 @@ impl<'a> MessageProcessor<'a> {
         }
     }
 
-    pub fn calculate_balances<'b>(&self, program: &'b Script<'b>) -> HashMap<&'b str, Money>
+    pub fn calculate_balances<'b>(
+        &self,
+        program: &'b Script<'b>,
+    ) -> Result<HashMap<&'b str, Money>, ReceiptResolveError>
     where
         'a: 'b,
     {
-        self.apply_statements(program, None, false).balances
+        self.calculate_balances_with_context(program, &ReceiptContext::default(), None)
     }
 
     pub fn calculate_balances_for_prefix<'b>(
         &self,
         program: &'b Script<'b>,
         prefix_len: usize,
-    ) -> HashMap<&'b str, Money>
+    ) -> Result<HashMap<&'b str, Money>, ReceiptResolveError>
     where
         'a: 'b,
     {
-        self.apply_statements(program, Some(prefix_len), false)
-            .balances
+        self.calculate_balances_for_prefix_with_context(
+            program,
+            prefix_len,
+            &ReceiptContext::default(),
+            None,
+        )
+    }
+
+    pub fn calculate_balances_with_context<'b>(
+        &self,
+        program: &'b Script<'b>,
+        context: &ReceiptContext,
+        ocr: Option<&dyn ReceiptOcr>,
+    ) -> Result<HashMap<&'b str, Money>, ReceiptResolveError>
+    where
+        'a: 'b,
+    {
+        Ok(self
+            .apply_statements(program, None, false, context, ocr)?
+            .balances)
+    }
+
+    pub fn calculate_balances_for_prefix_with_context<'b>(
+        &self,
+        program: &'b Script<'b>,
+        prefix_len: usize,
+        context: &ReceiptContext,
+        ocr: Option<&dyn ReceiptOcr>,
+    ) -> Result<HashMap<&'b str, Money>, ReceiptResolveError>
+    where
+        'a: 'b,
+    {
+        Ok(self
+            .apply_statements(program, Some(prefix_len), false, context, ocr)?
+            .balances)
     }
 
     pub fn build_settlement_result<'b>(
         &self,
         program: &'b Script<'b>,
-    ) -> Result<SettlementResult<'b>, SettlementOptimizationError>
+    ) -> Result<SettlementResult<'b>, SettlementBuildError>
     where
         'a: 'b,
     {
-        self.build_settlement_result_from_apply(self.apply_statements(program, None, true))
+        self.build_settlement_result_with_context(program, &ReceiptContext::default(), None)
     }
 
     pub fn build_settlement_result_for_prefix<'b>(
         &self,
         program: &'b Script<'b>,
         prefix_len: usize,
-    ) -> Result<SettlementResult<'b>, SettlementOptimizationError>
+    ) -> Result<SettlementResult<'b>, SettlementBuildError>
     where
         'a: 'b,
     {
-        self.build_settlement_result_from_apply(self.apply_statements(
+        self.build_settlement_result_for_prefix_with_context(
             program,
-            Some(prefix_len),
-            true,
-        ))
+            prefix_len,
+            &ReceiptContext::default(),
+            None,
+        )
+    }
+
+    pub fn build_settlement_result_with_context<'b>(
+        &self,
+        program: &'b Script<'b>,
+        context: &ReceiptContext,
+        ocr: Option<&dyn ReceiptOcr>,
+    ) -> Result<SettlementResult<'b>, SettlementBuildError>
+    where
+        'a: 'b,
+    {
+        let apply = self.apply_statements(program, None, true, context, ocr)?;
+        self.build_settlement_result_from_apply(apply)
+    }
+
+    pub fn build_settlement_result_for_prefix_with_context<'b>(
+        &self,
+        program: &'b Script<'b>,
+        prefix_len: usize,
+        context: &ReceiptContext,
+        ocr: Option<&dyn ReceiptOcr>,
+    ) -> Result<SettlementResult<'b>, SettlementBuildError>
+    where
+        'a: 'b,
+    {
+        let apply = self.apply_statements(program, Some(prefix_len), true, context, ocr)?;
+        self.build_settlement_result_from_apply(apply)
     }
 
     fn build_settlement_result_from_apply<'b>(
         &self,
         apply_result: ApplyResult<'b>,
-    ) -> Result<SettlementResult<'b>, SettlementOptimizationError> {
+    ) -> Result<SettlementResult<'b>, SettlementBuildError> {
         let mut person_balances: Vec<PersonBalance<'b>> = apply_result
             .balances
             .iter()
@@ -136,7 +202,9 @@ impl<'a> MessageProcessor<'a> {
         program: &'b Script<'b>,
         prefix_len: Option<usize>,
         apply_settle: bool,
-    ) -> ApplyResult<'b>
+        context: &ReceiptContext,
+        ocr: Option<&dyn ReceiptOcr>,
+    ) -> Result<ApplyResult<'b>, ReceiptResolveError>
     where
         'a: 'b,
     {
@@ -159,7 +227,9 @@ impl<'a> MessageProcessor<'a> {
         for stmt in &statements[..end] {
             match &stmt.statement {
                 ScriptStatement::Domain(statement) => {
-                    accumulator.apply(statement);
+                    let resolved =
+                        self.resolve_domain_statement(statement, stmt.line, context, ocr)?;
+                    accumulator.apply(&resolved);
                 }
                 ScriptStatement::Command(command) => {
                     if !apply_settle {
@@ -202,9 +272,39 @@ impl<'a> MessageProcessor<'a> {
             None
         };
 
-        ApplyResult {
+        Ok(ApplyResult {
             balances: accumulator.into_balances(),
             settle_up,
+        })
+    }
+
+    fn resolve_domain_statement<'b>(
+        &self,
+        statement: &Statement<'b>,
+        line: usize,
+        context: &ReceiptContext,
+        ocr: Option<&dyn ReceiptOcr>,
+    ) -> Result<walicord_domain::Statement<'b>, ReceiptResolveError>
+    where
+        'a: 'b,
+    {
+        match statement {
+            Statement::Declaration(decl) => Ok(walicord_domain::Statement::Declaration(
+                walicord_domain::Declaration {
+                    name: decl.name,
+                    expression: decl.expression.clone(),
+                },
+            )),
+            Statement::Payment(payment) => {
+                let amount = resolve_amount(&payment.amount, line, context, ocr)?;
+                Ok(walicord_domain::Statement::Payment(
+                    walicord_domain::Payment {
+                        amount,
+                        payer: payment.payer.clone(),
+                        payee: payment.payee.clone(),
+                    },
+                ))
+            }
         }
     }
 
@@ -230,14 +330,12 @@ impl<'a> MessageProcessor<'a> {
 mod tests {
     use super::*;
     use crate::{
+        AmountExpr, Payment,
         error::SettlementOptimizationError,
         ports::{ProgramParser, SettlementOptimizer},
     };
     use rstest::{fixture, rstest};
-    use walicord_domain::{
-        model::{MemberSetExpr, MemberSetOp, Money},
-        Payment, Statement,
-    };
+    use walicord_domain::model::{MemberSetExpr, MemberSetOp, Money};
 
     struct StubParser;
 
@@ -250,16 +348,16 @@ mod tests {
             let statements = vec![
                 ScriptStatementWithLine {
                     line: 1,
-                    statement: ScriptStatement::Domain(Statement::Payment(Payment {
-                        amount: Money::from_u64(60),
+                    statement: ScriptStatement::Domain(super::Statement::Payment(Payment {
+                        amount: AmountExpr::Literal(Money::from_u64(60)),
                         payer: MemberSetExpr::new(vec![MemberSetOp::Push("A")]),
                         payee: MemberSetExpr::new(vec![MemberSetOp::Push("C")]),
                     })),
                 },
                 ScriptStatementWithLine {
                     line: 2,
-                    statement: ScriptStatement::Domain(Statement::Payment(Payment {
-                        amount: Money::from_u64(40),
+                    statement: ScriptStatement::Domain(super::Statement::Payment(Payment {
+                        amount: AmountExpr::Literal(Money::from_u64(40)),
                         payer: MemberSetExpr::new(vec![MemberSetOp::Push("B")]),
                         payee: MemberSetExpr::new(vec![MemberSetOp::Push("C")]),
                     })),

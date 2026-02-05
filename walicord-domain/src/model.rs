@@ -120,7 +120,7 @@ impl Neg for Money {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum MemberSetOp<'a> {
     Push(&'a str),
     Union,
@@ -192,11 +192,7 @@ impl<'a> MemberSetExpr<'a> {
             }
         }
 
-        if stack.len() == 1 {
-            stack.pop()
-        } else {
-            None
-        }
+        if stack.len() == 1 { stack.pop() } else { None }
     }
 
     pub fn referenced_names(&self) -> impl Iterator<Item = &'a str> + '_ {

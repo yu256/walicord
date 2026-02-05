@@ -107,8 +107,14 @@ pub struct Declaration<'a> {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub enum AmountExpr {
+    Literal(u64),
+    ReceiptRef { index: usize },
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct Payment<'a> {
-    pub amount: u64,
+    pub amount: AmountExpr,
     pub payer: SetExpr<'a>,
     pub payee: SetExpr<'a>,
 }
@@ -284,6 +290,48 @@ fn yen(input: &str) -> IResult<&str, u64> {
         .parse(input)
 }
 
+fn receipt_amount(input: &str) -> IResult<&str, AmountExpr> {
+    let (rest, _) = tag_no_case("receipt").parse(input)?;
+    let mut rest = rest;
+    let mut index = None;
+    if let Some(after_hash) = rest.strip_prefix('#') {
+        let digit_len = after_hash
+            .as_bytes()
+            .iter()
+            .take_while(|b| b.is_ascii_digit())
+            .count();
+        if digit_len == 0 {
+            return Err(nom::Err::Error(nom::error::Error::new(
+                rest,
+                nom::error::ErrorKind::Digit,
+            )));
+        }
+        let digits = &after_hash[..digit_len];
+        rest = &after_hash[digit_len..];
+        index = Some(digits);
+    }
+
+    let index = match index {
+        Some(digits) => {
+            let parsed = digits.parse::<usize>().unwrap_or(0);
+            if parsed == 0 {
+                return Err(nom::Err::Error(nom::error::Error::new(
+                    rest,
+                    nom::error::ErrorKind::Digit,
+                )));
+            }
+            parsed - 1
+        }
+        None => 0,
+    };
+
+    Ok((rest, AmountExpr::ReceiptRef { index }))
+}
+
+fn amount_expr(input: &str) -> IResult<&str, AmountExpr> {
+    alt((receipt_amount, yen.map(AmountExpr::Literal))).parse(input)
+}
+
 fn ga(input: &str) -> IResult<&str, &str> {
     tag("が").parse(input)
 }
@@ -304,9 +352,16 @@ fn to(input: &str) -> IResult<&str, &str> {
 fn payment_lender_subject_ja(input: &str) -> IResult<&str, Payment<'_>> {
     (
         set_expr, // payer
-        sp, ga, sp, set_expr, // payee
-        sp, ni, sp, yen, // amount
-        sp, lent,
+        sp,
+        ga,
+        sp,
+        set_expr, // payee
+        sp,
+        ni,
+        sp,
+        amount_expr, // amount
+        sp,
+        lent,
     )
         .map(|(payer, _, _, _, payee, _, _, _, amount, _, _)| Payment {
             amount,
@@ -320,8 +375,14 @@ fn payment_lender_subject_ja(input: &str) -> IResult<&str, Payment<'_>> {
 fn payment_lender_subject_en(input: &str) -> IResult<&str, Payment<'_>> {
     (
         set_expr, // payer
-        sp, lent, sp, yen, // amount
-        sp, to, sp, set_expr, // payee
+        sp,
+        lent,
+        sp,
+        amount_expr, // amount
+        sp,
+        to,
+        sp,
+        set_expr, // payee
     )
         .map(|(payer, _, _, _, amount, _, _, _, payee)| Payment {
             amount,
@@ -335,10 +396,16 @@ fn payment_lender_subject_en(input: &str) -> IResult<&str, Payment<'_>> {
 fn payment_borrower_subject_ja(input: &str) -> IResult<&str, Payment<'_>> {
     (
         set_expr, // payee
-        sp, ga, sp, set_expr, // payer
-        sp, from, // "kara" in Japanese
-        sp, yen, // amount
-        sp, borrowed,
+        sp,
+        ga,
+        sp,
+        set_expr, // payer
+        sp,
+        from, // "kara" in Japanese
+        sp,
+        amount_expr, // amount
+        sp,
+        borrowed,
     )
         .map(|(payee, _, _, _, payer, _, _, _, amount, _, _)| Payment {
             amount,
@@ -350,7 +417,17 @@ fn payment_borrower_subject_ja(input: &str) -> IResult<&str, Payment<'_>> {
 
 // payee borrowed amount from payer
 fn payment_borrower_subject_en(input: &str) -> IResult<&str, Payment<'_>> {
-    (set_expr, sp, borrowed, sp, yen, sp, from, sp, set_expr)
+    (
+        set_expr,
+        sp,
+        borrowed,
+        sp,
+        amount_expr,
+        sp,
+        from,
+        sp,
+        set_expr,
+    )
         .map(|(payee, _, _, _, amount, _, _, _, payer)| Payment {
             amount,
             payer,
@@ -517,5 +594,25 @@ mod tests {
         expected_expr.push(SetOp::Push("A"));
         expected_expr.push(SetOp::Difference);
         assert_eq!(stmt, Statement::Command(Command::SettleUp(expected_expr)));
+    }
+
+    #[test]
+    fn test_parse_receipt_amount() {
+        let input = "A lent receipt to B";
+        let (_, stmt) = statement(input).unwrap();
+        let Statement::Payment(payment) = stmt else {
+            panic!("expected payment statement");
+        };
+        assert_eq!(payment.amount, AmountExpr::ReceiptRef { index: 0 });
+    }
+
+    #[test]
+    fn test_parse_receipt_amount_index() {
+        let input = "A lent receipt#2 to B";
+        let (_, stmt) = statement(input).unwrap();
+        let Statement::Payment(payment) = stmt else {
+            panic!("expected payment statement");
+        };
+        assert_eq!(payment.amount, AmountExpr::ReceiptRef { index: 1 });
     }
 }

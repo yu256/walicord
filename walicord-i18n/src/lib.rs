@@ -15,6 +15,11 @@ pub mod strings {
     pub const SETTLEMENT_CALCULATION_FAILED: &str = "清算の計算に失敗しました";
     pub const MISSING_MEMBERS_DECLARATION: &str =
         "チャンネルのtopicに `MEMBERS := ...` の宣言が見つかりません。";
+    pub const RECEIPT_OCR_UNAVAILABLE: &str = "レシートOCRが利用できません。";
+    pub const RECEIPT_ATTACHMENT_MISSING: &str = "レシート画像が見つかりません。";
+    pub const RECEIPT_OCR_FAILED: &str = "レシートのOCRに失敗しました。";
+    pub const RECEIPT_TOTAL_NOT_FOUND: &str = "レシートの合計金額が見つかりません。";
+    pub const RECEIPT_TOTAL_AMBIGUOUS: &str = "レシートの合計金額が特定できません。";
 }
 
 #[cfg(feature = "en")]
@@ -31,6 +36,11 @@ pub mod strings {
     pub const SETTLEMENT_CALCULATION_FAILED: &str = "Settlement calculation failed";
     pub const MISSING_MEMBERS_DECLARATION: &str =
         "Could not find `MEMBERS := ...` declaration in the channel topic.";
+    pub const RECEIPT_OCR_UNAVAILABLE: &str = "Receipt OCR is unavailable.";
+    pub const RECEIPT_ATTACHMENT_MISSING: &str = "Receipt image is missing.";
+    pub const RECEIPT_OCR_FAILED: &str = "Receipt OCR failed.";
+    pub const RECEIPT_TOTAL_NOT_FOUND: &str = "Receipt total not found.";
+    pub const RECEIPT_TOTAL_AMBIGUOUS: &str = "Receipt total is ambiguous.";
 }
 
 #[cfg(not(any(feature = "ja", feature = "en")))]
@@ -47,6 +57,11 @@ pub mod strings {
     pub const SETTLEMENT_CALCULATION_FAILED: &str = "Settlement calculation failed";
     pub const MISSING_MEMBERS_DECLARATION: &str =
         "Could not find `MEMBERS := ...` declaration in the channel topic.";
+    pub const RECEIPT_OCR_UNAVAILABLE: &str = "Receipt OCR is unavailable.";
+    pub const RECEIPT_ATTACHMENT_MISSING: &str = "Receipt image is missing.";
+    pub const RECEIPT_OCR_FAILED: &str = "Receipt OCR failed.";
+    pub const RECEIPT_TOTAL_NOT_FOUND: &str = "Receipt total not found.";
+    pub const RECEIPT_TOTAL_AMBIGUOUS: &str = "Receipt total is ambiguous.";
 }
 
 pub use strings::*;

@@ -1,13 +1,15 @@
 use walicord_application::{
-    Command, ProgramParseError, ProgramParser, Script, ScriptStatement, ScriptStatementWithLine,
+    AmountExpr, Command, Payment as AppPayment, ProgramParseError, ProgramParser, Script,
+    ScriptStatement, ScriptStatementWithLine, Statement as AppStatement,
 };
 use walicord_domain::{
-    model::{MemberSetExpr, MemberSetOp, Money},
-    Declaration, Payment, Program as DomainProgram, Statement as DomainStatement,
+    Declaration, Payment as DomainPayment, Program as DomainProgram, Statement as DomainStatement,
     StatementWithLine as DomainStatementWithLine,
+    model::{MemberSetExpr, MemberSetOp, Money},
 };
 use walicord_parser::{
-    parse_program, Command as ParserCommand, ParseError, SetOp, Statement as ParserStatement,
+    AmountExpr as ParserAmountExpr, Command as ParserCommand, ParseError, SetOp,
+    Statement as ParserStatement, parse_program,
 };
 
 #[derive(Default)]
@@ -42,7 +44,7 @@ impl ProgramParser for WalicordProgramParser {
                                 name: decl.name,
                                 expression,
                             };
-                            let app_statement = DomainStatement::Declaration(app_decl);
+                            let app_statement = AppStatement::Declaration(app_decl);
                             app_statements.push(ScriptStatementWithLine {
                                 line,
                                 statement: ScriptStatement::Domain(app_statement),
@@ -60,17 +62,28 @@ impl ProgramParser for WalicordProgramParser {
                             } = parser_payment;
                             let payer_expr = to_member_set_expr(payer);
                             let payee_expr = to_member_set_expr(payee);
-                            let app_payment = Payment {
-                                amount: Money::from_u64(amount),
+                            let app_amount = match amount {
+                                ParserAmountExpr::Literal(value) => {
+                                    AmountExpr::Literal(Money::from_u64(value))
+                                }
+                                ParserAmountExpr::ReceiptRef { index } => {
+                                    AmountExpr::ReceiptRef { index }
+                                }
+                            };
+                            let app_payment = AppPayment {
+                                amount: app_amount,
                                 payer: payer_expr.clone(),
                                 payee: payee_expr.clone(),
                             };
-                            let domain_payment = Payment {
-                                amount: Money::from_u64(amount),
+                            let domain_payment = DomainPayment {
+                                amount: match amount {
+                                    ParserAmountExpr::Literal(value) => Money::from_u64(value),
+                                    ParserAmountExpr::ReceiptRef { .. } => Money::zero(),
+                                },
                                 payer: payer_expr,
                                 payee: payee_expr,
                             };
-                            let app_statement = DomainStatement::Payment(app_payment);
+                            let app_statement = AppStatement::Payment(app_payment);
                             app_statements.push(ScriptStatementWithLine {
                                 line,
                                 statement: ScriptStatement::Domain(app_statement),

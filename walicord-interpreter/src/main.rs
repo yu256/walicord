@@ -1,8 +1,8 @@
 use std::{borrow::Cow, env, fs, process};
 
 use walicord_application::{
-    Command as ProgramCommand, MessageProcessor, ProcessingOutcome, Script, ScriptStatement,
-    SettlementOptimizationError,
+    Command as ProgramCommand, MessageProcessor, ProcessingOutcome, ReceiptResolveError, Script,
+    ScriptStatement, SettlementBuildError,
 };
 use walicord_infrastructure::{WalicordProgramParser, WalicordSettlementOptimizer};
 use walicord_parser::extract_members_from_topic;
@@ -10,16 +10,33 @@ use walicord_presentation::{SettlementPresenter, SettlementView, VariablesPresen
 
 type CliResult<T> = Result<T, Cow<'static, str>>;
 
-fn format_settlement_error(err: SettlementOptimizationError) -> Cow<'static, str> {
+fn format_settlement_error(err: SettlementBuildError) -> Cow<'static, str> {
     match err {
-        SettlementOptimizationError::ImbalancedTotal(total) => format!(
-            "{} (total: {total})",
-            walicord_i18n::SETTLEMENT_CALCULATION_FAILED
-        )
-        .into(),
-        SettlementOptimizationError::NoSolution => {
-            walicord_i18n::SETTLEMENT_CALCULATION_FAILED.into()
+        SettlementBuildError::Optimization(err) => match err {
+            walicord_application::SettlementOptimizationError::ImbalancedTotal(total) => format!(
+                "{} (total: {total})",
+                walicord_i18n::SETTLEMENT_CALCULATION_FAILED
+            )
+            .into(),
+            walicord_application::SettlementOptimizationError::NoSolution => {
+                walicord_i18n::SETTLEMENT_CALCULATION_FAILED.into()
+            }
+        },
+        SettlementBuildError::Receipt(err) => format_receipt_error(err),
+    }
+}
+
+fn format_receipt_error(err: ReceiptResolveError) -> Cow<'static, str> {
+    match err {
+        ReceiptResolveError::OcrUnavailable { .. } => walicord_i18n::RECEIPT_OCR_UNAVAILABLE.into(),
+        ReceiptResolveError::MissingAttachment { .. } => {
+            walicord_i18n::RECEIPT_ATTACHMENT_MISSING.into()
         }
+        ReceiptResolveError::OcrFailed { source } => {
+            format!("{} ({source})", walicord_i18n::RECEIPT_OCR_FAILED).into()
+        }
+        ReceiptResolveError::TotalNotFound { .. } => walicord_i18n::RECEIPT_TOTAL_NOT_FOUND.into(),
+        ReceiptResolveError::TotalAmbiguous { .. } => walicord_i18n::RECEIPT_TOTAL_AMBIGUOUS.into(),
     }
 }
 

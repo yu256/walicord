@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 walicord-domain = { path = "../walicord-domain" }
+thiserror = "2.0.17"
 
 [dev-dependencies]
 rstest = "0.26.1"

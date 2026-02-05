@@ -1,6 +1,8 @@
-use resvg::usvg::{Options, Tree};
+use resvg::{
+    tiny_skia::Pixmap,
+    usvg::{Options, Tree},
+};
 use std::sync::LazyLock;
-use tiny_skia::Pixmap;
 
 static OPTIONS: LazyLock<Options> = LazyLock::new(|| {
     let mut fontdb = resvg::usvg::fontdb::Database::new();
@@ -20,6 +22,10 @@ pub fn svg_to_png(svg: &str) -> Option<Vec<u8>> {
     let height = size.height().ceil() as u32;
 
     let mut pixmap = Pixmap::new(width, height)?;
-    resvg::render(&tree, tiny_skia::Transform::default(), &mut pixmap.as_mut());
+    resvg::render(
+        &tree,
+        resvg::tiny_skia::Transform::default(),
+        &mut pixmap.as_mut(),
+    );
     pixmap.encode_png().ok()
 }

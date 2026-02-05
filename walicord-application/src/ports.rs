@@ -1,7 +1,8 @@
 use crate::{
     Script,
-    error::{ProgramParseError, SettlementOptimizationError},
+    error::{ProgramParseError, ReceiptOcrError, SettlementOptimizationError},
     model::PersonBalance,
+    receipt::{OcrText, ReceiptImage},
 };
 use walicord_domain::Transfer;
 
@@ -18,4 +19,8 @@ pub trait SettlementOptimizer: Send + Sync {
         &self,
         balances: &[PersonBalance<'a>],
     ) -> Result<Vec<Transfer<'a>>, SettlementOptimizationError>;
+}
+
+pub trait ReceiptOcr: Send + Sync {
+    fn extract_text(&self, image: &ReceiptImage<'_>) -> Result<OcrText, ReceiptOcrError>;
 }
