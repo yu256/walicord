@@ -77,7 +77,12 @@ C lent 500 to group1
    DISCORD_TOKEN="YOUR_DISCORD_BOT_TOKEN"
    TARGET_CHANNEL_IDS="CHANNEL_ID_1,CHANNEL_ID_2" # カンマ区切りで複数指定可能
    ```
-3. `cargo run --release`で実行
+3. `receipt`でOCRを使う場合はモデルパスを設定:
+   ```
+   OCRS_DETECTION_MODEL="/path/to/text-detection.rten"
+   OCRS_RECOGNITION_MODEL="/path/to/text-recognition.rten"
+   ```
+4. `cargo run --release`で実行
 
 ### 言語切り替え（features）
 
