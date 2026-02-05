@@ -1,6 +1,0 @@
-- **Language:** Rust
-- **Discord API:** `serenity`
-- **Async Runtime:** `tokio`
-- **Parsing:** `nom` for creating a parser for a custom language.
-- **Calculation:** `microlp` for solving the debt settlement problem as a linear programming problem.
-- **Environment Variables:** `dotenvy` for managing configuration.
