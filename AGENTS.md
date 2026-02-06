@@ -1,5 +1,7 @@
 # Agent Guidelines
 
+Before starting to think, read the README to understand the project.
+
 ## Code Comments Guidelines
 
 **Avoid redundant comments:**
