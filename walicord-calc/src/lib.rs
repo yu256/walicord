@@ -67,6 +67,8 @@ pub fn minimize_transactions(
     }
 
     let mut problem = vars.minimise(objective).using(default_solver);
+    #[cfg(feature = "coin_cbc")]
+    problem.set_parameter("log", "0");
 
     // Constraint: how_much[i][j] <= big_m * who_pays[i][j]
     for ((&hm, &wp), &(_, _, max_amount)) in how_much.iter().zip(&who_pays).zip(&pairs) {
