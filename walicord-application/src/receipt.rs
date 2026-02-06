@@ -75,6 +75,12 @@ pub fn resolve_amount(
                 content_type: attachment.content_type.as_deref(),
             };
             let ocr_text = ocr.extract_text(&image)?;
+            tracing::info!(
+                target: "walicord_receipt",
+                line,
+                text = %ocr_text.text,
+                "OCR text extracted"
+            );
             resolve_total_from_text(&ocr_text.text, line)
         }
     }
@@ -84,9 +90,36 @@ fn resolve_total_from_text(text: &str, line: usize) -> Result<Money, ReceiptReso
     let normalized = normalize_text(text);
     let candidates = extract_candidates(&normalized);
     match select_total(&candidates) {
-        Ok(candidate) => Ok(Money::from_i64(candidate.value)),
-        Err(TotalSelectionError::NotFound) => Err(ReceiptResolveError::TotalNotFound { line }),
-        Err(TotalSelectionError::Ambiguous) => Err(ReceiptResolveError::TotalAmbiguous { line }),
+        Ok(candidate) => {
+            tracing::info!(
+                target: "walicord_receipt",
+                line,
+                value = candidate.value,
+                score = candidate.score,
+                line_index = candidate.line_index,
+                candidate_count = candidates.len(),
+                "Selected receipt total"
+            );
+            Ok(Money::from_i64(candidate.value))
+        }
+        Err(TotalSelectionError::NotFound) => {
+            tracing::warn!(
+                target: "walicord_receipt",
+                line,
+                candidate_count = candidates.len(),
+                "Receipt total not found"
+            );
+            Err(ReceiptResolveError::TotalNotFound { line })
+        }
+        Err(TotalSelectionError::Ambiguous) => {
+            tracing::warn!(
+                target: "walicord_receipt",
+                line,
+                candidate_count = candidates.len(),
+                "Receipt total ambiguous"
+            );
+            Err(ReceiptResolveError::TotalAmbiguous { line })
+        }
     }
 }
 
