@@ -3,7 +3,7 @@ use serenity::{
     all::MessageId,
     model::{
         channel::{Message, ReactionType},
-        id::ChannelId,
+        id::{ChannelId, UserId},
     },
     prelude::*,
 };
@@ -21,11 +21,15 @@ const COMMANDS: &[&str] = &["!variables", "!evaluate"];
 pub struct DiscordChannelService;
 
 impl DiscordChannelService {
-    pub async fn fetch_channel_member_display_names(
+    pub async fn fetch_member_display_names<I>(
         &self,
         ctx: &Context,
         channel_id: ChannelId,
-    ) -> Result<HashMap<MemberId, String>, ChannelError> {
+        member_ids: I,
+    ) -> Result<HashMap<MemberId, String>, ChannelError>
+    where
+        I: IntoIterator<Item = MemberId>,
+    {
         let channel = channel_id
             .to_channel(&ctx.http)
             .await
@@ -40,7 +44,11 @@ impl DiscordChannelService {
         };
 
         let mut members = HashMap::new();
-        for (user_id, member) in &guild.members {
+        for member_id in member_ids {
+            let user_id = UserId::new(member_id.0);
+            let Some(member) = guild.members.get(&user_id) else {
+                continue;
+            };
             if guild
                 .user_permissions_in(&guild_channel, member)
                 .view_channel()
@@ -49,7 +57,7 @@ impl DiscordChannelService {
                     .nick
                     .clone()
                     .unwrap_or_else(|| member.user.name.clone());
-                members.insert(MemberId(user_id.get()), display_name);
+                members.insert(member_id, display_name);
             }
         }
 

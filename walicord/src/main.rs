@@ -15,10 +15,10 @@ use serenity::{
     },
     prelude::*,
 };
-use std::{collections::HashMap, env};
+use std::{collections::{HashMap, HashSet}, env};
 use walicord_application::{
     Command as ProgramCommand, MessageProcessor, ProcessingOutcome, ScriptStatement,
-    SettlementOptimizationError,
+    SettlementOptimizationError, SettlementResult,
 };
 use walicord_domain::model::MemberId;
 use walicord_infrastructure::{WalicordProgramParser, WalicordSettlementOptimizer};
@@ -91,6 +91,63 @@ impl<'a> Handler<'a> {
             .unwrap_or_default()
     }
 
+    fn member_ids(result: &SettlementResult) -> impl Iterator<Item = MemberId> + '_ {
+        let balances = result.balances.iter().map(|balance| balance.id);
+        let transfers = result
+            .optimized_transfers
+            .iter()
+            .flat_map(|transfer| [transfer.from, transfer.to]);
+        let settle_up_ids = result.settle_up.iter().flat_map(|settle_up| {
+            let immediate = settle_up
+                .immediate_transfers
+                .iter()
+                .flat_map(|transfer| [transfer.from, transfer.to]);
+            immediate.chain(settle_up.settle_members.iter().copied())
+        });
+
+        balances.chain(transfers).chain(settle_up_ids)
+    }
+
+    async fn ensure_member_directory<'b, I>(
+        &self,
+        ctx: &Context,
+        channel_id: ChannelId,
+        member_ids: I,
+        member_directory: &'b mut Option<HashMap<MemberId, String>>,
+    ) -> &'b HashMap<MemberId, String>
+    where
+        I: IntoIterator<Item = MemberId>,
+    {
+        let mut missing_ids: HashSet<MemberId> = member_ids.into_iter().collect();
+        if let Some(directory) = member_directory.as_ref() {
+            missing_ids.retain(|member_id| !directory.contains_key(member_id));
+            if missing_ids.is_empty() {
+                return directory;
+            }
+        }
+
+        let fetched = self
+            .channel_service
+            .fetch_member_display_names(ctx, channel_id, missing_ids.iter().copied())
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!("Failed to fetch member directory: {:?}", e);
+                HashMap::new()
+            });
+
+        if let Some(directory) = member_directory.as_mut() {
+            directory.extend(fetched);
+            directory
+        } else {
+            *member_directory = Some(fetched);
+            if let Some(directory) = member_directory.as_ref() {
+                directory
+            } else {
+                unreachable!("member directory should be set")
+            }
+        }
+    }
+
     async fn reply(&self, ctx: &Context, msg: &Message, content: impl Into<String>) {
         let content = content.into();
         if let Err(e) = msg.reply(&ctx.http, content).await {
@@ -137,7 +194,7 @@ impl<'a> Handler<'a> {
     }
 
     async fn process_program_message(&self, ctx: &Context, msg: &Message) -> bool {
-        let members: Vec<&str> = Vec::new();
+        let members: [&str; 0] = [];
         let existing_content = self.get_combined_content(&msg.channel_id);
         let mut member_directory: Option<HashMap<MemberId, String>> = None;
 
@@ -209,27 +266,15 @@ impl<'a> Handler<'a> {
                                 .build_settlement_result_for_prefix(&program, stmt_index)
                             {
                                 Ok(response) => {
-                                    let directory = match member_directory {
-                                        Some(ref directory) => directory,
-                                        None => {
-                                            let fetched = self
-                                                .channel_service
-                                                .fetch_channel_member_display_names(
-                                                    ctx,
-                                                    msg.channel_id,
-                                                )
-                                                .await
-                                                .unwrap_or_else(|e| {
-                                                    tracing::warn!(
-                                                        "Failed to fetch member directory: {:?}",
-                                                        e
-                                                    );
-                                                    HashMap::new()
-                                                });
-                                            member_directory = Some(fetched);
-                                            member_directory.as_ref().expect("member directory")
-                                        }
-                                    };
+                                    let member_ids = Self::member_ids(&response);
+                                    let directory = self
+                                        .ensure_member_directory(
+                                            ctx,
+                                            msg.channel_id,
+                                            member_ids,
+                                            &mut member_directory,
+                                        )
+                                        .await;
                                     let view = SettlementPresenter::render_with_members(
                                         &response, directory,
                                     );
@@ -246,27 +291,15 @@ impl<'a> Handler<'a> {
                                 .build_settlement_result_for_prefix(&program, stmt_index)
                             {
                                 Ok(response) => {
-                                    let directory = match member_directory {
-                                        Some(ref directory) => directory,
-                                        None => {
-                                            let fetched = self
-                                                .channel_service
-                                                .fetch_channel_member_display_names(
-                                                    ctx,
-                                                    msg.channel_id,
-                                                )
-                                                .await
-                                                .unwrap_or_else(|e| {
-                                                    tracing::warn!(
-                                                        "Failed to fetch member directory: {:?}",
-                                                        e
-                                                    );
-                                                    HashMap::new()
-                                                });
-                                            member_directory = Some(fetched);
-                                            member_directory.as_ref().expect("member directory")
-                                        }
-                                    };
+                                    let member_ids = Self::member_ids(&response);
+                                    let directory = self
+                                        .ensure_member_directory(
+                                            ctx,
+                                            msg.channel_id,
+                                            member_ids,
+                                            &mut member_directory,
+                                        )
+                                        .await;
                                     let view = SettlementPresenter::render_with_members(
                                         &response, directory,
                                     );
