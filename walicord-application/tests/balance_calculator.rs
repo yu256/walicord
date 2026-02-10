@@ -4,7 +4,7 @@ use walicord_application::{
     MessageProcessor, PersonBalance, ProgramParseError, ProgramParser, Script,
     SettlementOptimizationError, SettlementOptimizer,
 };
-use walicord_domain::{model::MemberId, Money, Transfer};
+use walicord_domain::{Money, Transfer, model::MemberId};
 use walicord_infrastructure::WalicordProgramParser;
 
 struct NoopOptimizer;

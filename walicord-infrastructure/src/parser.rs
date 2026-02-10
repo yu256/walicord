@@ -3,12 +3,12 @@ use walicord_application::{
     Command, ProgramParseError, ProgramParser, Script, ScriptStatement, ScriptStatementWithLine,
 };
 use walicord_domain::{
-    model::{MemberId, MemberSetExpr, MemberSetOp, Money},
     Declaration, Payment, Program as DomainProgram, Statement as DomainStatement,
     StatementWithLine as DomainStatementWithLine,
+    model::{MemberId, MemberSetExpr, MemberSetOp, Money},
 };
 use walicord_parser::{
-    parse_program, Command as ParserCommand, ParseError, SetOp, Statement as ParserStatement,
+    Command as ParserCommand, ParseError, SetOp, Statement as ParserStatement, parse_program,
 };
 
 #[derive(Default)]

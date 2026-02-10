@@ -1,14 +1,14 @@
 use crate::{
+    SettlementOptimizationError,
     error::ProgramParseError,
     model::{
         Command, PersonBalance, Script, ScriptStatement, ScriptStatementWithLine, SettleUpContext,
     },
     ports::{ProgramParser, SettlementOptimizer},
-    SettlementOptimizationError,
 };
 use fxhash::FxHashMap;
 use std::borrow::Cow;
-use walicord_domain::{model::MemberId, BalanceAccumulator, Money, SettleUpPolicy, Transfer};
+use walicord_domain::{BalanceAccumulator, Money, SettleUpPolicy, Transfer, model::MemberId};
 
 pub struct SettlementResult {
     pub balances: Vec<PersonBalance>,
@@ -237,8 +237,8 @@ mod tests {
     };
     use rstest::{fixture, rstest};
     use walicord_domain::{
-        model::{MemberId, MemberSetExpr, MemberSetOp, Money},
         Payment, Statement,
+        model::{MemberId, MemberSetExpr, MemberSetOp, Money},
     };
 
     struct StubParser;

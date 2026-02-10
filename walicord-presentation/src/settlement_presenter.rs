@@ -1,7 +1,7 @@
 use crate::svg_table::{Alignment, SvgTableBuilder};
 use std::{borrow::Cow, collections::HashSet};
 use walicord_application::{MemberDirectory, PersonBalance, SettlementResult};
-use walicord_domain::{model::MemberId, Transfer};
+use walicord_domain::{Transfer, model::MemberId};
 use walicord_i18n as i18n;
 
 pub struct SettlementPresenter;
@@ -222,7 +222,7 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
     use walicord_application::PersonBalance;
-    use walicord_domain::{model::MemberId, Money, Transfer};
+    use walicord_domain::{Money, Transfer, model::MemberId};
 
     fn sample_result() -> SettlementResult {
         SettlementResult {
@@ -248,11 +248,12 @@ mod tests {
 
         assert!(view.balance_table_svg.contains("Alice"));
         assert!(!view.balance_table_svg.contains("<@1>"));
-        assert!(view
-            .transfer_table_svg
-            .as_ref()
-            .expect("transfer table")
-            .contains("Alice"));
+        assert!(
+            view.transfer_table_svg
+                .as_ref()
+                .expect("transfer table")
+                .contains("Alice")
+        );
     }
 
     #[test]
@@ -262,10 +263,11 @@ mod tests {
         let view = SettlementPresenter::render_with_members(&sample_result(), &directory);
 
         assert!(view.balance_table_svg.contains("&lt;@1&gt;"));
-        assert!(view
-            .transfer_table_svg
-            .as_ref()
-            .expect("transfer table")
-            .contains("&lt;@2&gt;"));
+        assert!(
+            view.transfer_table_svg
+                .as_ref()
+                .expect("transfer table")
+                .contains("&lt;@2&gt;")
+        );
     }
 }
