@@ -15,7 +15,10 @@ use serenity::{
     },
     prelude::*,
 };
-use std::{collections::{HashMap, HashSet}, env};
+use std::{
+    collections::{HashMap, HashSet},
+    env,
+};
 use walicord_application::{
     Command as ProgramCommand, MessageProcessor, ProcessingOutcome, ScriptStatement,
     SettlementOptimizationError, SettlementResult,
@@ -121,31 +124,26 @@ impl<'a> Handler<'a> {
         let mut missing_ids: HashSet<MemberId> = member_ids.into_iter().collect();
         if let Some(directory) = member_directory.as_ref() {
             missing_ids.retain(|member_id| !directory.contains_key(member_id));
-            if missing_ids.is_empty() {
-                return directory;
-            }
         }
 
-        let fetched = self
-            .channel_service
-            .fetch_member_display_names(ctx, channel_id, missing_ids.iter().copied())
-            .await
-            .unwrap_or_else(|e| {
-                tracing::warn!("Failed to fetch member directory: {:?}", e);
-                HashMap::new()
-            });
+        if !missing_ids.is_empty() {
+            let fetched = self
+                .channel_service
+                .fetch_member_display_names(ctx, channel_id, missing_ids.iter().copied())
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::warn!("Failed to fetch member directory: {:?}", e);
+                    HashMap::new()
+                });
 
-        if let Some(directory) = member_directory.as_mut() {
-            directory.extend(fetched);
-            directory
-        } else {
-            *member_directory = Some(fetched);
-            if let Some(directory) = member_directory.as_ref() {
-                directory
+            if let Some(directory) = member_directory.as_mut() {
+                directory.extend(fetched);
             } else {
-                unreachable!("member directory should be set")
+                *member_directory = Some(fetched);
             }
         }
+
+        member_directory.get_or_insert_with(HashMap::new)
     }
 
     async fn reply(&self, ctx: &Context, msg: &Message, content: impl Into<String>) {

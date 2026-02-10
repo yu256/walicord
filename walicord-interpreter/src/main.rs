@@ -52,6 +52,12 @@ fn run() -> CliResult<()> {
             )
             .into());
         }
+        ProcessingOutcome::UndefinedGroup { name, line } => {
+            return Err(format!("{} (line {})", walicord_i18n::undefined_group(name), line).into());
+        }
+        ProcessingOutcome::UndefinedMember { id, line } => {
+            return Err(format!("{} (line {})", walicord_i18n::undefined_member(id), line).into());
+        }
         ProcessingOutcome::SyntaxError { message } => {
             return Err(format!("Syntax error: {message}").into());
         }
