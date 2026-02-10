@@ -1,14 +1,14 @@
 use crate::{
-    SettlementOptimizationError,
     error::ProgramParseError,
     model::{
         Command, PersonBalance, Script, ScriptStatement, ScriptStatementWithLine, SettleUpContext,
     },
     ports::{ProgramParser, SettlementOptimizer},
+    SettlementOptimizationError,
 };
 use fxhash::FxHashMap;
 use std::borrow::Cow;
-use walicord_domain::{BalanceAccumulator, Money, SettleUpPolicy, Transfer, model::MemberId};
+use walicord_domain::{model::MemberId, BalanceAccumulator, Money, SettleUpPolicy, Transfer};
 
 pub struct SettlementResult {
     pub balances: Vec<PersonBalance>,
@@ -25,6 +25,7 @@ pub struct MessageProcessor<'a> {
 pub enum ProcessingOutcome<'a> {
     Success(Script<'a>),
     FailedToEvaluateGroup { name: Cow<'a, str>, line: usize },
+    UndefinedGroup { name: Cow<'a, str>, line: usize },
     SyntaxError { message: String },
 }
 
@@ -50,6 +51,9 @@ impl<'a> MessageProcessor<'a> {
             Ok(program) => ProcessingOutcome::Success(program),
             Err(ProgramParseError::FailedToEvaluateGroup { name, line }) => {
                 ProcessingOutcome::FailedToEvaluateGroup { name, line }
+            }
+            Err(ProgramParseError::UndefinedGroup { name, line }) => {
+                ProcessingOutcome::UndefinedGroup { name, line }
             }
             Err(ProgramParseError::SyntaxError(message)) => {
                 ProcessingOutcome::SyntaxError { message }
@@ -229,8 +233,8 @@ mod tests {
     };
     use rstest::{fixture, rstest};
     use walicord_domain::{
-        Payment, Statement,
         model::{MemberId, MemberSetExpr, MemberSetOp, Money},
+        Payment, Statement,
     };
 
     struct StubParser;

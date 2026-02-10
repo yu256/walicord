@@ -147,6 +147,7 @@ impl<'a> Handler<'a> {
             match self.processor.parse_program(&members, &existing_content) {
                 ProcessingOutcome::Success(program) => program.statements().len(),
                 ProcessingOutcome::FailedToEvaluateGroup { .. }
+                | ProcessingOutcome::UndefinedGroup { .. }
                 | ProcessingOutcome::SyntaxError { .. } => 0,
             }
         };
@@ -289,6 +290,20 @@ impl<'a> Handler<'a> {
                         "{} {} (line {line})",
                         msg.author.mention(),
                         walicord_i18n::failed_to_evaluate_group(name)
+                    ),
+                )
+                .await;
+                false
+            }
+            ProcessingOutcome::UndefinedGroup { name, line } => {
+                self.react(ctx, msg, '❎').await;
+                self.reply(
+                    ctx,
+                    msg,
+                    format!(
+                        "{} {} (line {line})",
+                        msg.author.mention(),
+                        walicord_i18n::undefined_group(name)
                     ),
                 )
                 .await;

@@ -4,7 +4,7 @@ use walicord_application::{
     MessageProcessor, PersonBalance, ProgramParseError, ProgramParser, Script,
     SettlementOptimizationError, SettlementOptimizer,
 };
-use walicord_domain::{Money, Transfer, model::MemberId};
+use walicord_domain::{model::MemberId, Money, Transfer};
 use walicord_infrastructure::WalicordProgramParser;
 
 struct NoopOptimizer;
@@ -33,6 +33,9 @@ fn parse_program_from_content<'a>(members: &'a [&'a str], content: &'a str) -> S
         Err(err) => match err {
             ProgramParseError::FailedToEvaluateGroup { name, line } => {
                 panic!("parse failed: failed to evaluate group {name} at line {line}")
+            }
+            ProgramParseError::UndefinedGroup { name, line } => {
+                panic!("parse failed: undefined group {name} at line {line}")
             }
             ProgramParseError::SyntaxError(message) => {
                 panic!("parse failed: {message}")

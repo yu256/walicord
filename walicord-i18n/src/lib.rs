@@ -56,12 +56,27 @@ pub fn failed_to_evaluate_group(name: impl std::fmt::Display) -> String {
     format!("グループ '{}' の評価に失敗しました", name)
 }
 
+#[cfg(feature = "ja")]
+pub fn undefined_group(name: impl std::fmt::Display) -> String {
+    format!("未定義のグループ '{}' です", name)
+}
+
 #[cfg(feature = "en")]
 pub fn failed_to_evaluate_group(name: impl std::fmt::Display) -> String {
     format!("Failed to evaluate group '{}'", name)
 }
 
+#[cfg(feature = "en")]
+pub fn undefined_group(name: impl std::fmt::Display) -> String {
+    format!("Undefined group '{}'", name)
+}
+
 #[cfg(not(any(feature = "ja", feature = "en")))]
 pub fn failed_to_evaluate_group(name: impl std::fmt::Display) -> String {
     format!("Failed to evaluate group '{}'", name)
+}
+
+#[cfg(not(any(feature = "ja", feature = "en")))]
+pub fn undefined_group(name: impl std::fmt::Display) -> String {
+    format!("Undefined group '{}'", name)
 }
