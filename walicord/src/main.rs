@@ -15,11 +15,12 @@ use serenity::{
     },
     prelude::*,
 };
-use std::env;
+use std::{collections::HashMap, env};
 use walicord_application::{
     Command as ProgramCommand, MessageProcessor, ProcessingOutcome, ScriptStatement,
     SettlementOptimizationError,
 };
+use walicord_domain::model::MemberId;
 use walicord_infrastructure::{WalicordProgramParser, WalicordSettlementOptimizer};
 // MEMBERS declaration removed; no topic parsing needed
 use walicord_presentation::{SettlementPresenter, SettlementView, VariablesPresenter};
@@ -138,6 +139,7 @@ impl<'a> Handler<'a> {
     async fn process_program_message(&self, ctx: &Context, msg: &Message) -> bool {
         let members: Vec<&str> = Vec::new();
         let existing_content = self.get_combined_content(&msg.channel_id);
+        let mut member_directory: Option<HashMap<MemberId, String>> = None;
 
         let previous_statement_count = if existing_content.is_empty() {
             0
@@ -205,7 +207,30 @@ impl<'a> Handler<'a> {
                                 .build_settlement_result_for_prefix(&program, stmt_index)
                             {
                                 Ok(response) => {
-                                    let view = SettlementPresenter::render(&response);
+                                    let directory = match member_directory {
+                                        Some(ref directory) => directory,
+                                        None => {
+                                            let fetched = self
+                                                .channel_service
+                                                .fetch_channel_member_display_names(
+                                                    ctx,
+                                                    msg.channel_id,
+                                                )
+                                                .await
+                                                .unwrap_or_else(|e| {
+                                                    tracing::warn!(
+                                                        "Failed to fetch member directory: {:?}",
+                                                        e
+                                                    );
+                                                    HashMap::new()
+                                                });
+                                            member_directory = Some(fetched);
+                                            member_directory.as_ref().expect("member directory")
+                                        }
+                                    };
+                                    let view = SettlementPresenter::render_with_members(
+                                        &response, directory,
+                                    );
                                     self.reply_with_settlement(ctx, msg, view).await
                                 }
                                 Err(err) => {
@@ -219,7 +244,30 @@ impl<'a> Handler<'a> {
                                 .build_settlement_result_for_prefix(&program, stmt_index)
                             {
                                 Ok(response) => {
-                                    let view = SettlementPresenter::render(&response);
+                                    let directory = match member_directory {
+                                        Some(ref directory) => directory,
+                                        None => {
+                                            let fetched = self
+                                                .channel_service
+                                                .fetch_channel_member_display_names(
+                                                    ctx,
+                                                    msg.channel_id,
+                                                )
+                                                .await
+                                                .unwrap_or_else(|e| {
+                                                    tracing::warn!(
+                                                        "Failed to fetch member directory: {:?}",
+                                                        e
+                                                    );
+                                                    HashMap::new()
+                                                });
+                                            member_directory = Some(fetched);
+                                            member_directory.as_ref().expect("member directory")
+                                        }
+                                    };
+                                    let view = SettlementPresenter::render_with_members(
+                                        &response, directory,
+                                    );
                                     self.reply_with_settlement(ctx, msg, view).await
                                 }
                                 Err(err) => {

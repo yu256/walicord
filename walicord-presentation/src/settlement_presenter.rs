@@ -1,7 +1,7 @@
 use crate::svg_table::{Alignment, SvgTableBuilder};
 use std::{borrow::Cow, collections::HashSet};
-use walicord_application::{PersonBalance, SettlementResult};
-use walicord_domain::Transfer;
+use walicord_application::{MemberDirectory, PersonBalance, SettlementResult};
+use walicord_domain::{model::MemberId, Transfer};
 use walicord_i18n as i18n;
 
 pub struct SettlementPresenter;
@@ -13,7 +13,15 @@ pub struct SettlementView {
 
 impl SettlementPresenter {
     pub fn render(result: &SettlementResult) -> SettlementView {
-        let balance_table_svg = Self::build_balance_table_svg(&result.balances);
+        let empty_directory = EmptyMemberDirectory;
+        Self::render_with_members(result, &empty_directory)
+    }
+
+    pub fn render_with_members(
+        result: &SettlementResult,
+        member_directory: &dyn MemberDirectory,
+    ) -> SettlementView {
+        let balance_table_svg = Self::build_balance_table_svg(&result.balances, member_directory);
 
         if let Some(settle_up) = &result.settle_up {
             let has_any_transfers =
@@ -56,6 +64,7 @@ impl SettlementPresenter {
                 &pay_from_settle,
                 &receive_for_settle,
                 &other_settlements,
+                member_directory,
             );
 
             return SettlementView {
@@ -70,7 +79,8 @@ impl SettlementPresenter {
                 transfer_table_svg: None,
             }
         } else {
-            let transfer_table_svg = Self::build_transfer_table_svg(&result.optimized_transfers);
+            let transfer_table_svg =
+                Self::build_transfer_table_svg(&result.optimized_transfers, member_directory);
             SettlementView {
                 balance_table_svg,
                 transfer_table_svg: Some(transfer_table_svg),
@@ -78,7 +88,10 @@ impl SettlementPresenter {
         }
     }
 
-    pub fn build_balance_table_svg(person_balances: &[PersonBalance]) -> String {
+    pub fn build_balance_table_svg(
+        person_balances: &[PersonBalance],
+        member_directory: &dyn MemberDirectory,
+    ) -> String {
         let mut builder = SvgTableBuilder::new()
             .alignments(&[Alignment::Left, Alignment::Right])
             .headers(&[Cow::Borrowed(i18n::MEMBER), Cow::Borrowed(i18n::BALANCE)]);
@@ -90,7 +103,7 @@ impl SettlementPresenter {
                 ""
             };
             builder = builder.row([
-                Cow::Owned(format!("<@{}>", person.id.0)),
+                format_member_label(person.id, member_directory),
                 Cow::Owned(format!("{sign}{}", person.balance.amount())),
             ]);
         }
@@ -98,7 +111,10 @@ impl SettlementPresenter {
         builder.build()
     }
 
-    pub fn build_transfer_table_svg(transfers: &[Transfer]) -> String {
+    pub fn build_transfer_table_svg(
+        transfers: &[Transfer],
+        member_directory: &dyn MemberDirectory,
+    ) -> String {
         let mut builder = SvgTableBuilder::new()
             .alignments(&[Alignment::Left, Alignment::Left, Alignment::Right])
             .headers(&[
@@ -109,8 +125,8 @@ impl SettlementPresenter {
 
         for transfer in transfers {
             builder = builder.row([
-                Cow::Owned(format!("<@{}>", transfer.from.0)),
-                Cow::Owned(format!("<@{}>", transfer.to.0)),
+                format_member_label(transfer.from, member_directory),
+                format_member_label(transfer.to, member_directory),
                 Cow::Owned(transfer.amount.to_string()),
             ]);
         }
@@ -122,6 +138,7 @@ impl SettlementPresenter {
         pay_from_settle: &[Transfer],
         receive_for_settle: &[Transfer],
         other_settlements: &[Transfer],
+        member_directory: &dyn MemberDirectory,
     ) -> String {
         let mut builder = SvgTableBuilder::new()
             .alignments(&[
@@ -140,8 +157,8 @@ impl SettlementPresenter {
         for transfer in pay_from_settle {
             builder = builder.row([
                 Cow::Borrowed(i18n::SETTLEMENT_PAYMENT),
-                Cow::Owned(format!("<@{}>", transfer.from.0)),
-                Cow::Owned(format!("<@{}>", transfer.to.0)),
+                format_member_label(transfer.from, member_directory),
+                format_member_label(transfer.to, member_directory),
                 Cow::Owned(transfer.amount.to_string()),
             ]);
         }
@@ -149,8 +166,8 @@ impl SettlementPresenter {
         for transfer in receive_for_settle {
             builder = builder.row([
                 Cow::Borrowed(i18n::PAYMENT_TO_SETTLOR),
-                Cow::Owned(format!("<@{}>", transfer.from.0)),
-                Cow::Owned(format!("<@{}>", transfer.to.0)),
+                format_member_label(transfer.from, member_directory),
+                format_member_label(transfer.to, member_directory),
                 Cow::Owned(transfer.amount.to_string()),
             ]);
         }
@@ -158,13 +175,31 @@ impl SettlementPresenter {
         for transfer in other_settlements {
             builder = builder.row([
                 Cow::Borrowed(i18n::PENDING),
-                Cow::Owned(format!("<@{}>", transfer.from.0)),
-                Cow::Owned(format!("<@{}>", transfer.to.0)),
+                format_member_label(transfer.from, member_directory),
+                format_member_label(transfer.to, member_directory),
                 Cow::Owned(transfer.amount.to_string()),
             ]);
         }
 
         builder.build()
+    }
+}
+
+struct EmptyMemberDirectory;
+
+impl MemberDirectory for EmptyMemberDirectory {
+    fn display_name(&self, _member_id: MemberId) -> Option<&str> {
+        None
+    }
+}
+
+fn format_member_label<'a>(
+    member_id: MemberId,
+    member_directory: &'a dyn MemberDirectory,
+) -> Cow<'a, str> {
+    match member_directory.display_name(member_id) {
+        Some(name) => Cow::Borrowed(name),
+        None => Cow::Owned(format!("<@{}>", member_id.0)),
     }
 }
 
@@ -180,4 +215,57 @@ fn sort_transfers(transfers: &mut [Transfer]) {
         }
         lhs.amount.cmp(&rhs.amount)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use walicord_application::PersonBalance;
+    use walicord_domain::{model::MemberId, Money, Transfer};
+
+    fn sample_result() -> SettlementResult {
+        SettlementResult {
+            balances: vec![PersonBalance {
+                id: MemberId(1),
+                balance: Money::from_i64(120),
+            }],
+            optimized_transfers: vec![Transfer {
+                from: MemberId(1),
+                to: MemberId(2),
+                amount: Money::from_i64(50),
+            }],
+            settle_up: None,
+        }
+    }
+
+    #[test]
+    fn render_uses_display_name_when_available() {
+        let mut directory = HashMap::new();
+        directory.insert(MemberId(1), "Alice".to_string());
+
+        let view = SettlementPresenter::render_with_members(&sample_result(), &directory);
+
+        assert!(view.balance_table_svg.contains("Alice"));
+        assert!(!view.balance_table_svg.contains("<@1>"));
+        assert!(view
+            .transfer_table_svg
+            .as_ref()
+            .expect("transfer table")
+            .contains("Alice"));
+    }
+
+    #[test]
+    fn render_falls_back_to_mentions_when_missing() {
+        let directory: HashMap<MemberId, String> = HashMap::new();
+
+        let view = SettlementPresenter::render_with_members(&sample_result(), &directory);
+
+        assert!(view.balance_table_svg.contains("&lt;@1&gt;"));
+        assert!(view
+            .transfer_table_svg
+            .as_ref()
+            .expect("transfer table")
+            .contains("&lt;@2&gt;"));
+    }
 }
