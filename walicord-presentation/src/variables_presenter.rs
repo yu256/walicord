@@ -28,7 +28,6 @@ impl VariablesPresenter {
 
     fn render_from_slice(statements: &[ScriptStatementWithLine<'_>]) -> String {
         let mut reply = String::with_capacity(512);
-        reply.push('\n');
 
         let mut resolver = MemberSetResolver::new();
 
