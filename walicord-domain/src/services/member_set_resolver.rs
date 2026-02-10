@@ -32,7 +32,7 @@ impl<'a> MemberSetResolver<'a> {
     }
 
     pub fn evaluate_members(&self, expr: &MemberSetExpr<'a>) -> Option<MemberSet> {
-        let set = expr.evaluate(&|name| self.groups.get(name).cloned())?;
+        let set = expr.evaluate(&|name| self.groups.get(name))?;
         let mut ordered: Vec<MemberId> = set.into_iter().collect();
         ordered.sort_unstable();
         Some(MemberSet::new(ordered))
