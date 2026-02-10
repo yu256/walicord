@@ -5,7 +5,7 @@ use walicord_application::{
     SettlementOptimizationError,
 };
 use walicord_infrastructure::{WalicordProgramParser, WalicordSettlementOptimizer};
-use walicord_parser::extract_members_from_topic;
+// MEMBERS declaration removed; no topic parsing needed
 use walicord_presentation::{SettlementPresenter, SettlementView, VariablesPresenter};
 
 type CliResult<T> = Result<T, Cow<'static, str>>;
@@ -44,14 +44,13 @@ fn run() -> CliResult<()> {
 
     let program = match processor.parse_program(&members, program_content) {
         ProcessingOutcome::Success(program) => program,
-        ProcessingOutcome::MissingMembersDeclaration => {
-            return Err("Program is missing MEMBERS declaration".into());
-        }
-        ProcessingOutcome::UndefinedMember { name, line } => {
-            return Err(format!("Undefined member '{name}' at line {line}").into());
-        }
-        ProcessingOutcome::FailedToEvaluateGroup { name } => {
-            return Err(walicord_i18n::failed_to_evaluate_group(name).into());
+        ProcessingOutcome::FailedToEvaluateGroup { name, line } => {
+            return Err(format!(
+                "{} (line {})",
+                walicord_i18n::failed_to_evaluate_group(name),
+                line
+            )
+            .into());
         }
         ProcessingOutcome::SyntaxError { message } => {
             return Err(format!("Syntax error: {message}").into());
@@ -123,25 +122,5 @@ fn print_program_output<'a>(
 }
 
 fn parse_members_first_line(source: &str) -> CliResult<(Vec<&str>, &str)> {
-    if source.is_empty() {
-        return Err("File is empty; expected `MEMBERS := ...` on the first line".into());
-    }
-
-    let (members_line_raw, rest) = match source.find('\n') {
-        Some(idx) => (&source[..idx], &source[idx + 1..]),
-        None => (source, ""),
-    };
-
-    let members_line = members_line_raw
-        .strip_suffix('\r')
-        .unwrap_or(members_line_raw);
-
-    if !members_line.trim_start().starts_with("MEMBERS") {
-        return Err("First line must start with `MEMBERS := ...`".into());
-    }
-
-    let members = extract_members_from_topic(members_line)
-        .map_err(|_| "Failed to parse `MEMBERS := ...` declaration on the first line")?;
-
-    Ok((members, rest))
+    Ok((Vec::new(), source))
 }

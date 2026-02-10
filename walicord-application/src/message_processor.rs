@@ -1,18 +1,19 @@
 use crate::{
+    SettlementOptimizationError,
     error::ProgramParseError,
     model::{
         Command, PersonBalance, Script, ScriptStatement, ScriptStatementWithLine, SettleUpContext,
     },
     ports::{ProgramParser, SettlementOptimizer},
-    SettlementOptimizationError,
 };
-use std::collections::HashMap;
-use walicord_domain::{BalanceAccumulator, Money, SettleUpPolicy, Transfer};
+use fxhash::FxHashMap;
+use std::borrow::Cow;
+use walicord_domain::{BalanceAccumulator, Money, SettleUpPolicy, Transfer, model::MemberId};
 
-pub struct SettlementResult<'a> {
-    pub balances: Vec<PersonBalance<'a>>,
-    pub optimized_transfers: Vec<Transfer<'a>>,
-    pub settle_up: Option<SettleUpContext<'a>>,
+pub struct SettlementResult {
+    pub balances: Vec<PersonBalance>,
+    pub optimized_transfers: Vec<Transfer>,
+    pub settle_up: Option<SettleUpContext>,
 }
 
 #[derive(Clone, Copy)]
@@ -23,15 +24,13 @@ pub struct MessageProcessor<'a> {
 
 pub enum ProcessingOutcome<'a> {
     Success(Script<'a>),
-    MissingMembersDeclaration,
-    UndefinedMember { name: &'a str, line: usize },
-    FailedToEvaluateGroup { name: &'a str },
+    FailedToEvaluateGroup { name: Cow<'a, str>, line: usize },
     SyntaxError { message: String },
 }
 
-struct ApplyResult<'a> {
-    balances: HashMap<&'a str, Money>,
-    settle_up: Option<SettleUpContext<'a>>,
+struct ApplyResult {
+    balances: FxHashMap<MemberId, Money>,
+    settle_up: Option<SettleUpContext>,
 }
 
 impl<'a> MessageProcessor<'a> {
@@ -49,14 +48,8 @@ impl<'a> MessageProcessor<'a> {
     {
         match self.parser.parse(members, content) {
             Ok(program) => ProcessingOutcome::Success(program),
-            Err(ProgramParseError::MissingMembersDeclaration) => {
-                ProcessingOutcome::MissingMembersDeclaration
-            }
-            Err(ProgramParseError::UndefinedMember { name, line }) => {
-                ProcessingOutcome::UndefinedMember { name, line }
-            }
-            Err(ProgramParseError::FailedToEvaluateGroup { name }) => {
-                ProcessingOutcome::FailedToEvaluateGroup { name }
+            Err(ProgramParseError::FailedToEvaluateGroup { name, line }) => {
+                ProcessingOutcome::FailedToEvaluateGroup { name, line }
             }
             Err(ProgramParseError::SyntaxError(message)) => {
                 ProcessingOutcome::SyntaxError { message }
@@ -64,7 +57,7 @@ impl<'a> MessageProcessor<'a> {
         }
     }
 
-    pub fn calculate_balances<'b>(&self, program: &'b Script<'b>) -> HashMap<&'b str, Money>
+    pub fn calculate_balances<'b>(&self, program: &'b Script<'b>) -> FxHashMap<MemberId, Money>
     where
         'a: 'b,
     {
@@ -75,7 +68,7 @@ impl<'a> MessageProcessor<'a> {
         &self,
         program: &'b Script<'b>,
         prefix_len: usize,
-    ) -> HashMap<&'b str, Money>
+    ) -> FxHashMap<MemberId, Money>
     where
         'a: 'b,
     {
@@ -86,7 +79,7 @@ impl<'a> MessageProcessor<'a> {
     pub fn build_settlement_result<'b>(
         &self,
         program: &'b Script<'b>,
-    ) -> Result<SettlementResult<'b>, SettlementOptimizationError>
+    ) -> Result<SettlementResult, SettlementOptimizationError>
     where
         'a: 'b,
     {
@@ -97,7 +90,7 @@ impl<'a> MessageProcessor<'a> {
         &self,
         program: &'b Script<'b>,
         prefix_len: usize,
-    ) -> Result<SettlementResult<'b>, SettlementOptimizationError>
+    ) -> Result<SettlementResult, SettlementOptimizationError>
     where
         'a: 'b,
     {
@@ -108,19 +101,19 @@ impl<'a> MessageProcessor<'a> {
         ))
     }
 
-    fn build_settlement_result_from_apply<'b>(
+    fn build_settlement_result_from_apply(
         &self,
-        apply_result: ApplyResult<'b>,
-    ) -> Result<SettlementResult<'b>, SettlementOptimizationError> {
-        let mut person_balances: Vec<PersonBalance<'b>> = apply_result
+        apply_result: ApplyResult,
+    ) -> Result<SettlementResult, SettlementOptimizationError> {
+        let mut person_balances: Vec<PersonBalance> = apply_result
             .balances
             .iter()
-            .map(|(name, balance)| PersonBalance {
-                name,
+            .map(|(id, balance)| PersonBalance {
+                id: *id,
                 balance: *balance,
             })
             .collect();
-        person_balances.sort_by_key(|p| p.name);
+        person_balances.sort_by_key(|p| p.id);
 
         let optimized_transfers = self.optimizer.optimize(&person_balances)?;
 
@@ -136,7 +129,7 @@ impl<'a> MessageProcessor<'a> {
         program: &'b Script<'b>,
         prefix_len: Option<usize>,
         apply_settle: bool,
-    ) -> ApplyResult<'b>
+    ) -> ApplyResult
     where
         'a: 'b,
     {
@@ -146,9 +139,9 @@ impl<'a> MessageProcessor<'a> {
             None => statements.len(),
         };
 
-        let mut accumulator = BalanceAccumulator::new(program.members());
-        let mut last_settle_members: Vec<&'b str> = Vec::new();
-        let mut last_settle_transfers: Vec<Transfer<'b>> = Vec::new();
+        let mut accumulator = BalanceAccumulator::new();
+        let mut last_settle_members: Vec<MemberId> = Vec::new();
+        let mut last_settle_transfers: Vec<Transfer> = Vec::new();
         let last_is_settle = apply_settle
             && end > 0
             && matches!(
@@ -180,9 +173,10 @@ impl<'a> MessageProcessor<'a> {
 
                             last_settle_members.extend(settle_members.iter());
 
+                            accumulator.ensure_members(settle_members.iter());
+
                             let result = SettleUpPolicy::settle(
                                 accumulator.balances().clone(),
-                                program.members(),
                                 settle_members.members(),
                             );
                             accumulator.set_balances(result.new_balances);
@@ -235,8 +229,8 @@ mod tests {
     };
     use rstest::{fixture, rstest};
     use walicord_domain::{
-        model::{MemberSetExpr, MemberSetOp, Money},
         Payment, Statement,
+        model::{MemberId, MemberSetExpr, MemberSetOp, Money},
     };
 
     struct StubParser;
@@ -252,22 +246,22 @@ mod tests {
                     line: 1,
                     statement: ScriptStatement::Domain(Statement::Payment(Payment {
                         amount: Money::from_u64(60),
-                        payer: MemberSetExpr::new(vec![MemberSetOp::Push("A")]),
-                        payee: MemberSetExpr::new(vec![MemberSetOp::Push("C")]),
+                        payer: MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(1))]),
+                        payee: MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(3))]),
                     })),
                 },
                 ScriptStatementWithLine {
                     line: 2,
                     statement: ScriptStatement::Domain(Statement::Payment(Payment {
                         amount: Money::from_u64(40),
-                        payer: MemberSetExpr::new(vec![MemberSetOp::Push("B")]),
-                        payee: MemberSetExpr::new(vec![MemberSetOp::Push("C")]),
+                        payer: MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(2))]),
+                        payee: MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(3))]),
                     })),
                 },
                 ScriptStatementWithLine {
                     line: 3,
                     statement: ScriptStatement::Command(Command::SettleUp(MemberSetExpr::new(
-                        vec![MemberSetOp::Push("A")],
+                        vec![MemberSetOp::Push(MemberId(1))],
                     ))),
                 },
             ];
@@ -279,10 +273,10 @@ mod tests {
     struct NoopOptimizer;
 
     impl SettlementOptimizer for NoopOptimizer {
-        fn optimize<'a>(
+        fn optimize(
             &self,
-            _balances: &[PersonBalance<'a>],
-        ) -> Result<Vec<Transfer<'a>>, SettlementOptimizationError> {
+            _balances: &[PersonBalance],
+        ) -> Result<Vec<Transfer>, SettlementOptimizationError> {
             Ok(Vec::new())
         }
     }

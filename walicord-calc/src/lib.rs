@@ -2,7 +2,7 @@
 
 mod model;
 
-use good_lp::{default_solver, variable, variables, Expression, Solution, SolverModel, Variable};
+use good_lp::{Expression, Solution, SolverModel, Variable, default_solver, variable, variables};
 use thiserror::Error;
 
 pub use model::{Payment, PersonBalance};
@@ -15,12 +15,12 @@ pub enum SettlementError {
     NoSolution,
 }
 
-pub fn minimize_transactions<'a>(
-    people: impl IntoIterator<Item = PersonBalance<'a>>,
+pub fn minimize_transactions(
+    people: impl IntoIterator<Item = PersonBalance>,
     alpha: f64,
     beta: f64,
-) -> Result<Vec<Payment<'a>>, SettlementError> {
-    let people: Vec<PersonBalance<'a>> = people.into_iter().collect();
+) -> Result<Vec<Payment>, SettlementError> {
+    let people: Vec<PersonBalance> = people.into_iter().collect();
     let total: i64 = people.iter().map(|p| p.balance).sum();
     if total != 0 {
         return Err(SettlementError::ImbalancedTotal(total));
@@ -94,8 +94,8 @@ pub fn minimize_transactions<'a>(
         let amount = solution.value(how_much[idx]).round() as i64;
         if amount > 0 {
             results.push(Payment {
-                from: people[i].name,
-                to: people[j].name,
+                from: people[i].id,
+                to: people[j].id,
                 amount,
             });
         }
@@ -106,18 +106,15 @@ pub fn minimize_transactions<'a>(
 
 #[cfg(test)]
 mod tests {
-    use super::{minimize_transactions, Payment, PersonBalance, SettlementError};
+    use super::{Payment, PersonBalance, SettlementError, minimize_transactions};
     use proptest::prelude::*;
     use rstest::rstest;
     use std::collections::HashMap;
 
-    fn balances_from_payments<'a>(
-        people: &[PersonBalance<'a>],
-        payments: &[Payment<'a>],
-    ) -> HashMap<&'a str, i64> {
+    fn balances_from_payments(people: &[PersonBalance], payments: &[Payment]) -> HashMap<u64, i64> {
         let mut balances = HashMap::with_capacity(people.len());
         for person in people {
-            balances.insert(person.name, 0);
+            balances.insert(person.id, 0);
         }
         for payment in payments {
             *balances.entry(payment.from).or_insert(0) -= payment.amount;
@@ -126,14 +123,14 @@ mod tests {
         balances
     }
 
-    fn assert_balances_match<'a>(people: &[PersonBalance<'a>], payments: &[Payment<'a>]) {
+    fn assert_balances_match(people: &[PersonBalance], payments: &[Payment]) {
         let balances = balances_from_payments(people, payments);
         for person in people {
-            let actual = balances.get(person.name).copied().unwrap_or(0);
+            let actual = balances.get(&person.id).copied().unwrap_or(0);
             assert_eq!(
                 actual, person.balance,
-                "balance mismatch for {}",
-                person.name
+                "balance mismatch for id {}",
+                person.id
             );
         }
     }
@@ -141,34 +138,34 @@ mod tests {
     #[rstest]
     #[case::simple_two_people(&[
         PersonBalance {
-            name: "A",
+            id: 1,
             balance: 100,
         },
         PersonBalance {
-            name: "B",
+            id: 2,
             balance: -100,
         },
     ])]
-    fn settles_two_people(#[case] people: &[PersonBalance<'static>]) {
+    fn settles_two_people(#[case] people: &[PersonBalance]) {
         let payments =
             minimize_transactions(people.iter().copied(), 1.0, 0.01).expect("expected solution");
 
         assert_eq!(payments.len(), 1);
-        assert_eq!(payments[0].from, "B");
-        assert_eq!(payments[0].to, "A");
+        assert_eq!(payments[0].from, 2);
+        assert_eq!(payments[0].to, 1);
         assert_eq!(payments[0].amount, 100);
         assert_balances_match(people, &payments);
     }
 
     #[rstest]
     #[case::imbalanced(&[
-        PersonBalance { name: "A", balance: 50 },
+        PersonBalance { id: 1, balance: 50 },
         PersonBalance {
-            name: "B",
+            id: 2,
             balance: -40,
         },
     ])]
-    fn rejects_imbalanced_total(#[case] people: &[PersonBalance<'static>]) {
+    fn rejects_imbalanced_total(#[case] people: &[PersonBalance]) {
         let result = minimize_transactions(people.iter().copied(), 1.0, 0.01);
         match result {
             Err(SettlementError::ImbalancedTotal(total)) => {
@@ -180,11 +177,11 @@ mod tests {
 
     #[rstest]
     #[case::all_zero(&[
-        PersonBalance { name: "A", balance: 0 },
-        PersonBalance { name: "B", balance: 0 },
-        PersonBalance { name: "C", balance: 0 },
+        PersonBalance { id: 1, balance: 0 },
+        PersonBalance { id: 2, balance: 0 },
+        PersonBalance { id: 3, balance: 0 },
     ])]
-    fn zero_balances_produce_no_payments(#[case] people: &[PersonBalance<'static>]) {
+    fn zero_balances_produce_no_payments(#[case] people: &[PersonBalance]) {
         let payments =
             minimize_transactions(people.iter().copied(), 1.0, 0.01).expect("expected solution");
         assert!(payments.is_empty());
@@ -193,10 +190,10 @@ mod tests {
     #[rstest]
     #[case::empty(&[])]
     #[case::single_zero(&[PersonBalance {
-        name: "A",
+        id: 1,
         balance: 0,
     }])]
-    fn small_inputs_produce_no_payments(#[case] people: &[PersonBalance<'static>]) {
+    fn small_inputs_produce_no_payments(#[case] people: &[PersonBalance]) {
         let payments =
             minimize_transactions(people.iter().copied(), 1.0, 0.01).expect("expected solution");
         assert!(payments.is_empty());
@@ -204,11 +201,11 @@ mod tests {
 
     #[rstest]
     #[case::single_nonzero(&[PersonBalance {
-        name: "A",
+        id: 1,
         balance: 50,
     }], 50)]
     fn small_inputs_reject_imbalanced(
-        #[case] people: &[PersonBalance<'static>],
+        #[case] people: &[PersonBalance],
         #[case] expected_total: i64,
     ) {
         let result = minimize_transactions(people.iter().copied(), 1.0, 0.01);
@@ -225,16 +222,13 @@ mod tests {
     #[case::beta_focus(0.0, 1.0)]
     fn balances_settle_with_weight_variations(#[case] alpha: f64, #[case] beta: f64) {
         let people = [
+            PersonBalance { id: 1, balance: 80 },
             PersonBalance {
-                name: "A",
-                balance: 80,
-            },
-            PersonBalance {
-                name: "B",
+                id: 2,
                 balance: -50,
             },
             PersonBalance {
-                name: "C",
+                id: 3,
                 balance: -30,
             },
         ];
@@ -251,16 +245,15 @@ mod tests {
             people_count in 2usize..=6,
             balances in prop::collection::vec(-200i64..=200, 1..=5),
         ) {
-            let names = ["A", "B", "C", "D", "E", "F"];
             let mut people = Vec::with_capacity(people_count);
             let mut sum = 0i64;
             for idx in 0..people_count.saturating_sub(1) {
                 let balance = *balances.get(idx).unwrap_or(&0);
                 sum += balance;
-                people.push(PersonBalance { name: names[idx], balance });
+                people.push(PersonBalance { id: idx as u64 + 1, balance });
             }
             people.push(PersonBalance {
-                name: names[people_count - 1],
+                id: people_count as u64,
                 balance: -sum,
             });
 
@@ -278,10 +271,8 @@ mod tests {
         fn zero_balances_have_no_payments(
             people_count in 2usize..=6,
         ) {
-            let names = ["A", "B", "C", "D", "E", "F"];
-            let people: Vec<PersonBalance<'_>> = names[..people_count]
-                .iter()
-                .map(|&name| PersonBalance { name, balance: 0 })
+            let people: Vec<PersonBalance> = (1..=people_count as u64)
+                .map(|id| PersonBalance { id, balance: 0 })
                 .collect();
 
             let payments = minimize_transactions(people.iter().copied(), 1.0, 0.01)

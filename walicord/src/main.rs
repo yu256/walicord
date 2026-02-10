@@ -4,10 +4,7 @@ mod infrastructure;
 
 use dashmap::DashMap;
 use indexmap::IndexMap;
-use infrastructure::{
-    discord::{ChannelError, DiscordChannelService},
-    svg_renderer::svg_to_png,
-};
+use infrastructure::{discord::DiscordChannelService, svg_renderer::svg_to_png};
 use serenity::{
     all::MessageId,
     async_trait,
@@ -24,7 +21,7 @@ use walicord_application::{
     SettlementOptimizationError,
 };
 use walicord_infrastructure::{WalicordProgramParser, WalicordSettlementOptimizer};
-use walicord_parser::extract_members_from_topic;
+// MEMBERS declaration removed; no topic parsing needed
 use walicord_presentation::{SettlementPresenter, SettlementView, VariablesPresenter};
 
 fn load_target_channel_ids() -> Vec<ChannelId> {
@@ -39,8 +36,6 @@ fn load_target_channel_ids() -> Vec<ChannelId> {
         .collect()
 }
 
-const MISSING_MEMBERS_MESSAGE: &str = walicord_i18n::MISSING_MEMBERS_DECLARATION;
-
 fn format_settlement_error(err: SettlementOptimizationError) -> String {
     match err {
         SettlementOptimizationError::ImbalancedTotal(total) => {
@@ -53,11 +48,6 @@ fn format_settlement_error(err: SettlementOptimizationError) -> String {
             walicord_i18n::SETTLEMENT_CALCULATION_FAILED.to_string()
         }
     }
-}
-
-enum MembersError {
-    Channel(ChannelError),
-    MissingDeclaration,
 }
 
 struct Handler<'a> {
@@ -98,20 +88,6 @@ impl<'a> Handler<'a> {
                     .join("\n")
             })
             .unwrap_or_default()
-    }
-
-    async fn fetch_topic(
-        &self,
-        ctx: &Context,
-        channel_id: ChannelId,
-    ) -> Result<String, MembersError> {
-        let channel = self
-            .channel_service
-            .fetch_guild_channel(ctx, channel_id)
-            .await
-            .map_err(MembersError::Channel)?;
-
-        channel.topic.ok_or(MembersError::MissingDeclaration)
     }
 
     async fn reply(&self, ctx: &Context, msg: &Message, content: impl Into<String>) {
@@ -160,37 +136,7 @@ impl<'a> Handler<'a> {
     }
 
     async fn process_program_message(&self, ctx: &Context, msg: &Message) -> bool {
-        let topic = match self.fetch_topic(ctx, msg.channel_id).await {
-            Ok(topic) => topic,
-            Err(MembersError::Channel(err)) => {
-                tracing::error!("Failed to fetch channel info: {}", err);
-                return false;
-            }
-            Err(MembersError::MissingDeclaration) => {
-                self.react(ctx, msg, '❎').await;
-                self.reply(
-                    ctx,
-                    msg,
-                    format!("{} Error: {MISSING_MEMBERS_MESSAGE}", msg.author.mention()),
-                )
-                .await;
-                return false;
-            }
-        };
-
-        let members = match extract_members_from_topic(&topic) {
-            Ok(members) => members,
-            Err(_) => {
-                self.react(ctx, msg, '❎').await;
-                self.reply(
-                    ctx,
-                    msg,
-                    format!("{} Error: {MISSING_MEMBERS_MESSAGE}", msg.author.mention()),
-                )
-                .await;
-                return false;
-            }
-        };
+        let members: Vec<&str> = Vec::new();
         let existing_content = self.get_combined_content(&msg.channel_id);
 
         let previous_statement_count = if existing_content.is_empty() {
@@ -198,9 +144,7 @@ impl<'a> Handler<'a> {
         } else {
             match self.processor.parse_program(&members, &existing_content) {
                 ProcessingOutcome::Success(program) => program.statements().len(),
-                ProcessingOutcome::MissingMembersDeclaration
-                | ProcessingOutcome::UndefinedMember { .. }
-                | ProcessingOutcome::FailedToEvaluateGroup { .. }
+                ProcessingOutcome::FailedToEvaluateGroup { .. }
                 | ProcessingOutcome::SyntaxError { .. } => 0,
             }
         };
@@ -288,32 +232,13 @@ impl<'a> Handler<'a> {
 
                 should_store
             }
-            ProcessingOutcome::MissingMembersDeclaration => {
-                self.react(ctx, msg, '❎').await;
-                self.reply(
-                    ctx,
-                    msg,
-                    format!("{} Error: {MISSING_MEMBERS_MESSAGE}", msg.author.mention()),
-                )
-                .await;
-                false
-            }
-            ProcessingOutcome::UndefinedMember { name, line } => {
-                self.react(ctx, msg, '❎').await;
-                let error_msg = format!(
-                    "Error: Undefined member '{name}' is used at line {line}.\nPlease define it in the channel topic MEMBERS declaration.\nCurrent members: {members:?}"
-                );
-                self.reply(ctx, msg, format!("{} {error_msg}", msg.author.mention()))
-                    .await;
-                false
-            }
-            ProcessingOutcome::FailedToEvaluateGroup { name } => {
+            ProcessingOutcome::FailedToEvaluateGroup { name, line } => {
                 self.react(ctx, msg, '❎').await;
                 self.reply(
                     ctx,
                     msg,
                     format!(
-                        "{} {}",
+                        "{} {} (line {line})",
                         msg.author.mention(),
                         walicord_i18n::failed_to_evaluate_group(name)
                     ),

@@ -8,12 +8,12 @@ use nom::{
     bytes::complete::{tag, tag_no_case, take_while, take_while1},
     character::complete::{char, u64},
     combinator::opt,
-    multi::separated_list1,
 };
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SetOp<'a> {
-    Push(&'a str),
+    Push(u64),          // Discord user ID (mention)
+    PushGroup(&'a str), // Group name reference
     Union,
     Intersection,
     Difference,
@@ -37,9 +37,16 @@ impl<'a> SetExpr<'a> {
         &self.ops
     }
 
-    pub fn referenced_names(&self) -> impl Iterator<Item = &'a str> + '_ {
+    pub fn referenced_ids(&self) -> impl Iterator<Item = u64> + '_ {
         self.ops.iter().filter_map(|op| match op {
-            SetOp::Push(name) => Some(*name),
+            SetOp::Push(id) => Some(*id),
+            _ => None,
+        })
+    }
+
+    pub fn referenced_groups(&self) -> impl Iterator<Item = &'a str> + '_ {
+        self.ops.iter().filter_map(|op| match op {
+            SetOp::PushGroup(name) => Some(*name),
             _ => None,
         })
     }
@@ -49,7 +56,8 @@ impl<'a> SetExpr<'a> {
 
         for op in &self.ops {
             match op {
-                SetOp::Push(name) => stack.push((*name).to_string()),
+                SetOp::Push(id) => stack.push(format!("<@{id}>")),
+                SetOp::PushGroup(name) => stack.push((*name).to_string()),
                 SetOp::Union => {
                     let b = stack.pop()?;
                     let a = stack.pop()?;
@@ -140,22 +148,25 @@ pub struct Program<'a> {
 }
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
-#[error("Parse error: {0}")]
-pub enum ParseError<'a> {
-    NoMembersDeclaration(#[from] NoMembersDeclarationError),
-    #[error("Undefined member '{name}' at line {line}.")]
-    UndefinedMember {
-        name: &'a str,
-        line: usize,
-    },
+pub enum ParseError {
+    #[error("Undefined member ID '{id}' at line {line}.")]
+    UndefinedMember { id: u64, line: usize },
+    #[error("Undefined group '{name}' at line {line}.")]
+    UndefinedGroup { name: String, line: usize },
+    #[error("Syntax error: {0}")]
     SyntaxError(String),
 }
 
-#[derive(Debug, Clone, PartialEq, thiserror::Error)]
-#[error("No MEMBERS declaration found in channel topic.")]
-pub struct NoMembersDeclarationError;
+// Parse Discord mention: <@123456789> or <@!123456789>
+fn mention(input: &str) -> IResult<&str, u64> {
+    let (input, _) = tag("<@")(input)?;
+    let (input, _) = opt(char('!')).parse(input)?;
+    let (input, id) = u64(input)?;
+    let (input, _) = char('>')(input)?;
+    Ok((input, id))
+}
 
-// Parse name (identifier)
+// Parse group name (identifier) - only for group declarations like "team := ..."
 fn identifier(input: &str) -> IResult<&str, &str> {
     take_while1(|c: char| c.is_alphanumeric() || c == '_' || c == '-' || is_japanese_char(c))(input)
 }
@@ -175,25 +186,20 @@ fn sp(input: &str) -> IResult<&str, &str> {
     take_while(|c: char| c.is_whitespace() || c == '\u{3000}')(input)
 }
 
-// Parse MEMBERS list: name1, name2, name3
-fn members_list(input: &str) -> IResult<&str, Vec<&str>> {
-    separated_list1((sp, char(','), sp), identifier).parse(input)
-}
-
-// MEMBERS := name1, name2, name3
-fn members_declaration(input: &str) -> IResult<&str, Vec<&str>> {
-    (tag("MEMBERS"), sp, tag(":="), sp, members_list)
-        .map(|(_, _, _, _, members)| members)
-        .parse(input)
-}
-
-// Parse a primary expression: either an identifier or a parenthesized expression
+// Parse a primary expression: mention (Discord ID), identifier (group name), or parenthesized expression
 fn set_primary(input: &str) -> IResult<&str, SetExpr<'_>> {
     alt((
         (char('('), sp, set_expr, sp, char(')')).map(|(_, _, expr, _, _)| expr),
+        // Try parsing as mention first (Discord ID)
+        mention.map(|id| {
+            let mut expr = SetExpr::new();
+            expr.push(SetOp::Push(id));
+            expr
+        }),
+        // Fall back to identifier (group name)
         identifier.map(|name| {
             let mut expr = SetExpr::new();
-            expr.push(SetOp::Push(name));
+            expr.push(SetOp::PushGroup(name));
             expr
         }),
     ))
@@ -392,11 +398,9 @@ fn statement(input: &str) -> IResult<&str, Statement<'_>> {
     .parse(input)
 }
 
-// Parse the entire program (MEMBERS declaration is provided separately)
-pub fn parse_program<'a>(
-    members_decl: &'a [&'a str],
-    input: &'a str,
-) -> Result<Program<'a>, ParseError<'a>> {
+// Parse the entire program
+// NOTE: MEMBERS declaration is no longer required - members are referenced via Discord mentions
+pub fn parse_program<'a>(input: &'a str) -> Result<Program<'a>, ParseError> {
     let mut statements = Vec::new();
 
     for (idx, line) in input.lines().enumerate() {
@@ -425,24 +429,9 @@ pub fn parse_program<'a>(
     }
 
     Ok(Program {
-        members_decl,
+        members_decl: &[], // Empty slice - MEMBERS declaration is no longer needed
         statements,
     })
-}
-
-// Extract MEMBERS declaration from the channel topic
-pub fn extract_members_from_topic(topic: &str) -> Result<Vec<&str>, NoMembersDeclarationError> {
-    // Find the line "MEMBERS := ..." from a multi-line topic
-    for line in topic.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("MEMBERS") {
-            match members_declaration(trimmed) {
-                Ok((_, members)) => return Ok(members),
-                Err(_) => continue,
-            }
-        }
-    }
-    Err(NoMembersDeclarationError)
 }
 
 #[cfg(test)]
@@ -451,43 +440,43 @@ mod tests {
     use rstest::rstest;
 
     #[rstest]
-    #[case("A", &[SetOp::Push("A")])]
+    #[case("<@65>", &[SetOp::Push(65)])] // 'A' = 65 in ASCII
     #[case(
-        "A ∪ B",
-        &[SetOp::Push("A"), SetOp::Push("B"), SetOp::Union]
+        "<@65> ∪ <@66>",
+        &[SetOp::Push(65), SetOp::Push(66), SetOp::Union]
     )]
     #[case(
-        "A, B",
-        &[SetOp::Push("A"), SetOp::Push("B"), SetOp::Union]
+        "<@65>, <@66>",
+        &[SetOp::Push(65), SetOp::Push(66), SetOp::Union]
     )]
     #[case(
-        "A ∩ B",
-        &[SetOp::Push("A"), SetOp::Push("B"), SetOp::Intersection]
+        "<@65> ∩ <@66>",
+        &[SetOp::Push(65), SetOp::Push(66), SetOp::Intersection]
     )]
     #[case(
-        "A - B",
-        &[SetOp::Push("A"), SetOp::Push("B"), SetOp::Difference]
+        "<@65> - <@66>",
+        &[SetOp::Push(65), SetOp::Push(66), SetOp::Difference]
     )]
     #[case(
-        "(A ∪ B) ∩ C",
+        "(<@65> ∪ <@66>) ∩ <@67>",
         &[
-            SetOp::Push("A"),
-            SetOp::Push("B"),
+            SetOp::Push(65),
+            SetOp::Push(66),
             SetOp::Union,
-            SetOp::Push("C"),
+            SetOp::Push(67),
             SetOp::Intersection
         ]
     )]
-    fn test_set_expr_ops(#[case] input: &str, #[case] expected: &'static [SetOp<'static>]) {
+    fn test_set_expr_ops(#[case] input: &str, #[case] expected: &'static [SetOp]) {
         let (_, expr) = set_expr(input).unwrap();
         assert_eq!(&expr.ops, expected);
     }
 
     #[rstest]
-    #[case("(A ∪ B) ∩ C", "(A ∪ B) ∩ C")]
-    #[case("A - B ∪ C", "(A - B) ∪ C")]
-    #[case("A", "A")]
-    #[case("A ∪ (B ∩ C)", "A ∪ (B ∩ C)")]
+    #[case("(<@65> ∪ <@66>) ∩ <@67>", "(<@65> ∪ <@66>) ∩ <@67>")]
+    #[case("<@65> - <@66> ∪ <@67>", "(<@65> - <@66>) ∪ <@67>")]
+    #[case("<@65>", "<@65>")]
+    #[case("<@65> ∪ (<@66> ∩ <@67>)", "<@65> ∪ (<@66> ∩ <@67>)")]
     fn test_infix_string(#[case] input: &str, #[case] expected: &str) {
         let (_, expr) = set_expr(input).unwrap();
         let infix = expr.to_infix_string().unwrap();
@@ -510,12 +499,68 @@ mod tests {
 
     #[test]
     fn test_parse_kakutei_command() {
-        let input = "!settleup MEMBERS - A";
+        let input = "!settleup <@999> - <@111>";
         let (_, stmt) = statement(input).unwrap();
         let mut expected_expr = SetExpr::new();
-        expected_expr.push(SetOp::Push("MEMBERS"));
-        expected_expr.push(SetOp::Push("A"));
+        expected_expr.push(SetOp::Push(999));
+        expected_expr.push(SetOp::Push(111));
         expected_expr.push(SetOp::Difference);
         assert_eq!(stmt, Statement::Command(Command::SettleUp(expected_expr)));
+    }
+
+    // TDD Phase 1: Tests for mention-based parsing (Discord ID)
+    #[rstest]
+    #[case("<@123456789>", 123456789)]
+    #[case("<@!123456789>", 123456789)] // nickname mention
+    fn test_parse_mention(#[case] input: &str, #[case] expected: u64) {
+        let (_, id) = mention(input).unwrap();
+        assert_eq!(id, expected);
+    }
+
+    #[rstest]
+    #[case("<@123> が <@456> に 1000 貸した")]
+    #[case("<@123> lent 1000 to <@456>")]
+    fn test_mention_based_payment(#[case] input: &str) {
+        let result = payment(input);
+        assert!(result.is_ok(), "Failed to parse: {}", input);
+        let (_, payment) = result.unwrap();
+        assert_eq!(payment.amount, 1000);
+    }
+
+    #[test]
+    fn test_name_based_parsed_as_group_refs() {
+        // 名前はグループ参照としてパースされる（メンバー参照ではない）
+        let result = payment("Alice が Bob に 1000 貸した");
+        assert!(result.is_ok(), "Names should parse as group references");
+
+        let (_, payment) = result.unwrap();
+        // payer should be a group reference "Alice"
+        assert_eq!(payment.payer.ops, vec![SetOp::PushGroup("Alice")]);
+        // payee should be a group reference "Bob"
+        assert_eq!(payment.payee.ops, vec![SetOp::PushGroup("Bob")]);
+    }
+
+    #[test]
+    fn test_no_members_declaration() {
+        // MEMBERS宣言なしで動作
+        let input = "<@123> が <@456> に 1000 貸した";
+        let result = parse_program(input);
+        assert!(result.is_ok(), "Should work without MEMBERS declaration");
+    }
+
+    #[test]
+    fn test_group_definition_with_mentions() {
+        // グループ定義もメンションで行う
+        let input = "team := <@111>, <@222>\nteam が <@333> に 1000 貸した";
+        let result = parse_program(input);
+        match &result {
+            Err(e) => println!("Parse error: {:?}", e),
+            Ok(_) => {}
+        }
+        assert!(
+            result.is_ok(),
+            "Should support group definitions: {:?}",
+            result
+        );
     }
 }

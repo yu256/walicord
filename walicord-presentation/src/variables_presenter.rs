@@ -7,7 +7,7 @@ pub struct VariablesPresenter;
 
 impl VariablesPresenter {
     pub fn render(program: &Script<'_>) -> String {
-        Self::render_from_slice(program.members(), program.statements())
+        Self::render_from_slice(program.statements())
     }
 
     pub fn render_for_prefix(program: &Script<'_>, prefix_len: usize) -> String {
@@ -23,15 +23,14 @@ impl VariablesPresenter {
             &statements[..prefix_len]
         };
 
-        Self::render_from_slice(program.members(), statements_slice)
+        Self::render_from_slice(statements_slice)
     }
 
-    fn render_from_slice(members: &[&str], statements: &[ScriptStatementWithLine<'_>]) -> String {
+    fn render_from_slice(statements: &[ScriptStatementWithLine<'_>]) -> String {
         let mut reply = String::with_capacity(512);
-        let _ = writeln!(&mut reply, "`MEMBERS` := {}", members.join(", "));
         reply.push('\n');
 
-        let mut resolver = MemberSetResolver::new(members);
+        let mut resolver = MemberSetResolver::new();
 
         for stmt in statements {
             let ScriptStatement::Domain(Statement::Declaration(decl)) = &stmt.statement else {
@@ -44,7 +43,12 @@ impl VariablesPresenter {
                     let listing = if members_vec.is_empty() {
                         "[empty]"
                     } else {
-                        tmp = members_vec.members().join(", ");
+                        tmp = members_vec
+                            .members()
+                            .iter()
+                            .map(|m| format!("<@{}>", m.0))
+                            .collect::<Vec<_>>()
+                            .join(", ");
                         &tmp
                     };
                     let _ = writeln!(&mut reply, "- `{}` := {listing}", decl.name);

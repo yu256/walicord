@@ -2631,6 +2631,7 @@ dependencies = [
 name = "walicord-application"
 version = "0.1.0"
 dependencies = [
+ "fxhash",
  "rstest",
  "walicord-domain",
  "walicord-infrastructure",
@@ -2650,6 +2651,7 @@ dependencies = [
 name = "walicord-domain"
 version = "0.1.0"
 dependencies = [
+ "fxhash",
  "proptest",
  "rstest",
 ]

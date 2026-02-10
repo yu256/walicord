@@ -12,7 +12,7 @@ pub struct SettlementView {
 }
 
 impl SettlementPresenter {
-    pub fn render(result: &SettlementResult<'_>) -> SettlementView {
+    pub fn render(result: &SettlementResult) -> SettlementView {
         let balance_table_svg = Self::build_balance_table_svg(&result.balances);
 
         if let Some(settle_up) = &result.settle_up {
@@ -26,7 +26,7 @@ impl SettlementPresenter {
                 };
             }
 
-            let settle_member_lookup: HashSet<&str> =
+            let settle_member_lookup: HashSet<_> =
                 settle_up.settle_members.iter().copied().collect();
 
             let mut pay_from_settle: Vec<Transfer> = Vec::new();
@@ -39,9 +39,9 @@ impl SettlementPresenter {
                 .copied()
                 .chain(result.optimized_transfers.iter().copied())
             {
-                if settle_member_lookup.contains(transfer.from) {
+                if settle_member_lookup.contains(&transfer.from) {
                     pay_from_settle.push(transfer);
-                } else if settle_member_lookup.contains(transfer.to) {
+                } else if settle_member_lookup.contains(&transfer.to) {
                     receive_for_settle.push(transfer);
                 } else {
                     other_settlements.push(transfer);
@@ -78,7 +78,7 @@ impl SettlementPresenter {
         }
     }
 
-    pub fn build_balance_table_svg(person_balances: &[PersonBalance<'_>]) -> String {
+    pub fn build_balance_table_svg(person_balances: &[PersonBalance]) -> String {
         let mut builder = SvgTableBuilder::new()
             .alignments(&[Alignment::Left, Alignment::Right])
             .headers(&[Cow::Borrowed(i18n::MEMBER), Cow::Borrowed(i18n::BALANCE)]);
@@ -90,7 +90,7 @@ impl SettlementPresenter {
                 ""
             };
             builder = builder.row([
-                Cow::Borrowed(person.name),
+                Cow::Owned(format!("<@{}>", person.id.0)),
                 Cow::Owned(format!("{sign}{}", person.balance.amount())),
             ]);
         }
@@ -98,7 +98,7 @@ impl SettlementPresenter {
         builder.build()
     }
 
-    pub fn build_transfer_table_svg(transfers: &[Transfer<'_>]) -> String {
+    pub fn build_transfer_table_svg(transfers: &[Transfer]) -> String {
         let mut builder = SvgTableBuilder::new()
             .alignments(&[Alignment::Left, Alignment::Left, Alignment::Right])
             .headers(&[
@@ -109,8 +109,8 @@ impl SettlementPresenter {
 
         for transfer in transfers {
             builder = builder.row([
-                Cow::Borrowed(transfer.from),
-                Cow::Borrowed(transfer.to),
+                Cow::Owned(format!("<@{}>", transfer.from.0)),
+                Cow::Owned(format!("<@{}>", transfer.to.0)),
                 Cow::Owned(transfer.amount.to_string()),
             ]);
         }
@@ -119,9 +119,9 @@ impl SettlementPresenter {
     }
 
     pub fn build_settle_up_transfer_svg(
-        pay_from_settle: &[Transfer<'_>],
-        receive_for_settle: &[Transfer<'_>],
-        other_settlements: &[Transfer<'_>],
+        pay_from_settle: &[Transfer],
+        receive_for_settle: &[Transfer],
+        other_settlements: &[Transfer],
     ) -> String {
         let mut builder = SvgTableBuilder::new()
             .alignments(&[
@@ -140,8 +140,8 @@ impl SettlementPresenter {
         for transfer in pay_from_settle {
             builder = builder.row([
                 Cow::Borrowed(i18n::SETTLEMENT_PAYMENT),
-                Cow::Borrowed(transfer.from),
-                Cow::Borrowed(transfer.to),
+                Cow::Owned(format!("<@{}>", transfer.from.0)),
+                Cow::Owned(format!("<@{}>", transfer.to.0)),
                 Cow::Owned(transfer.amount.to_string()),
             ]);
         }
@@ -149,8 +149,8 @@ impl SettlementPresenter {
         for transfer in receive_for_settle {
             builder = builder.row([
                 Cow::Borrowed(i18n::PAYMENT_TO_SETTLOR),
-                Cow::Borrowed(transfer.from),
-                Cow::Borrowed(transfer.to),
+                Cow::Owned(format!("<@{}>", transfer.from.0)),
+                Cow::Owned(format!("<@{}>", transfer.to.0)),
                 Cow::Owned(transfer.amount.to_string()),
             ]);
         }
@@ -158,8 +158,8 @@ impl SettlementPresenter {
         for transfer in other_settlements {
             builder = builder.row([
                 Cow::Borrowed(i18n::PENDING),
-                Cow::Borrowed(transfer.from),
-                Cow::Borrowed(transfer.to),
+                Cow::Owned(format!("<@{}>", transfer.from.0)),
+                Cow::Owned(format!("<@{}>", transfer.to.0)),
                 Cow::Owned(transfer.amount.to_string()),
             ]);
         }
@@ -168,16 +168,16 @@ impl SettlementPresenter {
     }
 }
 
-fn sort_transfers<'a>(transfers: &mut Vec<Transfer<'a>>) {
+fn sort_transfers(transfers: &mut [Transfer]) {
     transfers.sort_unstable_by(|lhs, rhs| {
-        let from_cmp = lhs.from.cmp(rhs.from);
+        let from_cmp = lhs.from.cmp(&rhs.from);
         if from_cmp != std::cmp::Ordering::Equal {
             return from_cmp;
         }
-        let to_cmp = lhs.to.cmp(rhs.to);
+        let to_cmp = lhs.to.cmp(&rhs.to);
         if to_cmp != std::cmp::Ordering::Equal {
             return to_cmp;
         }
         lhs.amount.cmp(&rhs.amount)
-    });
+    })
 }

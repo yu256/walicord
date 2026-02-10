@@ -1,22 +1,26 @@
+use std::borrow::Cow;
+use walicord_domain::ProgramBuildError;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProgramParseError<'a> {
-    MissingMembersDeclaration,
-    UndefinedMember { name: &'a str, line: usize },
-    FailedToEvaluateGroup { name: &'a str },
+    FailedToEvaluateGroup { name: Cow<'a, str>, line: usize },
     SyntaxError(String),
 }
 
 impl<'a> From<ProgramBuildError<'a>> for ProgramParseError<'a> {
     fn from(err: ProgramBuildError<'a>) -> Self {
         match err {
-            ProgramBuildError::MissingMembersDeclaration => {
-                ProgramParseError::MissingMembersDeclaration
+            ProgramBuildError::UndefinedGroup { name, line } => {
+                ProgramParseError::FailedToEvaluateGroup {
+                    name: Cow::Borrowed(name),
+                    line,
+                }
             }
-            ProgramBuildError::UndefinedMember { name, line } => {
-                ProgramParseError::UndefinedMember { name, line }
-            }
-            ProgramBuildError::FailedToEvaluateGroup { name, .. } => {
-                ProgramParseError::FailedToEvaluateGroup { name }
+            ProgramBuildError::FailedToEvaluateGroup { name, line } => {
+                ProgramParseError::FailedToEvaluateGroup {
+                    name: Cow::Borrowed(name),
+                    line,
+                }
             }
         }
     }
@@ -27,4 +31,3 @@ pub enum SettlementOptimizationError {
     ImbalancedTotal(i64),
     NoSolution,
 }
-use walicord_domain::ProgramBuildError;

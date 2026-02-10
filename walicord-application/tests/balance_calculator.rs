@@ -1,19 +1,19 @@
+use fxhash::FxHashMap;
 use rstest::{fixture, rstest};
-use std::collections::HashMap;
 use walicord_application::{
     MessageProcessor, PersonBalance, ProgramParseError, ProgramParser, Script,
     SettlementOptimizationError, SettlementOptimizer,
 };
-use walicord_domain::{Money, Transfer};
+use walicord_domain::{Money, Transfer, model::MemberId};
 use walicord_infrastructure::WalicordProgramParser;
 
 struct NoopOptimizer;
 
 impl SettlementOptimizer for NoopOptimizer {
-    fn optimize<'a>(
+    fn optimize(
         &self,
-        _balances: &[PersonBalance<'a>],
-    ) -> Result<Vec<Transfer<'a>>, SettlementOptimizationError> {
+        _balances: &[PersonBalance],
+    ) -> Result<Vec<Transfer>, SettlementOptimizationError> {
         Ok(Vec::new())
     }
 }
@@ -31,14 +31,8 @@ fn parse_program_from_content<'a>(members: &'a [&'a str], content: &'a str) -> S
     match parser.parse(members, content) {
         Ok(program) => program,
         Err(err) => match err {
-            ProgramParseError::MissingMembersDeclaration => {
-                panic!("parse failed: missing members declaration")
-            }
-            ProgramParseError::UndefinedMember { name, line } => {
-                panic!("parse failed: undefined member {name} at line {line}")
-            }
-            ProgramParseError::FailedToEvaluateGroup { name } => {
-                panic!("parse failed: failed to evaluate group {name}")
+            ProgramParseError::FailedToEvaluateGroup { name, line } => {
+                panic!("parse failed: failed to evaluate group {name} at line {line}")
             }
             ProgramParseError::SyntaxError(message) => {
                 panic!("parse failed: {message}")
@@ -47,72 +41,65 @@ fn parse_program_from_content<'a>(members: &'a [&'a str], content: &'a str) -> S
     }
 }
 
-fn assert_balances(balances: &HashMap<&str, Money>, expected: &[(&str, i64)]) {
-    for (name, balance) in expected {
+fn assert_balances(balances: &FxHashMap<MemberId, Money>, expected: &[(u64, i64)]) {
+    for (id, balance) in expected {
         assert_eq!(
-            balances.get(name).map(|money| money.amount()),
+            balances.get(&MemberId(*id)).map(|money| money.amount()),
             Some(*balance)
         );
     }
 }
 
-fn balances_from_result<'a>(balances: &[PersonBalance<'a>]) -> HashMap<&'a str, Money> {
+fn balances_from_result(balances: &[PersonBalance]) -> FxHashMap<MemberId, Money> {
     balances
         .iter()
-        .map(|balance| (balance.name, balance.balance))
+        .map(|balance| (balance.id, balance.balance))
         .collect()
 }
 
 #[rstest]
 #[case::simple_settle(
-    &["A", "B"],
-    "A lent 100 to B\n!settleup A",
+    &[],
+    "<@1> lent 100 to <@2>\n!settleup <@1>",
     1,
-    &[("A", 100), ("B", -100)],
-    &[("A", 0), ("B", 0)],
+    &[(1, 100), (2, -100)],
+    &[(1, 0), (2, 0)],
 )]
 #[case::keep_others(
-    &["A", "B", "C"],
-    "A lent 60 to C\nB lent 100 to C\n!settleup A",
+    &[],
+    "<@1> lent 60 to <@3>\n<@2> lent 100 to <@3>\n!settleup <@1>",
     2,
-    &[("A", 60), ("B", 100), ("C", -160)],
-    &[("A", 0), ("B", 100), ("C", -100)],
-)]
-#[case::empty_settle(
-    &["A", "B"],
-    "A lent 100 to B\n!settleup MEMBERS - MEMBERS",
-    1,
-    &[("A", 100), ("B", -100)],
-    &[("A", 100), ("B", -100)],
+    &[(1, 60), (2, 100), (3, -160)],
+    &[(1, 0), (2, 100), (3, -100)],
 )]
 #[case::settle_all_no_transfers(
-    &["A", "B"],
-    "A lent 100 to B\n!settleup MEMBERS",
-    1,
-    &[("A", 100), ("B", -100)],
-    &[("A", 0), ("B", 0)],
+    &[],
+    "all := <@1>, <@2>\n<@1> lent 100 to <@2>\n!settleup all",
+    2,
+    &[(1, 100), (2, -100)],
+    &[(1, 0), (2, 0)],
 )]
-#[case::settle_unknown_group_no_change(
-    &["A", "B"],
-    "A lent 100 to B\n!settleup UNKNOWN",
+#[case::empty_settle(
+    &[],
+    "<@1> lent 100 to <@2>\n!settleup <@1> - <@1>",
     1,
-    &[("A", 100), ("B", -100)],
-    &[("A", 100), ("B", -100)],
+    &[(1, 100), (2, -100)],
+    &[(1, 100), (2, -100)],
 )]
 #[case::settle_group_subset(
-    &["A", "B", "C"],
-    "group1 := A, B\nA lent 100 to C\n!settleup group1",
+    &[],
+    "group1 := <@1>, <@2>\n<@1> lent 100 to <@3>\n!settleup group1",
     2,
-    &[("A", 100), ("B", 0), ("C", -100)],
-    &[("A", 0), ("B", 0), ("C", 0)],
+    &[(1, 100), (2, 0), (3, -100)],
+    &[(1, 0), (2, 0), (3, 0)],
 )]
 fn settle_up_pre_and_post_balances(
     processor: MessageProcessor<'_>,
     #[case] members: &'static [&'static str],
     #[case] content: &'static str,
     #[case] prefix_len: usize,
-    #[case] expected_pre: &'static [(&'static str, i64)],
-    #[case] expected_post: &'static [(&'static str, i64)],
+    #[case] expected_pre: &'static [(u64, i64)],
+    #[case] expected_post: &'static [(u64, i64)],
 ) {
     let program = parse_program_from_content(members, content);
 
@@ -128,55 +115,55 @@ fn settle_up_pre_and_post_balances(
 
 #[rstest]
 #[case::negative_balance(
-    &["A", "B", "C"],
-    "B lent 100 to A\nC lent 50 to A\n!settleup A",
-    &[("A", 0)],
+    &[],
+    "<@2> lent 100 to <@1>\n<@3> lent 50 to <@1>\n!settleup <@1>",
+    &[(1, 0)],
 )]
 #[case::zero_balance_member_no_change(
-    &["A", "B", "C"],
-    "A lent 100 to B\n!settleup C",
-    &[("A", 100), ("B", -100), ("C", 0)],
+    &[],
+    "<@1> lent 100 to <@2>\n!settleup <@3>",
+    &[(1, 100), (2, -100), (3, 0)],
 )]
 #[case::multiple_members(
-    &["A", "B", "C", "D"],
-    "A lent 100 to C\nB lent 100 to C\nD lent 50 to A\n!settleup A, B",
-    &[("A", 0), ("B", 0)],
+    &[],
+    "<@1> lent 100 to <@3>\n<@2> lent 100 to <@3>\n<@4> lent 50 to <@1>\n!settleup <@1>, <@2>",
+    &[(1, 0), (2, 0)],
 )]
 #[case::cross_group(
-    &["A", "B", "C", "D"],
-    "A lent 100 to C\nB lent 100 to D\n!settleup A, B",
-    &[("A", 0), ("B", 0)],
+    &[],
+    "<@1> lent 100 to <@3>\n<@2> lent 100 to <@4>\n!settleup <@1>, <@2>",
+    &[(1, 0), (2, 0)],
 )]
 #[case::partial_within_group(
-    &["A", "B", "C"],
-    "A lent 100 to B\nC lent 50 to A\n!settleup A, B",
-    &[("A", 0), ("B", 0)],
+    &[],
+    "<@1> lent 100 to <@2>\n<@3> lent 50 to <@1>\n!settleup <@1>, <@2>",
+    &[(1, 0), (2, 0)],
 )]
 #[case::exact_match(
-    &["A", "B", "C"],
-    "A lent 100 to B\nB lent 100 to C\n!settleup A, B, C",
-    &[("A", 0), ("B", 0), ("C", 0)],
+    &[],
+    "<@1> lent 100 to <@2>\n<@2> lent 100 to <@3>\n!settleup <@1>, <@2>, <@3>",
+    &[(1, 0), (2, 0), (3, 0)],
 )]
 #[case::settle_with_group_and_member(
-    &["A", "B", "C"],
-    "group1 := A, B\nC lent 90 to group1\n!settleup group1, C",
-    &[("A", 0), ("B", 0), ("C", 0)],
+    &[],
+    "group1 := <@1>, <@2>\n<@3> lent 90 to group1\n!settleup group1, <@3>",
+    &[(1, 0), (2, 0), (3, 0)],
 )]
 #[case::settle_after_multiple_payments(
-    &["A", "B", "C"],
-    "A lent 100 to B\nB lent 30 to C\nC lent 10 to A\n!settleup A",
-    &[("A", 0)],
+    &[],
+    "<@1> lent 100 to <@2>\n<@2> lent 30 to <@3>\n<@3> lent 10 to <@1>\n!settleup <@1>",
+    &[(1, 0)],
 )]
 #[case::settle_complex_set_expr(
-    &["A", "B", "C", "D"],
-    "A lent 100 to B\nC lent 50 to D\n!settleup (MEMBERS - A) ∪ B",
-    &[("A", 0), ("B", 0), ("C", 0), ("D", 0)],
+    &[],
+    "all := <@1>, <@2>, <@3>, <@4>\n<@1> lent 100 to <@2>\n<@3> lent 50 to <@4>\n!settleup (all - <@1>) ∪ <@2>",
+    &[(1, 0), (2, 0), (3, 0), (4, 0)],
 )]
 fn settle_up_post_balances(
     processor: MessageProcessor<'_>,
     #[case] members: &'static [&'static str],
     #[case] content: &'static str,
-    #[case] expected_post: &'static [(&'static str, i64)],
+    #[case] expected_post: &'static [(u64, i64)],
 ) {
     let program = parse_program_from_content(members, content);
     let result = processor
@@ -188,75 +175,75 @@ fn settle_up_post_balances(
 
 #[rstest]
 #[case::remainder_distribution(
-    &["A", "B", "C"],
-    "A lent 100 to A, B, C",
-    &[("A", 66), ("B", -33), ("C", -33)],
+    &[],
+    "<@1> lent 100 to <@1>, <@2>, <@3>",
+    &[(1, 66), (2, -33), (3, -33)],
 )]
 #[case::remainder_distribution_four(
-    &["A", "B", "C", "D"],
-    "A lent 10 to A, B, C, D",
-    &[("A", 7), ("B", -3), ("C", -2), ("D", -2)],
+    &[],
+    "<@1> lent 10 to <@1>, <@2>, <@3>, <@4>",
+    &[(1, 7), (2, -3), (3, -2), (4, -2)],
 )]
 #[case::complex_set_expr_payee(
-    &["A", "B", "C"],
-    "A lent 90 to (B ∪ C) - C",
-    &[("A", 90), ("B", -90), ("C", 0)],
+    &[],
+    "<@1> lent 90 to (<@2> ∪ <@3>) - <@3>",
+    &[(1, 90), (2, -90), (3, 0)],
 )]
 #[case::fullwidth_comma_union(
-    &["A", "B", "C"],
-    "A lent 90 to B，C",
-    &[("A", 90), ("B", -45), ("C", -45)],
+    &[],
+    "<@1> lent 90 to <@2>，<@3>",
+    &[(1, 90), (2, -45), (3, -45)],
 )]
 #[case::members_as_payee(
-    &["A", "B", "C"],
-    "A lent 90 to MEMBERS",
-    &[("A", 60), ("B", -30), ("C", -30)],
+    &[],
+    "all := <@1>, <@2>, <@3>\n<@1> lent 90 to all",
+    &[(1, 60), (2, -30), (3, -30)],
 )]
 #[case::nested_set_expr_payee(
-    &["A", "B", "C", "D"],
-    "A lent 120 to ((A ∪ B) - A) ∪ (C ∩ MEMBERS)",
-    &[("A", 120), ("B", -60), ("C", -60), ("D", 0)],
+    &[],
+    "all := <@1>, <@2>, <@3>, <@4>\n<@1> lent 120 to ((<@1> ∪ <@2>) - <@1>) ∪ (<@3> ∩ all)",
+    &[(1, 120), (2, -60), (3, -60), (4, 0)],
 )]
 #[case::fullwidth_spaces(
-    &["A", "B"],
-    "A　lent　100　to　B",
-    &[("A", 100), ("B", -100)],
+    &[],
+    "<@1>　lent　100　to　<@2>",
+    &[(1, 100), (2, -100)],
 )]
 #[case::japanese_lent(
-    &["A", "B"],
-    "A が B に 100 貸した",
-    &[("A", 100), ("B", -100)],
+    &[],
+    "<@1> が <@2> に 100 貸した",
+    &[(1, 100), (2, -100)],
 )]
 #[case::japanese_borrowed(
-    &["A", "B"],
-    "B が A から 100 借りた",
-    &[("A", 100), ("B", -100)],
+    &[],
+    "<@2> が <@1> から 100 借りた",
+    &[(1, 100), (2, -100)],
 )]
 #[case::same_payer_payee_group(
-    &["A", "B", "C"],
-    "group1 := A, B\nA lent 50 to group1",
-    &[("A", 25), ("B", -25), ("C", 0)],
+    &[],
+    "group1 := <@1>, <@2>\n<@1> lent 50 to group1",
+    &[(1, 25), (2, -25)],
 )]
 #[case::zero_amount_no_change(
-    &["A", "B"],
-    "A lent 0 to B",
-    &[("A", 0), ("B", 0)],
+    &[],
+    "<@1> lent 0 to <@2>",
+    &[(1, 0), (2, 0)],
 )]
 #[case::single_member_no_op(
-    &["A"],
-    "A lent 100 to A",
-    &[("A", 0)],
+    &[],
+    "<@1> lent 100 to <@1>",
+    &[(1, 0)],
 )]
 #[case::multi_settlement_commands(
-    &["A", "B", "C"],
-    "A lent 60 to B\n!settleup A\nC lent 40 to B\n!settleup A",
-    &[("A", 0), ("B", -40), ("C", 40)],
+    &[],
+    "<@1> lent 60 to <@2>\n!settleup <@1>\n<@3> lent 40 to <@2>\n!settleup <@1>",
+    &[(1, 0), (2, -40), (3, 40)],
 )]
 fn payment_distribution_balances(
     processor: MessageProcessor<'_>,
     #[case] members: &'static [&'static str],
     #[case] content: &'static str,
-    #[case] expected_post: &'static [(&'static str, i64)],
+    #[case] expected_post: &'static [(u64, i64)],
 ) {
     let program = parse_program_from_content(members, content);
     let result = processor

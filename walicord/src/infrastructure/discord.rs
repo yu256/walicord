@@ -2,7 +2,7 @@ use indexmap::IndexMap;
 use serenity::{
     all::MessageId,
     model::{
-        channel::{GuildChannel, Message, ReactionType},
+        channel::{Message, ReactionType},
         id::ChannelId,
     },
     prelude::*,
@@ -10,8 +10,6 @@ use serenity::{
 
 #[derive(Debug, thiserror::Error)]
 pub enum ChannelError {
-    #[error("The specified channel is not a guild channel.")]
-    NotGuildChannel,
     #[error("Failed to fetch channel information: {0}")]
     Request(String),
 }
@@ -21,19 +19,6 @@ const COMMANDS: &[&str] = &["!variables", "!evaluate"];
 pub struct DiscordChannelService;
 
 impl DiscordChannelService {
-    pub async fn fetch_guild_channel(
-        &self,
-        ctx: &Context,
-        channel_id: ChannelId,
-    ) -> Result<GuildChannel, ChannelError> {
-        channel_id
-            .to_channel(&ctx.http)
-            .await
-            .map_err(|e| ChannelError::Request(format!("{e:?}")))?
-            .guild()
-            .ok_or(ChannelError::NotGuildChannel)
-    }
-
     pub async fn fetch_all_messages(
         &self,
         ctx: &Context,

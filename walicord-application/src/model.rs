@@ -1,4 +1,7 @@
-use walicord_domain::{MemberSetExpr, Money, Statement, Transfer};
+use walicord_domain::{
+    Money, Statement, Transfer,
+    model::{MemberId, MemberSetExpr},
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command<'a> {
@@ -40,13 +43,13 @@ impl<'a> Script<'a> {
 }
 
 #[derive(Debug)]
-pub struct SettleUpContext<'a> {
-    pub settle_members: Vec<&'a str>,
-    pub immediate_transfers: Vec<Transfer<'a>>,
+pub struct SettleUpContext {
+    pub settle_members: Vec<MemberId>,
+    pub immediate_transfers: Vec<Transfer>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct PersonBalance<'a> {
-    pub name: &'a str,
+pub struct PersonBalance {
+    pub id: MemberId,
     pub balance: Money,
 }

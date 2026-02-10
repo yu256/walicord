@@ -14,8 +14,8 @@ pub trait ProgramParser: Send + Sync {
 }
 
 pub trait SettlementOptimizer: Send + Sync {
-    fn optimize<'a>(
+    fn optimize(
         &self,
-        balances: &[PersonBalance<'a>],
-    ) -> Result<Vec<Transfer<'a>>, SettlementOptimizationError>;
+        balances: &[PersonBalance],
+    ) -> Result<Vec<Transfer>, SettlementOptimizationError>;
 }
