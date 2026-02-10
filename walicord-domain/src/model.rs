@@ -167,10 +167,10 @@ impl<'a> MemberSetExpr<'a> {
     /// Evaluate the expression to produce a set of member IDs
     ///
     /// # Arguments
-    /// * `member_resolver` - Resolves a group name to a set of member IDs
-    pub fn evaluate<F>(&self, member_resolver: &F) -> Option<FxHashSet<MemberId>>
+    /// * `member_resolver` - Resolves a group name to a borrowed set of member IDs
+    pub fn evaluate<'r, F>(&self, member_resolver: &F) -> Option<FxHashSet<MemberId>>
     where
-        F: Fn(&str) -> Option<FxHashSet<MemberId>>,
+        F: Fn(&str) -> Option<&'r FxHashSet<MemberId>>,
     {
         let mut stack: Vec<FxHashSet<MemberId>> = Vec::with_capacity(self.ops.len());
 
@@ -183,9 +183,9 @@ impl<'a> MemberSetExpr<'a> {
                     stack.push(set);
                 }
                 MemberSetOp::PushGroup(name) => {
-                    // Group reference - resolve through resolver
+                    // Group reference - resolve through resolver and clone only when needed
                     let set = member_resolver(name)?;
-                    stack.push(set);
+                    stack.push(set.clone());
                 }
                 MemberSetOp::Union => {
                     let b = stack.pop()?;
