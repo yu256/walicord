@@ -113,10 +113,7 @@ impl ProgramParser for WalicordProgramParser {
                         })
                     }
                     ParseError::UndefinedMember { id, line } => {
-                        Err(ProgramParseError::FailedToEvaluateGroup {
-                            name: Cow::Owned(format!("<@{id}>")),
-                            line,
-                        })
+                        Err(ProgramParseError::UndefinedMember { id, line })
                     }
                 }
             }

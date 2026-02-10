@@ -37,6 +37,9 @@ fn parse_program_from_content<'a>(members: &'a [&'a str], content: &'a str) -> S
             ProgramParseError::UndefinedGroup { name, line } => {
                 panic!("parse failed: undefined group {name} at line {line}")
             }
+            ProgramParseError::UndefinedMember { id, line } => {
+                panic!("parse failed: undefined member <@{id}> at line {line}")
+            }
             ProgramParseError::SyntaxError(message) => {
                 panic!("parse failed: {message}")
             }

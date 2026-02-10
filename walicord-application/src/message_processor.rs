@@ -26,6 +26,7 @@ pub enum ProcessingOutcome<'a> {
     Success(Script<'a>),
     FailedToEvaluateGroup { name: Cow<'a, str>, line: usize },
     UndefinedGroup { name: Cow<'a, str>, line: usize },
+    UndefinedMember { id: u64, line: usize },
     SyntaxError { message: String },
 }
 
@@ -54,6 +55,9 @@ impl<'a> MessageProcessor<'a> {
             }
             Err(ProgramParseError::UndefinedGroup { name, line }) => {
                 ProcessingOutcome::UndefinedGroup { name, line }
+            }
+            Err(ProgramParseError::UndefinedMember { id, line }) => {
+                ProcessingOutcome::UndefinedMember { id, line }
             }
             Err(ProgramParseError::SyntaxError(message)) => {
                 ProcessingOutcome::SyntaxError { message }

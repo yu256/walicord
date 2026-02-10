@@ -61,6 +61,11 @@ pub fn undefined_group(name: impl std::fmt::Display) -> String {
     format!("未定義のグループ '{}' です", name)
 }
 
+#[cfg(feature = "ja")]
+pub fn undefined_member(id: u64) -> String {
+    format!("未定義のメンバー <@{id}> です")
+}
+
 #[cfg(feature = "en")]
 pub fn failed_to_evaluate_group(name: impl std::fmt::Display) -> String {
     format!("Failed to evaluate group '{}'", name)
@@ -71,6 +76,11 @@ pub fn undefined_group(name: impl std::fmt::Display) -> String {
     format!("Undefined group '{}'", name)
 }
 
+#[cfg(feature = "en")]
+pub fn undefined_member(id: u64) -> String {
+    format!("Undefined member <@{id}>")
+}
+
 #[cfg(not(any(feature = "ja", feature = "en")))]
 pub fn failed_to_evaluate_group(name: impl std::fmt::Display) -> String {
     format!("Failed to evaluate group '{}'", name)
@@ -79,4 +89,9 @@ pub fn failed_to_evaluate_group(name: impl std::fmt::Display) -> String {
 #[cfg(not(any(feature = "ja", feature = "en")))]
 pub fn undefined_group(name: impl std::fmt::Display) -> String {
     format!("Undefined group '{}'", name)
+}
+
+#[cfg(not(any(feature = "ja", feature = "en")))]
+pub fn undefined_member(id: u64) -> String {
+    format!("Undefined member <@{id}>")
 }

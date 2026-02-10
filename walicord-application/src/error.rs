@@ -5,6 +5,7 @@ use walicord_domain::ProgramBuildError;
 pub enum ProgramParseError<'a> {
     FailedToEvaluateGroup { name: Cow<'a, str>, line: usize },
     UndefinedGroup { name: Cow<'a, str>, line: usize },
+    UndefinedMember { id: u64, line: usize },
     SyntaxError(String),
 }
 
