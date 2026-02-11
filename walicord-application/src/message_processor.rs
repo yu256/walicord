@@ -1,14 +1,14 @@
 use crate::{
+    SettlementOptimizationError,
     error::ProgramParseError,
     model::{
         Command, PersonBalance, Script, ScriptStatement, ScriptStatementWithLine, SettleUpContext,
     },
     ports::{ProgramParser, SettlementOptimizer},
-    SettlementOptimizationError,
 };
 use std::borrow::Cow;
 use walicord_domain::{
-    model::MemberId, BalanceAccumulator, MemberBalances, SettleUpPolicy, Transfer,
+    BalanceAccumulator, MemberBalances, SettleUpPolicy, Transfer, model::MemberId,
 };
 
 pub struct SettlementResult {
@@ -30,6 +30,10 @@ pub enum ProcessingOutcome<'a> {
     UndefinedMember { id: u64, line: usize },
     SyntaxError { line: usize, detail: String },
     ImplicitPayerWithoutAuthor { line: usize },
+}
+
+fn line_count_increment(content: &str, prior_ended_with_newline: bool) -> usize {
+    content.lines().count() + if prior_ended_with_newline { 1 } else { 0 }
 }
 
 struct ApplyResult {
@@ -94,7 +98,7 @@ impl<'a> MessageProcessor<'a> {
                 // Update line_count as if messages were concatenated with a single newline between
                 // them: add the number of lines in the current content, plus one extra line if the
                 // previous message ended with a newline, to account for the implicit separator.
-                line_count += content.lines().count() + if ends_with_newline { 1 } else { 0 };
+                line_count += line_count_increment(content, ends_with_newline);
             } else {
                 line_count = content.lines().count();
             }
@@ -306,11 +310,17 @@ mod tests {
         error::SettlementOptimizationError,
         ports::{ProgramParser, SettlementOptimizer},
     };
+    use proptest::prelude::*;
     use rstest::{fixture, rstest};
     use walicord_domain::{
-        model::{MemberId, MemberSetExpr, MemberSetOp, Money},
         Payment, Statement,
+        model::{MemberId, MemberSetExpr, MemberSetOp, Money},
     };
+
+    fn any_string() -> impl Strategy<Value = String> {
+        proptest::collection::vec(any::<char>(), 0..40)
+            .prop_map(|chars| chars.into_iter().collect())
+    }
 
     struct StubParser;
 
@@ -477,5 +487,17 @@ mod tests {
         };
 
         assert_eq!(line, expected_line);
+    }
+
+    proptest! {
+        #[test]
+        fn line_count_increment_matches_concat(prev in any_string(), current in any_string()) {
+            let prev_line_count = prev.lines().count();
+            let prev_ended_with_newline = prev.is_empty() || prev.ends_with('\n');
+            let increment = line_count_increment(&current, prev_ended_with_newline);
+            let concatenated = format!("{prev}\n{current}");
+
+            prop_assert_eq!(prev_line_count + increment, concatenated.lines().count());
+        }
     }
 }
