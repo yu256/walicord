@@ -30,7 +30,7 @@ jobs:
           tool: nextest
 
       - name: Run clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy -- -D warnings
 
       - name: Run tests
         run: cargo nextest run

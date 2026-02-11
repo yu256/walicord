@@ -523,7 +523,7 @@ mod tests {
     #[case("<@123> lent 1000 to <@456>")]
     fn test_mention_based_payment(#[case] input: &str) {
         let result = payment(input);
-        assert!(result.is_ok(), "Failed to parse: {}", input);
+        assert!(result.is_ok(), "Failed to parse: {input}");
         let (_, payment) = result.unwrap();
         assert_eq!(payment.amount, 1000);
     }
@@ -556,8 +556,7 @@ mod tests {
         let result = parse_program(input);
         assert!(
             result.is_ok(),
-            "Should support group definitions: {:?}",
-            result
+            "Should support group definitions: {result:?}"
         );
     }
 }
