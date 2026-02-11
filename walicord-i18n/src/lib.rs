@@ -95,3 +95,74 @@ pub fn undefined_group(name: impl std::fmt::Display) -> String {
 pub fn undefined_member(id: u64) -> String {
     format!("Undefined member <@{id}>")
 }
+
+pub struct SyntaxErrorMessage {
+    line: usize,
+    detail: String,
+}
+
+pub struct ImplicitPayerMissingMessage {
+    line: usize,
+}
+
+pub fn syntax_error(line: usize, detail: String) -> SyntaxErrorMessage {
+    SyntaxErrorMessage { line, detail }
+}
+
+pub fn implicit_payer_missing(line: usize) -> ImplicitPayerMissingMessage {
+    ImplicitPayerMissingMessage { line }
+}
+
+#[cfg(feature = "ja")]
+impl std::fmt::Display for SyntaxErrorMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "構文エラー (行 {}): {}", self.line, self.detail)
+    }
+}
+
+#[cfg(feature = "ja")]
+impl std::fmt::Display for ImplicitPayerMissingMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "支払者が省略されています (行 {}). `A が B に 1000 貸した` のように支払者を明示してください。",
+            self.line
+        )
+    }
+}
+
+#[cfg(feature = "en")]
+impl std::fmt::Display for SyntaxErrorMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Syntax error at line {}: {}", self.line, self.detail)
+    }
+}
+
+#[cfg(feature = "en")]
+impl std::fmt::Display for ImplicitPayerMissingMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Payer is missing at line {}. Use explicit payer syntax, for example `Alice lent 1000 to Bob`.",
+            self.line
+        )
+    }
+}
+
+#[cfg(not(any(feature = "ja", feature = "en")))]
+impl std::fmt::Display for SyntaxErrorMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Syntax error at line {}: {}", self.line, self.detail)
+    }
+}
+
+#[cfg(not(any(feature = "ja", feature = "en")))]
+impl std::fmt::Display for ImplicitPayerMissingMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Payer is missing at line {}. Use explicit payer syntax, for example `Alice lent 1000 to Bob`.",
+            self.line
+        )
+    }
+}

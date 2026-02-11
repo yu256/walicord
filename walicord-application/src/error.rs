@@ -6,7 +6,8 @@ pub enum ProgramParseError<'a> {
     FailedToEvaluateGroup { name: Cow<'a, str>, line: usize },
     UndefinedGroup { name: Cow<'a, str>, line: usize },
     UndefinedMember { id: u64, line: usize },
-    SyntaxError(String),
+    SyntaxError { line: usize, detail: String },
+    MissingContextForImplicitPayment { line: usize },
 }
 
 impl<'a> From<ProgramBuildError<'a>> for ProgramParseError<'a> {

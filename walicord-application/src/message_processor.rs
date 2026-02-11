@@ -28,7 +28,12 @@ pub enum ProcessingOutcome<'a> {
     FailedToEvaluateGroup { name: Cow<'a, str>, line: usize },
     UndefinedGroup { name: Cow<'a, str>, line: usize },
     UndefinedMember { id: u64, line: usize },
-    SyntaxError { message: String },
+    SyntaxError { line: usize, detail: String },
+    MissingContextForImplicitPayment { line: usize },
+}
+
+fn line_count_increment(content: &str, prior_ended_with_newline: bool) -> usize {
+    content.lines().count() + if prior_ended_with_newline { 1 } else { 0 }
 }
 
 struct ApplyResult {
@@ -45,25 +50,63 @@ impl<'a> MessageProcessor<'a> {
         &self,
         member_ids: &'b [MemberId],
         content: &'b str,
+        author_id: Option<MemberId>,
     ) -> ProcessingOutcome<'b>
     where
         'a: 'b,
     {
-        match self.parser.parse(member_ids, content) {
+        match self.parser.parse(member_ids, content, author_id) {
             Ok(program) => ProcessingOutcome::Success(program),
-            Err(ProgramParseError::FailedToEvaluateGroup { name, line }) => {
-                ProcessingOutcome::FailedToEvaluateGroup { name, line }
-            }
-            Err(ProgramParseError::UndefinedGroup { name, line }) => {
-                ProcessingOutcome::UndefinedGroup { name, line }
-            }
-            Err(ProgramParseError::UndefinedMember { id, line }) => {
-                ProcessingOutcome::UndefinedMember { id, line }
-            }
-            Err(ProgramParseError::SyntaxError(message)) => {
-                ProcessingOutcome::SyntaxError { message }
-            }
+            Err(err) => Self::map_parse_error(err, 0),
         }
+    }
+
+    pub fn parse_program_sequence<'b, I>(
+        &self,
+        member_ids: &'b [MemberId],
+        messages: I,
+    ) -> ProcessingOutcome<'b>
+    where
+        I: IntoIterator<Item = (&'b str, Option<MemberId>)>,
+        'a: 'b,
+    {
+        let mut statements = Vec::new();
+        let mut line_count = 0usize;
+        let mut ends_with_newline = false;
+        let mut has_any = false;
+
+        for (content, author_id) in messages {
+            let offset = if has_any {
+                line_count + if ends_with_newline { 1 } else { 0 }
+            } else {
+                0
+            };
+
+            match self.parser.parse(member_ids, content, author_id) {
+                Ok(program) => {
+                    let mut program_statements = program.into_statements();
+                    for statement in &mut program_statements {
+                        statement.line += offset;
+                    }
+                    statements.extend(program_statements);
+                }
+                Err(err) => return Self::map_parse_error(err, offset),
+            }
+
+            if has_any {
+                // Offsets reflect concatenating messages with a single newline separator.
+                // Update line_count as if messages were concatenated with a single newline between
+                // them: add the number of lines in the current content, plus one extra line if the
+                // previous message ended with a newline, to account for the implicit separator.
+                line_count += line_count_increment(content, ends_with_newline);
+            } else {
+                line_count = content.lines().count();
+            }
+            ends_with_newline = content.is_empty() || content.ends_with('\n');
+            has_any = true;
+        }
+
+        ProcessingOutcome::Success(Script::new(member_ids, statements))
     }
 
     pub fn calculate_balances<'b>(&self, program: &'b Script<'b>) -> MemberBalances
@@ -230,6 +273,34 @@ impl<'a> MessageProcessor<'a> {
         }
         prefix_len
     }
+
+    fn map_parse_error<'b>(err: ProgramParseError<'b>, offset: usize) -> ProcessingOutcome<'b> {
+        match err {
+            ProgramParseError::FailedToEvaluateGroup { name, line } => {
+                ProcessingOutcome::FailedToEvaluateGroup {
+                    name,
+                    line: line + offset,
+                }
+            }
+            ProgramParseError::UndefinedGroup { name, line } => ProcessingOutcome::UndefinedGroup {
+                name,
+                line: line + offset,
+            },
+            ProgramParseError::UndefinedMember { id, line } => ProcessingOutcome::UndefinedMember {
+                id,
+                line: line + offset,
+            },
+            ProgramParseError::SyntaxError { line, detail } => ProcessingOutcome::SyntaxError {
+                line: line + offset,
+                detail,
+            },
+            ProgramParseError::MissingContextForImplicitPayment { line } => {
+                ProcessingOutcome::MissingContextForImplicitPayment {
+                    line: line + offset,
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -239,11 +310,17 @@ mod tests {
         error::SettlementOptimizationError,
         ports::{ProgramParser, SettlementOptimizer},
     };
+    use proptest::prelude::*;
     use rstest::{fixture, rstest};
     use walicord_domain::{
         Payment, Statement,
         model::{MemberId, MemberSetExpr, MemberSetOp, Money},
     };
+
+    fn any_string() -> impl Strategy<Value = String> {
+        proptest::collection::vec(any::<char>(), 0..40)
+            .prop_map(|chars| chars.into_iter().collect())
+    }
 
     struct StubParser;
 
@@ -252,6 +329,7 @@ mod tests {
             &self,
             _member_ids: &'a [MemberId],
             _content: &'a str,
+            _author_id: Option<MemberId>,
         ) -> Result<Script<'a>, ProgramParseError<'a>> {
             let statements = vec![
                 ScriptStatementWithLine {
@@ -298,10 +376,39 @@ mod tests {
         MessageProcessor::new(&StubParser, &NoopOptimizer)
     }
 
+    struct SequenceParser;
+
+    impl ProgramParser for SequenceParser {
+        fn parse<'a>(
+            &self,
+            _member_ids: &'a [MemberId],
+            content: &'a str,
+            _author_id: Option<MemberId>,
+        ) -> Result<Script<'a>, ProgramParseError<'a>> {
+            if content.contains("SYNTAX") {
+                return Err(ProgramParseError::SyntaxError {
+                    line: 1,
+                    detail: "Syntax error - stub".to_string(),
+                });
+            }
+            if content.contains("IMPLICIT") {
+                return Err(ProgramParseError::MissingContextForImplicitPayment { line: 1 });
+            }
+
+            Ok(Script::new(
+                &[],
+                vec![ScriptStatementWithLine {
+                    line: 1,
+                    statement: ScriptStatement::Command(Command::Variables),
+                }],
+            ))
+        }
+    }
+
     #[rstest]
     fn settle_up_response_groups_transfers(processor: MessageProcessor<'_>) {
         let members: [MemberId; 0] = [];
-        let program = match processor.parse_program(&members, "unused") {
+        let program = match processor.parse_program(&members, "unused", None) {
             ProcessingOutcome::Success(program) => program,
             _ => panic!("unexpected parse outcome"),
         };
@@ -313,5 +420,84 @@ mod tests {
 
         let settle_up = result.settle_up.expect("expected settle up context");
         assert!(!settle_up.immediate_transfers.is_empty());
+    }
+
+    #[rstest]
+    #[case("a\nb", "c", 3)]
+    #[case("a\nb\n", "c", 4)]
+    fn parse_program_sequence_offsets_lines(
+        #[case] first: &str,
+        #[case] second: &str,
+        #[case] expected_second_line: usize,
+    ) {
+        let processor = MessageProcessor::new(&SequenceParser, &NoopOptimizer);
+        let members: [MemberId; 0] = [];
+        let outcome = processor.parse_program_sequence(
+            &members,
+            vec![(first, Some(MemberId(1))), (second, Some(MemberId(2)))],
+        );
+
+        let program = match outcome {
+            ProcessingOutcome::Success(program) => program,
+            _ => panic!("unexpected parse outcome"),
+        };
+
+        let lines: Vec<_> = program.statements().iter().map(|stmt| stmt.line).collect();
+        assert_eq!(lines, vec![1, expected_second_line]);
+    }
+
+    #[rstest]
+    #[case("a\nb", 3)]
+    #[case("a\nb\n", 4)]
+    fn parse_program_sequence_offsets_syntax_error(
+        #[case] first: &str,
+        #[case] expected_line: usize,
+    ) {
+        let processor = MessageProcessor::new(&SequenceParser, &NoopOptimizer);
+        let members: [MemberId; 0] = [];
+        let outcome = processor.parse_program_sequence(
+            &members,
+            vec![(first, Some(MemberId(1))), ("SYNTAX", Some(MemberId(2)))],
+        );
+
+        let ProcessingOutcome::SyntaxError { line, detail } = outcome else {
+            panic!("unexpected parse outcome");
+        };
+
+        assert_eq!(line, expected_line);
+        assert_eq!(detail, "Syntax error - stub");
+    }
+
+    #[rstest]
+    #[case("a\nb", 3)]
+    #[case("a\nb\n", 4)]
+    fn parse_program_sequence_offsets_implicit_payer_error(
+        #[case] first: &str,
+        #[case] expected_line: usize,
+    ) {
+        let processor = MessageProcessor::new(&SequenceParser, &NoopOptimizer);
+        let members: [MemberId; 0] = [];
+        let outcome = processor.parse_program_sequence(
+            &members,
+            vec![(first, Some(MemberId(1))), ("IMPLICIT", Some(MemberId(2)))],
+        );
+
+        let ProcessingOutcome::MissingContextForImplicitPayment { line } = outcome else {
+            panic!("unexpected parse outcome");
+        };
+
+        assert_eq!(line, expected_line);
+    }
+
+    proptest! {
+        #[test]
+        fn line_count_increment_matches_concat(prev in any_string(), current in any_string()) {
+            let prev_line_count = prev.lines().count();
+            let prev_ended_with_newline = prev.is_empty() || prev.ends_with('\n');
+            let increment = line_count_increment(&current, prev_ended_with_newline);
+            let concatenated = format!("{prev}\n{current}");
+
+            prop_assert_eq!(prev_line_count + increment, concatenated.lines().count());
+        }
     }
 }

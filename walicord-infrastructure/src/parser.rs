@@ -8,7 +8,8 @@ use walicord_domain::{
     model::{MemberId, MemberSetExpr, MemberSetOp, Money},
 };
 use walicord_parser::{
-    Command as ParserCommand, ParseError, SetOp, Statement as ParserStatement, parse_program,
+    Command as ParserCommand, ParseError, PayerSpec, SetOp, Statement as ParserStatement,
+    parse_program,
 };
 
 #[derive(Default)]
@@ -19,6 +20,7 @@ impl ProgramParser for WalicordProgramParser {
         &self,
         member_ids: &'a [MemberId],
         content: &'a str,
+        author_id: Option<MemberId>,
     ) -> Result<Script<'a>, ProgramParseError<'a>> {
         match parse_program(content) {
             Ok(program) => {
@@ -56,7 +58,19 @@ impl ProgramParser for WalicordProgramParser {
                                 payer,
                                 payee,
                             } = parser_payment;
-                            let payer_expr = to_member_set_expr(payer);
+                            let payer_expr = match payer {
+                                PayerSpec::Explicit(expr) => to_member_set_expr(expr),
+                                PayerSpec::Implicit => {
+                                    let Some(author) = author_id else {
+                                        return Err(
+                                            ProgramParseError::MissingContextForImplicitPayment {
+                                                line,
+                                            },
+                                        );
+                                    };
+                                    MemberSetExpr::new(vec![MemberSetOp::Push(author)])
+                                }
+                            };
                             let payee_expr = to_member_set_expr(payee);
                             let app_payment = Payment {
                                 amount: Money::from_u64(amount),
@@ -101,8 +115,8 @@ impl ProgramParser for WalicordProgramParser {
             Err(err) => {
                 // Handle error conversion
                 match err {
-                    ParseError::SyntaxError(details) => {
-                        Err(ProgramParseError::SyntaxError(details))
+                    ParseError::SyntaxError { line, detail } => {
+                        Err(ProgramParseError::SyntaxError { line, detail })
                     }
                     ParseError::UndefinedGroup { name, line } => {
                         Err(ProgramParseError::UndefinedGroup {
@@ -132,4 +146,46 @@ fn to_member_set_expr<'a>(expr: walicord_parser::SetExpr<'a>) -> MemberSetExpr<'
         })
         .collect();
     MemberSetExpr::new(ops)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rstest::rstest;
+    use walicord_application::{ProgramParser, ScriptStatement};
+    use walicord_domain::Statement;
+
+    #[rstest]
+    #[case("1000 <@2>")]
+    #[case("1000 to <@2>")]
+    fn parse_implicit_payer_injects_author(#[case] input: &str) {
+        let parser = WalicordProgramParser;
+        let members: [MemberId; 0] = [];
+        let script = parser
+            .parse(&members, input, Some(MemberId(1)))
+            .expect("parse should succeed");
+
+        let statement = &script.statements()[0].statement;
+        let ScriptStatement::Domain(Statement::Payment(payment)) = statement else {
+            panic!("expected payment statement");
+        };
+
+        let payer_ids: Vec<_> = payment.payer.referenced_ids().collect();
+        assert_eq!(payer_ids, vec![MemberId(1)]);
+    }
+
+    #[rstest]
+    #[case("1000 <@2>")]
+    #[case("1000 to <@2>")]
+    fn parse_implicit_payer_without_author_returns_error(#[case] input: &str) {
+        let parser = WalicordProgramParser;
+        let members: [MemberId; 0] = [];
+        let result = parser.parse(&members, input, None);
+        match result {
+            Err(ProgramParseError::MissingContextForImplicitPayment { line }) => {
+                assert_eq!(line, 1);
+            }
+            _ => panic!("expected implicit payer without author error"),
+        }
+    }
 }

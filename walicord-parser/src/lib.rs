@@ -115,10 +115,28 @@ pub struct Declaration<'a> {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub enum PayerSpec<'a> {
+    Explicit(SetExpr<'a>),
+    Implicit,
+}
+
+impl<'a> PayerSpec<'a> {
+    pub fn is_implicit(&self) -> bool {
+        matches!(self, Self::Implicit)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct Payment<'a> {
     pub amount: u64,
-    pub payer: SetExpr<'a>,
+    pub payer: PayerSpec<'a>,
     pub payee: SetExpr<'a>,
+}
+
+impl<'a> Payment<'a> {
+    pub fn is_payer_implicit(&self) -> bool {
+        self.payer.is_implicit()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -152,8 +170,8 @@ pub enum ParseError {
     UndefinedMember { id: u64, line: usize },
     #[error("Undefined group '{name}' at line {line}.")]
     UndefinedGroup { name: String, line: usize },
-    #[error("Syntax error: {0}")]
-    SyntaxError(String),
+    #[error("Syntax error at line {line}: {detail}")]
+    SyntaxError { line: usize, detail: String },
 }
 
 fn mention(input: &str) -> IResult<&str, u64> {
@@ -317,7 +335,7 @@ fn payment_lender_subject_ja(input: &str) -> IResult<&str, Payment<'_>> {
     )
         .map(|(payer, _, _, _, payee, _, _, _, amount, _, _)| Payment {
             amount,
-            payer,
+            payer: PayerSpec::Explicit(payer),
             payee,
         })
         .parse(input)
@@ -332,7 +350,7 @@ fn payment_lender_subject_en(input: &str) -> IResult<&str, Payment<'_>> {
     )
         .map(|(payer, _, _, _, amount, _, _, _, payee)| Payment {
             amount,
-            payer,
+            payer: PayerSpec::Explicit(payer),
             payee,
         })
         .parse(input)
@@ -349,7 +367,7 @@ fn payment_borrower_subject_ja(input: &str) -> IResult<&str, Payment<'_>> {
     )
         .map(|(payee, _, _, _, payer, _, _, _, amount, _, _)| Payment {
             amount,
-            payer,
+            payer: PayerSpec::Explicit(payer),
             payee,
         })
         .parse(input)
@@ -360,7 +378,29 @@ fn payment_borrower_subject_en(input: &str) -> IResult<&str, Payment<'_>> {
     (set_expr, sp, borrowed, sp, yen, sp, from, sp, set_expr)
         .map(|(payee, _, _, _, amount, _, _, _, payer)| Payment {
             amount,
-            payer,
+            payer: PayerSpec::Explicit(payer),
+            payee,
+        })
+        .parse(input)
+}
+
+// {amount} {payee}
+fn payment_implicit_simple(input: &str) -> IResult<&str, Payment<'_>> {
+    (yen, sp, set_expr)
+        .map(|(amount, _, payee)| Payment {
+            amount,
+            payer: PayerSpec::Implicit,
+            payee,
+        })
+        .parse(input)
+}
+
+// {amount} to {payee}
+fn payment_implicit_with_to(input: &str) -> IResult<&str, Payment<'_>> {
+    (yen, sp, to, sp, set_expr)
+        .map(|(amount, _, _, _, payee)| Payment {
+            amount,
+            payer: PayerSpec::Implicit,
             payee,
         })
         .parse(input)
@@ -372,6 +412,8 @@ fn payment(input: &str) -> IResult<&str, Payment<'_>> {
         payment_lender_subject_en,
         payment_borrower_subject_ja,
         payment_borrower_subject_en,
+        payment_implicit_with_to,
+        payment_implicit_simple,
     ))
     .parse(input)
 }
@@ -413,10 +455,10 @@ pub fn parse_program<'a>(input: &'a str) -> Result<Program<'a>, ParseError> {
         match statement(trimmed) {
             Ok((rest, stmt)) => {
                 if !rest.trim().is_empty() {
-                    return Err(ParseError::SyntaxError(i18n::line_syntax_error_unparsed(
-                        idx + 1,
-                        rest.trim(),
-                    )));
+                    return Err(ParseError::SyntaxError {
+                        line: idx + 1,
+                        detail: i18n::syntax_error_unparsed_detail(rest.trim()),
+                    });
                 }
                 statements.push(StatementWithLine {
                     line: idx + 1,
@@ -424,7 +466,10 @@ pub fn parse_program<'a>(input: &'a str) -> Result<Program<'a>, ParseError> {
                 });
             }
             Err(e) => {
-                return Err(ParseError::SyntaxError(i18n::line_syntax_error(idx + 1, e)));
+                return Err(ParseError::SyntaxError {
+                    line: idx + 1,
+                    detail: i18n::syntax_error_detail(e),
+                });
             }
         }
     }
@@ -490,23 +535,17 @@ mod tests {
         assert_eq!(infix, expected);
     }
 
-    #[test]
-    fn test_parse_variables_command() {
-        let input = "!variables";
+    #[rstest]
+    #[case("!variables", Statement::Command(Command::Variables))]
+    #[case("!evaluate", Statement::Command(Command::Evaluate))]
+    fn test_parse_simple_commands(#[case] input: &str, #[case] expected: Statement<'_>) {
         let (_, stmt) = statement(input).unwrap();
-        assert_eq!(stmt, Statement::Command(Command::Variables));
+        assert_eq!(stmt, expected);
     }
 
-    #[test]
-    fn test_parse_evaluate_command() {
-        let input = "!evaluate";
-        let (_, stmt) = statement(input).unwrap();
-        assert_eq!(stmt, Statement::Command(Command::Evaluate));
-    }
-
-    #[test]
-    fn test_parse_kakutei_command() {
-        let input = "!settleup <@999> - <@111>";
+    #[rstest]
+    #[case("!settleup <@999> - <@111>")]
+    fn test_parse_kakutei_command(#[case] input: &str) {
         let (_, stmt) = statement(input).unwrap();
         let mut expected_expr = SetExpr::new();
         expected_expr.push(SetOp::Push(999));
@@ -532,37 +571,46 @@ mod tests {
         assert!(result.is_ok(), "Failed to parse: {input}");
         let (_, payment) = result.unwrap();
         assert_eq!(payment.amount, 1000);
+        assert!(matches!(payment.payer, PayerSpec::Explicit(_)));
     }
 
-    #[test]
-    fn test_name_based_parsed_as_group_refs() {
+    #[rstest]
+    #[case("Alice が Bob に 1000 貸した", "Alice", "Bob")]
+    fn test_name_based_parsed_as_group_refs(
+        #[case] input: &str,
+        #[case] payer_name: &str,
+        #[case] payee_name: &str,
+    ) {
         // Names are parsed as group references, not member references
-        let result = payment("Alice が Bob に 1000 貸した");
+        let result = payment(input);
         assert!(result.is_ok(), "Names should parse as group references");
 
         let (_, payment) = result.unwrap();
-        // payer should be a group reference "Alice"
-        assert_eq!(payment.payer.ops, vec![SetOp::PushGroup("Alice")]);
-        // payee should be a group reference "Bob"
-        assert_eq!(payment.payee.ops, vec![SetOp::PushGroup("Bob")]);
+        // payer should be a group reference
+        let PayerSpec::Explicit(payer) = payment.payer else {
+            panic!("Expected explicit payer");
+        };
+        assert_eq!(payer.ops, vec![SetOp::PushGroup(payer_name)]);
+        // payee should be a group reference
+        assert_eq!(payment.payee.ops, vec![SetOp::PushGroup(payee_name)]);
     }
 
-    #[test]
-    fn test_no_members_declaration() {
-        // Works without a MEMBERS declaration
-        let input = "<@123> が <@456> に 1000 貸した";
-        let result = parse_program(input);
-        assert!(result.is_ok(), "Should work without MEMBERS declaration");
+    #[rstest]
+    #[case("1000 <@456>")]
+    #[case("1000 to <@456>")]
+    fn test_implicit_payment(#[case] input: &str) {
+        let result = payment(input);
+        assert!(result.is_ok(), "Failed to parse implicit payment");
+        let (_, payment) = result.unwrap();
+        assert_eq!(payment.amount, 1000);
+        assert!(payment.is_payer_implicit());
     }
 
-    #[test]
-    fn test_group_definition_with_mentions() {
-        // Define groups using space-separated mentions
-        let input = "team := <@111> <@222>\nteam が <@333> に 1000 貸した";
+    #[rstest]
+    #[case("<@123> が <@456> に 1000 貸した")]
+    #[case("team := <@111> <@222>\nteam が <@333> に 1000 貸した")]
+    fn test_parse_program_variants(#[case] input: &str) {
         let result = parse_program(input);
-        assert!(
-            result.is_ok(),
-            "Should support group definitions: {result:?}"
-        );
+        assert!(result.is_ok(), "Program should parse: {result:?}");
     }
 }
