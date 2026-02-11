@@ -169,9 +169,9 @@ fn mention(input: &str) -> IResult<&str, u64> {
 // e.g., "<@123> <@456> <@789>" becomes Push(123), Push(456), Push(789), Union, Union
 fn mention_sequence(input: &str) -> IResult<&str, SetExpr<'_>> {
     use nom::multi::many1;
-    
+
     let (input, mentions) = many1((mention, sp).map(|(id, _)| id)).parse(input)?;
-    
+
     if mentions.len() == 1 {
         // Single mention, just push it
         let mut expr = SetExpr::new();
