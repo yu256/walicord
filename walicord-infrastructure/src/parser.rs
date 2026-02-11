@@ -113,8 +113,8 @@ impl ProgramParser for WalicordProgramParser {
             Err(err) => {
                 // Handle error conversion
                 match err {
-                    ParseError::SyntaxError(details) => {
-                        Err(ProgramParseError::SyntaxError(details))
+                    ParseError::SyntaxError { line, detail } => {
+                        Err(ProgramParseError::SyntaxError { line, detail })
                     }
                     ParseError::UndefinedGroup { name, line } => {
                         Err(ProgramParseError::UndefinedGroup {

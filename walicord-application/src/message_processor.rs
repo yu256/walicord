@@ -28,7 +28,7 @@ pub enum ProcessingOutcome<'a> {
     FailedToEvaluateGroup { name: Cow<'a, str>, line: usize },
     UndefinedGroup { name: Cow<'a, str>, line: usize },
     UndefinedMember { id: u64, line: usize },
-    SyntaxError { message: String },
+    SyntaxError { line: usize, detail: String },
     ImplicitPayerWithoutAuthor { line: usize },
 }
 
@@ -282,8 +282,9 @@ impl<'a> MessageProcessor<'a> {
                 id,
                 line: line + offset,
             },
-            ProgramParseError::SyntaxError(message) => ProcessingOutcome::SyntaxError {
-                message: Self::adjust_syntax_error(message, offset),
+            ProgramParseError::SyntaxError { line, detail } => ProcessingOutcome::SyntaxError {
+                line: line + offset,
+                detail,
             },
             ProgramParseError::ImplicitPayerWithoutAuthor { line } => {
                 ProcessingOutcome::ImplicitPayerWithoutAuthor {
@@ -291,25 +292,6 @@ impl<'a> MessageProcessor<'a> {
                 }
             }
         }
-    }
-
-    fn adjust_syntax_error(message: String, offset: usize) -> String {
-        if offset == 0 {
-            return message;
-        }
-
-        let Some(rest) = message.strip_prefix("Line ") else {
-            return message;
-        };
-        let Some((line_str, tail)) = rest.split_once(':') else {
-            return message;
-        };
-        let Ok(line) = line_str.trim().parse::<usize>() else {
-            return message;
-        };
-
-        let updated_line = line + offset;
-        format!("Line {updated_line}:{tail}")
     }
 }
 
@@ -390,9 +372,10 @@ mod tests {
             _author_id: Option<MemberId>,
         ) -> Result<Script<'a>, ProgramParseError<'a>> {
             if content.contains("SYNTAX") {
-                return Err(ProgramParseError::SyntaxError(
-                    "Line 1: Syntax error - stub".to_string(),
-                ));
+                return Err(ProgramParseError::SyntaxError {
+                    line: 1,
+                    detail: "Syntax error - stub".to_string(),
+                });
             }
             if content.contains("IMPLICIT") {
                 return Err(ProgramParseError::ImplicitPayerWithoutAuthor { line: 1 });
@@ -450,11 +433,11 @@ mod tests {
     }
 
     #[rstest]
-    #[case("a\nb", "Line 3: Syntax error - stub")]
-    #[case("a\nb\n", "Line 4: Syntax error - stub")]
+    #[case("a\nb", 3)]
+    #[case("a\nb\n", 4)]
     fn parse_program_sequence_offsets_syntax_error(
         #[case] first: &str,
-        #[case] expected_message: &str,
+        #[case] expected_line: usize,
     ) {
         let processor = MessageProcessor::new(&SequenceParser, &NoopOptimizer);
         let members: [MemberId; 0] = [];
@@ -463,11 +446,12 @@ mod tests {
             vec![(first, Some(MemberId(1))), ("SYNTAX", Some(MemberId(2)))],
         );
 
-        let ProcessingOutcome::SyntaxError { message } = outcome else {
+        let ProcessingOutcome::SyntaxError { line, detail } = outcome else {
             panic!("unexpected parse outcome");
         };
 
-        assert_eq!(message, expected_message);
+        assert_eq!(line, expected_line);
+        assert_eq!(detail, "Syntax error - stub");
     }
 
     #[rstest]

@@ -41,8 +41,8 @@ fn parse_program_from_content<'a>(members: &'a [MemberId], content: &'a str) -> 
             ProgramParseError::UndefinedMember { id, line } => {
                 panic!("parse failed: undefined member <@{id}> at line {line}")
             }
-            ProgramParseError::SyntaxError(message) => {
-                panic!("parse failed: {message}")
+            ProgramParseError::SyntaxError { line, detail } => {
+                panic!("parse failed at line {line}: {detail}")
             }
             ProgramParseError::ImplicitPayerWithoutAuthor { line } => {
                 panic!("parse failed: implicit payer without author at line {line}")

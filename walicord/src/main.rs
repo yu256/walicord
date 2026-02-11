@@ -412,12 +412,15 @@ impl<'a> Handler<'a> {
                 .await;
                 false
             }
-            ProcessingOutcome::SyntaxError { message } => {
+            ProcessingOutcome::SyntaxError { line, detail } => {
                 self.react(ctx, msg, '❎').await;
                 self.reply(
                     ctx,
                     msg,
-                    format!("{} Syntax error: {message}", msg.author.mention()),
+                    format!(
+                        "{} Syntax error at line {line}: {detail}",
+                        msg.author.mention()
+                    ),
                 )
                 .await;
                 false

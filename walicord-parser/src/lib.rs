@@ -170,8 +170,8 @@ pub enum ParseError {
     UndefinedMember { id: u64, line: usize },
     #[error("Undefined group '{name}' at line {line}.")]
     UndefinedGroup { name: String, line: usize },
-    #[error("Syntax error: {0}")]
-    SyntaxError(String),
+    #[error("Syntax error at line {line}: {detail}")]
+    SyntaxError { line: usize, detail: String },
 }
 
 fn mention(input: &str) -> IResult<&str, u64> {
@@ -455,10 +455,10 @@ pub fn parse_program<'a>(input: &'a str) -> Result<Program<'a>, ParseError> {
         match statement(trimmed) {
             Ok((rest, stmt)) => {
                 if !rest.trim().is_empty() {
-                    return Err(ParseError::SyntaxError(i18n::line_syntax_error_unparsed(
-                        idx + 1,
-                        rest.trim(),
-                    )));
+                    return Err(ParseError::SyntaxError {
+                        line: idx + 1,
+                        detail: i18n::syntax_error_unparsed_detail(rest.trim()),
+                    });
                 }
                 statements.push(StatementWithLine {
                     line: idx + 1,
@@ -466,7 +466,10 @@ pub fn parse_program<'a>(input: &'a str) -> Result<Program<'a>, ParseError> {
                 });
             }
             Err(e) => {
-                return Err(ParseError::SyntaxError(i18n::line_syntax_error(idx + 1, e)));
+                return Err(ParseError::SyntaxError {
+                    line: idx + 1,
+                    detail: i18n::syntax_error_detail(e),
+                });
             }
         }
     }
