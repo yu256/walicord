@@ -29,7 +29,7 @@ Discord上で共有経費を追跡し、グループメンバー間の最適な�
 
 ## プロジェクト構成
 
-このプロジェクトは9つのクレートで構成されるRustワークスペースです:
+このプロジェクトは8つのクレートで構成されるRustワークスペースです:
 
 - **walicord**: Discord APIとの連携を担当するメインのDiscordボットアプリケーション
 - **walicord-application**: メッセージ処理やユースケースをまとめるアプリケーション層
@@ -39,35 +39,6 @@ Discord上で共有経費を追跡し、グループメンバー間の最適な�
 - **walicord-infrastructure**: パーサーと最適化ソルバーのアダプタ
 - **walicord-presentation**: 残高表と決済表のSVG/テキスト出力
 - **walicord-i18n**: 表示メッセージのローカライズ
-- **walicord-interpreter**: `.walicord`スクリプトを実行するためのコマンドラインツール
-
-## `walicord-interpreter`
-
-`walicord-interpreter`は、Discordを介さずに`walicord`のコアロジックをテストしたり、スクリプトとして実行したりするためのコマンドラインツールです。結果はSVGテキストとして標準出力に出力されます。
-
-### 使い方
-
-```sh
-cargo run --package walicord-interpreter -- <file.walicord>
-```
-
-### `.walicord` ファイルフォーマット
-
-- ファイルの1行目には、`MEMBERS`宣言を記述する必要があります。
-- 2行目以降には、グループ宣言や支払い記録など、ボットが通常解釈するのと同じ構文のステートメントを記述できます。
-
-#### 例: `example.walicord`
-
-```
-MEMBERS := A, B, C
-
-group1 := A, B
-
-A lent 1000 to B
-C lent 500 to group1
-
-!evaluate
-```
 
 ## セットアップ
 
@@ -91,12 +62,6 @@ cargo run --release --features en
 
 ```sh
 cargo run --release --features ja
-```
-
-`walicord-interpreter`も同じfeaturesを使用できます。
-
-```sh
-cargo run --package walicord-interpreter --features en -- <file.walicord>
 ```
 
 ### Unix系での依存関係
