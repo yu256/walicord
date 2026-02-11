@@ -10,6 +10,8 @@ use nom::{
     combinator::opt,
 };
 
+pub const COMMAND_PREFIXES: &[&str] = &["!variables", "!review", "!清算確認", "!settleup", "!確定"];
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum SetOp<'a> {
     Push(u64),          // Discord user ID (mention)
@@ -421,7 +423,8 @@ fn payment(input: &str) -> IResult<&str, Payment<'_>> {
 fn command(input: &str) -> IResult<&str, Command<'_>> {
     alt((
         tag_no_case("!variables").map(|_| Command::Variables),
-        tag_no_case("!evaluate").map(|_| Command::Evaluate),
+        tag_no_case("!review").map(|_| Command::Evaluate),
+        tag("!清算確認").map(|_| Command::Evaluate),
         (
             alt((tag_no_case("!settleup"), tag_no_case("!確定"))),
             sp,
@@ -537,7 +540,8 @@ mod tests {
 
     #[rstest]
     #[case("!variables", Statement::Command(Command::Variables))]
-    #[case("!evaluate", Statement::Command(Command::Evaluate))]
+    #[case("!review", Statement::Command(Command::Evaluate))]
+    #[case("!清算確認", Statement::Command(Command::Evaluate))]
     fn test_parse_simple_commands(#[case] input: &str, #[case] expected: Statement<'_>) {
         let (_, stmt) = statement(input).unwrap();
         assert_eq!(stmt, expected);

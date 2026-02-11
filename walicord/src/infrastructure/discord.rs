@@ -10,6 +10,7 @@ use serenity::{
 };
 use std::sync::Arc;
 use walicord_domain::model::{MemberId, MemberInfo};
+use walicord_parser::COMMAND_PREFIXES;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ChannelError {
@@ -20,8 +21,6 @@ pub enum ChannelError {
     #[error("Guild is not available in cache")]
     GuildNotCached,
 }
-
-const COMMANDS: &[&str] = &["!variables", "!evaluate", "!settleup", "!確定"];
 
 pub struct DiscordChannelService;
 
@@ -76,7 +75,9 @@ impl DiscordChannelService {
                         ReactionType::Unicode(s) if s == "❎" && r.me
                     )
                 })
-                || COMMANDS.iter().any(|&cmd| message.content.starts_with(cmd))
+                || COMMAND_PREFIXES
+                    .iter()
+                    .any(|&cmd| message.content.starts_with(cmd))
         }
 
         loop {
