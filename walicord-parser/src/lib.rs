@@ -257,7 +257,7 @@ fn set_expr(input: &str) -> IResult<&str, SetExpr<'_>> {
 }
 
 fn union_token(input: &str) -> IResult<&str, &str> {
-    tag("∪").parse(input)
+    alt((tag("∪"), tag(","), tag("，"))).parse(input)
 }
 
 // name := expression (e.g., name := (A ∪ B) ∩ C)
@@ -469,6 +469,14 @@ mod tests {
     fn test_set_expr_ops(#[case] input: &str, #[case] expected: &'static [SetOp]) {
         let (_, expr) = set_expr(input).unwrap();
         assert_eq!(&expr.ops, expected);
+    }
+
+    #[rstest]
+    #[case("<@65>, <@66> lent 1000 to <@67>")]
+    #[case("<@65> <@66>, <@67> lent 1000 to <@68>")]
+    fn test_accepts_union_separators(#[case] input: &str) {
+        let result = parse_program(input);
+        assert!(result.is_ok(), "Should accept union separators");
     }
 
     #[rstest]
