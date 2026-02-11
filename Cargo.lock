@@ -2626,6 +2626,7 @@ dependencies = [
  "futures",
  "indexmap",
  "resvg",
+ "rstest",
  "serenity",
  "thiserror 2.0.17",
  "tiny-skia",

@@ -23,11 +23,7 @@ use serenity::{
     },
     prelude::*,
 };
-use std::{
-    collections::{HashMap, HashSet},
-    env,
-    future::Future,
-};
+use std::{collections::HashMap, env};
 use walicord_application::{
     Command as ProgramCommand, MessageProcessor, ProcessingOutcome, ScriptStatement,
     SettlementOptimizationError, SettlementResult,
@@ -132,12 +128,31 @@ impl<'a> Handler<'a> {
     where
         I: IntoIterator<Item = MemberId>,
     {
-        ensure_member_directory_with(member_ids, member_directory, async |missing| {
-            self.channel_service
-                .fetch_member_display_names(ctx, channel_id, missing)
-                .await
-        })
-        .await
+        let channel = channel_id
+            .to_channel(&ctx.http)
+            .await
+            .map_err(|e| ChannelError::Request(format!("{e:?}")))?;
+        let Some(guild_channel) = channel.guild() else {
+            return Err(ChannelError::NotGuildChannel);
+        };
+        let guild_id = guild_channel.guild_id;
+
+        // Ensure roster is loaded (warm_up if needed)
+        if let Err(e) = self.roster_provider.warm_up(ctx, channel_id).await {
+            tracing::warn!(
+                "Failed to warm up roster for channel {}: {:?}",
+                channel_id,
+                e
+            );
+        }
+
+        let display_names = self
+            .roster_provider
+            .display_names_for_guild(guild_id, member_ids);
+        let directory = member_directory.get_or_insert_with(HashMap::new);
+        directory.extend(display_names);
+
+        Ok(directory)
     }
 
     async fn reply(&self, ctx: &Context, msg: &Message, content: impl Into<String>) {
@@ -402,89 +417,6 @@ impl<'a> Handler<'a> {
                 false
             }
         }
-    }
-}
-
-async fn ensure_member_directory_with<I, F, Fut>(
-    member_ids: I,
-    member_directory: &mut Option<HashMap<MemberId, String>>,
-    fetcher: F,
-) -> Result<&HashMap<MemberId, String>, ChannelError>
-where
-    I: IntoIterator<Item = MemberId>,
-    F: FnOnce(Vec<MemberId>) -> Fut,
-    Fut: Future<Output = Result<HashMap<MemberId, String>, ChannelError>>,
-{
-    let mut missing_ids: HashSet<MemberId> = member_ids.into_iter().collect();
-    if let Some(directory) = member_directory.as_ref() {
-        missing_ids.retain(|member_id| !directory.contains_key(member_id));
-    }
-
-    if missing_ids.is_empty() {
-        return Ok(member_directory.get_or_insert_with(HashMap::new));
-    }
-
-    let missing_ids: Vec<MemberId> = missing_ids.into_iter().collect();
-    let fetched = fetcher(missing_ids).await?;
-
-    if let Some(directory) = member_directory.as_mut() {
-        directory.extend(fetched);
-    } else {
-        *member_directory = Some(fetched);
-    }
-
-    Ok(member_directory.get_or_insert_with(HashMap::new))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn ensure_member_directory_skips_fetch_when_full() {
-        let mut directory = Some(HashMap::from([(MemberId(1), "Alice".to_string())]));
-
-        let result =
-            ensure_member_directory_with([MemberId(1)], &mut directory, async |_missing| {
-                panic!("fetcher should not be called")
-            })
-            .await
-            .expect("expected directory");
-
-        assert_eq!(result.get(&MemberId(1)).map(String::as_str), Some("Alice"));
-    }
-
-    #[tokio::test]
-    async fn ensure_member_directory_fetches_missing_members() {
-        let mut directory = Some(HashMap::from([(MemberId(1), "Alice".to_string())]));
-
-        let result = ensure_member_directory_with(
-            [MemberId(1), MemberId(2)],
-            &mut directory,
-            async |missing| {
-                assert_eq!(missing, vec![MemberId(2)]);
-                Ok(HashMap::from([(MemberId(2), "Bob".to_string())]))
-            },
-        )
-        .await
-        .expect("expected directory");
-
-        assert_eq!(result.get(&MemberId(1)).map(String::as_str), Some("Alice"));
-        assert_eq!(result.get(&MemberId(2)).map(String::as_str), Some("Bob"));
-    }
-
-    #[tokio::test]
-    async fn ensure_member_directory_propagates_fetch_errors() {
-        let mut directory = None;
-
-        let result =
-            ensure_member_directory_with([MemberId(1)], &mut directory, async |_missing| {
-                Err(ChannelError::NotGuildChannel)
-            })
-            .await;
-
-        assert!(matches!(result, Err(ChannelError::NotGuildChannel)));
-        assert!(directory.is_none());
     }
 }
 

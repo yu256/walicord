@@ -22,6 +22,9 @@ resvg = "0.45"
 tiny-skia = "0.11"
 futures = "0.3.31"
 
+[dev-dependencies]
+rstest = "0.26.1"
+
 [features]
 default = ["microlp", "ja"]
 microlp = ["walicord-infrastructure/microlp"]

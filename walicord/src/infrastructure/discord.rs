@@ -4,12 +4,10 @@ use serenity::{
     model::{
         channel::{Message, ReactionType},
         guild::Member,
-        id::{ChannelId, GuildId, UserId},
+        id::{ChannelId, GuildId},
     },
     prelude::*,
 };
-use std::collections::HashMap;
-use walicord_domain::model::MemberId;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ChannelError {
@@ -17,8 +15,6 @@ pub enum ChannelError {
     Request(String),
     #[error("Channel is not a guild channel")]
     NotGuildChannel,
-    #[error("Guild is not available in cache")]
-    GuildNotCached,
 }
 
 const COMMANDS: &[&str] = &["!variables", "!evaluate"];
@@ -26,49 +22,6 @@ const COMMANDS: &[&str] = &["!variables", "!evaluate"];
 pub struct DiscordChannelService;
 
 impl DiscordChannelService {
-    pub async fn fetch_member_display_names<I>(
-        &self,
-        ctx: &Context,
-        channel_id: ChannelId,
-        member_ids: I,
-    ) -> Result<HashMap<MemberId, String>, ChannelError>
-    where
-        I: IntoIterator<Item = MemberId>,
-    {
-        let channel = channel_id
-            .to_channel(&ctx.http)
-            .await
-            .map_err(|e| ChannelError::Request(format!("{e:?}")))?;
-
-        let Some(guild_channel) = channel.guild() else {
-            return Err(ChannelError::NotGuildChannel);
-        };
-
-        let Some(guild) = guild_channel.guild(&ctx.cache) else {
-            return Err(ChannelError::GuildNotCached);
-        };
-
-        let mut members = HashMap::new();
-        for member_id in member_ids {
-            let user_id = UserId::new(member_id.0);
-            let Some(member) = guild.members.get(&user_id) else {
-                continue;
-            };
-            if guild
-                .user_permissions_in(&guild_channel, member)
-                .view_channel()
-            {
-                let display_name = member
-                    .nick
-                    .clone()
-                    .unwrap_or_else(|| member.user.name.clone());
-                members.insert(member_id, display_name);
-            }
-        }
-
-        Ok(members)
-    }
-
     pub async fn fetch_guild_members(
         &self,
         ctx: &Context,
