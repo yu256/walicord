@@ -125,7 +125,7 @@ impl std::fmt::Display for ImplicitPayerMissingMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "支払者が省略されています (行 {}). `A が B に 1000 貸した` のように支払者を明示してください。",
+            "支払者が省略されています (行 {}). `A が B に 1000 立て替えた` のように支払者を明示してください。",
             self.line
         )
     }
@@ -143,7 +143,7 @@ impl std::fmt::Display for ImplicitPayerMissingMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "Payer is missing at line {}. Use explicit payer syntax, for example `Alice lent 1000 to Bob`.",
+            "Payer is missing at line {}. Use explicit payer syntax, for example `Alice paid 1000 to Bob`.",
             self.line
         )
     }
@@ -161,7 +161,7 @@ impl std::fmt::Display for ImplicitPayerMissingMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "Payer is missing at line {}. Use explicit payer syntax, for example `Alice lent 1000 to Bob`.",
+            "Payer is missing at line {}. Use explicit payer syntax, for example `Alice paid 1000 to Bob`.",
             self.line
         )
     }

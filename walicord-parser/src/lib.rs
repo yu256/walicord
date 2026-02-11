@@ -287,18 +287,14 @@ fn declaration(input: &str) -> IResult<&str, Declaration<'_>> {
         .parse(input)
 }
 
-fn borrowed(input: &str) -> IResult<&str, &str> {
+fn paid(input: &str) -> IResult<&str, &str> {
     alt((
-        tag("かりた"),
-        tag("借りた"),
-        tag("borrowed"),
-        tag("BORROWED"),
+        tag("立て替えた"),
+        tag("たてかえた"),
+        tag("paid"),
+        tag("PAID"),
     ))
     .parse(input)
-}
-
-fn from(input: &str) -> IResult<&str, &str> {
-    alt((tag("from"), tag("FROM"), tag("から"))).parse(input)
 }
 
 fn yen(input: &str) -> IResult<&str, u64> {
@@ -319,21 +315,17 @@ fn ni(input: &str) -> IResult<&str, &str> {
     tag("に").parse(input)
 }
 
-fn lent(input: &str) -> IResult<&str, &str> {
-    alt((tag("貸した"), tag("かした"), tag("lent"), tag("LENT"))).parse(input)
-}
-
 fn to(input: &str) -> IResult<&str, &str> {
     alt((tag("to"), tag("TO"))).parse(input)
 }
 
-// {payer} ga {payee} ni {amount} lent (Japanese grammar pattern)
+// {payer} ga {payee} ni {amount} paid (Japanese grammar pattern)
 fn payment_lender_subject_ja(input: &str) -> IResult<&str, Payment<'_>> {
     (
         set_expr, // payer
         sp, ga, sp, set_expr, // payee
         sp, ni, sp, yen, // amount
-        sp, lent,
+        sp, paid,
     )
         .map(|(payer, _, _, _, payee, _, _, _, amount, _, _)| Payment {
             amount,
@@ -343,42 +335,14 @@ fn payment_lender_subject_ja(input: &str) -> IResult<&str, Payment<'_>> {
         .parse(input)
 }
 
-// {payer} lent {amount} to {payee}
+// {payer} paid {amount} to {payee}
 fn payment_lender_subject_en(input: &str) -> IResult<&str, Payment<'_>> {
     (
         set_expr, // payer
-        sp, lent, sp, yen, // amount
+        sp, paid, sp, yen, // amount
         sp, to, sp, set_expr, // payee
     )
         .map(|(payer, _, _, _, amount, _, _, _, payee)| Payment {
-            amount,
-            payer: PayerSpec::Explicit(payer),
-            payee,
-        })
-        .parse(input)
-}
-
-// {payee} ga {payer} kara {amount} borrowed (Japanese grammar pattern)
-fn payment_borrower_subject_ja(input: &str) -> IResult<&str, Payment<'_>> {
-    (
-        set_expr, // payee
-        sp, ga, sp, set_expr, // payer
-        sp, from, // "kara" in Japanese
-        sp, yen, // amount
-        sp, borrowed,
-    )
-        .map(|(payee, _, _, _, payer, _, _, _, amount, _, _)| Payment {
-            amount,
-            payer: PayerSpec::Explicit(payer),
-            payee,
-        })
-        .parse(input)
-}
-
-// payee borrowed amount from payer
-fn payment_borrower_subject_en(input: &str) -> IResult<&str, Payment<'_>> {
-    (set_expr, sp, borrowed, sp, yen, sp, from, sp, set_expr)
-        .map(|(payee, _, _, _, amount, _, _, _, payer)| Payment {
             amount,
             payer: PayerSpec::Explicit(payer),
             payee,
@@ -412,8 +376,6 @@ fn payment(input: &str) -> IResult<&str, Payment<'_>> {
     alt((
         payment_lender_subject_ja,
         payment_lender_subject_en,
-        payment_borrower_subject_ja,
-        payment_borrower_subject_en,
         payment_implicit_with_to,
         payment_implicit_simple,
     ))
@@ -520,8 +482,8 @@ mod tests {
     }
 
     #[rstest]
-    #[case("<@65>, <@66> lent 1000 to <@67>")]
-    #[case("<@65> <@66>, <@67> lent 1000 to <@68>")]
+    #[case("<@65>, <@66> paid 1000 to <@67>")]
+    #[case("<@65> <@66>, <@67> paid 1000 to <@68>")]
     fn test_accepts_union_separators(#[case] input: &str) {
         let result = parse_program(input);
         assert!(result.is_ok(), "Should accept union separators");
@@ -568,8 +530,8 @@ mod tests {
     }
 
     #[rstest]
-    #[case("<@123> が <@456> に 1000 貸した")]
-    #[case("<@123> lent 1000 to <@456>")]
+    #[case("<@123> が <@456> に 1000 立て替えた")]
+    #[case("<@123> paid 1000 to <@456>")]
     fn test_mention_based_payment(#[case] input: &str) {
         let result = payment(input);
         assert!(result.is_ok(), "Failed to parse: {input}");
@@ -579,7 +541,7 @@ mod tests {
     }
 
     #[rstest]
-    #[case("Alice が Bob に 1000 貸した", "Alice", "Bob")]
+    #[case("Alice が Bob に 1000 立て替えた", "Alice", "Bob")]
     fn test_name_based_parsed_as_group_refs(
         #[case] input: &str,
         #[case] payer_name: &str,
@@ -611,8 +573,8 @@ mod tests {
     }
 
     #[rstest]
-    #[case("<@123> が <@456> に 1000 貸した")]
-    #[case("team := <@111> <@222>\nteam が <@333> に 1000 貸した")]
+    #[case("<@123> が <@456> に 1000 立て替えた")]
+    #[case("team := <@111> <@222>\nteam が <@333> に 1000 立て替えた")]
     fn test_parse_program_variants(#[case] input: &str) {
         let result = parse_program(input);
         assert!(result.is_ok(), "Program should parse: {result:?}");
