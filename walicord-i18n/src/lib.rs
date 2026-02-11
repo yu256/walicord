@@ -66,6 +66,18 @@ pub fn undefined_member(id: u64) -> String {
     format!("未定義のメンバー <@{id}> です")
 }
 
+#[cfg(feature = "ja")]
+pub fn syntax_error(line: usize, detail: impl std::fmt::Display) -> String {
+    format!("構文エラー (line {line}): {detail}")
+}
+
+#[cfg(feature = "ja")]
+pub fn implicit_payer_missing(line: usize) -> String {
+    format!(
+        "支払者が省略されています (line {line}). `A が B に 1000 貸した` のように支払者を明示してください。"
+    )
+}
+
 #[cfg(feature = "en")]
 pub fn failed_to_evaluate_group(name: impl std::fmt::Display) -> String {
     format!("Failed to evaluate group '{}'", name)
@@ -81,6 +93,18 @@ pub fn undefined_member(id: u64) -> String {
     format!("Undefined member <@{id}>")
 }
 
+#[cfg(feature = "en")]
+pub fn syntax_error(line: usize, detail: impl std::fmt::Display) -> String {
+    format!("Syntax error at line {line}: {detail}")
+}
+
+#[cfg(feature = "en")]
+pub fn implicit_payer_missing(line: usize) -> String {
+    format!(
+        "Payer is missing at line {line}. Use explicit payer syntax, for example `Alice が Bob に 1000 貸した`."
+    )
+}
+
 #[cfg(not(any(feature = "ja", feature = "en")))]
 pub fn failed_to_evaluate_group(name: impl std::fmt::Display) -> String {
     format!("Failed to evaluate group '{}'", name)
@@ -94,4 +118,16 @@ pub fn undefined_group(name: impl std::fmt::Display) -> String {
 #[cfg(not(any(feature = "ja", feature = "en")))]
 pub fn undefined_member(id: u64) -> String {
     format!("Undefined member <@{id}>")
+}
+
+#[cfg(not(any(feature = "ja", feature = "en")))]
+pub fn syntax_error(line: usize, detail: impl std::fmt::Display) -> String {
+    format!("Syntax error at line {line}: {detail}")
+}
+
+#[cfg(not(any(feature = "ja", feature = "en")))]
+pub fn implicit_payer_missing(line: usize) -> String {
+    format!(
+        "Payer is missing at line {line}. Use explicit payer syntax, for example `Alice が Bob に 1000 貸した`."
+    )
 }

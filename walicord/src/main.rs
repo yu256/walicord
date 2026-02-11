@@ -209,22 +209,15 @@ impl<'a> Handler<'a> {
         let messages_guard = self.message_cache.get(&msg.channel_id);
 
         let previous_statement_count = match &messages_guard {
-            Some(messages) => {
-                let message_iter = messages
-                    .iter()
-                    .map(|(_, m)| (m.content.as_str(), Some(MemberId(m.author.id.get()))));
-                match self
-                    .processor
-                    .parse_program_sequence(&member_ids, message_iter)
-                {
-                    ProcessingOutcome::Success(program) => program.statements().len(),
-                    ProcessingOutcome::FailedToEvaluateGroup { .. }
-                    | ProcessingOutcome::UndefinedGroup { .. }
-                    | ProcessingOutcome::UndefinedMember { .. }
-                    | ProcessingOutcome::SyntaxError { .. }
-                    | ProcessingOutcome::ImplicitPayerWithoutAuthor { .. } => 0,
-                }
-            }
+            Some(messages) => messages
+                .iter()
+                .map(|(_, m)| {
+                    m.content
+                        .lines()
+                        .filter(|line| !line.trim().is_empty())
+                        .count()
+                })
+                .sum(),
             None => 0,
         };
 
@@ -418,8 +411,9 @@ impl<'a> Handler<'a> {
                     ctx,
                     msg,
                     format!(
-                        "{} Syntax error at line {line}: {detail}",
-                        msg.author.mention()
+                        "{} {}",
+                        msg.author.mention(),
+                        walicord_i18n::syntax_error(line, detail)
                     ),
                 )
                 .await;
@@ -431,8 +425,9 @@ impl<'a> Handler<'a> {
                     ctx,
                     msg,
                     format!(
-                        "{} Implicit payer syntax requires message author context at line {line}.",
-                        msg.author.mention()
+                        "{} {}",
+                        msg.author.mention(),
+                        walicord_i18n::implicit_payer_missing(line)
                     ),
                 )
                 .await;
