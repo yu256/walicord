@@ -1,18 +1,20 @@
 use crate::{
+    SettlementOptimizationError,
     error::ProgramParseError,
     model::{
         Command, PersonBalance, Script, ScriptStatement, ScriptStatementWithLine, SettleUpContext,
     },
     ports::{ProgramParser, SettlementOptimizer},
-    SettlementOptimizationError,
 };
-use std::collections::HashMap;
-use walicord_domain::{BalanceAccumulator, Money, SettleUpPolicy, Transfer};
+use std::borrow::Cow;
+use walicord_domain::{
+    BalanceAccumulator, MemberBalances, SettleUpPolicy, Transfer, model::MemberId,
+};
 
-pub struct SettlementResult<'a> {
-    pub balances: Vec<PersonBalance<'a>>,
-    pub optimized_transfers: Vec<Transfer<'a>>,
-    pub settle_up: Option<SettleUpContext<'a>>,
+pub struct SettlementResult {
+    pub balances: Vec<PersonBalance>,
+    pub optimized_transfers: Vec<Transfer>,
+    pub settle_up: Option<SettleUpContext>,
 }
 
 #[derive(Clone, Copy)]
@@ -23,15 +25,15 @@ pub struct MessageProcessor<'a> {
 
 pub enum ProcessingOutcome<'a> {
     Success(Script<'a>),
-    MissingMembersDeclaration,
-    UndefinedMember { name: &'a str, line: usize },
-    FailedToEvaluateGroup { name: &'a str },
+    FailedToEvaluateGroup { name: Cow<'a, str>, line: usize },
+    UndefinedGroup { name: Cow<'a, str>, line: usize },
+    UndefinedMember { id: u64, line: usize },
     SyntaxError { message: String },
 }
 
-struct ApplyResult<'a> {
-    balances: HashMap<&'a str, Money>,
-    settle_up: Option<SettleUpContext<'a>>,
+struct ApplyResult {
+    balances: MemberBalances,
+    settle_up: Option<SettleUpContext>,
 }
 
 impl<'a> MessageProcessor<'a> {
@@ -41,22 +43,22 @@ impl<'a> MessageProcessor<'a> {
 
     pub fn parse_program<'b>(
         &self,
-        members: &'b [&'b str],
+        member_ids: &'b [MemberId],
         content: &'b str,
     ) -> ProcessingOutcome<'b>
     where
         'a: 'b,
     {
-        match self.parser.parse(members, content) {
+        match self.parser.parse(member_ids, content) {
             Ok(program) => ProcessingOutcome::Success(program),
-            Err(ProgramParseError::MissingMembersDeclaration) => {
-                ProcessingOutcome::MissingMembersDeclaration
+            Err(ProgramParseError::FailedToEvaluateGroup { name, line }) => {
+                ProcessingOutcome::FailedToEvaluateGroup { name, line }
             }
-            Err(ProgramParseError::UndefinedMember { name, line }) => {
-                ProcessingOutcome::UndefinedMember { name, line }
+            Err(ProgramParseError::UndefinedGroup { name, line }) => {
+                ProcessingOutcome::UndefinedGroup { name, line }
             }
-            Err(ProgramParseError::FailedToEvaluateGroup { name }) => {
-                ProcessingOutcome::FailedToEvaluateGroup { name }
+            Err(ProgramParseError::UndefinedMember { id, line }) => {
+                ProcessingOutcome::UndefinedMember { id, line }
             }
             Err(ProgramParseError::SyntaxError(message)) => {
                 ProcessingOutcome::SyntaxError { message }
@@ -64,7 +66,7 @@ impl<'a> MessageProcessor<'a> {
         }
     }
 
-    pub fn calculate_balances<'b>(&self, program: &'b Script<'b>) -> HashMap<&'b str, Money>
+    pub fn calculate_balances<'b>(&self, program: &'b Script<'b>) -> MemberBalances
     where
         'a: 'b,
     {
@@ -75,7 +77,7 @@ impl<'a> MessageProcessor<'a> {
         &self,
         program: &'b Script<'b>,
         prefix_len: usize,
-    ) -> HashMap<&'b str, Money>
+    ) -> MemberBalances
     where
         'a: 'b,
     {
@@ -86,7 +88,7 @@ impl<'a> MessageProcessor<'a> {
     pub fn build_settlement_result<'b>(
         &self,
         program: &'b Script<'b>,
-    ) -> Result<SettlementResult<'b>, SettlementOptimizationError>
+    ) -> Result<SettlementResult, SettlementOptimizationError>
     where
         'a: 'b,
     {
@@ -97,7 +99,7 @@ impl<'a> MessageProcessor<'a> {
         &self,
         program: &'b Script<'b>,
         prefix_len: usize,
-    ) -> Result<SettlementResult<'b>, SettlementOptimizationError>
+    ) -> Result<SettlementResult, SettlementOptimizationError>
     where
         'a: 'b,
     {
@@ -108,19 +110,19 @@ impl<'a> MessageProcessor<'a> {
         ))
     }
 
-    fn build_settlement_result_from_apply<'b>(
+    fn build_settlement_result_from_apply(
         &self,
-        apply_result: ApplyResult<'b>,
-    ) -> Result<SettlementResult<'b>, SettlementOptimizationError> {
-        let mut person_balances: Vec<PersonBalance<'b>> = apply_result
+        apply_result: ApplyResult,
+    ) -> Result<SettlementResult, SettlementOptimizationError> {
+        let mut person_balances: Vec<PersonBalance> = apply_result
             .balances
             .iter()
-            .map(|(name, balance)| PersonBalance {
-                name,
+            .map(|(id, balance)| PersonBalance {
+                id: *id,
                 balance: *balance,
             })
             .collect();
-        person_balances.sort_by_key(|p| p.name);
+        person_balances.sort_by_key(|p| p.id);
 
         let optimized_transfers = self.optimizer.optimize(&person_balances)?;
 
@@ -136,7 +138,7 @@ impl<'a> MessageProcessor<'a> {
         program: &'b Script<'b>,
         prefix_len: Option<usize>,
         apply_settle: bool,
-    ) -> ApplyResult<'b>
+    ) -> ApplyResult
     where
         'a: 'b,
     {
@@ -146,9 +148,9 @@ impl<'a> MessageProcessor<'a> {
             None => statements.len(),
         };
 
-        let mut accumulator = BalanceAccumulator::new(program.members());
-        let mut last_settle_members: Vec<&'b str> = Vec::new();
-        let mut last_settle_transfers: Vec<Transfer<'b>> = Vec::new();
+        let mut accumulator = BalanceAccumulator::new_with_members(program.members());
+        let mut last_settle_members: Vec<MemberId> = Vec::new();
+        let mut last_settle_transfers: Vec<Transfer> = Vec::new();
         let last_is_settle = apply_settle
             && end > 0
             && matches!(
@@ -182,7 +184,11 @@ impl<'a> MessageProcessor<'a> {
 
                             let result = SettleUpPolicy::settle(
                                 accumulator.balances().clone(),
-                                program.members(),
+                                accumulator
+                                    .balances()
+                                    .keys()
+                                    .copied()
+                                    .chain(settle_members.iter()),
                                 settle_members.members(),
                             );
                             accumulator.set_balances(result.new_balances);
@@ -235,8 +241,8 @@ mod tests {
     };
     use rstest::{fixture, rstest};
     use walicord_domain::{
-        model::{MemberSetExpr, MemberSetOp, Money},
         Payment, Statement,
+        model::{MemberId, MemberSetExpr, MemberSetOp, Money},
     };
 
     struct StubParser;
@@ -244,7 +250,7 @@ mod tests {
     impl ProgramParser for StubParser {
         fn parse<'a>(
             &self,
-            _members: &'a [&'a str],
+            _member_ids: &'a [MemberId],
             _content: &'a str,
         ) -> Result<Script<'a>, ProgramParseError<'a>> {
             let statements = vec![
@@ -252,37 +258,37 @@ mod tests {
                     line: 1,
                     statement: ScriptStatement::Domain(Statement::Payment(Payment {
                         amount: Money::from_u64(60),
-                        payer: MemberSetExpr::new(vec![MemberSetOp::Push("A")]),
-                        payee: MemberSetExpr::new(vec![MemberSetOp::Push("C")]),
+                        payer: MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(1))]),
+                        payee: MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(3))]),
                     })),
                 },
                 ScriptStatementWithLine {
                     line: 2,
                     statement: ScriptStatement::Domain(Statement::Payment(Payment {
                         amount: Money::from_u64(40),
-                        payer: MemberSetExpr::new(vec![MemberSetOp::Push("B")]),
-                        payee: MemberSetExpr::new(vec![MemberSetOp::Push("C")]),
+                        payer: MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(2))]),
+                        payee: MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(3))]),
                     })),
                 },
                 ScriptStatementWithLine {
                     line: 3,
                     statement: ScriptStatement::Command(Command::SettleUp(MemberSetExpr::new(
-                        vec![MemberSetOp::Push("A")],
+                        vec![MemberSetOp::Push(MemberId(1))],
                     ))),
                 },
             ];
 
-            Ok(Script::new(&["A", "B", "C"], statements))
+            Ok(Script::new(&[], statements))
         }
     }
 
     struct NoopOptimizer;
 
     impl SettlementOptimizer for NoopOptimizer {
-        fn optimize<'a>(
+        fn optimize(
             &self,
-            _balances: &[PersonBalance<'a>],
-        ) -> Result<Vec<Transfer<'a>>, SettlementOptimizationError> {
+            _balances: &[PersonBalance],
+        ) -> Result<Vec<Transfer>, SettlementOptimizationError> {
             Ok(Vec::new())
         }
     }
@@ -294,7 +300,7 @@ mod tests {
 
     #[rstest]
     fn settle_up_response_groups_transfers(processor: MessageProcessor<'_>) {
-        let members = ["A", "B", "C"];
+        let members: [MemberId; 0] = [];
         let program = match processor.parse_program(&members, "unused") {
             ProcessingOutcome::Success(program) => program,
             _ => panic!("unexpected parse outcome"),

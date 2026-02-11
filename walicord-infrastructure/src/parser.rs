@@ -1,13 +1,14 @@
+use std::borrow::Cow;
 use walicord_application::{
     Command, ProgramParseError, ProgramParser, Script, ScriptStatement, ScriptStatementWithLine,
 };
 use walicord_domain::{
-    model::{MemberSetExpr, MemberSetOp, Money},
     Declaration, Payment, Program as DomainProgram, Statement as DomainStatement,
     StatementWithLine as DomainStatementWithLine,
+    model::{MemberId, MemberSetExpr, MemberSetOp, Money},
 };
 use walicord_parser::{
-    parse_program, Command as ParserCommand, ParseError, SetOp, Statement as ParserStatement,
+    Command as ParserCommand, ParseError, SetOp, Statement as ParserStatement, parse_program,
 };
 
 #[derive(Default)]
@@ -16,15 +17,12 @@ pub struct WalicordProgramParser;
 impl ProgramParser for WalicordProgramParser {
     fn parse<'a>(
         &self,
-        members: &'a [&'a str],
+        member_ids: &'a [MemberId],
         content: &'a str,
     ) -> Result<Script<'a>, ProgramParseError<'a>> {
-        match parse_program(members, content) {
+        match parse_program(content) {
             Ok(program) => {
-                let walicord_parser::Program {
-                    members_decl,
-                    statements,
-                } = program;
+                let walicord_parser::Program { statements, .. } = program;
 
                 let mut app_statements = Vec::with_capacity(statements.len());
                 let mut domain_statements = Vec::with_capacity(statements.len());
@@ -96,17 +94,27 @@ impl ProgramParser for WalicordProgramParser {
                     }
                 }
 
-                DomainProgram::try_new(members_decl, domain_statements)
+                DomainProgram::try_new(domain_statements, member_ids)
                     .map_err(ProgramParseError::from)?;
-                Ok(Script::new(members_decl, app_statements))
+                Ok(Script::new(member_ids, app_statements))
             }
-            Err(err) => Err(match err {
-                ParseError::NoMembersDeclaration(_) => ProgramParseError::MissingMembersDeclaration,
-                ParseError::SyntaxError(details) => ProgramParseError::SyntaxError(details),
-                ParseError::UndefinedMember { name, line } => {
-                    ProgramParseError::UndefinedMember { name, line }
+            Err(err) => {
+                // Handle error conversion
+                match err {
+                    ParseError::SyntaxError(details) => {
+                        Err(ProgramParseError::SyntaxError(details))
+                    }
+                    ParseError::UndefinedGroup { name, line } => {
+                        Err(ProgramParseError::UndefinedGroup {
+                            name: Cow::Owned(name),
+                            line,
+                        })
+                    }
+                    ParseError::UndefinedMember { id, line } => {
+                        Err(ProgramParseError::UndefinedMember { id, line })
+                    }
                 }
-            }),
+            }
         }
     }
 }
@@ -116,7 +124,8 @@ fn to_member_set_expr<'a>(expr: walicord_parser::SetExpr<'a>) -> MemberSetExpr<'
         .ops()
         .iter()
         .map(|op| match op {
-            SetOp::Push(name) => MemberSetOp::Push(name),
+            SetOp::Push(id) => MemberSetOp::Push(MemberId(*id)),
+            SetOp::PushGroup(name) => MemberSetOp::PushGroup(name),
             SetOp::Union => MemberSetOp::Union,
             SetOp::Intersection => MemberSetOp::Intersection,
             SetOp::Difference => MemberSetOp::Difference,

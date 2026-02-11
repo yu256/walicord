@@ -1,8 +1,10 @@
+use fxhash::FxHashSet;
 use std::{
     borrow::Cow,
-    collections::{HashMap, HashSet},
+    collections::BTreeMap,
     fmt,
     ops::{Add, AddAssign, Neg, Sub, SubAssign},
+    sync::Arc,
 };
 
 use crate::services::MemberSetResolver;
@@ -24,12 +26,12 @@ pub enum Statement<'a> {
 }
 
 pub struct Program<'a> {
-    members: &'a [&'a str],
+    members: Vec<MemberId>,
     statements: Vec<Statement<'a>>,
 }
 
 pub struct BalanceAccumulator<'a> {
-    balances: HashMap<&'a str, Money>,
+    balances: MemberBalances,
     resolver: MemberSetResolver<'a>,
 }
 
@@ -40,8 +42,7 @@ pub struct StatementWithLine<'a> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProgramBuildError<'a> {
-    MissingMembersDeclaration,
-    UndefinedMember { name: &'a str, line: usize },
+    UndefinedGroup { name: &'a str, line: usize },
     FailedToEvaluateGroup { name: &'a str, line: usize },
 }
 
@@ -120,9 +121,16 @@ impl Neg for Money {
     }
 }
 
+/// Discord user ID
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct MemberId(pub u64);
+
+pub type MemberBalances = BTreeMap<MemberId, Money>;
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum MemberSetOp<'a> {
-    Push(&'a str),
+    Push(MemberId),     // Discord user ID (from mention)
+    PushGroup(&'a str), // Group name reference
     Union,
     Intersection,
     Difference,
@@ -134,20 +142,20 @@ pub struct MemberSetExpr<'a> {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MemberSet<'a> {
-    members: Vec<&'a str>,
+pub struct MemberSet {
+    members: Vec<MemberId>,
 }
 
-impl<'a> MemberSet<'a> {
-    pub fn new(members: Vec<&'a str>) -> Self {
+impl MemberSet {
+    pub fn new(members: Vec<MemberId>) -> Self {
         Self { members }
     }
 
-    pub fn members(&self) -> &[&'a str] {
+    pub fn members(&self) -> &[MemberId] {
         &self.members
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = &'a str> + '_ {
+    pub fn iter(&self) -> impl Iterator<Item = MemberId> + '_ {
         self.members.iter().copied()
     }
 
@@ -156,52 +164,112 @@ impl<'a> MemberSet<'a> {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemberInfo {
+    pub id: MemberId,
+    pub display_name: Arc<str>,
+    pub username: Arc<str>,
+    pub avatar_url: Option<Arc<str>>,
+}
+
+impl MemberInfo {
+    pub fn effective_name(&self) -> &str {
+        &self.display_name
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn member_info_effective_name_returns_display_name() {
+        let info = MemberInfo {
+            id: MemberId(1),
+            display_name: Arc::from("Nickname"),
+            username: Arc::from("username"),
+            avatar_url: None,
+        };
+        assert_eq!(info.effective_name(), "Nickname");
+    }
+
+    #[test]
+    fn member_info_clone_shares_arc() {
+        let info1 = MemberInfo {
+            id: MemberId(1),
+            display_name: Arc::from("Test"),
+            username: Arc::from("test"),
+            avatar_url: None,
+        };
+        let info2 = info1.clone();
+
+        assert_eq!(info1.display_name.as_ptr(), info2.display_name.as_ptr());
+    }
+}
+
 impl<'a> MemberSetExpr<'a> {
     pub fn new(ops: Vec<MemberSetOp<'a>>) -> Self {
         Self { ops }
     }
 
-    pub fn evaluate<'b, F>(&self, resolver: &F) -> Option<Cow<'b, HashSet<&'a str>>>
+    /// Evaluate the expression to produce a set of member IDs
+    ///
+    /// # Arguments
+    /// * `member_resolver` - Resolves a group name to a borrowed set of member IDs
+    pub fn evaluate<'r, F>(&self, member_resolver: &F) -> Option<Cow<'r, FxHashSet<MemberId>>>
     where
-        'a: 'b,
-        F: Fn(&str) -> Option<&'b HashSet<&'a str>>,
+        F: Fn(&str) -> Option<&'r FxHashSet<MemberId>>,
     {
-        let mut stack: Vec<Cow<'b, HashSet<&'a str>>> = Vec::with_capacity(self.ops.len());
+        let mut stack: Vec<Cow<'r, FxHashSet<MemberId>>> = Vec::with_capacity(self.ops.len());
 
         for op in &self.ops {
             match op {
-                MemberSetOp::Push(name) => {
-                    let set = resolver(name)?;
+                MemberSetOp::Push(id) => {
+                    // Direct member reference - create singleton set
+                    let mut set = FxHashSet::default();
+                    set.insert(*id);
+                    stack.push(Cow::Owned(set));
+                }
+                MemberSetOp::PushGroup(name) => {
+                    let set = member_resolver(name)?;
                     stack.push(Cow::Borrowed(set));
                 }
                 MemberSetOp::Union => {
                     let b = stack.pop()?;
                     let a = stack.pop()?;
-                    stack.push(Cow::Owned(a.union(&b).copied().collect()));
+                    let merged = a.union(b.as_ref()).copied().collect();
+                    stack.push(Cow::Owned(merged));
                 }
                 MemberSetOp::Intersection => {
                     let b = stack.pop()?;
                     let a = stack.pop()?;
-                    stack.push(Cow::Owned(a.intersection(&b).copied().collect()));
+                    let merged = a.intersection(b.as_ref()).copied().collect();
+                    stack.push(Cow::Owned(merged));
                 }
                 MemberSetOp::Difference => {
                     let b = stack.pop()?;
                     let a = stack.pop()?;
-                    stack.push(Cow::Owned(a.difference(&b).copied().collect()));
+                    let merged = a.difference(b.as_ref()).copied().collect();
+                    stack.push(Cow::Owned(merged));
                 }
             }
         }
 
-        if stack.len() == 1 {
-            stack.pop()
-        } else {
-            None
-        }
+        if stack.len() == 1 { stack.pop() } else { None }
     }
 
-    pub fn referenced_names(&self) -> impl Iterator<Item = &'a str> + '_ {
+    /// Returns all directly referenced member IDs
+    pub fn referenced_ids(&self) -> impl Iterator<Item = MemberId> + '_ {
         self.ops.iter().filter_map(|op| match op {
-            MemberSetOp::Push(name) => Some(*name),
+            MemberSetOp::Push(id) => Some(*id),
+            _ => None,
+        })
+    }
+
+    /// Returns all referenced group names
+    pub fn referenced_groups(&self) -> impl Iterator<Item = &'a str> + '_ {
+        self.ops.iter().filter_map(|op| match op {
+            MemberSetOp::PushGroup(name) => Some(*name),
             _ => None,
         })
     }
@@ -209,22 +277,22 @@ impl<'a> MemberSetExpr<'a> {
 
 impl<'a> Program<'a> {
     pub fn try_new(
-        members: &'a [&'a str],
         statements: Vec<StatementWithLine<'a>>,
+        member_ids: &[MemberId],
     ) -> Result<Self, ProgramBuildError<'a>> {
-        if members.is_empty() {
-            return Err(ProgramBuildError::MissingMembersDeclaration);
-        }
-
-        let mut resolver = MemberSetResolver::new(members);
         let mut validated_statements = Vec::with_capacity(statements.len());
+        let mut resolver = MemberSetResolver::new_with_members(member_ids.iter().copied());
 
         for StatementWithLine { line, statement } in statements {
             match &statement {
                 Statement::Declaration(decl) => {
-                    for name in decl.expression.referenced_names() {
-                        if !resolver.is_defined(name) {
-                            return Err(ProgramBuildError::UndefinedMember { name, line });
+                    // Check that all referenced groups are defined
+                    for group_name in decl.expression.referenced_groups() {
+                        if !resolver.is_defined(group_name) {
+                            return Err(ProgramBuildError::UndefinedGroup {
+                                name: group_name,
+                                line,
+                            });
                         }
                     }
 
@@ -237,13 +305,17 @@ impl<'a> Program<'a> {
                     resolver.register_group_members(decl.name, members_vec.iter());
                 }
                 Statement::Payment(payment) => {
-                    for name in payment
+                    // Check that all referenced groups in payment are defined
+                    for group_name in payment
                         .payer
-                        .referenced_names()
-                        .chain(payment.payee.referenced_names())
+                        .referenced_groups()
+                        .chain(payment.payee.referenced_groups())
                     {
-                        if !resolver.is_defined(name) {
-                            return Err(ProgramBuildError::UndefinedMember { name, line });
+                        if !resolver.is_defined(group_name) {
+                            return Err(ProgramBuildError::UndefinedGroup {
+                                name: group_name,
+                                line,
+                            });
                         }
                     }
                 }
@@ -253,21 +325,17 @@ impl<'a> Program<'a> {
         }
 
         Ok(Self {
-            members,
+            members: member_ids.to_vec(),
             statements: validated_statements,
         })
-    }
-
-    pub fn members(&self) -> &'a [&'a str] {
-        self.members
     }
 
     pub fn statements(&self) -> &[Statement<'a>] {
         &self.statements
     }
 
-    pub fn calculate_balances(&self) -> HashMap<&'a str, Money> {
-        let mut accumulator = BalanceAccumulator::new(self.members);
+    pub fn calculate_balances(&self) -> MemberBalances {
+        let mut accumulator = BalanceAccumulator::new_with_members(&self.members);
         for stmt in &self.statements {
             accumulator.apply(stmt);
         }
@@ -275,14 +343,20 @@ impl<'a> Program<'a> {
     }
 }
 
+impl<'a> Default for BalanceAccumulator<'a> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<'a> BalanceAccumulator<'a> {
-    pub fn new(members: &'a [&'a str]) -> Self {
-        let balances: HashMap<&'a str, Money> = members
-            .iter()
-            .copied()
-            .map(|member| (member, Money::zero()))
-            .collect();
-        let resolver = MemberSetResolver::new(members);
+    pub fn new() -> Self {
+        Self::new_with_members(&[])
+    }
+
+    pub fn new_with_members(member_ids: &[MemberId]) -> Self {
+        let balances: MemberBalances = MemberBalances::default();
+        let resolver = MemberSetResolver::new_with_members(member_ids.iter().copied());
 
         Self { balances, resolver }
     }
@@ -290,6 +364,9 @@ impl<'a> BalanceAccumulator<'a> {
     pub fn apply(&mut self, statement: &Statement<'a>) {
         match statement {
             Statement::Declaration(decl) => {
+                for member_id in decl.expression.referenced_ids() {
+                    self.balances.entry(member_id).or_insert(Money::zero());
+                }
                 let Some(members_vec) = self.resolver.evaluate_members(&decl.expression) else {
                     return;
                 };
@@ -300,6 +377,13 @@ impl<'a> BalanceAccumulator<'a> {
                     .register_group_members(decl.name, members_vec.iter());
             }
             Statement::Payment(payment) => {
+                for member_id in payment
+                    .payer
+                    .referenced_ids()
+                    .chain(payment.payee.referenced_ids())
+                {
+                    self.balances.entry(member_id).or_insert(Money::zero());
+                }
                 let Some(payer_members) = self.resolver.evaluate_members(&payment.payer) else {
                     return;
                 };
@@ -313,39 +397,39 @@ impl<'a> BalanceAccumulator<'a> {
         }
     }
 
-    pub fn balances(&self) -> &HashMap<&'a str, Money> {
+    pub fn balances(&self) -> &MemberBalances {
         &self.balances
     }
 
-    pub fn into_balances(self) -> HashMap<&'a str, Money> {
+    pub fn into_balances(self) -> MemberBalances {
         self.balances
     }
 
-    pub fn set_balances(&mut self, balances: HashMap<&'a str, Money>) {
+    pub fn set_balances(&mut self, balances: MemberBalances) {
         self.balances = balances;
     }
 
-    pub fn evaluate_members(&self, expr: &MemberSetExpr<'a>) -> Option<MemberSet<'a>> {
+    pub fn evaluate_members(&self, expr: &MemberSetExpr<'a>) -> Option<MemberSet> {
         self.resolver.evaluate_members(expr)
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Transfer<'a> {
-    pub from: &'a str,
-    pub to: &'a str,
+pub struct Transfer {
+    pub from: MemberId,
+    pub to: MemberId,
     pub amount: Money,
 }
 
 #[derive(Debug, PartialEq)]
-pub struct Settlement<'a> {
-    pub new_balances: HashMap<&'a str, Money>,
-    pub transfers: Vec<Transfer<'a>>,
+pub struct Settlement {
+    pub new_balances: MemberBalances,
+    pub transfers: Vec<Transfer>,
 }
 
-pub fn distribute_balances<'a>(
-    balances: &mut HashMap<&'a str, Money>,
-    members: &MemberSet<'a>,
+pub fn distribute_balances(
+    balances: &mut MemberBalances,
+    members: &MemberSet,
     amount: Money,
     direction: i64,
 ) {

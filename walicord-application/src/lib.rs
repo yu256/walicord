@@ -10,4 +10,4 @@ pub use message_processor::{MessageProcessor, ProcessingOutcome, SettlementResul
 pub use model::{
     Command, PersonBalance, Script, ScriptStatement, ScriptStatementWithLine, SettleUpContext,
 };
-pub use ports::{ProgramParser, SettlementOptimizer};
+pub use ports::{MemberDirectory, ProgramParser, SettlementOptimizer};

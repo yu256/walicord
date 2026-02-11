@@ -6,12 +6,12 @@ use walicord_domain::{Money, Transfer};
 pub struct WalicordSettlementOptimizer;
 
 impl SettlementOptimizer for WalicordSettlementOptimizer {
-    fn optimize<'a>(
+    fn optimize(
         &self,
-        balances: &[PersonBalance<'a>],
-    ) -> Result<Vec<Transfer<'a>>, SettlementOptimizationError> {
+        balances: &[PersonBalance],
+    ) -> Result<Vec<Transfer>, SettlementOptimizationError> {
         let calc_balances = balances.iter().map(|balance| CalcBalance {
-            name: balance.name,
+            id: balance.id.0,
             balance: balance.balance.amount(),
         });
 
@@ -26,8 +26,8 @@ impl SettlementOptimizer for WalicordSettlementOptimizer {
         let optimized_transfers = settlements
             .iter()
             .map(|payment| Transfer {
-                from: payment.from,
-                to: payment.to,
+                from: walicord_domain::model::MemberId(payment.from),
+                to: walicord_domain::model::MemberId(payment.to),
                 amount: Money::from_i64(payment.amount),
             })
             .collect();

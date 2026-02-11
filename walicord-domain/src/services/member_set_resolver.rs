@@ -1,29 +1,30 @@
-use crate::model::{MemberSet, MemberSetExpr};
-use std::collections::{HashMap, HashSet};
+use crate::model::{MemberId, MemberSet, MemberSetExpr};
+use fxhash::{FxHashMap, FxHashSet};
 
+/// Resolves group names to sets of member IDs
 pub struct MemberSetResolver<'a> {
-    order: &'a [&'a str],
-    order_lookup: HashSet<&'a str>,
-    base_sets: HashMap<&'a str, HashSet<&'a str>>,
-    groups: HashMap<&'a str, HashSet<&'a str>>,
+    // Groups map group names to sets of member IDs
+    groups: FxHashMap<&'a str, FxHashSet<MemberId>>,
+    default_members: Option<FxHashSet<MemberId>>,
 }
 
 impl<'a> MemberSetResolver<'a> {
-    pub fn new(order: &'a [&'a str]) -> Self {
-        let order_lookup: HashSet<&str> = order.iter().copied().collect();
+    pub fn new() -> Self {
+        Self::new_with_members(std::iter::empty())
+    }
 
-        let mut base_sets: HashMap<&str, HashSet<&str>> = order
-            .iter()
-            .copied()
-            .map(|member| (member, HashSet::from([member])))
-            .collect();
-        base_sets.insert("MEMBERS", order_lookup.clone());
-
+    pub fn new_with_members<I>(members: I) -> Self
+    where
+        I: IntoIterator<Item = MemberId>,
+    {
+        let default_members: FxHashSet<MemberId> = members.into_iter().collect();
         Self {
-            order,
-            order_lookup,
-            base_sets,
-            groups: HashMap::new(),
+            groups: FxHashMap::default(),
+            default_members: if default_members.is_empty() {
+                None
+            } else {
+                Some(default_members)
+            },
         }
     }
 
@@ -31,7 +32,7 @@ impl<'a> MemberSetResolver<'a> {
         &mut self,
         name: &'a str,
         expr: &MemberSetExpr<'a>,
-    ) -> Option<MemberSet<'a>> {
+    ) -> Option<MemberSet> {
         let members = self.evaluate_members(expr)?;
         self.register_group_members(name, members.iter());
         Some(members)
@@ -39,44 +40,39 @@ impl<'a> MemberSetResolver<'a> {
 
     pub fn register_group_members<I>(&mut self, name: &'a str, members: I)
     where
-        I: IntoIterator<Item = &'a str>,
+        I: IntoIterator<Item = MemberId>,
     {
         self.groups.insert(name, members.into_iter().collect());
     }
 
-    pub fn evaluate_members(&self, expr: &MemberSetExpr<'a>) -> Option<MemberSet<'a>> {
-        let set = self.evaluate_set(expr)?;
-        Some(MemberSet::new(self.order_members(&set)))
+    pub fn evaluate_members(&self, expr: &MemberSetExpr<'a>) -> Option<MemberSet> {
+        let set = expr.evaluate(&|name| {
+            if name == "MEMBERS" {
+                self.default_members.as_ref()
+            } else {
+                self.groups.get(name)
+            }
+        })?;
+        let mut ordered: Vec<MemberId> = set.iter().copied().collect();
+        ordered.sort_unstable();
+        Some(MemberSet::new(ordered))
     }
 
     pub fn is_defined(&self, name: &str) -> bool {
-        self.groups.contains_key(name) || self.base_sets.contains_key(name)
-    }
-
-    fn evaluate_set(&self, expr: &MemberSetExpr<'a>) -> Option<HashSet<&'a str>> {
-        expr.evaluate(&|name| self.groups.get(name).or_else(|| self.base_sets.get(name)))
-            .map(|cow| cow.into_owned())
-    }
-
-    fn order_members(&self, set: &HashSet<&'a str>) -> Vec<&'a str> {
-        let mut ordered: Vec<&str> = self
-            .order
-            .iter()
-            .copied()
-            .filter(|member| set.contains(member))
-            .collect();
-
-        if ordered.len() == set.len() {
-            return ordered;
+        if name == "MEMBERS" {
+            self.default_members.is_some()
+        } else {
+            self.groups.contains_key(name)
         }
+    }
 
-        let mut extras: Vec<&str> = set
-            .iter()
-            .copied()
-            .filter(|member| !self.order_lookup.contains(member))
-            .collect();
-        extras.sort_unstable();
-        ordered.extend(extras);
-        ordered
+    pub fn is_group_defined(&self, name: &str) -> bool {
+        self.groups.contains_key(name)
+    }
+}
+
+impl<'a> Default for MemberSetResolver<'a> {
+    fn default() -> Self {
+        Self::new()
     }
 }
