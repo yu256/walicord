@@ -1,14 +1,14 @@
 use crate::{
-    SettlementOptimizationError,
     error::ProgramParseError,
     model::{
         Command, PersonBalance, Script, ScriptStatement, ScriptStatementWithLine, SettleUpContext,
     },
     ports::{ProgramParser, SettlementOptimizer},
+    SettlementOptimizationError,
 };
 use std::borrow::Cow;
 use walicord_domain::{
-    BalanceAccumulator, MemberBalances, SettleUpPolicy, Transfer, model::MemberId,
+    model::MemberId, BalanceAccumulator, MemberBalances, SettleUpPolicy, Transfer,
 };
 
 pub struct SettlementResult {
@@ -90,6 +90,7 @@ impl<'a> MessageProcessor<'a> {
             }
 
             if has_any {
+                // Offsets reflect concatenating messages with a single newline separator.
                 line_count += content.lines().count() + if ends_with_newline { 1 } else { 0 };
             } else {
                 line_count = content.lines().count();
@@ -304,8 +305,8 @@ mod tests {
     };
     use rstest::{fixture, rstest};
     use walicord_domain::{
-        Payment, Statement,
         model::{MemberId, MemberSetExpr, MemberSetOp, Money},
+        Payment, Statement,
     };
 
     struct StubParser;
