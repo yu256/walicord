@@ -28,8 +28,10 @@ impl DiscordChannelService {
         guild_id: GuildId,
     ) -> Result<Vec<Member>, ChannelError> {
         use futures::stream::TryStreamExt;
+        let bot_id = ctx.cache.current_user().id;
         guild_id
             .members_iter(&ctx.http)
+            .try_filter(|m| std::future::ready(m.user.id != bot_id))
             .try_collect()
             .await
             .map_err(|e| ChannelError::Request(format!("{e:?}")))
