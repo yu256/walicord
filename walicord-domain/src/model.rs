@@ -1,5 +1,6 @@
 use fxhash::{FxHashMap, FxHashSet};
 use std::{
+    borrow::Cow,
     fmt,
     ops::{Add, AddAssign, Neg, Sub, SubAssign},
 };
@@ -168,11 +169,11 @@ impl<'a> MemberSetExpr<'a> {
     ///
     /// # Arguments
     /// * `member_resolver` - Resolves a group name to a borrowed set of member IDs
-    pub fn evaluate<'r, F>(&self, member_resolver: &F) -> Option<FxHashSet<MemberId>>
+    pub fn evaluate<'r, F>(&self, member_resolver: &F) -> Option<Cow<'r, FxHashSet<MemberId>>>
     where
         F: Fn(&str) -> Option<&'r FxHashSet<MemberId>>,
     {
-        let mut stack: Vec<FxHashSet<MemberId>> = Vec::with_capacity(self.ops.len());
+        let mut stack: Vec<Cow<'r, FxHashSet<MemberId>>> = Vec::with_capacity(self.ops.len());
 
         for op in &self.ops {
             match op {
@@ -180,27 +181,29 @@ impl<'a> MemberSetExpr<'a> {
                     // Direct member reference - create singleton set
                     let mut set = FxHashSet::default();
                     set.insert(*id);
-                    stack.push(set);
+                    stack.push(Cow::Owned(set));
                 }
                 MemberSetOp::PushGroup(name) => {
-                    // Group reference - resolve through resolver and clone only when needed
                     let set = member_resolver(name)?;
-                    stack.push(set.clone());
+                    stack.push(Cow::Borrowed(set));
                 }
                 MemberSetOp::Union => {
                     let b = stack.pop()?;
                     let a = stack.pop()?;
-                    stack.push(a.union(&b).copied().collect());
+                    let merged = a.union(b.as_ref()).copied().collect();
+                    stack.push(Cow::Owned(merged));
                 }
                 MemberSetOp::Intersection => {
                     let b = stack.pop()?;
                     let a = stack.pop()?;
-                    stack.push(a.intersection(&b).copied().collect());
+                    let merged = a.intersection(b.as_ref()).copied().collect();
+                    stack.push(Cow::Owned(merged));
                 }
                 MemberSetOp::Difference => {
                     let b = stack.pop()?;
                     let a = stack.pop()?;
-                    stack.push(a.difference(&b).copied().collect());
+                    let merged = a.difference(b.as_ref()).copied().collect();
+                    stack.push(Cow::Owned(merged));
                 }
             }
         }

@@ -3,11 +3,11 @@
 mod i18n;
 
 use nom::{
+    IResult, Parser,
     branch::alt,
     bytes::complete::{tag, tag_no_case, take_while, take_while1},
     character::complete::{char, u64},
     combinator::opt,
-    IResult, Parser,
 };
 
 #[derive(Debug, Clone, PartialEq)]
