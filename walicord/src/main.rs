@@ -132,7 +132,12 @@ impl<'a> Handler<'a> {
                 .fetch_member_display_names(ctx, channel_id, missing_ids.iter().copied())
                 .await
                 .unwrap_or_else(|e| {
-                    tracing::warn!("Failed to fetch member directory: {:?}", e);
+                    tracing::warn!(
+                        "Failed to fetch member directory for channel {} ({} member IDs): {:?}",
+                        channel_id,
+                        missing_ids.len(),
+                        e
+                    );
                     HashMap::new()
                 });
 

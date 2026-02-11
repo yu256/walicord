@@ -14,6 +14,10 @@ use walicord_domain::model::MemberId;
 pub enum ChannelError {
     #[error("Failed to fetch channel information: {0}")]
     Request(String),
+    #[error("Channel is not a guild channel")]
+    NotGuildChannel,
+    #[error("Guild is not available in cache")]
+    GuildNotCached,
 }
 
 const COMMANDS: &[&str] = &["!variables", "!evaluate"];
@@ -36,11 +40,11 @@ impl DiscordChannelService {
             .map_err(|e| ChannelError::Request(format!("{e:?}")))?;
 
         let Some(guild_channel) = channel.guild() else {
-            return Ok(HashMap::new());
+            return Err(ChannelError::NotGuildChannel);
         };
 
         let Some(guild) = guild_channel.guild(&ctx.cache) else {
-            return Ok(HashMap::new());
+            return Err(ChannelError::GuildNotCached);
         };
 
         let mut members = HashMap::new();
