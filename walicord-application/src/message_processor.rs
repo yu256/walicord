@@ -91,6 +91,9 @@ impl<'a> MessageProcessor<'a> {
 
             if has_any {
                 // Offsets reflect concatenating messages with a single newline separator.
+                // Update line_count as if messages were concatenated with a single newline between
+                // them: add the number of lines in the current content, plus one extra line if the
+                // previous message ended with a newline, to account for the implicit separator.
                 line_count += content.lines().count() + if ends_with_newline { 1 } else { 0 };
             } else {
                 line_count = content.lines().count();
