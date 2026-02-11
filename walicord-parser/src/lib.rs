@@ -508,7 +508,7 @@ mod tests {
         assert_eq!(stmt, Statement::Command(Command::SettleUp(expected_expr)));
     }
 
-    // TDD Phase 1: Tests for mention-based parsing (Discord ID)
+    // Tests for mention-based parsing (Discord ID)
     #[rstest]
     #[case("<@123456789>", 123456789)]
     #[case("<@!123456789>", 123456789)] // nickname mention
@@ -529,7 +529,7 @@ mod tests {
 
     #[test]
     fn test_name_based_parsed_as_group_refs() {
-        // 名前はグループ参照としてパースされる（メンバー参照ではない）
+        // Names are parsed as group references, not member references
         let result = payment("Alice が Bob に 1000 貸した");
         assert!(result.is_ok(), "Names should parse as group references");
 
@@ -542,7 +542,7 @@ mod tests {
 
     #[test]
     fn test_no_members_declaration() {
-        // MEMBERS宣言なしで動作
+        // Works without a MEMBERS declaration
         let input = "<@123> が <@456> に 1000 貸した";
         let result = parse_program(input);
         assert!(result.is_ok(), "Should work without MEMBERS declaration");
@@ -550,13 +550,9 @@ mod tests {
 
     #[test]
     fn test_group_definition_with_mentions() {
-        // グループ定義もメンションで行う
+        // Define groups using mentions as well
         let input = "team := <@111>, <@222>\nteam が <@333> に 1000 貸した";
         let result = parse_program(input);
-        match &result {
-            Err(e) => println!("Parse error: {:?}", e),
-            Ok(_) => {}
-        }
         assert!(
             result.is_ok(),
             "Should support group definitions: {:?}",
