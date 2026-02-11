@@ -29,7 +29,7 @@ pub enum ProcessingOutcome<'a> {
     UndefinedGroup { name: Cow<'a, str>, line: usize },
     UndefinedMember { id: u64, line: usize },
     SyntaxError { line: usize, detail: String },
-    ImplicitPayerWithoutAuthor { line: usize },
+    MissingContextForImplicitPayment { line: usize },
 }
 
 fn line_count_increment(content: &str, prior_ended_with_newline: bool) -> usize {
@@ -294,8 +294,8 @@ impl<'a> MessageProcessor<'a> {
                 line: line + offset,
                 detail,
             },
-            ProgramParseError::ImplicitPayerWithoutAuthor { line } => {
-                ProcessingOutcome::ImplicitPayerWithoutAuthor {
+            ProgramParseError::MissingContextForImplicitPayment { line } => {
+                ProcessingOutcome::MissingContextForImplicitPayment {
                     line: line + offset,
                 }
             }
@@ -392,7 +392,7 @@ mod tests {
                 });
             }
             if content.contains("IMPLICIT") {
-                return Err(ProgramParseError::ImplicitPayerWithoutAuthor { line: 1 });
+                return Err(ProgramParseError::MissingContextForImplicitPayment { line: 1 });
             }
 
             Ok(Script::new(
@@ -482,7 +482,7 @@ mod tests {
             vec![(first, Some(MemberId(1))), ("IMPLICIT", Some(MemberId(2)))],
         );
 
-        let ProcessingOutcome::ImplicitPayerWithoutAuthor { line } = outcome else {
+        let ProcessingOutcome::MissingContextForImplicitPayment { line } = outcome else {
             panic!("unexpected parse outcome");
         };
 

@@ -63,7 +63,9 @@ impl ProgramParser for WalicordProgramParser {
                                 PayerSpec::Implicit => {
                                     let Some(author) = author_id else {
                                         return Err(
-                                            ProgramParseError::ImplicitPayerWithoutAuthor { line },
+                                            ProgramParseError::MissingContextForImplicitPayment {
+                                                line,
+                                            },
                                         );
                                     };
                                     MemberSetExpr::new(vec![MemberSetOp::Push(author)])
@@ -180,7 +182,7 @@ mod tests {
         let members: [MemberId; 0] = [];
         let result = parser.parse(&members, input, None);
         match result {
-            Err(ProgramParseError::ImplicitPayerWithoutAuthor { line }) => {
+            Err(ProgramParseError::MissingContextForImplicitPayment { line }) => {
                 assert_eq!(line, 1);
             }
             _ => panic!("expected implicit payer without author error"),

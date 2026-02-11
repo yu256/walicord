@@ -419,7 +419,7 @@ impl<'a> Handler<'a> {
                 .await;
                 false
             }
-            ProcessingOutcome::ImplicitPayerWithoutAuthor { line } => {
+            ProcessingOutcome::MissingContextForImplicitPayment { line } => {
                 self.react(ctx, msg, '❎').await;
                 self.reply(
                     ctx,
