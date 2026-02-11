@@ -6,7 +6,6 @@ members = [
     "walicord-domain",
     "walicord-i18n",
     "walicord-infrastructure",
-    "walicord-interpreter",
     "walicord-parser",
     "walicord-presentation"
 ]

@@ -2687,18 +2687,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "walicord-interpreter"
-version = "0.1.0"
-dependencies = [
- "walicord-application",
- "walicord-domain",
- "walicord-i18n",
- "walicord-infrastructure",
- "walicord-parser",
- "walicord-presentation",
-]
-
-[[package]]
 name = "walicord-parser"
 version = "0.1.0"
 dependencies = [
