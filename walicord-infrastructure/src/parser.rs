@@ -17,15 +17,12 @@ pub struct WalicordProgramParser;
 impl ProgramParser for WalicordProgramParser {
     fn parse<'a>(
         &self,
-        _members: &'a [&'a str], // Kept for API compatibility, but no longer used
+        member_ids: &'a [MemberId],
         content: &'a str,
     ) -> Result<Script<'a>, ProgramParseError<'a>> {
         match parse_program(content) {
             Ok(program) => {
-                let walicord_parser::Program {
-                    members_decl,
-                    statements,
-                } = program;
+                let walicord_parser::Program { statements, .. } = program;
 
                 let mut app_statements = Vec::with_capacity(statements.len());
                 let mut domain_statements = Vec::with_capacity(statements.len());
@@ -97,8 +94,9 @@ impl ProgramParser for WalicordProgramParser {
                     }
                 }
 
-                DomainProgram::try_new(domain_statements).map_err(ProgramParseError::from)?;
-                Ok(Script::new(members_decl, app_statements))
+                DomainProgram::try_new(domain_statements, member_ids)
+                    .map_err(ProgramParseError::from)?;
+                Ok(Script::new(member_ids, app_statements))
             }
             Err(err) => {
                 // Handle error conversion

@@ -25,7 +25,7 @@ pub enum Statement<'a> {
 }
 
 pub struct Program<'a> {
-    // members field removed - MEMBERS declaration no longer required
+    members: Vec<MemberId>,
     statements: Vec<Statement<'a>>,
 }
 
@@ -232,18 +232,19 @@ impl<'a> MemberSetExpr<'a> {
 }
 
 impl<'a> Program<'a> {
-    pub fn try_new(statements: Vec<StatementWithLine<'a>>) -> Result<Self, ProgramBuildError<'a>> {
-        // MEMBERS declaration no longer required
-        // Collect all unique member IDs from statements
+    pub fn try_new(
+        statements: Vec<StatementWithLine<'a>>,
+        member_ids: &[MemberId],
+    ) -> Result<Self, ProgramBuildError<'a>> {
         let mut validated_statements = Vec::with_capacity(statements.len());
-        let mut resolver = MemberSetResolver::new();
+        let mut resolver = MemberSetResolver::new_with_members(member_ids.iter().copied());
 
         for StatementWithLine { line, statement } in statements {
             match &statement {
                 Statement::Declaration(decl) => {
                     // Check that all referenced groups are defined
                     for group_name in decl.expression.referenced_groups() {
-                        if !resolver.is_group_defined(group_name) {
+                        if !resolver.is_defined(group_name) {
                             return Err(ProgramBuildError::UndefinedGroup {
                                 name: group_name,
                                 line,
@@ -266,7 +267,7 @@ impl<'a> Program<'a> {
                         .referenced_groups()
                         .chain(payment.payee.referenced_groups())
                     {
-                        if !resolver.is_group_defined(group_name) {
+                        if !resolver.is_defined(group_name) {
                             return Err(ProgramBuildError::UndefinedGroup {
                                 name: group_name,
                                 line,
@@ -280,6 +281,7 @@ impl<'a> Program<'a> {
         }
 
         Ok(Self {
+            members: member_ids.to_vec(),
             statements: validated_statements,
         })
     }
@@ -289,7 +291,7 @@ impl<'a> Program<'a> {
     }
 
     pub fn calculate_balances(&self) -> MemberBalances {
-        let mut accumulator = BalanceAccumulator::new();
+        let mut accumulator = BalanceAccumulator::new_with_members(&self.members);
         for stmt in &self.statements {
             accumulator.apply(stmt);
         }
@@ -305,8 +307,12 @@ impl<'a> Default for BalanceAccumulator<'a> {
 
 impl<'a> BalanceAccumulator<'a> {
     pub fn new() -> Self {
+        Self::new_with_members(&[])
+    }
+
+    pub fn new_with_members(member_ids: &[MemberId]) -> Self {
         let balances: MemberBalances = MemberBalances::default();
-        let resolver = MemberSetResolver::new();
+        let resolver = MemberSetResolver::new_with_members(member_ids.iter().copied());
 
         Self { balances, resolver }
     }

@@ -29,7 +29,6 @@ use walicord_application::{
 };
 use walicord_domain::model::MemberId;
 use walicord_infrastructure::{WalicordProgramParser, WalicordSettlementOptimizer};
-// MEMBERS declaration removed; no topic parsing needed
 use walicord_presentation::{SettlementPresenter, SettlementView, VariablesPresenter};
 
 fn load_target_channel_ids() -> Vec<ChannelId> {
@@ -179,14 +178,28 @@ impl<'a> Handler<'a> {
     }
 
     async fn process_program_message(&self, ctx: &Context, msg: &Message) -> bool {
-        let members: [&str; 0] = [];
+        let member_ids = match self
+            .channel_service
+            .fetch_channel_member_ids(ctx, msg.channel_id)
+            .await
+        {
+            Ok(member_ids) => member_ids,
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to fetch channel member IDs for {}: {:?}",
+                    msg.channel_id,
+                    e
+                );
+                Vec::new()
+            }
+        };
         let existing_content = self.get_combined_content(&msg.channel_id);
         let mut member_directory: Option<HashMap<MemberId, String>> = None;
 
         let previous_statement_count = if existing_content.is_empty() {
             0
         } else {
-            match self.processor.parse_program(&members, &existing_content) {
+            match self.processor.parse_program(&member_ids, &existing_content) {
                 ProcessingOutcome::Success(program) => program.statements().len(),
                 ProcessingOutcome::FailedToEvaluateGroup { .. }
                 | ProcessingOutcome::UndefinedGroup { .. }
@@ -201,7 +214,7 @@ impl<'a> Handler<'a> {
         }
         content.push_str(&msg.content);
 
-        match self.processor.parse_program(&members, &content) {
+        match self.processor.parse_program(&member_ids, &content) {
             ProcessingOutcome::Success(program) => {
                 let mut commands: Vec<(usize, ProgramCommand)> = Vec::new();
                 let mut has_effect_statement = false;
@@ -242,7 +255,11 @@ impl<'a> Handler<'a> {
                 for (stmt_index, command) in commands {
                     match command {
                         ProgramCommand::Variables => {
-                            let reply = VariablesPresenter::render_for_prefix(&program, stmt_index);
+                            let reply = VariablesPresenter::render_for_prefix_with_members(
+                                &program,
+                                stmt_index,
+                                &member_ids,
+                            );
                             self.reply(ctx, msg, reply).await;
                         }
                         ProgramCommand::Evaluate => {

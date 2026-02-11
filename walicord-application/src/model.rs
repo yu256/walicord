@@ -21,19 +21,19 @@ pub struct ScriptStatementWithLine<'a> {
 }
 
 pub struct Script<'a> {
-    members: &'a [&'a str],
+    members: &'a [MemberId],
     statements: Vec<ScriptStatementWithLine<'a>>,
 }
 
 impl<'a> Script<'a> {
-    pub fn new(members: &'a [&'a str], statements: Vec<ScriptStatementWithLine<'a>>) -> Self {
+    pub fn new(member_ids: &'a [MemberId], statements: Vec<ScriptStatementWithLine<'a>>) -> Self {
         Self {
-            members,
+            members: member_ids,
             statements,
         }
     }
 
-    pub fn members(&self) -> &'a [&'a str] {
+    pub fn members(&self) -> &'a [MemberId] {
         self.members
     }
 

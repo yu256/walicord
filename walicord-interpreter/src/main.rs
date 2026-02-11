@@ -4,8 +4,8 @@ use walicord_application::{
     Command as ProgramCommand, MessageProcessor, ProcessingOutcome, Script, ScriptStatement,
     SettlementOptimizationError,
 };
+use walicord_domain::model::MemberId;
 use walicord_infrastructure::{WalicordProgramParser, WalicordSettlementOptimizer};
-// MEMBERS declaration removed; no topic parsing needed
 use walicord_presentation::{SettlementPresenter, SettlementView, VariablesPresenter};
 
 type CliResult<T> = Result<T, Cow<'static, str>>;
@@ -38,11 +38,11 @@ fn run() -> CliResult<()> {
     let source =
         fs::read_to_string(&path).map_err(|err| format!("Failed to read '{path}': {err}"))?;
 
-    let (members, program_content) = parse_members_first_line(&source)?;
+    let (member_ids, program_content) = parse_members_first_line(&source)?;
 
     let processor = MessageProcessor::new(&WalicordProgramParser, &WalicordSettlementOptimizer);
 
-    let program = match processor.parse_program(&members, program_content) {
+    let program = match processor.parse_program(&member_ids, program_content) {
         ProcessingOutcome::Success(program) => program,
         ProcessingOutcome::FailedToEvaluateGroup { name, line } => {
             return Err(format!(
@@ -127,6 +127,6 @@ fn print_program_output<'a>(
     Ok(())
 }
 
-fn parse_members_first_line(source: &str) -> CliResult<(Vec<&str>, &str)> {
+fn parse_members_first_line(source: &str) -> CliResult<(Vec<MemberId>, &str)> {
     Ok((Vec::new(), source))
 }

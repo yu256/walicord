@@ -31,7 +31,7 @@ proptest! {
             });
         }
 
-        let program = Program::try_new(statements).expect("program build failed");
+        let program = Program::try_new(statements, &[]).expect("program build failed");
         let balances = program.calculate_balances();
         let total: i64 = balances.values().map(|money| money.amount()).sum();
         prop_assert_eq!(total, 0);
@@ -83,7 +83,7 @@ proptest! {
             ops.push(MemberSetOp::Push(MemberId(1)));
         }
 
-        let program = Program::try_new(statements).expect("program build failed");
+        let program = Program::try_new(statements, &[]).expect("program build failed");
         let balances = program.calculate_balances();
 
         let settle_expr = MemberSetExpr::new(ops);

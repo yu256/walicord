@@ -5,12 +5,26 @@ use fxhash::{FxHashMap, FxHashSet};
 pub struct MemberSetResolver<'a> {
     // Groups map group names to sets of member IDs
     groups: FxHashMap<&'a str, FxHashSet<MemberId>>,
+    default_members: Option<FxHashSet<MemberId>>,
 }
 
 impl<'a> MemberSetResolver<'a> {
     pub fn new() -> Self {
+        Self::new_with_members(std::iter::empty())
+    }
+
+    pub fn new_with_members<I>(members: I) -> Self
+    where
+        I: IntoIterator<Item = MemberId>,
+    {
+        let default_members: FxHashSet<MemberId> = members.into_iter().collect();
         Self {
             groups: FxHashMap::default(),
+            default_members: if default_members.is_empty() {
+                None
+            } else {
+                Some(default_members)
+            },
         }
     }
 
@@ -32,15 +46,24 @@ impl<'a> MemberSetResolver<'a> {
     }
 
     pub fn evaluate_members(&self, expr: &MemberSetExpr<'a>) -> Option<MemberSet> {
-        let set = expr.evaluate(&|name| self.groups.get(name))?;
+        let set = expr.evaluate(&|name| {
+            if name == "MEMBERS" {
+                self.default_members.as_ref()
+            } else {
+                self.groups.get(name)
+            }
+        })?;
         let mut ordered: Vec<MemberId> = set.iter().copied().collect();
         ordered.sort_unstable();
         Some(MemberSet::new(ordered))
     }
 
     pub fn is_defined(&self, name: &str) -> bool {
-        // For the new design, we check if it's a registered group
-        self.groups.contains_key(name)
+        if name == "MEMBERS" {
+            self.default_members.is_some()
+        } else {
+            self.groups.contains_key(name)
+        }
     }
 
     pub fn is_group_defined(&self, name: &str) -> bool {

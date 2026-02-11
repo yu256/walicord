@@ -440,6 +440,7 @@ mod tests {
     use rstest::rstest;
 
     #[rstest]
+    #[case("MEMBERS", &[SetOp::PushGroup("MEMBERS")])]
     #[case("<@65>", &[SetOp::Push(65)])] // 'A' = 65 in ASCII
     #[case(
         "<@65> ∪ <@66>",

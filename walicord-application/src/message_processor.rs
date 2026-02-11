@@ -43,13 +43,13 @@ impl<'a> MessageProcessor<'a> {
 
     pub fn parse_program<'b>(
         &self,
-        members: &'b [&'b str],
+        member_ids: &'b [MemberId],
         content: &'b str,
     ) -> ProcessingOutcome<'b>
     where
         'a: 'b,
     {
-        match self.parser.parse(members, content) {
+        match self.parser.parse(member_ids, content) {
             Ok(program) => ProcessingOutcome::Success(program),
             Err(ProgramParseError::FailedToEvaluateGroup { name, line }) => {
                 ProcessingOutcome::FailedToEvaluateGroup { name, line }
@@ -148,7 +148,7 @@ impl<'a> MessageProcessor<'a> {
             None => statements.len(),
         };
 
-        let mut accumulator = BalanceAccumulator::new();
+        let mut accumulator = BalanceAccumulator::new_with_members(program.members());
         let mut last_settle_members: Vec<MemberId> = Vec::new();
         let mut last_settle_transfers: Vec<Transfer> = Vec::new();
         let last_is_settle = apply_settle
@@ -250,7 +250,7 @@ mod tests {
     impl ProgramParser for StubParser {
         fn parse<'a>(
             &self,
-            _members: &'a [&'a str],
+            _member_ids: &'a [MemberId],
             _content: &'a str,
         ) -> Result<Script<'a>, ProgramParseError<'a>> {
             let statements = vec![
@@ -278,7 +278,7 @@ mod tests {
                 },
             ];
 
-            Ok(Script::new(&["A", "B", "C"], statements))
+            Ok(Script::new(&[], statements))
         }
     }
 
@@ -300,7 +300,7 @@ mod tests {
 
     #[rstest]
     fn settle_up_response_groups_transfers(processor: MessageProcessor<'_>) {
-        let members = ["A", "B", "C"];
+        let members: [MemberId; 0] = [];
         let program = match processor.parse_program(&members, "unused") {
             ProcessingOutcome::Success(program) => program,
             _ => panic!("unexpected parse outcome"),

@@ -9,7 +9,7 @@ use walicord_domain::{Transfer, model::MemberId};
 pub trait ProgramParser: Send + Sync {
     fn parse<'a>(
         &self,
-        members: &'a [&'a str],
+        member_ids: &'a [MemberId],
         content: &'a str,
     ) -> Result<Script<'a>, ProgramParseError<'a>>;
 }

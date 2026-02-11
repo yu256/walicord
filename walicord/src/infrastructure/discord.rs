@@ -68,6 +68,41 @@ impl DiscordChannelService {
         Ok(members)
     }
 
+    pub async fn fetch_channel_member_ids(
+        &self,
+        ctx: &Context,
+        channel_id: ChannelId,
+    ) -> Result<Vec<MemberId>, ChannelError> {
+        let channel = channel_id
+            .to_channel(&ctx.http)
+            .await
+            .map_err(|e| ChannelError::Request(format!("{e:?}")))?;
+
+        let Some(guild_channel) = channel.guild() else {
+            return Err(ChannelError::NotGuildChannel);
+        };
+
+        let Some(guild) = guild_channel.guild(&ctx.cache) else {
+            return Err(ChannelError::GuildNotCached);
+        };
+
+        let mut member_ids: Vec<MemberId> = guild
+            .members
+            .iter()
+            .filter_map(|(user_id, member)| {
+                guild
+                    .user_permissions_in(&guild_channel, member)
+                    .view_channel()
+                    .then_some(MemberId(user_id.get()))
+            })
+            .collect();
+
+        member_ids.sort_unstable();
+        member_ids.dedup();
+
+        Ok(member_ids)
+    }
+
     pub async fn fetch_all_messages(
         &self,
         ctx: &Context,
