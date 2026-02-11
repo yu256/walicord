@@ -38,11 +38,10 @@ fn run() -> CliResult<()> {
     let source =
         fs::read_to_string(&path).map_err(|err| format!("Failed to read '{path}': {err}"))?;
 
-    let (member_ids, program_content) = parse_members_first_line(&source)?;
-
     let processor = MessageProcessor::new(&WalicordProgramParser, &WalicordSettlementOptimizer);
 
-    let program = match processor.parse_program(&member_ids, program_content) {
+    let member_ids: Vec<MemberId> = Vec::new();
+    let program = match processor.parse_program(&member_ids, &source) {
         ProcessingOutcome::Success(program) => program,
         ProcessingOutcome::FailedToEvaluateGroup { name, line } => {
             return Err(format!(
@@ -125,8 +124,4 @@ fn print_program_output<'a>(
     }
 
     Ok(())
-}
-
-fn parse_members_first_line(source: &str) -> CliResult<(Vec<MemberId>, &str)> {
-    Ok((Vec::new(), source))
 }
