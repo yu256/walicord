@@ -171,6 +171,11 @@ fn settle_up_pre_and_post_balances(
     "group1 := <@1> <@2>\n<@3> lent 90 to group1\n!settleup group1 ∪ <@3>",
     &[(1, 0), (2, 0), (3, 0)],
 )]
+#[case::settle_space_separated_mentions(
+    &EMPTY_MEMBERS,
+    "<@1> lent 100 to <@2>\n<@2> lent 50 to <@3>\n!settleup <@1> <@2> <@3>",
+    &[(1, 0), (2, 0), (3, 0)],
+)]
 #[case::settle_after_multiple_payments(
     &EMPTY_MEMBERS,
     "<@1> lent 100 to <@2>\n<@2> lent 30 to <@3>\n<@3> lent 10 to <@1>\n!settleup <@1>",

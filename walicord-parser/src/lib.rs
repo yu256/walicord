@@ -172,24 +172,17 @@ fn mention_sequence(input: &str) -> IResult<&str, SetExpr<'_>> {
 
     let (input, mentions) = many1((mention, sp).map(|(id, _)| id)).parse(input)?;
 
-    if mentions.len() == 1 {
-        // Single mention, just push it
-        let mut expr = SetExpr::new();
-        expr.push(SetOp::Push(mentions[0]));
-        Ok((input, expr))
-    } else {
-        // Multiple mentions, create union operations
-        let mut expr = SetExpr::new();
-        let len = mentions.len();
-        for id in mentions {
-            expr.push(SetOp::Push(id));
-        }
-        // Add Union operations for n-1 times (to combine n mentions)
-        for _ in 0..len - 1 {
-            expr.push(SetOp::Union);
-        }
-        Ok((input, expr))
+    // Create union operations for all mentions
+    let mut expr = SetExpr::new();
+    let len = mentions.len();
+    for id in mentions {
+        expr.push(SetOp::Push(id));
     }
+    // Add Union operations for n-1 times (to combine n mentions)
+    for _ in 0..len - 1 {
+        expr.push(SetOp::Union);
+    }
+    Ok((input, expr))
 }
 
 // Parse group name (identifier) - only for group declarations like "team := ..."
