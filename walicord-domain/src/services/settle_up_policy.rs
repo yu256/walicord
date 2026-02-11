@@ -1,16 +1,23 @@
 use crate::{
-    model::{MemberId, Money, Settlement},
+    model::{MemberBalances, MemberId, Money, Settlement},
     services::SettlementCalculator,
 };
-use fxhash::FxHashMap;
 
 pub struct SettleUpPolicy;
 
 impl SettleUpPolicy {
-    pub fn settle(balances: FxHashMap<MemberId, Money>, settle_members: &[MemberId]) -> Settlement {
+    pub fn settle<I>(
+        mut balances: MemberBalances,
+        all_members: I,
+        settle_members: &[MemberId],
+    ) -> Settlement
+    where
+        I: IntoIterator<Item = MemberId>,
+    {
         let calculator = SettlementCalculator;
-        let mut all_members: Vec<MemberId> = balances.keys().copied().collect();
-        all_members.sort_unstable();
-        calculator.calculate(balances, &all_members, settle_members)
+        for member in all_members {
+            balances.entry(member).or_insert(Money::zero());
+        }
+        calculator.calculate(balances, settle_members)
     }
 }

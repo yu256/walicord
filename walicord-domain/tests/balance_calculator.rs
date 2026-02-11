@@ -95,7 +95,12 @@ proptest! {
             return Ok(());
         }
 
-        let settlement = SettleUpPolicy::settle(balances, settle_members.members());
+        let all_members: Vec<MemberId> = balances.keys().copied().collect();
+        let settlement = SettleUpPolicy::settle(
+            balances,
+            all_members.into_iter().chain(settle_members.iter()),
+            settle_members.members(),
+        );
         let balances = settlement.new_balances;
 
         for idx in 0..member_count {

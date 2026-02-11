@@ -1,6 +1,7 @@
-use fxhash::{FxHashMap, FxHashSet};
+use fxhash::FxHashSet;
 use std::{
     borrow::Cow,
+    collections::BTreeMap,
     fmt,
     ops::{Add, AddAssign, Neg, Sub, SubAssign},
 };
@@ -29,7 +30,7 @@ pub struct Program<'a> {
 }
 
 pub struct BalanceAccumulator<'a> {
-    balances: FxHashMap<MemberId, Money>,
+    balances: MemberBalances,
     resolver: MemberSetResolver<'a>,
 }
 
@@ -122,6 +123,8 @@ impl Neg for Money {
 /// Discord user ID
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct MemberId(pub u64);
+
+pub type MemberBalances = BTreeMap<MemberId, Money>;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum MemberSetOp<'a> {
@@ -285,7 +288,7 @@ impl<'a> Program<'a> {
         &self.statements
     }
 
-    pub fn calculate_balances(&self) -> FxHashMap<MemberId, Money> {
+    pub fn calculate_balances(&self) -> MemberBalances {
         let mut accumulator = BalanceAccumulator::new();
         for stmt in &self.statements {
             accumulator.apply(stmt);
@@ -302,7 +305,7 @@ impl<'a> Default for BalanceAccumulator<'a> {
 
 impl<'a> BalanceAccumulator<'a> {
     pub fn new() -> Self {
-        let balances: FxHashMap<MemberId, Money> = FxHashMap::default();
+        let balances: MemberBalances = MemberBalances::default();
         let resolver = MemberSetResolver::new();
 
         Self { balances, resolver }
@@ -344,25 +347,16 @@ impl<'a> BalanceAccumulator<'a> {
         }
     }
 
-    pub fn balances(&self) -> &FxHashMap<MemberId, Money> {
+    pub fn balances(&self) -> &MemberBalances {
         &self.balances
     }
 
-    pub fn into_balances(self) -> FxHashMap<MemberId, Money> {
+    pub fn into_balances(self) -> MemberBalances {
         self.balances
     }
 
-    pub fn set_balances(&mut self, balances: FxHashMap<MemberId, Money>) {
+    pub fn set_balances(&mut self, balances: MemberBalances) {
         self.balances = balances;
-    }
-
-    pub fn ensure_members<I>(&mut self, members: I)
-    where
-        I: IntoIterator<Item = MemberId>,
-    {
-        for member_id in members {
-            self.balances.entry(member_id).or_insert(Money::zero());
-        }
     }
 
     pub fn evaluate_members(&self, expr: &MemberSetExpr<'a>) -> Option<MemberSet> {
@@ -379,12 +373,12 @@ pub struct Transfer {
 
 #[derive(Debug, PartialEq)]
 pub struct Settlement {
-    pub new_balances: FxHashMap<MemberId, Money>,
+    pub new_balances: MemberBalances,
     pub transfers: Vec<Transfer>,
 }
 
 pub fn distribute_balances(
-    balances: &mut FxHashMap<MemberId, Money>,
+    balances: &mut MemberBalances,
     members: &MemberSet,
     amount: Money,
     direction: i64,

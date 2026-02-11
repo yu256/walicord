@@ -6,9 +6,10 @@ use crate::{
     },
     ports::{ProgramParser, SettlementOptimizer},
 };
-use fxhash::FxHashMap;
 use std::borrow::Cow;
-use walicord_domain::{BalanceAccumulator, Money, SettleUpPolicy, Transfer, model::MemberId};
+use walicord_domain::{
+    BalanceAccumulator, MemberBalances, SettleUpPolicy, Transfer, model::MemberId,
+};
 
 pub struct SettlementResult {
     pub balances: Vec<PersonBalance>,
@@ -31,7 +32,7 @@ pub enum ProcessingOutcome<'a> {
 }
 
 struct ApplyResult {
-    balances: FxHashMap<MemberId, Money>,
+    balances: MemberBalances,
     settle_up: Option<SettleUpContext>,
 }
 
@@ -65,7 +66,7 @@ impl<'a> MessageProcessor<'a> {
         }
     }
 
-    pub fn calculate_balances<'b>(&self, program: &'b Script<'b>) -> FxHashMap<MemberId, Money>
+    pub fn calculate_balances<'b>(&self, program: &'b Script<'b>) -> MemberBalances
     where
         'a: 'b,
     {
@@ -76,7 +77,7 @@ impl<'a> MessageProcessor<'a> {
         &self,
         program: &'b Script<'b>,
         prefix_len: usize,
-    ) -> FxHashMap<MemberId, Money>
+    ) -> MemberBalances
     where
         'a: 'b,
     {
@@ -181,10 +182,13 @@ impl<'a> MessageProcessor<'a> {
 
                             last_settle_members.extend(settle_members.iter());
 
-                            accumulator.ensure_members(settle_members.iter());
-
                             let result = SettleUpPolicy::settle(
                                 accumulator.balances().clone(),
+                                accumulator
+                                    .balances()
+                                    .keys()
+                                    .copied()
+                                    .chain(settle_members.iter()),
                                 settle_members.members(),
                             );
                             accumulator.set_balances(result.new_balances);

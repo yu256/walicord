@@ -1,10 +1,9 @@
-use fxhash::FxHashMap;
 use rstest::{fixture, rstest};
 use walicord_application::{
     MessageProcessor, PersonBalance, ProgramParseError, ProgramParser, Script,
     SettlementOptimizationError, SettlementOptimizer,
 };
-use walicord_domain::{Money, Transfer, model::MemberId};
+use walicord_domain::{MemberBalances, Transfer, model::MemberId};
 use walicord_infrastructure::WalicordProgramParser;
 
 struct NoopOptimizer;
@@ -47,7 +46,7 @@ fn parse_program_from_content<'a>(members: &'a [&'a str], content: &'a str) -> S
     }
 }
 
-fn assert_balances(balances: &FxHashMap<MemberId, Money>, expected: &[(u64, i64)]) {
+fn assert_balances(balances: &MemberBalances, expected: &[(u64, i64)]) {
     for (id, balance) in expected {
         assert_eq!(
             balances.get(&MemberId(*id)).map(|money| money.amount()),
@@ -56,7 +55,7 @@ fn assert_balances(balances: &FxHashMap<MemberId, Money>, expected: &[(u64, i64)
     }
 }
 
-fn balances_from_result(balances: &[PersonBalance]) -> FxHashMap<MemberId, Money> {
+fn balances_from_result(balances: &[PersonBalance]) -> MemberBalances {
     balances
         .iter()
         .map(|balance| (balance.id, balance.balance))

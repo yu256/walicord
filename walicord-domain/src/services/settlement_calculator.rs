@@ -1,5 +1,5 @@
-use crate::model::{MemberId, Money, Settlement, Transfer};
-use fxhash::{FxHashMap, FxHashSet};
+use crate::model::{MemberBalances, MemberId, Money, Settlement, Transfer};
+use fxhash::FxHashSet;
 
 /// Settlement calculation service
 pub struct SettlementCalculator;
@@ -11,20 +11,15 @@ impl SettlementCalculator {
     ///
     /// # Arguments
     /// * `balances` - Current balance table (MemberId -> Money)
-    /// * `participants` - List of all participants (MemberIds)
     /// * `settle_members` - Members to settle (MemberIds)
     ///
     /// # Returns
     /// New balances after settlement and transfer list
-    pub fn calculate(
-        &self,
-        balances: FxHashMap<MemberId, Money>,
-        participants: &[MemberId],
-        settle_members: &[MemberId],
-    ) -> Settlement {
+    pub fn calculate(&self, balances: MemberBalances, settle_members: &[MemberId]) -> Settlement {
         let mut working_balances = balances;
         let mut transfers = Vec::new();
         let settle_lookup: FxHashSet<MemberId> = settle_members.iter().copied().collect();
+        let participants: Vec<MemberId> = working_balances.keys().copied().collect();
 
         for &member in settle_members {
             let balance = match working_balances.get(&member).copied() {
@@ -74,7 +69,7 @@ impl SettlementCalculator {
             }
 
             if remaining > 0 {
-                for &other in participants {
+                for &other in &participants {
                     if other == member || settle_lookup.contains(&other) {
                         continue;
                     }
@@ -127,7 +122,7 @@ impl SettlementCalculator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fxhash::FxHashMap;
+    use crate::model::MemberBalances;
     use rstest::{fixture, rstest};
 
     fn id(n: u64) -> MemberId {
@@ -141,41 +136,37 @@ mod tests {
 
     #[rstest]
     #[case::simple_positive_balance(
-        FxHashMap::from_iter([
+        MemberBalances::from_iter([
             (id(1), Money::from_i64(100)),
             (id(2), Money::from_i64(-100)),
         ]),
-        &[id(1), id(2)],
         &[id(1)],
-        FxHashMap::from_iter([(id(1), Money::zero()), (id(2), Money::zero())]),
+        MemberBalances::from_iter([(id(1), Money::zero()), (id(2), Money::zero())]),
         vec![(id(1), id(2), 100)]
     )]
     #[case::simple_negative_balance(
-        FxHashMap::from_iter([
+        MemberBalances::from_iter([
             (id(1), Money::from_i64(-100)),
             (id(2), Money::from_i64(100)),
         ]),
-        &[id(1), id(2)],
         &[id(1)],
-        FxHashMap::from_iter([(id(1), Money::zero()), (id(2), Money::zero())]),
+        MemberBalances::from_iter([(id(1), Money::zero()), (id(2), Money::zero())]),
         vec![(id(2), id(1), 100)]
     )]
     #[case::zero_balance(
-        FxHashMap::from_iter([(id(1), Money::zero()), (id(2), Money::zero())]),
-        &[id(1), id(2)],
+        MemberBalances::from_iter([(id(1), Money::zero()), (id(2), Money::zero())]),
         &[id(1)],
-        FxHashMap::from_iter([(id(1), Money::zero()), (id(2), Money::zero())]),
+        MemberBalances::from_iter([(id(1), Money::zero()), (id(2), Money::zero())]),
         vec![]
     )]
     #[case::multiple_settle_members(
-        FxHashMap::from_iter([
+        MemberBalances::from_iter([
             (id(1), Money::from_i64(100)),
             (id(2), Money::from_i64(100)),
             (id(3), Money::from_i64(-200)),
         ]),
-        &[id(1), id(2), id(3)],
         &[id(1), id(2)],
-        FxHashMap::from_iter([
+        MemberBalances::from_iter([
             (id(1), Money::zero()),
             (id(2), Money::zero()),
             (id(3), Money::zero()),
@@ -183,14 +174,13 @@ mod tests {
         vec![(id(1), id(3), 100), (id(2), id(3), 100)]
     )]
     #[case::cross_group_transfer(
-        FxHashMap::from_iter([
+        MemberBalances::from_iter([
             (id(1), Money::from_i64(100)),
             (id(2), Money::from_i64(-50)),
             (id(3), Money::from_i64(-50)),
         ]),
-        &[id(1), id(2), id(3)],
         &[id(1)],
-        FxHashMap::from_iter([
+        MemberBalances::from_iter([
             (id(1), Money::zero()),
             (id(2), Money::zero()),
             (id(3), Money::zero()),
@@ -198,37 +188,39 @@ mod tests {
         vec![(id(1), id(2), 50), (id(1), id(3), 50)]
     )]
     #[case::empty_settle_members(
-        FxHashMap::from_iter([
+        MemberBalances::from_iter([
             (id(1), Money::from_i64(100)),
             (id(2), Money::from_i64(-100)),
         ]),
-        &[id(1), id(2)],
         &[],
-        FxHashMap::from_iter([
+        MemberBalances::from_iter([
             (id(1), Money::from_i64(100)),
             (id(2), Money::from_i64(-100)),
         ]),
         vec![]
     )]
     #[case::missing_balance_member(
-        FxHashMap::from_iter([
+        MemberBalances::from_iter([
             (id(1), Money::from_i64(100)),
             (id(2), Money::from_i64(-100)),
+            (id(3), Money::zero()),
         ]),
-        &[id(1), id(2), id(3)],
         &[id(1), id(3)],
-        FxHashMap::from_iter([(id(1), Money::zero()), (id(2), Money::zero())]),
+        MemberBalances::from_iter([
+            (id(1), Money::zero()),
+            (id(2), Money::zero()),
+            (id(3), Money::zero()),
+        ]),
         vec![(id(1), id(2), 100)]
     )]
     fn settlement_calculator_cases(
         calculator: SettlementCalculator,
-        #[case] balances: FxHashMap<MemberId, Money>,
-        #[case] participants: &[MemberId],
+        #[case] balances: MemberBalances,
         #[case] settle_members: &[MemberId],
-        #[case] expected_balances: FxHashMap<MemberId, Money>,
+        #[case] expected_balances: MemberBalances,
         #[case] expected_transfers: Vec<(MemberId, MemberId, i64)>,
     ) {
-        let result = calculator.calculate(balances, participants, settle_members);
+        let result = calculator.calculate(balances, settle_members);
 
         assert_eq!(result.new_balances, expected_balances);
 
