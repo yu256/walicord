@@ -88,19 +88,6 @@ impl<'a> Handler<'a> {
             .is_some_and(|target| *target == channel_id)
     }
 
-    fn get_combined_content(&self, channel_id: &ChannelId) -> String {
-        self.message_cache
-            .get(channel_id)
-            .map(|messages| {
-                messages
-                    .iter()
-                    .map(|(_, m)| m.content.as_str())
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            })
-            .unwrap_or_default()
-    }
-
     fn member_ids(result: &SettlementResult) -> impl Iterator<Item = MemberId> + '_ {
         let balances = result.balances.iter().map(|balance| balance.id);
         let transfers = result
@@ -216,28 +203,47 @@ impl<'a> Handler<'a> {
                 Vec::new()
             }
         };
-        let existing_content = self.get_combined_content(&msg.channel_id);
         let mut member_directory: Option<HashMap<MemberId, String>> = None;
+        let author_id = MemberId(msg.author.id.get());
 
-        let previous_statement_count = if existing_content.is_empty() {
-            0
-        } else {
-            match self.processor.parse_program(&member_ids, &existing_content) {
-                ProcessingOutcome::Success(program) => program.statements().len(),
-                ProcessingOutcome::FailedToEvaluateGroup { .. }
-                | ProcessingOutcome::UndefinedGroup { .. }
-                | ProcessingOutcome::UndefinedMember { .. }
-                | ProcessingOutcome::SyntaxError { .. } => 0,
+        let messages_guard = self.message_cache.get(&msg.channel_id);
+
+        let previous_statement_count = match &messages_guard {
+            Some(messages) => {
+                let message_iter = messages
+                    .iter()
+                    .map(|(_, m)| (m.content.as_str(), Some(MemberId(m.author.id.get()))));
+                match self
+                    .processor
+                    .parse_program_sequence(&member_ids, message_iter)
+                {
+                    ProcessingOutcome::Success(program) => program.statements().len(),
+                    ProcessingOutcome::FailedToEvaluateGroup { .. }
+                    | ProcessingOutcome::UndefinedGroup { .. }
+                    | ProcessingOutcome::UndefinedMember { .. }
+                    | ProcessingOutcome::SyntaxError { .. }
+                    | ProcessingOutcome::ImplicitPayerWithoutAuthor { .. } => 0,
+                }
             }
+            None => 0,
         };
 
-        let mut content = existing_content;
-        if !content.is_empty() {
-            content.push('\n');
-        }
-        content.push_str(&msg.content);
+        let parse_outcome = match &messages_guard {
+            Some(messages) => {
+                let message_iter = messages
+                    .iter()
+                    .map(|(_, m)| (m.content.as_str(), Some(MemberId(m.author.id.get()))))
+                    .chain(std::iter::once((msg.content.as_str(), Some(author_id))));
+                self.processor
+                    .parse_program_sequence(&member_ids, message_iter)
+            }
+            None => self.processor.parse_program_sequence(
+                &member_ids,
+                std::iter::once((msg.content.as_str(), Some(author_id))),
+            ),
+        };
 
-        match self.processor.parse_program(&member_ids, &content) {
+        match parse_outcome {
             ProcessingOutcome::Success(program) => {
                 let mut commands: Vec<(usize, ProgramCommand)> = Vec::new();
                 let mut has_effect_statement = false;
@@ -412,6 +418,19 @@ impl<'a> Handler<'a> {
                     ctx,
                     msg,
                     format!("{} Syntax error: {message}", msg.author.mention()),
+                )
+                .await;
+                false
+            }
+            ProcessingOutcome::ImplicitPayerWithoutAuthor { line } => {
+                self.react(ctx, msg, '❎').await;
+                self.reply(
+                    ctx,
+                    msg,
+                    format!(
+                        "{} Implicit payer syntax requires message author context at line {line}.",
+                        msg.author.mention()
+                    ),
                 )
                 .await;
                 false

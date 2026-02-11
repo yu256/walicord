@@ -29,7 +29,7 @@ fn processor() -> MessageProcessor<'static> {
 
 fn parse_program_from_content<'a>(members: &'a [MemberId], content: &'a str) -> Script<'a> {
     let parser = WalicordProgramParser;
-    match parser.parse(members, content) {
+    match parser.parse(members, content, None) {
         Ok(program) => program,
         Err(err) => match err {
             ProgramParseError::FailedToEvaluateGroup { name, line } => {
@@ -44,13 +44,16 @@ fn parse_program_from_content<'a>(members: &'a [MemberId], content: &'a str) -> 
             ProgramParseError::SyntaxError(message) => {
                 panic!("parse failed: {message}")
             }
+            ProgramParseError::ImplicitPayerWithoutAuthor { line } => {
+                panic!("parse failed: implicit payer without author at line {line}")
+            }
         },
     }
 }
 
 fn assert_parse_undefined_group(members: &[MemberId], content: &str, name: &str, line: usize) {
     let parser = WalicordProgramParser;
-    match parser.parse(members, content) {
+    match parser.parse(members, content, None) {
         Ok(_) => panic!("expected undefined group error"),
         Err(ProgramParseError::UndefinedGroup {
             name: actual_name,

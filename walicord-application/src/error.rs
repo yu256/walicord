@@ -7,6 +7,7 @@ pub enum ProgramParseError<'a> {
     UndefinedGroup { name: Cow<'a, str>, line: usize },
     UndefinedMember { id: u64, line: usize },
     SyntaxError(String),
+    ImplicitPayerWithoutAuthor { line: usize },
 }
 
 impl<'a> From<ProgramBuildError<'a>> for ProgramParseError<'a> {

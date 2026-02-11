@@ -11,6 +11,7 @@ pub trait ProgramParser: Send + Sync {
         &self,
         member_ids: &'a [MemberId],
         content: &'a str,
+        author_id: Option<MemberId>,
     ) -> Result<Script<'a>, ProgramParseError<'a>>;
 }
 

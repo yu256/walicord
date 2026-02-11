@@ -40,6 +40,10 @@ impl<'a> Script<'a> {
     pub fn statements(&self) -> &[ScriptStatementWithLine<'a>] {
         &self.statements
     }
+
+    pub fn into_statements(self) -> Vec<ScriptStatementWithLine<'a>> {
+        self.statements
+    }
 }
 
 #[derive(Debug)]
