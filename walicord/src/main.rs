@@ -1,6 +1,7 @@
 #![warn(clippy::uninlined_format_args)]
 
 mod infrastructure;
+mod member_roster_provider;
 
 use dashmap::DashMap;
 use indexmap::IndexMap;
@@ -8,13 +9,17 @@ use infrastructure::{
     discord::{ChannelError, DiscordChannelService},
     svg_renderer::svg_to_png,
 };
+use member_roster_provider::MemberRosterProvider;
 use serenity::{
     all::MessageId,
     async_trait,
     model::{
         channel::{Message, ReactionType},
+        event::GuildMemberUpdateEvent,
         gateway::Ready,
+        guild::Member,
         id::{ChannelId, GuildId},
+        user::User,
     },
     prelude::*,
 };
@@ -61,6 +66,7 @@ struct Handler<'a> {
     target_channel: Option<ChannelId>,
     message_cache: DashMap<ChannelId, IndexMap<MessageId, Message>>,
     channel_service: DiscordChannelService,
+    roster_provider: MemberRosterProvider,
     processor: MessageProcessor<'a>,
 }
 
@@ -68,12 +74,14 @@ impl<'a> Handler<'a> {
     fn new(
         target_channel: Option<ChannelId>,
         channel_service: DiscordChannelService,
+        roster_provider: MemberRosterProvider,
         processor: MessageProcessor<'a>,
     ) -> Self {
         Self {
             target_channel,
             message_cache: DashMap::new(),
             channel_service,
+            roster_provider,
             processor,
         }
     }
@@ -179,8 +187,8 @@ impl<'a> Handler<'a> {
 
     async fn process_program_message(&self, ctx: &Context, msg: &Message) -> bool {
         let member_ids = match self
-            .channel_service
-            .fetch_channel_member_ids(ctx, msg.channel_id)
+            .roster_provider
+            .roster_for_channel(ctx, msg.channel_id)
             .await
         {
             Ok(member_ids) => member_ids,
@@ -531,6 +539,43 @@ impl EventHandler for Handler<'_> {
                 tracing::error!("Failed to fetch initial messages: {:?}", e);
             }
         }
+
+        if let Err(e) = self.roster_provider.warm_up(&ctx, channel_id).await {
+            tracing::warn!(
+                "Failed to build member cache for channel {}: {:?}",
+                channel_id,
+                e
+            );
+        } else {
+            tracing::info!("Member cache built successfully.");
+        }
+    }
+
+    async fn guild_member_addition(&self, _ctx: Context, new_member: Member) {
+        self.roster_provider.apply_member_add(new_member);
+    }
+
+    async fn guild_member_update(
+        &self,
+        _ctx: Context,
+        _old_if_available: Option<Member>,
+        new_if_available: Option<Member>,
+        _event: GuildMemberUpdateEvent,
+    ) {
+        let Some(new_member) = new_if_available else {
+            return;
+        };
+        self.roster_provider.apply_member_update(new_member);
+    }
+
+    async fn guild_member_removal(
+        &self,
+        _ctx: Context,
+        guild_id: GuildId,
+        user: User,
+        _member_data: Option<Member>,
+    ) {
+        self.roster_provider.apply_member_remove(guild_id, user.id);
     }
 
     async fn message_delete(
@@ -590,8 +635,10 @@ async fn main() {
     tracing_subscriber::fmt::init();
 
     let token = env::var("DISCORD_TOKEN").expect("DISCORD_TOKEN is not set");
-    let intents =
-        GatewayIntents::GUILD_MESSAGES | GatewayIntents::MESSAGE_CONTENT | GatewayIntents::GUILDS;
+    let intents = GatewayIntents::GUILD_MESSAGES
+        | GatewayIntents::MESSAGE_CONTENT
+        | GatewayIntents::GUILDS
+        | GatewayIntents::GUILD_MEMBERS;
 
     let target_channel = load_target_channel_ids();
     let processor = MessageProcessor::new(&WalicordProgramParser, &WalicordSettlementOptimizer);
@@ -599,7 +646,13 @@ async fn main() {
     let handles: Vec<tokio::task::JoinHandle<()>> = target_channel
         .into_iter()
         .map(|channel_id| {
-            let handler = Handler::new(Some(channel_id), DiscordChannelService, processor);
+            let roster_provider = MemberRosterProvider::new(DiscordChannelService);
+            let handler = Handler::new(
+                Some(channel_id),
+                DiscordChannelService,
+                roster_provider,
+                processor,
+            );
 
             tokio::spawn({
                 let client_builder = Client::builder(&token, intents);
