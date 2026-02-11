@@ -143,7 +143,6 @@ pub struct StatementWithLine<'a> {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Program<'a> {
-    pub members_decl: &'a [&'a str],
     pub statements: Vec<StatementWithLine<'a>>,
 }
 
@@ -166,6 +165,33 @@ fn mention(input: &str) -> IResult<&str, u64> {
     Ok((input, id))
 }
 
+// Parse a sequence of space-separated mentions as a union
+// e.g., "<@123> <@456> <@789>" becomes Push(123), Push(456), Push(789), Union, Union
+fn mention_sequence(input: &str) -> IResult<&str, SetExpr<'_>> {
+    use nom::multi::many1;
+    
+    let (input, mentions) = many1((mention, sp).map(|(id, _)| id)).parse(input)?;
+    
+    if mentions.len() == 1 {
+        // Single mention, just push it
+        let mut expr = SetExpr::new();
+        expr.push(SetOp::Push(mentions[0]));
+        Ok((input, expr))
+    } else {
+        // Multiple mentions, create union operations
+        let mut expr = SetExpr::new();
+        let len = mentions.len();
+        for id in mentions {
+            expr.push(SetOp::Push(id));
+        }
+        // Add Union operations for n-1 times (to combine n mentions)
+        for _ in 0..len - 1 {
+            expr.push(SetOp::Union);
+        }
+        Ok((input, expr))
+    }
+}
+
 // Parse group name (identifier) - only for group declarations like "team := ..."
 fn identifier(input: &str) -> IResult<&str, &str> {
     take_while1(|c: char| c.is_alphanumeric() || c == '_' || c == '-' || is_japanese_char(c))(input)
@@ -186,16 +212,12 @@ fn sp(input: &str) -> IResult<&str, &str> {
     take_while(|c: char| c.is_whitespace() || c == '\u{3000}')(input)
 }
 
-// Parse a primary expression: mention (Discord ID), identifier (group name), or parenthesized expression
+// Parse a primary expression: mention sequence, identifier (group name), or parenthesized expression
 fn set_primary(input: &str) -> IResult<&str, SetExpr<'_>> {
     alt((
         (char('('), sp, set_expr, sp, char(')')).map(|(_, _, expr, _, _)| expr),
-        // Try parsing as mention first (Discord ID)
-        mention.map(|id| {
-            let mut expr = SetExpr::new();
-            expr.push(SetOp::Push(id));
-            expr
-        }),
+        // Try parsing as mention sequence (one or more space-separated Discord IDs)
+        mention_sequence,
         // Fall back to identifier (group name)
         identifier.map(|name| {
             let mut expr = SetExpr::new();
@@ -256,7 +278,7 @@ fn set_expr(input: &str) -> IResult<&str, SetExpr<'_>> {
 }
 
 fn union_token(input: &str) -> IResult<&str, &str> {
-    alt((tag("∪"), tag(","), tag("，"))).parse(input)
+    tag("∪").parse(input)
 }
 
 // name := expression (e.g., name := (A ∪ B) ∩ C)
@@ -428,10 +450,7 @@ pub fn parse_program<'a>(input: &'a str) -> Result<Program<'a>, ParseError> {
         }
     }
 
-    Ok(Program {
-        members_decl: &[], // Empty slice - MEMBERS declaration is no longer needed
-        statements,
-    })
+    Ok(Program { statements })
 }
 
 #[cfg(test)]
@@ -447,7 +466,7 @@ mod tests {
         &[SetOp::Push(65), SetOp::Push(66), SetOp::Union]
     )]
     #[case(
-        "<@65>, <@66>",
+        "<@65> <@66>",
         &[SetOp::Push(65), SetOp::Push(66), SetOp::Union]
     )]
     #[case(
@@ -551,8 +570,8 @@ mod tests {
 
     #[test]
     fn test_group_definition_with_mentions() {
-        // Define groups using mentions as well
-        let input = "team := <@111>, <@222>\nteam が <@333> に 1000 貸した";
+        // Define groups using space-separated mentions
+        let input = "team := <@111> <@222>\nteam が <@333> に 1000 貸した";
         let result = parse_program(input);
         assert!(
             result.is_ok(),
