@@ -96,7 +96,7 @@ fn balances_from_result(balances: &[PersonBalance]) -> MemberBalances {
 )]
 #[case::settle_all_no_transfers(
     &EMPTY_MEMBERS,
-    "all := <@1>, <@2>\n<@1> lent 100 to <@2>\n!settleup all",
+    "all := <@1> <@2>\n<@1> lent 100 to <@2>\n!settleup all",
     2,
     &[(1, 100), (2, -100)],
     &[(1, 0), (2, 0)],
@@ -110,7 +110,7 @@ fn balances_from_result(balances: &[PersonBalance]) -> MemberBalances {
 )]
 #[case::settle_group_subset(
     &EMPTY_MEMBERS,
-    "group1 := <@1>, <@2>\n<@1> lent 100 to <@3>\n!settleup group1",
+    "group1 := <@1> <@2>\n<@1> lent 100 to <@3>\n!settleup group1",
     2,
     &[(1, 100), (2, 0), (3, -100)],
     &[(1, 0), (2, 0), (3, 0)],
@@ -148,27 +148,32 @@ fn settle_up_pre_and_post_balances(
 )]
 #[case::multiple_members(
     &EMPTY_MEMBERS,
-    "<@1> lent 100 to <@3>\n<@2> lent 100 to <@3>\n<@4> lent 50 to <@1>\n!settleup <@1>, <@2>",
+    "<@1> lent 100 to <@3>\n<@2> lent 100 to <@3>\n<@4> lent 50 to <@1>\n!settleup <@1> <@2>",
     &[(1, 0), (2, 0)],
 )]
 #[case::cross_group(
     &EMPTY_MEMBERS,
-    "<@1> lent 100 to <@3>\n<@2> lent 100 to <@4>\n!settleup <@1>, <@2>",
+    "<@1> lent 100 to <@3>\n<@2> lent 100 to <@4>\n!settleup <@1> <@2>",
     &[(1, 0), (2, 0)],
 )]
 #[case::partial_within_group(
     &EMPTY_MEMBERS,
-    "<@1> lent 100 to <@2>\n<@3> lent 50 to <@1>\n!settleup <@1>, <@2>",
+    "<@1> lent 100 to <@2>\n<@3> lent 50 to <@1>\n!settleup <@1> <@2>",
     &[(1, 0), (2, 0)],
 )]
 #[case::exact_match(
     &EMPTY_MEMBERS,
-    "<@1> lent 100 to <@2>\n<@2> lent 100 to <@3>\n!settleup <@1>, <@2>, <@3>",
+    "<@1> lent 100 to <@2>\n<@2> lent 100 to <@3>\n!settleup <@1> <@2> <@3>",
     &[(1, 0), (2, 0), (3, 0)],
 )]
 #[case::settle_with_group_and_member(
     &EMPTY_MEMBERS,
-    "group1 := <@1>, <@2>\n<@3> lent 90 to group1\n!settleup group1, <@3>",
+    "group1 := <@1> <@2>\n<@3> lent 90 to group1\n!settleup group1 ∪ <@3>",
+    &[(1, 0), (2, 0), (3, 0)],
+)]
+#[case::settle_space_separated_mentions(
+    &EMPTY_MEMBERS,
+    "<@1> lent 100 to <@2>\n<@2> lent 50 to <@3>\n!settleup <@1> <@2> <@3>",
     &[(1, 0), (2, 0), (3, 0)],
 )]
 #[case::settle_after_multiple_payments(
@@ -178,7 +183,7 @@ fn settle_up_pre_and_post_balances(
 )]
 #[case::settle_complex_set_expr(
     &EMPTY_MEMBERS,
-    "all := <@1>, <@2>, <@3>, <@4>\n<@1> lent 100 to <@2>\n<@3> lent 50 to <@4>\n!settleup (all - <@1>) ∪ <@2>",
+    "all := <@1> <@2> <@3> <@4>\n<@1> lent 100 to <@2>\n<@3> lent 50 to <@4>\n!settleup (all - <@1>) ∪ <@2>",
     &[(1, 0), (2, 0), (3, 0), (4, 0)],
 )]
 fn settle_up_post_balances(
@@ -198,12 +203,12 @@ fn settle_up_post_balances(
 #[rstest]
 #[case::remainder_distribution(
     &EMPTY_MEMBERS,
-    "<@1> lent 100 to <@1>, <@2>, <@3>",
+    "<@1> lent 100 to <@1> <@2> <@3>",
     &[(1, 66), (2, -33), (3, -33)],
 )]
 #[case::remainder_distribution_four(
     &EMPTY_MEMBERS,
-    "<@1> lent 10 to <@1>, <@2>, <@3>, <@4>",
+    "<@1> lent 10 to <@1> <@2> <@3> <@4>",
     &[(1, 7), (2, -3), (3, -2), (4, -2)],
 )]
 #[case::complex_set_expr_payee(
@@ -213,12 +218,12 @@ fn settle_up_post_balances(
 )]
 #[case::fullwidth_comma_union(
     &EMPTY_MEMBERS,
-    "<@1> lent 90 to <@2>，<@3>",
+    "<@1> lent 90 to <@2> <@3>",
     &[(1, 90), (2, -45), (3, -45)],
 )]
 #[case::group_as_payee(
     &EMPTY_MEMBERS,
-    "all := <@1>, <@2>, <@3>\n<@1> lent 90 to all",
+    "all := <@1> <@2> <@3>\n<@1> lent 90 to all",
     &[(1, 60), (2, -30), (3, -30)],
 )]
 #[case::members_as_payee(
@@ -228,7 +233,7 @@ fn settle_up_post_balances(
 )]
 #[case::nested_set_expr_payee(
     &EMPTY_MEMBERS,
-    "all := <@1>, <@2>, <@3>, <@4>\n<@1> lent 120 to ((<@1> ∪ <@2>) - <@1>) ∪ (<@3> ∩ all)",
+    "all := <@1> <@2> <@3> <@4>\n<@1> lent 120 to ((<@1> ∪ <@2>) - <@1>) ∪ (<@3> ∩ all)",
     &[(1, 120), (2, -60), (3, -60), (4, 0)],
 )]
 #[case::fullwidth_spaces(
@@ -248,7 +253,7 @@ fn settle_up_post_balances(
 )]
 #[case::same_payer_payee_group(
     &EMPTY_MEMBERS,
-    "group1 := <@1>, <@2>\n<@1> lent 50 to group1",
+    "group1 := <@1> <@2>\n<@1> lent 50 to group1",
     &[(1, 25), (2, -25)],
 )]
 #[case::zero_amount_no_change(

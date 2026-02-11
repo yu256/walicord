@@ -143,7 +143,6 @@ pub struct StatementWithLine<'a> {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Program<'a> {
-    pub members_decl: &'a [&'a str],
     pub statements: Vec<StatementWithLine<'a>>,
 }
 
@@ -157,7 +156,6 @@ pub enum ParseError {
     SyntaxError(String),
 }
 
-// Parse Discord mention: <@123456789> or <@!123456789>
 fn mention(input: &str) -> IResult<&str, u64> {
     let (input, _) = tag("<@")(input)?;
     let (input, _) = opt(char('!')).parse(input)?;
@@ -166,12 +164,26 @@ fn mention(input: &str) -> IResult<&str, u64> {
     Ok((input, id))
 }
 
-// Parse group name (identifier) - only for group declarations like "team := ..."
+fn mention_sequence(input: &str) -> IResult<&str, SetExpr<'_>> {
+    use nom::multi::many1;
+
+    let (input, mentions) = many1((mention, sp).map(|(id, _)| id)).parse(input)?;
+
+    let mut expr = SetExpr::new();
+    let len = mentions.len();
+    for id in mentions {
+        expr.push(SetOp::Push(id));
+    }
+    for _ in 0..len - 1 {
+        expr.push(SetOp::Union);
+    }
+    Ok((input, expr))
+}
+
 fn identifier(input: &str) -> IResult<&str, &str> {
     take_while1(|c: char| c.is_alphanumeric() || c == '_' || c == '-' || is_japanese_char(c))(input)
 }
 
-// Check for Japanese characters
 fn is_japanese_char(c: char) -> bool {
     matches!(c,
         '\u{3040}'..='\u{309F}' | // Hiragana
@@ -181,22 +193,14 @@ fn is_japanese_char(c: char) -> bool {
     )
 }
 
-// Custom whitespace parser that includes full-width spaces
 fn sp(input: &str) -> IResult<&str, &str> {
     take_while(|c: char| c.is_whitespace() || c == '\u{3000}')(input)
 }
 
-// Parse a primary expression: mention (Discord ID), identifier (group name), or parenthesized expression
 fn set_primary(input: &str) -> IResult<&str, SetExpr<'_>> {
     alt((
         (char('('), sp, set_expr, sp, char(')')).map(|(_, _, expr, _, _)| expr),
-        // Try parsing as mention first (Discord ID)
-        mention.map(|id| {
-            let mut expr = SetExpr::new();
-            expr.push(SetOp::Push(id));
-            expr
-        }),
-        // Fall back to identifier (group name)
+        mention_sequence,
         identifier.map(|name| {
             let mut expr = SetExpr::new();
             expr.push(SetOp::PushGroup(name));
@@ -206,7 +210,6 @@ fn set_primary(input: &str) -> IResult<&str, SetExpr<'_>> {
     .parse(input)
 }
 
-// Parse difference operations (highest precedence after primary)
 fn set_difference(input: &str) -> IResult<&str, SetExpr<'_>> {
     (
         set_primary,
@@ -214,7 +217,6 @@ fn set_difference(input: &str) -> IResult<&str, SetExpr<'_>> {
     )
         .map(|(first, ops)| {
             ops.into_iter().fold(first, |mut acc, (_, _, _, right)| {
-                // Merge right's ops into acc, then add Difference op
                 acc.ops.extend(right.ops);
                 acc.push(SetOp::Difference);
                 acc
@@ -223,7 +225,6 @@ fn set_difference(input: &str) -> IResult<&str, SetExpr<'_>> {
         .parse(input)
 }
 
-// Parse intersection operations (middle precedence)
 fn set_intersection(input: &str) -> IResult<&str, SetExpr<'_>> {
     (
         set_difference,
@@ -428,10 +429,7 @@ pub fn parse_program<'a>(input: &'a str) -> Result<Program<'a>, ParseError> {
         }
     }
 
-    Ok(Program {
-        members_decl: &[], // Empty slice - MEMBERS declaration is no longer needed
-        statements,
-    })
+    Ok(Program { statements })
 }
 
 #[cfg(test)]
@@ -447,7 +445,7 @@ mod tests {
         &[SetOp::Push(65), SetOp::Push(66), SetOp::Union]
     )]
     #[case(
-        "<@65>, <@66>",
+        "<@65> <@66>",
         &[SetOp::Push(65), SetOp::Push(66), SetOp::Union]
     )]
     #[case(
@@ -471,6 +469,14 @@ mod tests {
     fn test_set_expr_ops(#[case] input: &str, #[case] expected: &'static [SetOp]) {
         let (_, expr) = set_expr(input).unwrap();
         assert_eq!(&expr.ops, expected);
+    }
+
+    #[rstest]
+    #[case("<@65>, <@66> lent 1000 to <@67>")]
+    #[case("<@65> <@66>, <@67> lent 1000 to <@68>")]
+    fn test_accepts_union_separators(#[case] input: &str) {
+        let result = parse_program(input);
+        assert!(result.is_ok(), "Should accept union separators");
     }
 
     #[rstest]
@@ -551,8 +557,8 @@ mod tests {
 
     #[test]
     fn test_group_definition_with_mentions() {
-        // Define groups using mentions as well
-        let input = "team := <@111>, <@222>\nteam が <@333> に 1000 貸した";
+        // Define groups using space-separated mentions
+        let input = "team := <@111> <@222>\nteam が <@333> に 1000 貸した";
         let result = parse_program(input);
         assert!(
             result.is_ok(),
