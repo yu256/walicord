@@ -154,6 +154,7 @@ impl MemberRosterProvider {
                 let display_name = member
                     .nick
                     .clone()
+                    .or_else(|| member.user.global_name.clone())
                     .unwrap_or_else(|| member.user.name.clone());
                 result.insert(member_id, display_name);
             }
