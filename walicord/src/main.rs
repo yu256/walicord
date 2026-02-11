@@ -6,7 +6,7 @@ mod member_roster_provider;
 use dashmap::DashMap;
 use indexmap::IndexMap;
 use infrastructure::{
-    discord::{ChannelError, DiscordChannelService},
+    discord::{ChannelError, DiscordChannelService, to_member_info},
     svg_renderer::svg_to_png,
 };
 use member_roster_provider::MemberRosterProvider;
@@ -484,7 +484,9 @@ impl EventHandler for Handler<'_> {
     }
 
     async fn guild_member_addition(&self, _ctx: Context, new_member: Member) {
-        self.roster_provider.apply_member_add(new_member);
+        let guild_id = new_member.guild_id;
+        let member_info = to_member_info(&new_member);
+        self.roster_provider.apply_member_add(guild_id, member_info);
     }
 
     async fn guild_member_update(
@@ -497,7 +499,10 @@ impl EventHandler for Handler<'_> {
         let Some(new_member) = new_if_available else {
             return;
         };
-        self.roster_provider.apply_member_update(new_member);
+        let guild_id = new_member.guild_id;
+        let member_info = to_member_info(&new_member);
+        self.roster_provider
+            .apply_member_update(guild_id, member_info);
     }
 
     async fn guild_member_removal(
@@ -507,7 +512,8 @@ impl EventHandler for Handler<'_> {
         user: User,
         _member_data: Option<Member>,
     ) {
-        self.roster_provider.apply_member_remove(guild_id, user.id);
+        self.roster_provider
+            .apply_member_remove(guild_id, MemberId(user.id.get()));
     }
 
     async fn message_delete(

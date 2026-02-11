@@ -4,6 +4,7 @@ use std::{
     collections::BTreeMap,
     fmt,
     ops::{Add, AddAssign, Neg, Sub, SubAssign},
+    sync::Arc,
 };
 
 use crate::services::MemberSetResolver;
@@ -160,6 +161,49 @@ impl MemberSet {
 
     pub fn is_empty(&self) -> bool {
         self.members.is_empty()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemberInfo {
+    pub id: MemberId,
+    pub display_name: Arc<str>,
+    pub username: Arc<str>,
+    pub avatar_url: Option<Arc<str>>,
+}
+
+impl MemberInfo {
+    pub fn effective_name(&self) -> &str {
+        &self.display_name
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn member_info_effective_name_returns_display_name() {
+        let info = MemberInfo {
+            id: MemberId(1),
+            display_name: Arc::from("Nickname"),
+            username: Arc::from("username"),
+            avatar_url: None,
+        };
+        assert_eq!(info.effective_name(), "Nickname");
+    }
+
+    #[test]
+    fn member_info_clone_shares_arc() {
+        let info1 = MemberInfo {
+            id: MemberId(1),
+            display_name: Arc::from("Test"),
+            username: Arc::from("test"),
+            avatar_url: None,
+        };
+        let info2 = info1.clone();
+
+        assert_eq!(info1.display_name.as_ptr(), info2.display_name.as_ptr());
     }
 }
 
