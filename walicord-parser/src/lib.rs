@@ -3,11 +3,11 @@
 mod i18n;
 
 use nom::{
-    IResult, Parser,
     branch::alt,
     bytes::complete::{tag, tag_no_case, take_while, take_while1},
     character::complete::{char, u64},
     combinator::opt,
+    IResult, Parser,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -149,7 +149,7 @@ pub struct Program<'a> {
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum ParseError {
-    #[error("Undefined member ID '{id}' at line {line}.")]
+    #[error("Undefined member ID '<@{id}>' at line {line}.")]
     UndefinedMember { id: u64, line: usize },
     #[error("Undefined group '{name}' at line {line}.")]
     UndefinedGroup { name: String, line: usize },
