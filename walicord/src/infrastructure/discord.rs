@@ -21,7 +21,7 @@ pub enum ChannelError {
     GuildNotCached,
 }
 
-const COMMANDS: &[&str] = &["!variables", "!evaluate"];
+const COMMANDS: &[&str] = &["!variables", "!evaluate", "!settleup", "!確定"];
 
 pub struct DiscordChannelService;
 
