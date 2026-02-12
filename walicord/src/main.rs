@@ -14,8 +14,8 @@ use serenity::{
     all::MessageId,
     async_trait,
     model::{
-        channel::{Message, ReactionType},
-        event::GuildMemberUpdateEvent,
+        channel::{Message, Reaction, ReactionType},
+        event::{GuildMemberUpdateEvent, MessageUpdateEvent},
         gateway::Ready,
         guild::Member,
         id::{ChannelId, GuildId},
@@ -67,6 +67,23 @@ struct Handler<'a> {
     channel_service: DiscordChannelService,
     roster_provider: MemberRosterProvider,
     processor: MessageProcessor<'a>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReactionState {
+    Clear,
+    Valid,
+    Invalid,
+}
+
+enum MessageUpdateResolution {
+    Message(Box<Message>),
+    Fetch,
+}
+
+struct CacheRebuildPlan {
+    cache: IndexMap<MessageId, Message>,
+    reactions: Vec<(Message, ReactionState)>,
 }
 
 impl<'a> Handler<'a> {
@@ -190,6 +207,153 @@ impl<'a> Handler<'a> {
         }
     }
 
+    async fn delete_reaction(&self, ctx: &Context, msg: &Message, emoji: char) {
+        if let Err(e) = msg
+            .delete_reaction(&ctx.http, None, ReactionType::Unicode(emoji.to_string()))
+            .await
+        {
+            tracing::warn!("Failed to remove reaction: {:?}", e);
+        }
+    }
+
+    fn update_cached_reaction_add(
+        message: &mut Message,
+        emoji: &ReactionType,
+        is_me: bool,
+        is_burst: bool,
+    ) -> bool {
+        let Some(entry) = message
+            .reactions
+            .iter_mut()
+            .find(|reaction| reaction.reaction_type == *emoji)
+        else {
+            return false;
+        };
+
+        entry.count = entry.count.saturating_add(1);
+        if is_burst {
+            entry.count_details.burst = entry.count_details.burst.saturating_add(1);
+            if is_me {
+                entry.me_burst = true;
+            }
+        } else {
+            entry.count_details.normal = entry.count_details.normal.saturating_add(1);
+        }
+        if is_me {
+            entry.me = true;
+        }
+
+        true
+    }
+
+    fn update_cached_reaction_remove(
+        message: &mut Message,
+        emoji: &ReactionType,
+        is_me: bool,
+        is_burst: bool,
+    ) -> bool {
+        let Some(position) = message
+            .reactions
+            .iter()
+            .position(|reaction| reaction.reaction_type == *emoji)
+        else {
+            return false;
+        };
+
+        let entry = &mut message.reactions[position];
+        if entry.count > 0 {
+            entry.count -= 1;
+        }
+        if is_burst {
+            entry.count_details.burst = entry.count_details.burst.saturating_sub(1);
+            if is_me {
+                entry.me_burst = false;
+            }
+        } else {
+            entry.count_details.normal = entry.count_details.normal.saturating_sub(1);
+        }
+        if is_me {
+            entry.me = false;
+        }
+
+        if entry.count == 0 {
+            message.reactions.remove(position);
+        }
+
+        true
+    }
+
+    async fn update_reaction_state(&self, ctx: &Context, msg: &Message, desired: ReactionState) {
+        match desired {
+            ReactionState::Valid => {
+                self.delete_reaction(ctx, msg, '❎').await;
+                self.react(ctx, msg, '✅').await;
+            }
+            ReactionState::Invalid => {
+                self.delete_reaction(ctx, msg, '✅').await;
+                self.react(ctx, msg, '❎').await;
+            }
+            ReactionState::Clear => {
+                self.delete_reaction(ctx, msg, '✅').await;
+                self.delete_reaction(ctx, msg, '❎').await;
+            }
+        }
+    }
+
+    async fn rebuild_channel_cache(
+        &self,
+        ctx: &Context,
+        channel_id: ChannelId,
+        updated_message: Option<Message>,
+    ) {
+        let mut messages: Vec<Message> = match self.message_cache.get(&channel_id) {
+            Some(messages) => messages.iter().map(|(_, m)| m.clone()).collect(),
+            None => Vec::new(),
+        };
+
+        if let Some(updated_message) = updated_message {
+            if let Some(pos) = messages.iter().position(|m| m.id == updated_message.id) {
+                messages[pos] = updated_message;
+            } else {
+                messages.push(updated_message);
+            }
+        }
+
+        if messages.is_empty() {
+            self.message_cache.remove(&channel_id);
+            return;
+        }
+
+        let member_ids = match self
+            .roster_provider
+            .roster_for_channel(ctx, channel_id)
+            .await
+        {
+            Ok(member_ids) => member_ids,
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to fetch channel member IDs for {}: {:?}",
+                    channel_id,
+                    e
+                );
+                Vec::new()
+            }
+        };
+
+        let plan = plan_cache_rebuild(&self.processor, &member_ids, messages);
+
+        for (message, desired_reaction) in plan.reactions {
+            self.update_reaction_state(ctx, &message, desired_reaction)
+                .await;
+        }
+
+        if plan.cache.is_empty() {
+            self.message_cache.remove(&channel_id);
+        } else {
+            self.message_cache.insert(channel_id, plan.cache);
+        }
+    }
+
     async fn process_program_message(&self, ctx: &Context, msg: &Message) -> bool {
         let member_ids = match self
             .roster_provider
@@ -211,16 +375,8 @@ impl<'a> Handler<'a> {
 
         let messages_guard = self.message_cache.get(&msg.channel_id);
 
-        let previous_statement_count = match &messages_guard {
-            Some(messages) => messages
-                .iter()
-                .map(|(_, m)| {
-                    m.content
-                        .lines()
-                        .filter(|line| !line.trim().is_empty())
-                        .count()
-                })
-                .sum(),
+        let next_line_offset = match &messages_guard {
+            Some(messages) => next_line_offset(messages.iter().map(|(_, m)| m)),
             None => 0,
         };
 
@@ -247,18 +403,12 @@ impl<'a> Handler<'a> {
 
                 {
                     let statements = program.statements();
-                    let new_statements = if statements.len() >= previous_statement_count {
-                        &statements[previous_statement_count..]
-                    } else {
-                        &[]
-                    };
-
-                    if !new_statements.is_empty() {
+                    for (stmt_index, stmt) in statements
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, stmt)| stmt.line > next_line_offset)
+                    {
                         should_store = true;
-                    }
-
-                    for (offset, stmt) in new_statements.iter().enumerate() {
-                        let stmt_index = previous_statement_count + offset;
                         match &stmt.statement {
                             ScriptStatement::Domain(_) => {
                                 has_effect_statement = true;
@@ -454,6 +604,146 @@ impl<'a> Handler<'a> {
     }
 }
 
+fn line_count_with_prior_newline(content: &str, prior_ended_with_newline: bool) -> usize {
+    content.lines().count() + if prior_ended_with_newline { 1 } else { 0 }
+}
+
+fn next_line_offset<'a, I>(messages: I) -> usize
+where
+    I: IntoIterator<Item = &'a Message>,
+{
+    let mut line_count = 0usize;
+    let mut ends_with_newline = false;
+    let mut has_any = false;
+
+    for message in messages {
+        let content = message.content.as_str();
+        if has_any {
+            line_count += line_count_with_prior_newline(content, ends_with_newline);
+        } else {
+            line_count = content.lines().count();
+        }
+        ends_with_newline = content.is_empty() || content.ends_with('\n');
+        has_any = true;
+    }
+
+    if has_any {
+        line_count + if ends_with_newline { 1 } else { 0 }
+    } else {
+        0
+    }
+}
+
+fn plan_cache_rebuild(
+    processor: &MessageProcessor,
+    member_ids: &[MemberId],
+    mut messages: Vec<Message>,
+) -> CacheRebuildPlan {
+    messages.sort_by_key(|m| m.id.get());
+
+    let mut cache: IndexMap<MessageId, Message> = IndexMap::new();
+    let mut reactions = Vec::new();
+    let mut inputs: Vec<(String, Option<MemberId>)> = Vec::new();
+    let mut line_count = 0usize;
+    let mut ends_with_newline = false;
+    let mut has_any = false;
+
+    for message in messages {
+        if message.author.bot {
+            continue;
+        }
+
+        let message_content = message.content.clone();
+        let author_id = MemberId(message.author.id.get());
+        let line_offset = if has_any {
+            line_count + if ends_with_newline { 1 } else { 0 }
+        } else {
+            0
+        };
+
+        let (desired_reaction, should_store) = {
+            let outcome = processor.parse_program_sequence(
+                member_ids,
+                inputs
+                    .iter()
+                    .map(|(content, author_id)| (content.as_str(), *author_id))
+                    .chain(std::iter::once((message_content.as_str(), Some(author_id)))),
+            );
+
+            match outcome {
+                ProcessingOutcome::Success(program) => {
+                    let mut has_any_statement = false;
+                    let mut has_effect_statement = false;
+
+                    for stmt in program
+                        .statements()
+                        .iter()
+                        .filter(|stmt| stmt.line > line_offset)
+                    {
+                        has_any_statement = true;
+                        match &stmt.statement {
+                            ScriptStatement::Domain(_) => {
+                                has_effect_statement = true;
+                            }
+                            ScriptStatement::Command(command) => {
+                                if matches!(command, ProgramCommand::SettleUp(_)) {
+                                    has_effect_statement = true;
+                                }
+                            }
+                        }
+                    }
+
+                    let should_store = has_any_statement;
+                    let desired = if has_any_statement && has_effect_statement {
+                        ReactionState::Valid
+                    } else {
+                        ReactionState::Clear
+                    };
+                    (desired, should_store)
+                }
+                _ => (ReactionState::Invalid, false),
+            }
+        };
+
+        reactions.push((message.clone(), desired_reaction));
+
+        if should_store {
+            cache.insert(message.id, message);
+            inputs.push((message_content.clone(), Some(author_id)));
+            if has_any {
+                line_count += line_count_with_prior_newline(&message_content, ends_with_newline);
+            } else {
+                line_count = message_content.lines().count();
+            }
+            ends_with_newline = message_content.is_empty() || message_content.ends_with('\n');
+            has_any = true;
+        }
+    }
+
+    CacheRebuildPlan { cache, reactions }
+}
+
+fn resolve_message_update(
+    event: &MessageUpdateEvent,
+    new: Option<Message>,
+    old: Option<Message>,
+    cached: Option<Message>,
+) -> MessageUpdateResolution {
+    if let Some(message) = new {
+        return MessageUpdateResolution::Message(Box::new(message));
+    }
+    if let Some(mut message) = old {
+        event.apply_to_message(&mut message);
+        return MessageUpdateResolution::Message(Box::new(message));
+    }
+    if let Some(mut message) = cached {
+        event.apply_to_message(&mut message);
+        return MessageUpdateResolution::Message(Box::new(message));
+    }
+
+    MessageUpdateResolution::Fetch
+}
+
 #[async_trait]
 impl EventHandler for Handler<'_> {
     async fn message(&self, ctx: Context, msg: Message) {
@@ -599,6 +889,111 @@ impl EventHandler for Handler<'_> {
             }
         }
     }
+
+    async fn message_update(
+        &self,
+        ctx: Context,
+        old_if_available: Option<Message>,
+        new: Option<Message>,
+        event: MessageUpdateEvent,
+    ) {
+        if !self.is_target_channel(event.channel_id) {
+            return;
+        }
+
+        let cached_message = self
+            .message_cache
+            .get(&event.channel_id)
+            .and_then(|messages| messages.get(&event.id).cloned());
+
+        let updated_message =
+            match resolve_message_update(&event, new, old_if_available, cached_message) {
+                MessageUpdateResolution::Message(message) => *message,
+                MessageUpdateResolution::Fetch => {
+                    match event.channel_id.message(&ctx.http, event.id).await {
+                        Ok(message) => message,
+                        Err(e) => {
+                            tracing::warn!(
+                                "Failed to fetch updated message {} in {}: {:?}",
+                                event.id,
+                                event.channel_id,
+                                e
+                            );
+                            return;
+                        }
+                    }
+                }
+            };
+
+        if updated_message.author.bot {
+            return;
+        }
+
+        self.rebuild_channel_cache(&ctx, event.channel_id, Some(updated_message))
+            .await;
+    }
+
+    async fn reaction_add(&self, ctx: Context, add_reaction: Reaction) {
+        if !self.is_target_channel(add_reaction.channel_id) {
+            return;
+        }
+
+        let current_user_id = ctx.cache.current_user().id;
+        let is_me = add_reaction.user_id == Some(current_user_id);
+        if let Some(mut messages) = self.message_cache.get_mut(&add_reaction.channel_id)
+            && let Some(message) = messages.get_mut(&add_reaction.message_id)
+        {
+            let updated = Self::update_cached_reaction_add(
+                message,
+                &add_reaction.emoji,
+                is_me,
+                add_reaction.burst,
+            );
+            if updated {
+                return;
+            }
+        }
+
+        if let Ok(message) = add_reaction
+            .channel_id
+            .message(&ctx.http, add_reaction.message_id)
+            .await
+            && let Some(mut messages) = self.message_cache.get_mut(&add_reaction.channel_id)
+        {
+            messages.insert(message.id, message);
+        }
+    }
+
+    async fn reaction_remove(&self, ctx: Context, removed_reaction: Reaction) {
+        if !self.is_target_channel(removed_reaction.channel_id) {
+            return;
+        }
+
+        let current_user_id = ctx.cache.current_user().id;
+        let is_me = removed_reaction.user_id == Some(current_user_id);
+        if let Some(mut messages) = self.message_cache.get_mut(&removed_reaction.channel_id)
+            && let Some(message) = messages.get_mut(&removed_reaction.message_id)
+        {
+            let updated = Self::update_cached_reaction_remove(
+                message,
+                &removed_reaction.emoji,
+                is_me,
+                removed_reaction.burst,
+            );
+            if updated {
+                return;
+            }
+        }
+
+        if let Ok(message) = removed_reaction
+            .channel_id
+            .message(&ctx.http, removed_reaction.message_id)
+            .await
+            && let Some(mut messages) = self.message_cache.get_mut(&removed_reaction.channel_id)
+        {
+            messages.insert(message.id, message);
+        }
+    }
 }
 
 #[tokio::main]
@@ -610,7 +1005,8 @@ async fn main() {
     let intents = GatewayIntents::GUILD_MESSAGES
         | GatewayIntents::MESSAGE_CONTENT
         | GatewayIntents::GUILDS
-        | GatewayIntents::GUILD_MEMBERS;
+        | GatewayIntents::GUILD_MEMBERS
+        | GatewayIntents::GUILD_MESSAGE_REACTIONS;
 
     let target_channel = load_target_channel_ids();
     let processor = MessageProcessor::new(&WalicordProgramParser, &WalicordSettlementOptimizer);
@@ -644,5 +1040,303 @@ async fn main() {
 
     for handle in handles {
         let _ = handle.await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use serenity::model::id::UserId;
+    use walicord_application::{
+        ProgramParseError, ProgramParser, Script, ScriptStatementWithLine, SettlementOptimizer,
+    };
+    use walicord_domain::{MemberSetExpr, MemberSetOp, Money, Payment, Statement, Transfer};
+
+    struct StubParser;
+
+    impl ProgramParser for StubParser {
+        fn parse<'a>(
+            &self,
+            _member_ids: &'a [MemberId],
+            content: &'a str,
+            _author_id: Option<MemberId>,
+        ) -> Result<Script<'a>, ProgramParseError<'a>> {
+            if content.starts_with("MULTI") {
+                let payment = Payment {
+                    amount: Money::try_from(100).expect("amount should fit in i64"),
+                    payer: MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(1))]),
+                    payee: MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(2))]),
+                };
+                return Ok(Script::new(
+                    &[],
+                    vec![ScriptStatementWithLine {
+                        line: 2,
+                        statement: ScriptStatement::Domain(Statement::Payment(payment)),
+                    }],
+                ));
+            }
+
+            match content {
+                "PAY" => {
+                    let payment = Payment {
+                        amount: Money::try_from(100).expect("amount should fit in i64"),
+                        payer: MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(1))]),
+                        payee: MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(2))]),
+                    };
+                    Ok(Script::new(
+                        &[],
+                        vec![ScriptStatementWithLine {
+                            line: 1,
+                            statement: ScriptStatement::Domain(Statement::Payment(payment)),
+                        }],
+                    ))
+                }
+                "SETTLE" => Ok(Script::new(
+                    &[],
+                    vec![ScriptStatementWithLine {
+                        line: 1,
+                        statement: ScriptStatement::Command(ProgramCommand::SettleUp(
+                            MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(1))]),
+                        )),
+                    }],
+                )),
+                "REVIEW" => Ok(Script::new(
+                    &[],
+                    vec![ScriptStatementWithLine {
+                        line: 1,
+                        statement: ScriptStatement::Command(ProgramCommand::Review),
+                    }],
+                )),
+                "EMPTY" => Ok(Script::new(&[], Vec::new())),
+                "BAD" => Err(ProgramParseError::SyntaxError {
+                    line: 1,
+                    detail: "bad".to_string(),
+                }),
+                _ => Ok(Script::new(&[], Vec::new())),
+            }
+        }
+    }
+
+    struct NoopOptimizer;
+
+    impl SettlementOptimizer for NoopOptimizer {
+        fn optimize(
+            &self,
+            _balances: &[walicord_application::PersonBalance],
+        ) -> Result<Vec<Transfer>, walicord_application::SettlementOptimizationError> {
+            Ok(Vec::new())
+        }
+    }
+
+    fn make_message(id: u64, channel_id: u64, author_id: u64, content: &str) -> Message {
+        let mut message = Message::default();
+        message.id = MessageId::new(id);
+        message.channel_id = ChannelId::new(channel_id);
+        message.author = User::default();
+        message.author.id = UserId::new(author_id);
+        message.content = content.to_string();
+        message
+    }
+
+    fn make_reaction(
+        emoji: &str,
+        count: u64,
+        normal: u64,
+        burst: u64,
+        me: bool,
+        me_burst: bool,
+    ) -> serenity::model::channel::MessageReaction {
+        serde_json::from_value(json!({
+            "count": count,
+            "count_details": { "normal": normal, "burst": burst },
+            "me": me,
+            "me_burst": me_burst,
+            "emoji": { "id": null, "name": emoji },
+            "burst_colors": []
+        }))
+        .expect("MessageReaction should deserialize")
+    }
+
+    fn message_update_event(
+        channel_id: u64,
+        message_id: u64,
+        content: Option<&str>,
+    ) -> MessageUpdateEvent {
+        let mut value = json!({
+            "id": message_id.to_string(),
+            "channel_id": channel_id.to_string()
+        });
+        if let Some(content) = content {
+            value["content"] = json!(content);
+        }
+        serde_json::from_value(value).expect("MessageUpdateEvent should deserialize")
+    }
+
+    #[test]
+    fn plan_cache_rebuild_reacts_and_caches_messages() {
+        let processor = MessageProcessor::new(&StubParser, &NoopOptimizer);
+        let members: [MemberId; 0] = [];
+        let messages = vec![
+            make_message(3, 1, 1, "PAY"),
+            make_message(1, 1, 1, "PAY"),
+            make_message(2, 1, 1, "BAD"),
+        ];
+
+        let plan = plan_cache_rebuild(&processor, &members, messages);
+        let reaction_states: Vec<(u64, ReactionState)> = plan
+            .reactions
+            .iter()
+            .map(|(message, state)| (message.id.get(), *state))
+            .collect();
+
+        assert_eq!(
+            reaction_states,
+            vec![
+                (1, ReactionState::Valid),
+                (2, ReactionState::Invalid),
+                (3, ReactionState::Valid),
+            ]
+        );
+        assert_eq!(
+            plan.cache.keys().map(|id| id.get()).collect::<Vec<_>>(),
+            vec![1, 3]
+        );
+    }
+
+    #[test]
+    fn plan_cache_rebuild_handles_multiline_offsets() {
+        let processor = MessageProcessor::new(&StubParser, &NoopOptimizer);
+        let members: [MemberId; 0] = [];
+        let messages = vec![
+            make_message(1, 1, 1, "MULTI\nCOMMENT"),
+            make_message(2, 1, 1, "PAY"),
+        ];
+
+        let plan = plan_cache_rebuild(&processor, &members, messages);
+        let reaction_states: Vec<(u64, ReactionState)> = plan
+            .reactions
+            .iter()
+            .map(|(message, state)| (message.id.get(), *state))
+            .collect();
+
+        assert_eq!(
+            reaction_states,
+            vec![(1, ReactionState::Valid), (2, ReactionState::Valid)]
+        );
+        assert_eq!(
+            plan.cache.keys().map(|id| id.get()).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+    }
+
+    #[test]
+    fn update_cached_reaction_add_updates_existing_entry() {
+        let mut message = Message::default();
+        message.reactions = vec![make_reaction("✅", 1, 1, 0, false, false)];
+
+        let updated = Handler::update_cached_reaction_add(
+            &mut message,
+            &ReactionType::Unicode("✅".to_string()),
+            true,
+            false,
+        );
+
+        assert!(updated);
+        assert_eq!(message.reactions.len(), 1);
+        let reaction = &message.reactions[0];
+        assert_eq!(reaction.count, 2);
+        assert!(reaction.me);
+        assert_eq!(reaction.count_details.normal, 2);
+    }
+
+    #[test]
+    fn update_cached_reaction_add_returns_false_when_missing() {
+        let mut message = Message::default();
+
+        let updated = Handler::update_cached_reaction_add(
+            &mut message,
+            &ReactionType::Unicode("✅".to_string()),
+            true,
+            false,
+        );
+
+        assert!(!updated);
+        assert!(message.reactions.is_empty());
+    }
+
+    #[test]
+    fn update_cached_reaction_remove_deletes_entry_when_count_reaches_zero() {
+        let mut message = Message::default();
+        message.reactions = vec![make_reaction("✅", 1, 1, 0, true, false)];
+
+        let updated = Handler::update_cached_reaction_remove(
+            &mut message,
+            &ReactionType::Unicode("✅".to_string()),
+            true,
+            false,
+        );
+
+        assert!(updated);
+        assert!(message.reactions.is_empty());
+    }
+
+    #[test]
+    fn update_cached_reaction_remove_returns_false_when_missing() {
+        let mut message = Message::default();
+
+        let updated = Handler::update_cached_reaction_remove(
+            &mut message,
+            &ReactionType::Unicode("✅".to_string()),
+            true,
+            false,
+        );
+
+        assert!(!updated);
+        assert!(message.reactions.is_empty());
+    }
+
+    #[test]
+    fn resolve_message_update_prefers_new_then_old_then_cached() {
+        let event = message_update_event(1, 10, Some("edited"));
+        let new_message = make_message(10, 1, 1, "new");
+        let old_message = make_message(10, 1, 1, "old");
+        let cached_message = make_message(10, 1, 1, "cached");
+
+        let resolved = resolve_message_update(
+            &event,
+            Some(new_message.clone()),
+            Some(old_message.clone()),
+            Some(cached_message.clone()),
+        );
+        let MessageUpdateResolution::Message(message) = resolved else {
+            panic!("expected message resolution");
+        };
+        assert_eq!(message.content, "new");
+
+        let resolved = resolve_message_update(
+            &event,
+            None,
+            Some(old_message.clone()),
+            Some(cached_message.clone()),
+        );
+        let MessageUpdateResolution::Message(message) = resolved else {
+            panic!("expected message resolution");
+        };
+        assert_eq!(message.content, "edited");
+
+        let resolved = resolve_message_update(&event, None, None, Some(cached_message));
+        let MessageUpdateResolution::Message(message) = resolved else {
+            panic!("expected message resolution");
+        };
+        assert_eq!(message.content, "edited");
+    }
+
+    #[test]
+    fn resolve_message_update_falls_back_to_fetch_when_empty() {
+        let event = message_update_event(1, 10, None);
+
+        let resolved = resolve_message_update(&event, None, None, None);
+        assert!(matches!(resolved, MessageUpdateResolution::Fetch));
     }
 }

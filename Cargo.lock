@@ -2627,6 +2627,7 @@ dependencies = [
  "indexmap",
  "resvg",
  "rstest",
+ "serde_json",
  "serenity",
  "thiserror 2.0.17",
  "tiny-skia",
