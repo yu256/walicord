@@ -26,7 +26,7 @@ use serenity::{
 use std::{collections::HashMap, env};
 use walicord_application::{
     Command as ProgramCommand, MessageProcessor, ProcessingOutcome, ScriptStatement,
-    ScriptStatementWithLine, SettlementOptimizationError, SettlementResult,
+    SettlementOptimizationError, SettlementResult,
 };
 use walicord_domain::model::MemberId;
 use walicord_infrastructure::{WalicordProgramParser, WalicordSettlementOptimizer};
@@ -332,16 +332,8 @@ impl<'a> Handler<'a> {
 
         let messages_guard = self.message_cache.get(&msg.channel_id);
 
-        let previous_statement_count = match &messages_guard {
-            Some(messages) => messages
-                .iter()
-                .map(|(_, m)| {
-                    m.content
-                        .lines()
-                        .filter(|line| !line.trim().is_empty())
-                        .count()
-                })
-                .sum(),
+        let previous_line_offset = match &messages_guard {
+            Some(messages) => next_message_offset(messages.iter().map(|(_, m)| m)),
             None => 0,
         };
 
@@ -368,18 +360,12 @@ impl<'a> Handler<'a> {
 
                 {
                     let statements = program.statements();
-                    let new_statements = if statements.len() >= previous_statement_count {
-                        &statements[previous_statement_count..]
-                    } else {
-                        &[]
-                    };
-
-                    if !new_statements.is_empty() {
+                    for (stmt_index, stmt) in statements
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, stmt)| stmt.line > previous_line_offset)
+                    {
                         should_store = true;
-                    }
-
-                    for (offset, stmt) in new_statements.iter().enumerate() {
-                        let stmt_index = previous_statement_count + offset;
                         match &stmt.statement {
                             ScriptStatement::Domain(_) => {
                                 has_effect_statement = true;
@@ -575,23 +561,33 @@ impl<'a> Handler<'a> {
     }
 }
 
-fn non_empty_line_count(content: &str) -> usize {
-    content
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .count()
+fn line_count_increment(content: &str, prior_ended_with_newline: bool) -> usize {
+    content.lines().count() + if prior_ended_with_newline { 1 } else { 0 }
 }
 
-fn reaction_state_for_statements(new_statements: &[ScriptStatementWithLine<'_>]) -> ReactionState {
-    let has_effect_statement = new_statements.iter().any(|stmt| match &stmt.statement {
-        ScriptStatement::Domain(_) => true,
-        ScriptStatement::Command(command) => matches!(command, ProgramCommand::SettleUp(_)),
-    });
+fn next_message_offset<'a, I>(messages: I) -> usize
+where
+    I: IntoIterator<Item = &'a Message>,
+{
+    let mut line_count = 0usize;
+    let mut ends_with_newline = false;
+    let mut has_any = false;
 
-    if has_effect_statement {
-        ReactionState::Valid
+    for message in messages {
+        let content = message.content.as_str();
+        if has_any {
+            line_count += line_count_increment(content, ends_with_newline);
+        } else {
+            line_count = content.lines().count();
+        }
+        ends_with_newline = content.is_empty() || content.ends_with('\n');
+        has_any = true;
+    }
+
+    if has_any {
+        line_count + if ends_with_newline { 1 } else { 0 }
     } else {
-        ReactionState::Clear
+        0
     }
 }
 
@@ -604,48 +600,80 @@ fn plan_cache_rebuild(
 
     let mut cache: IndexMap<MessageId, Message> = IndexMap::new();
     let mut reactions = Vec::new();
-    let mut statement_count = 0usize;
+    let mut inputs: Vec<(String, Option<MemberId>)> = Vec::new();
+    let mut line_count = 0usize;
+    let mut ends_with_newline = false;
+    let mut has_any = false;
 
     for message in messages {
         if message.author.bot {
             continue;
         }
 
+        let message_content = message.content.clone();
         let author_id = MemberId(message.author.id.get());
-        let mut inputs: Vec<(String, Option<MemberId>)> = cache
-            .iter()
-            .map(|(_, m)| (m.content.clone(), Some(MemberId(m.author.id.get()))))
-            .collect();
-        inputs.push((message.content.clone(), Some(author_id)));
+        let line_offset = if has_any {
+            line_count + if ends_with_newline { 1 } else { 0 }
+        } else {
+            0
+        };
 
-        let outcome = processor.parse_program_sequence(
-            member_ids,
-            inputs
-                .iter()
-                .map(|(content, author_id)| (content.as_str(), *author_id)),
-        );
+        let (desired_reaction, should_store) = {
+            let outcome = processor.parse_program_sequence(
+                member_ids,
+                inputs
+                    .iter()
+                    .map(|(content, author_id)| (content.as_str(), *author_id))
+                    .chain(std::iter::once((message_content.as_str(), Some(author_id)))),
+            );
 
-        let (desired_reaction, should_store) = match outcome {
-            ProcessingOutcome::Success(program) => {
-                let statements = program.statements();
-                let new_statements = if statements.len() >= statement_count {
-                    &statements[statement_count..]
-                } else {
-                    &[]
-                };
+            match outcome {
+                ProcessingOutcome::Success(program) => {
+                    let mut has_any_statement = false;
+                    let mut has_effect_statement = false;
 
-                let should_store = !new_statements.is_empty();
-                let desired = reaction_state_for_statements(new_statements);
-                (desired, should_store)
+                    for stmt in program
+                        .statements()
+                        .iter()
+                        .filter(|stmt| stmt.line > line_offset)
+                    {
+                        has_any_statement = true;
+                        match &stmt.statement {
+                            ScriptStatement::Domain(_) => {
+                                has_effect_statement = true;
+                            }
+                            ScriptStatement::Command(command) => {
+                                if matches!(command, ProgramCommand::SettleUp(_)) {
+                                    has_effect_statement = true;
+                                }
+                            }
+                        }
+                    }
+
+                    let should_store = has_any_statement;
+                    let desired = if has_any_statement && has_effect_statement {
+                        ReactionState::Valid
+                    } else {
+                        ReactionState::Clear
+                    };
+                    (desired, should_store)
+                }
+                _ => (ReactionState::Invalid, false),
             }
-            _ => (ReactionState::Invalid, false),
         };
 
         reactions.push((message.clone(), desired_reaction));
 
         if should_store {
-            statement_count += non_empty_line_count(&message.content);
             cache.insert(message.id, message);
+            inputs.push((message_content.clone(), Some(author_id)));
+            if has_any {
+                line_count += line_count_increment(&message_content, ends_with_newline);
+            } else {
+                line_count = message_content.lines().count();
+            }
+            ends_with_newline = message_content.is_empty() || message_content.ends_with('\n');
+            has_any = true;
         }
     }
 
@@ -661,7 +689,8 @@ fn resolve_message_update(
     if let Some(message) = new {
         return MessageUpdateResolution::Message(Box::new(message));
     }
-    if let Some(message) = old {
+    if let Some(mut message) = old {
+        event.apply_to_message(&mut message);
         return MessageUpdateResolution::Message(Box::new(message));
     }
     if let Some(mut message) = cached {
@@ -913,7 +942,9 @@ mod tests {
     use super::*;
     use serde_json::json;
     use serenity::model::id::UserId;
-    use walicord_application::{ProgramParseError, ProgramParser, Script, SettlementOptimizer};
+    use walicord_application::{
+        ProgramParseError, ProgramParser, Script, ScriptStatementWithLine, SettlementOptimizer,
+    };
     use walicord_domain::{MemberSetExpr, MemberSetOp, Money, Payment, Statement, Transfer};
 
     struct StubParser;
@@ -925,6 +956,21 @@ mod tests {
             content: &'a str,
             _author_id: Option<MemberId>,
         ) -> Result<Script<'a>, ProgramParseError<'a>> {
+            if content.starts_with("MULTI") {
+                let payment = Payment {
+                    amount: Money::try_from(100).expect("amount should fit in i64"),
+                    payer: MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(1))]),
+                    payee: MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(2))]),
+                };
+                return Ok(Script::new(
+                    &[],
+                    vec![ScriptStatementWithLine {
+                        line: 2,
+                        statement: ScriptStatement::Domain(Statement::Payment(payment)),
+                    }],
+                ));
+            }
+
             match content {
                 "PAY" => {
                     let payment = Payment {
@@ -1034,6 +1080,32 @@ mod tests {
     }
 
     #[test]
+    fn plan_cache_rebuild_handles_multiline_offsets() {
+        let processor = MessageProcessor::new(&StubParser, &NoopOptimizer);
+        let members: [MemberId; 0] = [];
+        let messages = vec![
+            make_message(1, 1, 1, "MULTI\nCOMMENT"),
+            make_message(2, 1, 1, "PAY"),
+        ];
+
+        let plan = plan_cache_rebuild(&processor, &members, messages);
+        let reaction_states: Vec<(u64, ReactionState)> = plan
+            .reactions
+            .iter()
+            .map(|(message, state)| (message.id.get(), *state))
+            .collect();
+
+        assert_eq!(
+            reaction_states,
+            vec![(1, ReactionState::Valid), (2, ReactionState::Valid)]
+        );
+        assert_eq!(
+            plan.cache.keys().map(|id| id.get()).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+    }
+
+    #[test]
     fn resolve_message_update_prefers_new_then_old_then_cached() {
         let event = message_update_event(1, 10, Some("edited"));
         let new_message = make_message(10, 1, 1, "new");
@@ -1060,7 +1132,7 @@ mod tests {
         let MessageUpdateResolution::Message(message) = resolved else {
             panic!("expected message resolution");
         };
-        assert_eq!(message.content, "old");
+        assert_eq!(message.content, "edited");
 
         let resolved = resolve_message_update(&event, None, None, Some(cached_message));
         let MessageUpdateResolution::Message(message) = resolved else {
