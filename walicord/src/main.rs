@@ -14,7 +14,7 @@ use serenity::{
     all::MessageId,
     async_trait,
     model::{
-        channel::{Message, ReactionType},
+        channel::{Message, Reaction, ReactionType},
         event::{GuildMemberUpdateEvent, MessageUpdateEvent},
         gateway::Ready,
         guild::Member,
@@ -216,41 +216,86 @@ impl<'a> Handler<'a> {
         }
     }
 
-    fn has_own_reaction(msg: &Message, emoji: char) -> bool {
-        let target = emoji.to_string();
-        msg.reactions
+    fn update_cached_reaction_add(
+        message: &mut Message,
+        emoji: &ReactionType,
+        is_me: bool,
+        is_burst: bool,
+    ) -> bool {
+        let Some(entry) = message
+            .reactions
+            .iter_mut()
+            .find(|reaction| reaction.reaction_type == *emoji)
+        else {
+            return false;
+        };
+
+        entry.count = entry.count.saturating_add(1);
+        if is_burst {
+            entry.count_details.burst = entry.count_details.burst.saturating_add(1);
+            if is_me {
+                entry.me_burst = true;
+            }
+        } else {
+            entry.count_details.normal = entry.count_details.normal.saturating_add(1);
+        }
+        if is_me {
+            entry.me = true;
+        }
+
+        true
+    }
+
+    fn update_cached_reaction_remove(
+        message: &mut Message,
+        emoji: &ReactionType,
+        is_me: bool,
+        is_burst: bool,
+    ) -> bool {
+        let Some(position) = message
+            .reactions
             .iter()
-            .any(|r| r.me && matches!(&r.reaction_type, ReactionType::Unicode(s) if s == &target))
+            .position(|reaction| reaction.reaction_type == *emoji)
+        else {
+            return false;
+        };
+
+        let entry = &mut message.reactions[position];
+        if entry.count > 0 {
+            entry.count -= 1;
+        }
+        if is_burst {
+            entry.count_details.burst = entry.count_details.burst.saturating_sub(1);
+            if is_me {
+                entry.me_burst = false;
+            }
+        } else {
+            entry.count_details.normal = entry.count_details.normal.saturating_sub(1);
+        }
+        if is_me {
+            entry.me = false;
+        }
+
+        if entry.count == 0 {
+            message.reactions.remove(position);
+        }
+
+        true
     }
 
     async fn update_reaction_state(&self, ctx: &Context, msg: &Message, desired: ReactionState) {
-        let has_check = Self::has_own_reaction(msg, '✅');
-        let has_cross = Self::has_own_reaction(msg, '❎');
-
         match desired {
             ReactionState::Valid => {
-                if has_cross {
-                    self.delete_reaction(ctx, msg, '❎').await;
-                }
-                if !has_check {
-                    self.react(ctx, msg, '✅').await;
-                }
+                self.delete_reaction(ctx, msg, '❎').await;
+                self.react(ctx, msg, '✅').await;
             }
             ReactionState::Invalid => {
-                if has_check {
-                    self.delete_reaction(ctx, msg, '✅').await;
-                }
-                if !has_cross {
-                    self.react(ctx, msg, '❎').await;
-                }
+                self.delete_reaction(ctx, msg, '✅').await;
+                self.react(ctx, msg, '❎').await;
             }
             ReactionState::Clear => {
-                if has_check {
-                    self.delete_reaction(ctx, msg, '✅').await;
-                }
-                if has_cross {
-                    self.delete_reaction(ctx, msg, '❎').await;
-                }
+                self.delete_reaction(ctx, msg, '✅').await;
+                self.delete_reaction(ctx, msg, '❎').await;
             }
         }
     }
@@ -278,8 +323,6 @@ impl<'a> Handler<'a> {
             self.message_cache.remove(&channel_id);
             return;
         }
-
-        messages.sort_by_key(|m| m.id.get());
 
         let member_ids = match self
             .roster_provider
@@ -889,6 +932,68 @@ impl EventHandler for Handler<'_> {
         self.rebuild_channel_cache(&ctx, event.channel_id, Some(updated_message))
             .await;
     }
+
+    async fn reaction_add(&self, ctx: Context, add_reaction: Reaction) {
+        if !self.is_target_channel(add_reaction.channel_id) {
+            return;
+        }
+
+        let current_user_id = ctx.cache.current_user().id;
+        let is_me = add_reaction.user_id == Some(current_user_id);
+        if let Some(mut messages) = self.message_cache.get_mut(&add_reaction.channel_id)
+            && let Some(message) = messages.get_mut(&add_reaction.message_id)
+        {
+            let updated = Self::update_cached_reaction_add(
+                message,
+                &add_reaction.emoji,
+                is_me,
+                add_reaction.burst,
+            );
+            if updated {
+                return;
+            }
+        }
+
+        if let Ok(message) = add_reaction
+            .channel_id
+            .message(&ctx.http, add_reaction.message_id)
+            .await
+            && let Some(mut messages) = self.message_cache.get_mut(&add_reaction.channel_id)
+        {
+            messages.insert(message.id, message);
+        }
+    }
+
+    async fn reaction_remove(&self, ctx: Context, removed_reaction: Reaction) {
+        if !self.is_target_channel(removed_reaction.channel_id) {
+            return;
+        }
+
+        let current_user_id = ctx.cache.current_user().id;
+        let is_me = removed_reaction.user_id == Some(current_user_id);
+        if let Some(mut messages) = self.message_cache.get_mut(&removed_reaction.channel_id)
+            && let Some(message) = messages.get_mut(&removed_reaction.message_id)
+        {
+            let updated = Self::update_cached_reaction_remove(
+                message,
+                &removed_reaction.emoji,
+                is_me,
+                removed_reaction.burst,
+            );
+            if updated {
+                return;
+            }
+        }
+
+        if let Ok(message) = removed_reaction
+            .channel_id
+            .message(&ctx.http, removed_reaction.message_id)
+            .await
+            && let Some(mut messages) = self.message_cache.get_mut(&removed_reaction.channel_id)
+        {
+            messages.insert(message.id, message);
+        }
+    }
 }
 
 #[tokio::main]
@@ -900,7 +1005,8 @@ async fn main() {
     let intents = GatewayIntents::GUILD_MESSAGES
         | GatewayIntents::MESSAGE_CONTENT
         | GatewayIntents::GUILDS
-        | GatewayIntents::GUILD_MEMBERS;
+        | GatewayIntents::GUILD_MEMBERS
+        | GatewayIntents::GUILD_MESSAGE_REACTIONS;
 
     let target_channel = load_target_channel_ids();
     let processor = MessageProcessor::new(&WalicordProgramParser, &WalicordSettlementOptimizer);
@@ -1033,6 +1139,25 @@ mod tests {
         message
     }
 
+    fn make_reaction(
+        emoji: &str,
+        count: u64,
+        normal: u64,
+        burst: u64,
+        me: bool,
+        me_burst: bool,
+    ) -> serenity::model::channel::MessageReaction {
+        serde_json::from_value(json!({
+            "count": count,
+            "count_details": { "normal": normal, "burst": burst },
+            "me": me,
+            "me_burst": me_burst,
+            "emoji": { "id": null, "name": emoji },
+            "burst_colors": []
+        }))
+        .expect("MessageReaction should deserialize")
+    }
+
     fn message_update_event(
         channel_id: u64,
         message_id: u64,
@@ -1103,6 +1228,72 @@ mod tests {
             plan.cache.keys().map(|id| id.get()).collect::<Vec<_>>(),
             vec![1, 2]
         );
+    }
+
+    #[test]
+    fn update_cached_reaction_add_updates_existing_entry() {
+        let mut message = Message::default();
+        message.reactions = vec![make_reaction("✅", 1, 1, 0, false, false)];
+
+        let updated = Handler::update_cached_reaction_add(
+            &mut message,
+            &ReactionType::Unicode("✅".to_string()),
+            true,
+            false,
+        );
+
+        assert!(updated);
+        assert_eq!(message.reactions.len(), 1);
+        let reaction = &message.reactions[0];
+        assert_eq!(reaction.count, 2);
+        assert!(reaction.me);
+        assert_eq!(reaction.count_details.normal, 2);
+    }
+
+    #[test]
+    fn update_cached_reaction_add_returns_false_when_missing() {
+        let mut message = Message::default();
+
+        let updated = Handler::update_cached_reaction_add(
+            &mut message,
+            &ReactionType::Unicode("✅".to_string()),
+            true,
+            false,
+        );
+
+        assert!(!updated);
+        assert!(message.reactions.is_empty());
+    }
+
+    #[test]
+    fn update_cached_reaction_remove_deletes_entry_when_count_reaches_zero() {
+        let mut message = Message::default();
+        message.reactions = vec![make_reaction("✅", 1, 1, 0, true, false)];
+
+        let updated = Handler::update_cached_reaction_remove(
+            &mut message,
+            &ReactionType::Unicode("✅".to_string()),
+            true,
+            false,
+        );
+
+        assert!(updated);
+        assert!(message.reactions.is_empty());
+    }
+
+    #[test]
+    fn update_cached_reaction_remove_returns_false_when_missing() {
+        let mut message = Message::default();
+
+        let updated = Handler::update_cached_reaction_remove(
+            &mut message,
+            &ReactionType::Unicode("✅".to_string()),
+            true,
+            false,
+        );
+
+        assert!(!updated);
+        assert!(message.reactions.is_empty());
     }
 
     #[test]
