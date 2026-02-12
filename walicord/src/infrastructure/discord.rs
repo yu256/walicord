@@ -10,7 +10,7 @@ use serenity::{
 };
 use std::sync::Arc;
 use walicord_domain::model::{MemberId, MemberInfo};
-use walicord_parser::COMMAND_PREFIXES;
+use walicord_parser::is_command_message;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ChannelError {
@@ -67,25 +67,6 @@ impl DiscordChannelService {
         let mut all_messages = IndexMap::new();
         let mut last_message_id = None;
 
-        fn is_command_prefix(content: &str, cmd: &str) -> bool {
-            let is_prefix = if cmd.is_ascii() {
-                content
-                    .get(..cmd.len())
-                    .is_some_and(|head| head.eq_ignore_ascii_case(cmd))
-            } else {
-                content.starts_with(cmd)
-            };
-
-            if !is_prefix {
-                return false;
-            }
-
-            content
-                .get(cmd.len()..)
-                .and_then(|rest| rest.chars().next())
-                .is_none_or(char::is_whitespace)
-        }
-
         fn should_ignore(message: &Message) -> bool {
             message.author.bot
                 || message.reactions.iter().any(|r| {
@@ -94,9 +75,7 @@ impl DiscordChannelService {
                         ReactionType::Unicode(s) if s == "❎" && r.me
                     )
                 })
-                || COMMAND_PREFIXES
-                    .iter()
-                    .any(|&cmd| is_command_prefix(&message.content, cmd))
+                || is_command_message(&message.content)
         }
 
         loop {
