@@ -288,20 +288,14 @@ fn declaration(input: &str) -> IResult<&str, Declaration<'_>> {
 }
 
 fn paid(input: &str) -> IResult<&str, &str> {
-    alt((
-        tag("立て替えた"),
-        tag("たてかえた"),
-        tag("paid"),
-        tag("PAID"),
-    ))
-    .parse(input)
+    alt((tag("立て替えた"), tag("たてかえた"), tag_no_case("paid"))).parse(input)
 }
 
 fn yen(input: &str) -> IResult<&str, u64> {
     (
         opt(char('¥')),
         u64,
-        opt(alt((tag("円"), tag("えん"), tag("yen")))),
+        opt(alt((tag("円"), tag("えん"), tag_no_case("yen")))),
     )
         .map(|(_, amount, _)| amount)
         .parse(input)
@@ -316,7 +310,7 @@ fn ni(input: &str) -> IResult<&str, &str> {
 }
 
 fn to(input: &str) -> IResult<&str, &str> {
-    alt((tag("to"), tag("TO"))).parse(input)
+    tag_no_case("to").parse(input)
 }
 
 // {payer} ga {payee} ni {amount} paid (Japanese grammar pattern)
