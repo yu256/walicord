@@ -223,7 +223,7 @@ fn sp(input: &str) -> IResult<&str, &str> {
     }
 
     fn line_comment(input: &str) -> IResult<&str, &str> {
-        recognize((tag("//"), take_till(|_| false))).parse(input)
+        recognize((tag("//"), take_till(|c| c == '\n'))).parse(input)
     }
 
     recognize(many0(alt((
@@ -435,12 +435,7 @@ pub fn parse_program<'a>(input: &'a str) -> Result<Program<'a>, ParseError> {
         if rest.trim().is_empty() {
             continue;
         }
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-
-        match statement_with_sp(trimmed) {
+        match statement_with_sp(rest) {
             Ok((rest, stmt)) => {
                 if !rest.trim().is_empty() {
                     return Err(ParseError::SyntaxError {
