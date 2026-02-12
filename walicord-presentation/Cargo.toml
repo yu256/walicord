@@ -1,0 +1,9 @@
+[package]
+name = "walicord-presentation"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+walicord-application = { path = "../walicord-application" }
+walicord-domain = { path = "../walicord-domain" }
+walicord-i18n = { path = "../walicord-i18n" }

@@ -1,0 +1,17 @@
+[workspace]
+description = "Walicord - Discord bot for expense settlement"
+version = "0.1.0"
+members = [
+    "walicord",
+    "walicord-application",
+    "walicord-calc",
+    "walicord-domain",
+    "walicord-i18n",
+    "walicord-infrastructure",
+    "walicord-parser",
+    "walicord-presentation"
+]
+resolver = "3"
+
+[workspace.lints.clippy]
+uninlined_format_args = "deny"

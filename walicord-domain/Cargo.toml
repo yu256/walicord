@@ -1,0 +1,11 @@
+[package]
+name = "walicord-domain"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+fxhash = "0.2.1"
+
+[dev-dependencies]
+proptest = "1.6.0"
+rstest = "0.26.1"
