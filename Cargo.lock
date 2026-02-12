@@ -2669,6 +2669,7 @@ dependencies = [
  "fxhash",
  "proptest",
  "rstest",
+ "smallvec",
 ]
 
 [[package]]
@@ -2693,6 +2694,7 @@ version = "0.1.0"
 dependencies = [
  "nom",
  "rstest",
+ "smallvec",
  "thiserror 2.0.17",
 ]
 
@@ -2700,6 +2702,7 @@ dependencies = [
 name = "walicord-presentation"
 version = "0.1.0"
 dependencies = [
+ "rstest",
  "walicord-application",
  "walicord-domain",
  "walicord-i18n",

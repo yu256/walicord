@@ -8,6 +8,7 @@ pub enum ProgramParseError<'a> {
     UndefinedMember { id: u64, line: usize },
     SyntaxError { line: usize, detail: String },
     MissingContextForImplicitPayment { line: usize },
+    InvalidAmountExpression { line: usize, detail: String },
 }
 
 impl<'a> From<ProgramBuildError<'a>> for ProgramParseError<'a> {
@@ -31,4 +32,5 @@ impl<'a> From<ProgramBuildError<'a>> for ProgramParseError<'a> {
 pub enum SettlementOptimizationError {
     ImbalancedTotal(i64),
     NoSolution,
+    RoundingMismatch,
 }

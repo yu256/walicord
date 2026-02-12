@@ -213,8 +213,9 @@ fn escape_xml(s: &str) -> Cow<'_, str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
-    #[test]
+    #[rstest]
     fn test_simple_table() {
         let svg = SvgTableBuilder::new()
             .alignments(&[Alignment::Left, Alignment::Right])
@@ -231,9 +232,11 @@ mod tests {
         assert!(svg.contains("-100"));
     }
 
-    #[test]
-    fn test_escape_xml() {
-        let result = escape_xml("<test & 'value'>");
-        assert_eq!(result, "&lt;test &amp; &#39;value&#39;&gt;");
+    #[rstest]
+    #[case::escapes_all("<test & 'value'>", "&lt;test &amp; &#39;value&#39;&gt;")]
+    #[case::keeps_plain("plain", "plain")]
+    fn test_escape_xml(#[case] input: &str, #[case] expected: &str) {
+        let result = escape_xml(input);
+        assert_eq!(result, expected);
     }
 }

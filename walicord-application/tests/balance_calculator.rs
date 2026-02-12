@@ -47,6 +47,9 @@ fn parse_program_from_content<'a>(members: &'a [MemberId], content: &'a str) -> 
             ProgramParseError::MissingContextForImplicitPayment { line } => {
                 panic!("parse failed: implicit payer without author at line {line}")
             }
+            ProgramParseError::InvalidAmountExpression { line, detail } => {
+                panic!("parse failed: invalid amount expression at line {line}: {detail}")
+            }
         },
     }
 }

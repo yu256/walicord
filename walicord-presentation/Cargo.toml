@@ -7,3 +7,6 @@ edition = "2024"
 walicord-application = { path = "../walicord-application" }
 walicord-domain = { path = "../walicord-domain" }
 walicord-i18n = { path = "../walicord-i18n" }
+
+[dev-dependencies]
+rstest = "0.26.1"

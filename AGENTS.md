@@ -1,5 +1,9 @@
 # Agent Guidelines
 
+## First Step
+
+- Before thinking about the solution to a request, first read relevant project files to understand the context
+
 ## Code Comments Guidelines
 
 **Avoid redundant comments:**
@@ -20,3 +24,17 @@
 - Use descriptive variable and function names
 - Extract complex logic into well-named functions
 - Structure code to be readable without comments
+
+## Testing Rule
+
+- Use t-wada style TDD for tests
+
+## Default Commands
+
+- Always run the following commands after code changes and before committing:
+  - PowerShell: `cargo +nightly clippy --fix --allow-dirty --all-targets; cargo +nightly fmt; cargo test`
+  - Bash/sh: `cargo +nightly clippy --fix --allow-dirty --all-targets && cargo +nightly fmt && cargo test`
+
+## Architecture Rule
+
+- The project adopts Tactical DDD

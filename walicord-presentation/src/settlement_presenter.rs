@@ -220,6 +220,7 @@ fn sort_transfers(transfers: &mut [Transfer]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
     use std::collections::HashMap;
     use walicord_application::PersonBalance;
     use walicord_domain::{Money, Transfer, model::MemberId};
@@ -239,35 +240,31 @@ mod tests {
         }
     }
 
-    #[test]
-    fn render_uses_display_name_when_available() {
+    #[rstest]
+    #[case::with_display_name(Some("Alice"), "Alice", Some("&lt;@1&gt;"), "Alice")]
+    #[case::without_display_name(None, "&lt;@1&gt;", None, "&lt;@2&gt;")]
+    fn render_cases(
+        #[case] display_name: Option<&str>,
+        #[case] expected_balance_contains: &str,
+        #[case] forbidden_balance: Option<&str>,
+        #[case] expected_transfer_contains: &str,
+    ) {
         let mut directory = HashMap::new();
-        directory.insert(MemberId(1), "Alice".to_string());
+        if let Some(name) = display_name {
+            directory.insert(MemberId(1), name.to_string());
+        }
 
         let view = SettlementPresenter::render_with_members(&sample_result(), &directory);
 
-        assert!(view.balance_table_svg.contains("Alice"));
-        assert!(!view.balance_table_svg.contains("<@1>"));
+        assert!(view.balance_table_svg.contains(expected_balance_contains));
+        if let Some(forbidden) = forbidden_balance {
+            assert!(!view.balance_table_svg.contains(forbidden));
+        }
         assert!(
             view.transfer_table_svg
                 .as_ref()
                 .expect("transfer table")
-                .contains("Alice")
-        );
-    }
-
-    #[test]
-    fn render_falls_back_to_mentions_when_missing() {
-        let directory: HashMap<MemberId, String> = HashMap::new();
-
-        let view = SettlementPresenter::render_with_members(&sample_result(), &directory);
-
-        assert!(view.balance_table_svg.contains("&lt;@1&gt;"));
-        assert!(
-            view.transfer_table_svg
-                .as_ref()
-                .expect("transfer table")
-                .contains("&lt;@2&gt;")
+                .contains(expected_transfer_contains)
         );
     }
 }

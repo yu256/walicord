@@ -5,10 +5,13 @@ mod i18n;
 use nom::{
     IResult, Parser,
     branch::alt,
-    bytes::complete::{tag, tag_no_case, take_while, take_while1},
-    character::complete::{char, u64},
-    combinator::opt,
+    bytes::complete::{tag, tag_no_case, take_till, take_until, take_while1},
+    character::complete::{char, multispace1, u64},
+    combinator::{opt, recognize},
+    multi::many0,
+    sequence::delimited,
 };
+use smallvec::{SmallVec, smallvec};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SetOp<'a> {
@@ -21,12 +24,14 @@ pub enum SetOp<'a> {
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct SetExpr<'a> {
-    ops: Vec<SetOp<'a>>,
+    ops: SmallVec<[SetOp<'a>; 3]>,
 }
 
 impl<'a> SetExpr<'a> {
     pub fn new() -> Self {
-        Self { ops: Vec::new() }
+        Self {
+            ops: SmallVec::new(),
+        }
     }
 
     fn push(&mut self, op: SetOp<'a>) {
@@ -50,62 +55,6 @@ impl<'a> SetExpr<'a> {
             _ => None,
         })
     }
-
-    pub fn to_infix_string(&self) -> Option<String> {
-        let mut stack: Vec<String> = Vec::new();
-
-        for op in &self.ops {
-            match op {
-                SetOp::Push(id) => stack.push(format!("<@{id}>")),
-                SetOp::PushGroup(name) => stack.push((*name).to_string()),
-                SetOp::Union => {
-                    let b = stack.pop()?;
-                    let a = stack.pop()?;
-                    stack.push(format!("({a} ∪ {b})"));
-                }
-                SetOp::Intersection => {
-                    let b = stack.pop()?;
-                    let a = stack.pop()?;
-                    stack.push(format!("({a} ∩ {b})"));
-                }
-                SetOp::Difference => {
-                    let b = stack.pop()?;
-                    let a = stack.pop()?;
-                    stack.push(format!("({a} - {b})"));
-                }
-            }
-        }
-
-        if stack.len() == 1 {
-            let mut result = stack.pop()?;
-            if is_fully_wrapped(&result) {
-                result = result[1..result.len() - 1].to_string();
-            }
-            Some(result)
-        } else {
-            None
-        }
-    }
-}
-
-fn is_fully_wrapped(value: &str) -> bool {
-    if !value.starts_with('(') || !value.ends_with(')') || value.len() <= 1 {
-        return false;
-    }
-
-    let mut depth = 0;
-    for (i, c) in value.char_indices() {
-        if c == '(' {
-            depth += 1;
-        } else if c == ')' {
-            depth -= 1;
-            if depth == 0 && i != value.len() - 1 {
-                return false;
-            }
-        }
-    }
-
-    depth == 0
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -127,8 +76,42 @@ impl<'a> PayerSpec<'a> {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct AmountExpr {
+    ops: SmallVec<[AmountOp; 1]>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AmountOp {
+    Literal(u64),
+    Add,
+    Sub,
+    Mul,
+    Div,
+}
+
+impl AmountExpr {
+    pub fn literal(value: u64) -> Self {
+        Self {
+            ops: smallvec![AmountOp::Literal(value)],
+        }
+    }
+
+    pub fn ops(&self) -> &[AmountOp] {
+        &self.ops
+    }
+
+    fn push_ops(&mut self, mut other: AmountExpr) {
+        self.ops.append(&mut other.ops);
+    }
+
+    fn push_op(&mut self, op: AmountOp) {
+        self.ops.push(op);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct Payment<'a> {
-    pub amount: u64,
+    pub amount: AmountExpr,
     pub payer: PayerSpec<'a>,
     pub payee: SetExpr<'a>,
 }
@@ -212,7 +195,25 @@ fn is_japanese_char(c: char) -> bool {
 }
 
 fn sp(input: &str) -> IResult<&str, &str> {
-    take_while(|c: char| c.is_whitespace() || c == '\u{3000}')(input)
+    fn fullwidth_space(input: &str) -> IResult<&str, &str> {
+        take_while1(|c: char| c == '\u{3000}')(input)
+    }
+
+    fn comment(input: &str) -> IResult<&str, &str> {
+        delimited(tag("/*"), take_until("*/"), tag("*/")).parse(input)
+    }
+
+    fn line_comment(input: &str) -> IResult<&str, &str> {
+        recognize((tag("//"), take_till(|c| c == '\n'))).parse(input)
+    }
+
+    recognize(many0(alt((
+        multispace1,
+        fullwidth_space,
+        comment,
+        line_comment,
+    ))))
+    .parse(input)
 }
 
 fn set_primary(input: &str) -> IResult<&str, SetExpr<'_>> {
@@ -289,13 +290,61 @@ fn paid(input: &str) -> IResult<&str, &str> {
     alt((tag("立て替えた"), tag("たてかえた"), tag_no_case("paid"))).parse(input)
 }
 
-fn yen(input: &str) -> IResult<&str, u64> {
+fn amount_literal(input: &str) -> IResult<&str, AmountExpr> {
     (
         opt(char('¥')),
         u64,
         opt(alt((tag("円"), tag("えん"), tag_no_case("yen")))),
     )
-        .map(|(_, amount, _)| amount)
+        .map(|(_, amount, _)| AmountExpr::literal(amount))
+        .parse(input)
+}
+
+fn amount_primary(input: &str) -> IResult<&str, AmountExpr> {
+    alt((
+        (char('('), sp, amount_expr, sp, char(')')).map(|(_, _, value, _, _)| value),
+        amount_literal,
+    ))
+    .parse(input)
+}
+
+fn amount_term(input: &str) -> IResult<&str, AmountExpr> {
+    (
+        amount_primary,
+        many0((sp, alt((char('*'), char('/'))), sp, amount_primary)),
+    )
+        .map(|(first, rest)| {
+            rest.into_iter().fold(first, |mut acc, (_, op, _, rhs)| {
+                acc.push_ops(rhs);
+                acc.push_op(match op {
+                    '*' => AmountOp::Mul,
+                    '/' => AmountOp::Div,
+                    _ => unreachable!("parser should only produce * or /"),
+                });
+                acc
+            })
+        })
+        .parse(input)
+}
+
+fn amount_expr(input: &str) -> IResult<&str, AmountExpr> {
+    (
+        amount_term,
+        many0((sp, alt((char('+'), char('-'))), sp, amount_term)),
+    )
+        .map(|(first, rest)| {
+            rest.into_iter().fold(first, |mut acc, (_, op, _, rhs)| {
+                acc.push_ops(rhs);
+                acc.push_op(match op {
+                    '+' => AmountOp::Add,
+                    '-' => AmountOp::Sub,
+                    _ => {
+                        unreachable!("parser should only produce + or -")
+                    }
+                });
+                acc
+            })
+        })
         .parse(input)
 }
 
@@ -315,9 +364,16 @@ fn to(input: &str) -> IResult<&str, &str> {
 fn payment_lender_subject_ja(input: &str) -> IResult<&str, Payment<'_>> {
     (
         set_expr, // payer
-        sp, ga, sp, set_expr, // payee
-        sp, ni, sp, yen, // amount
-        sp, paid,
+        sp,
+        ga,
+        sp,
+        set_expr, // payee
+        sp,
+        ni,
+        sp,
+        amount_expr, // amount
+        sp,
+        paid,
     )
         .map(|(payer, _, _, _, payee, _, _, _, amount, _, _)| Payment {
             amount,
@@ -331,8 +387,14 @@ fn payment_lender_subject_ja(input: &str) -> IResult<&str, Payment<'_>> {
 fn payment_lender_subject_en(input: &str) -> IResult<&str, Payment<'_>> {
     (
         set_expr, // payer
-        sp, paid, sp, yen, // amount
-        sp, to, sp, set_expr, // payee
+        sp,
+        paid,
+        sp,
+        amount_expr, // amount
+        sp,
+        to,
+        sp,
+        set_expr, // payee
     )
         .map(|(payer, _, _, _, amount, _, _, _, payee)| Payment {
             amount,
@@ -344,7 +406,7 @@ fn payment_lender_subject_en(input: &str) -> IResult<&str, Payment<'_>> {
 
 // {amount} {payee}
 fn payment_implicit_simple(input: &str) -> IResult<&str, Payment<'_>> {
-    (yen, sp, set_expr)
+    (amount_expr, sp, set_expr)
         .map(|(amount, _, payee)| Payment {
             amount,
             payer: PayerSpec::Implicit,
@@ -355,7 +417,7 @@ fn payment_implicit_simple(input: &str) -> IResult<&str, Payment<'_>> {
 
 // {amount} to {payee}
 fn payment_implicit_with_to(input: &str) -> IResult<&str, Payment<'_>> {
-    (yen, sp, to, sp, set_expr)
+    (amount_expr, sp, to, sp, set_expr)
         .map(|(amount, _, _, _, payee)| Payment {
             amount,
             payer: PayerSpec::Implicit,
@@ -398,18 +460,24 @@ fn statement(input: &str) -> IResult<&str, Statement<'_>> {
     .parse(input)
 }
 
+fn statement_with_sp(input: &str) -> IResult<&str, Statement<'_>> {
+    (sp, statement, sp).map(|(_, stmt, _)| stmt).parse(input)
+}
+
 // Parse the entire program
 // NOTE: MEMBERS declaration is no longer required - members are referenced via Discord mentions
 pub fn parse_program<'a>(input: &'a str) -> Result<Program<'a>, ParseError> {
     let mut statements = Vec::new();
 
     for (idx, line) in input.lines().enumerate() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
+        let (rest, _) = sp(line).map_err(|e| ParseError::SyntaxError {
+            line: idx + 1,
+            detail: i18n::syntax_error_detail(e),
+        })?;
+        if rest.trim().is_empty() {
             continue;
         }
-
-        match statement(trimmed) {
+        match statement_with_sp(rest) {
             Ok((rest, stmt)) => {
                 if !rest.trim().is_empty() {
                     return Err(ParseError::SyntaxError {
@@ -439,26 +507,53 @@ mod tests {
     use super::*;
     use rstest::rstest;
 
+    fn mention_expr(id: u64) -> SetExpr<'static> {
+        let mut expr = SetExpr::new();
+        expr.push(SetOp::Push(id));
+        expr
+    }
+
+    fn eval_amount(expr: &AmountExpr) -> Option<i128> {
+        let mut stack: Vec<i128> = Vec::with_capacity(expr.ops().len());
+        for op in expr.ops() {
+            match op {
+                AmountOp::Literal(value) => stack.push(*value as i128),
+                AmountOp::Add => apply_bin(&mut stack, |a, b| a.checked_add(b))?,
+                AmountOp::Sub => apply_bin(&mut stack, |a, b| a.checked_sub(b))?,
+                AmountOp::Mul => apply_bin(&mut stack, |a, b| a.checked_mul(b))?,
+                AmountOp::Div => apply_bin(&mut stack, |a, b| a.checked_div(b))?,
+            }
+        }
+        if stack.len() == 1 { stack.pop() } else { None }
+    }
+
+    fn apply_bin(stack: &mut Vec<i128>, op: fn(i128, i128) -> Option<i128>) -> Option<()> {
+        let rhs = stack.pop()?;
+        let lhs = stack.pop()?;
+        stack.push(op(lhs, rhs)?);
+        Some(())
+    }
+
     #[rstest]
-    #[case("MEMBERS", &[SetOp::PushGroup("MEMBERS")])]
-    #[case("<@65>", &[SetOp::Push(65)])] // 'A' = 65 in ASCII
-    #[case(
+    #[case::members("MEMBERS", &[SetOp::PushGroup("MEMBERS")])]
+    #[case::mention("<@65>", &[SetOp::Push(65)])] // 'A' = 65 in ASCII
+    #[case::union_symbol(
         "<@65> ∪ <@66>",
         &[SetOp::Push(65), SetOp::Push(66), SetOp::Union]
     )]
-    #[case(
+    #[case::union_space(
         "<@65> <@66>",
         &[SetOp::Push(65), SetOp::Push(66), SetOp::Union]
     )]
-    #[case(
+    #[case::intersection(
         "<@65> ∩ <@66>",
         &[SetOp::Push(65), SetOp::Push(66), SetOp::Intersection]
     )]
-    #[case(
+    #[case::difference(
         "<@65> - <@66>",
         &[SetOp::Push(65), SetOp::Push(66), SetOp::Difference]
     )]
-    #[case(
+    #[case::nested(
         "(<@65> ∪ <@66>) ∩ <@67>",
         &[
             SetOp::Push(65),
@@ -470,39 +565,28 @@ mod tests {
     )]
     fn test_set_expr_ops(#[case] input: &str, #[case] expected: &'static [SetOp]) {
         let (_, expr) = set_expr(input).unwrap();
-        assert_eq!(&expr.ops, expected);
+        assert_eq!(expr.ops(), expected);
     }
 
     #[rstest]
-    #[case("<@65>, <@66> paid 1000 to <@67>")]
-    #[case("<@65> <@66>, <@67> paid 1000 to <@68>")]
+    #[case::comma_union("<@65>, <@66> paid 1000 to <@67>")]
+    #[case::mixed_union("<@65> <@66>, <@67> paid 1000 to <@68>")]
     fn test_accepts_union_separators(#[case] input: &str) {
         let result = parse_program(input);
         assert!(result.is_ok(), "Should accept union separators");
     }
 
     #[rstest]
-    #[case("(<@65> ∪ <@66>) ∩ <@67>", "(<@65> ∪ <@66>) ∩ <@67>")]
-    #[case("<@65> - <@66> ∪ <@67>", "(<@65> - <@66>) ∪ <@67>")]
-    #[case("<@65>", "<@65>")]
-    #[case("<@65> ∪ (<@66> ∩ <@67>)", "<@65> ∪ (<@66> ∩ <@67>)")]
-    fn test_infix_string(#[case] input: &str, #[case] expected: &str) {
-        let (_, expr) = set_expr(input).unwrap();
-        let infix = expr.to_infix_string().unwrap();
-        assert_eq!(infix, expected);
-    }
-
-    #[rstest]
-    #[case("!variables", Statement::Command(Command::Variables))]
-    #[case("!review", Statement::Command(Command::Review))]
-    #[case("!清算確認", Statement::Command(Command::Review))]
-    fn test_parse_simple_commands(#[case] input: &str, #[case] expected: Statement<'_>) {
+    #[case::variables("!variables", Statement::Command(Command::Variables))]
+    #[case::review_en("!review", Statement::Command(Command::Review))]
+    #[case::review_ja("!清算確認", Statement::Command(Command::Review))]
+    fn test_parse_simple_commands<'a>(#[case] input: &'a str, #[case] expected: Statement<'a>) {
         let (_, stmt) = statement(input).unwrap();
         assert_eq!(stmt, expected);
     }
 
     #[rstest]
-    #[case("!settleup <@999> - <@111>")]
+    #[case::settleup_difference("!settleup <@999> - <@111>")]
     fn test_parse_kakutei_command(#[case] input: &str) {
         let (_, stmt) = statement(input).unwrap();
         let mut expected_expr = SetExpr::new();
@@ -514,26 +598,51 @@ mod tests {
 
     // Tests for mention-based parsing (Discord ID)
     #[rstest]
-    #[case("<@123456789>", 123456789)]
-    #[case("<@!123456789>", 123456789)] // nickname mention
+    #[case::standard("<@123456789>", 123456789)]
+    #[case::nickname("<@!123456789>", 123456789)] // nickname mention
     fn test_parse_mention(#[case] input: &str, #[case] expected: u64) {
         let (_, id) = mention(input).unwrap();
         assert_eq!(id, expected);
     }
 
     #[rstest]
-    #[case("<@123> が <@456> に 1000 立て替えた")]
-    #[case("<@123> paid 1000 to <@456>")]
+    #[case::ja("<@123> が <@456> に 1000 立て替えた")]
+    #[case::en("<@123> paid 1000 to <@456>")]
     fn test_mention_based_payment(#[case] input: &str) {
         let result = payment(input);
         assert!(result.is_ok(), "Failed to parse: {input}");
         let (_, payment) = result.unwrap();
-        assert_eq!(payment.amount, 1000);
+        assert_eq!(eval_amount(&payment.amount), Some(1000));
         assert!(matches!(payment.payer, PayerSpec::Explicit(_)));
     }
 
     #[rstest]
-    #[case("Alice が Bob に 1000 立て替えた", "Alice", "Bob")]
+    #[case::sum("100+200", 300)]
+    #[case::mul("100*3", 300)]
+    #[case::mixed("100+200*3", 700)]
+    #[case::paren("(100+200)*3", 900)]
+    #[case::yen_literals("100円+200円", 300)]
+    #[case::spaces("100 + 200", 300)]
+    fn test_amount_expr(#[case] input: &str, #[case] expected: u64) {
+        let result = amount_expr(input);
+        assert!(result.is_ok(), "Failed to parse amount expression: {input}");
+        let (rest, amount) = result.unwrap();
+        assert!(rest.is_empty());
+        assert_eq!(eval_amount(&amount), Some(expected as i128));
+    }
+
+    #[rstest]
+    #[case::trailing_op("10+")]
+    #[case::missing_paren("(10+20")]
+    fn test_amount_expr_rejects_invalid_syntax(#[case] input: &str) {
+        let result = amount_expr(input);
+        if let Ok((rest, _)) = result {
+            assert!(!rest.is_empty())
+        }
+    }
+
+    #[rstest]
+    #[case::names_as_groups("Alice が Bob に 1000 立て替えた", "Alice", "Bob")]
     fn test_name_based_parsed_as_group_refs(
         #[case] input: &str,
         #[case] payer_name: &str,
@@ -544,29 +653,150 @@ mod tests {
         assert!(result.is_ok(), "Names should parse as group references");
 
         let (_, payment) = result.unwrap();
-        // payer should be a group reference
         let PayerSpec::Explicit(payer) = payment.payer else {
             panic!("Expected explicit payer");
         };
-        assert_eq!(payer.ops, vec![SetOp::PushGroup(payer_name)]);
-        // payee should be a group reference
-        assert_eq!(payment.payee.ops, vec![SetOp::PushGroup(payee_name)]);
+        assert_eq!(payer.ops(), &[SetOp::PushGroup(payer_name)]);
+        assert_eq!(payment.payee.ops(), &[SetOp::PushGroup(payee_name)]);
     }
 
     #[rstest]
-    #[case("1000 <@456>")]
-    #[case("1000 to <@456>")]
+    #[case::implicit_simple("1000 <@456>")]
+    #[case::implicit_to("1000 to <@456>")]
     fn test_implicit_payment(#[case] input: &str) {
         let result = payment(input);
         assert!(result.is_ok(), "Failed to parse implicit payment");
         let (_, payment) = result.unwrap();
-        assert_eq!(payment.amount, 1000);
+        assert_eq!(eval_amount(&payment.amount), Some(1000));
         assert!(payment.is_payer_implicit());
     }
 
     #[rstest]
-    #[case("<@123> が <@456> に 1000 立て替えた")]
-    #[case("team := <@111> <@222>\nteam が <@333> に 1000 立て替えた")]
+    #[case::inline_comment_payment(
+        "1000円 /*ランチ*/ <@456>",
+        Statement::Payment(Payment {
+            amount: AmountExpr::literal(1000),
+            payer: PayerSpec::Implicit,
+            payee: mention_expr(456),
+        })
+    )]
+    #[case::inline_comment_paid_ja(
+        "<@123> /*交通費*/ が <@456> に 1000 立て替えた",
+        Statement::Payment(Payment {
+            amount: AmountExpr::literal(1000),
+            payer: PayerSpec::Explicit(mention_expr(123)),
+            payee: mention_expr(456),
+        })
+    )]
+    #[case::inline_comment_declaration(
+        "team := <@111> /*主担当*/ <@222>",
+        Statement::Declaration(Declaration {
+            name: "team",
+            expression: {
+                let mut expr = SetExpr::new();
+                expr.push(SetOp::Push(111));
+                expr.push(SetOp::Push(222));
+                expr.push(SetOp::Union);
+                expr
+            },
+        })
+    )]
+    #[case::inline_comment_settleup(
+        "!settleup /*除外*/ <@999> - <@111>",
+        Statement::Command(Command::SettleUp({
+            let mut expr = SetExpr::new();
+            expr.push(SetOp::Push(999));
+            expr.push(SetOp::Push(111));
+            expr.push(SetOp::Difference);
+            expr
+        }))
+    )]
+    #[case::inline_comment_adjacent(
+        "1000円/*ランチ*/<@456>",
+        Statement::Payment(Payment {
+            amount: AmountExpr::literal(1000),
+            payer: PayerSpec::Implicit,
+            payee: mention_expr(456),
+        })
+    )]
+    #[case::inline_comment_multiple(
+        "1000円 /*A*/ <@456> /*B*/",
+        Statement::Payment(Payment {
+            amount: AmountExpr::literal(1000),
+            payer: PayerSpec::Implicit,
+            payee: mention_expr(456),
+        })
+    )]
+    #[case::inline_comment_empty(
+        "1000円 /**/ <@456>",
+        Statement::Payment(Payment {
+            amount: AmountExpr::literal(1000),
+            payer: PayerSpec::Implicit,
+            payee: mention_expr(456),
+        })
+    )]
+    fn test_accepts_inline_comments(
+        #[case] input: &'static str,
+        #[case] expected: Statement<'static>,
+    ) {
+        let program = parse_program(input).expect("Should accept inline comments");
+        assert_eq!(program.statements.len(), 1);
+        assert_eq!(program.statements[0].statement, expected);
+    }
+
+    #[rstest]
+    #[case::line_comment_trailing(
+        "1000円 <@456> // ランチ",
+        Statement::Payment(Payment {
+            amount: AmountExpr::literal(1000),
+            payer: PayerSpec::Implicit,
+            payee: mention_expr(456),
+        })
+    )]
+    #[case::line_comment_adjacent(
+        "1000円 <@456>// ランチ",
+        Statement::Payment(Payment {
+            amount: AmountExpr::literal(1000),
+            payer: PayerSpec::Implicit,
+            payee: mention_expr(456),
+        })
+    )]
+    #[case::line_comment_settleup(
+        "!settleup <@999> // 除外",
+        Statement::Command(Command::SettleUp({
+            let mut expr = SetExpr::new();
+            expr.push(SetOp::Push(999));
+            expr
+        }))
+    )]
+    fn test_accepts_line_comments(
+        #[case] input: &'static str,
+        #[case] expected: Statement<'static>,
+    ) {
+        let program = parse_program(input).expect("Should accept line comments");
+        assert_eq!(program.statements.len(), 1);
+        assert_eq!(program.statements[0].statement, expected);
+    }
+
+    #[rstest]
+    #[case::line_comment_only("// メモ")]
+    #[case::line_comment_leading_spaces("   // メモ")]
+    fn test_line_comment_only_is_ignored(#[case] input: &str) {
+        let program = parse_program(input).expect("Should accept line comments");
+        assert!(program.statements.is_empty());
+    }
+
+    #[rstest]
+    #[case::unterminated_inline("1000円 /*ランチ <@456>")]
+    #[case::unterminated_multiline("1000円 /*メモ\n<@456>")]
+    fn test_unterminated_comment_returns_error(#[case] input: &str) {
+        let result = parse_program(input);
+        assert!(matches!(result, Err(ParseError::SyntaxError { .. })));
+    }
+
+    #[rstest]
+    #[case::single_payment("<@123> が <@456> に 1000 立て替えた")]
+    #[case::declaration_and_payment("team := <@111> <@222>\nteam が <@333> に 1000 立て替えた")]
     fn test_parse_program_variants(#[case] input: &str) {
         let result = parse_program(input);
         assert!(result.is_ok(), "Program should parse: {result:?}");

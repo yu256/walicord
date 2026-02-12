@@ -141,6 +141,7 @@ impl MemberRosterProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
     use std::sync::Arc;
 
     fn create_test_member_info(user_id: u64, name: &str, nick: Option<&str>) -> MemberInfo {
@@ -167,34 +168,35 @@ mod tests {
         provider
     }
 
-    #[test]
-    fn display_names_for_guild_returns_cached_names() {
+    #[rstest]
+    #[case::returns_cached_names(
+        &[(1, "Alice", Some("Ali")), (2, "Bob", None)],
+        &[1, 2],
+        &[(1, "Ali"), (2, "Bob")]
+    )]
+    #[case::skips_missing_members(&[(1, "Alice", None)], &[1, 2], &[(1, "Alice")])]
+    fn display_names_for_guild_cases(
+        #[case] members: &[(u64, &str, Option<&str>)],
+        #[case] request_ids: &[u64],
+        #[case] expected: &[(u64, &str)],
+    ) {
         let guild_id = GuildId::new(1);
-        let members = vec![
-            create_test_member_info(1, "Alice", Some("Ali")),
-            create_test_member_info(2, "Bob", None),
-        ];
+        let members = members
+            .iter()
+            .map(|(id, name, nick)| create_test_member_info(*id, name, *nick))
+            .collect();
         let provider = setup_provider_with_members(guild_id, members);
 
-        let result = provider.display_names_for_guild(guild_id, vec![MemberId(1), MemberId(2)]);
+        let result =
+            provider.display_names_for_guild(guild_id, request_ids.iter().map(|id| MemberId(*id)));
 
-        assert_eq!(result.get(&MemberId(1)), Some(&"Ali".to_string()));
-        assert_eq!(result.get(&MemberId(2)), Some(&"Bob".to_string()));
+        assert_eq!(result.len(), expected.len());
+        for (id, name) in expected {
+            assert_eq!(result.get(&MemberId(*id)), Some(&name.to_string()));
+        }
     }
 
-    #[test]
-    fn display_names_for_guild_skips_missing_members() {
-        let guild_id = GuildId::new(1);
-        let members = vec![create_test_member_info(1, "Alice", None)];
-        let provider = setup_provider_with_members(guild_id, members);
-
-        let result = provider.display_names_for_guild(guild_id, vec![MemberId(1), MemberId(2)]);
-
-        assert_eq!(result.len(), 1);
-        assert_eq!(result.get(&MemberId(1)), Some(&"Alice".to_string()));
-    }
-
-    #[test]
+    #[rstest]
     fn display_names_for_guild_returns_empty_when_not_loaded() {
         let guild_id = GuildId::new(1);
         let provider = MemberRosterProvider::new(DiscordChannelService);
@@ -204,20 +206,41 @@ mod tests {
         assert!(result.is_empty());
     }
 
-    #[test]
-    fn apply_member_add_inserts_member_to_existing_guild() {
+    #[derive(Clone, Copy)]
+    enum UpdateAction {
+        Add,
+        Update,
+    }
+
+    #[rstest]
+    #[case::add(UpdateAction::Add, 2, "Bob", Some("Bobby"), 2, "Bobby")]
+    #[case::update(UpdateAction::Update, 1, "NewName", Some("NewNick"), 1, "NewNick")]
+    fn apply_member_add_or_update_modifies_existing(
+        #[case] action: UpdateAction,
+        #[case] member_id: u64,
+        #[case] name: &str,
+        #[case] nick: Option<&str>,
+        #[case] expected_id: u64,
+        #[case] expected: &str,
+    ) {
         let guild_id = GuildId::new(1);
         let members = vec![create_test_member_info(1, "Alice", None)];
         let provider = setup_provider_with_members(guild_id, members);
 
-        let new_member = create_test_member_info(2, "Bob", Some("Bobby"));
-        provider.apply_member_add(guild_id, new_member);
+        let updated_member = create_test_member_info(member_id, name, nick);
+        match action {
+            UpdateAction::Add => provider.apply_member_add(guild_id, updated_member),
+            UpdateAction::Update => provider.apply_member_update(guild_id, updated_member),
+        }
 
-        let result = provider.display_names_for_guild(guild_id, vec![MemberId(2)]);
-        assert_eq!(result.get(&MemberId(2)), Some(&"Bobby".to_string()));
+        let result = provider.display_names_for_guild(guild_id, vec![MemberId(expected_id)]);
+        assert_eq!(
+            result.get(&MemberId(expected_id)),
+            Some(&expected.to_string())
+        );
     }
 
-    #[test]
+    #[rstest]
     fn apply_member_add_ignores_new_guild() {
         let guild_id = GuildId::new(1);
         let provider = MemberRosterProvider::new(DiscordChannelService);
@@ -229,43 +252,30 @@ mod tests {
         assert!(result.is_empty());
     }
 
-    #[test]
-    fn apply_member_update_modifies_existing() {
+    #[rstest]
+    #[case::removes_existing(
+        &[(1, "Alice", None), (2, "Bob", None)],
+        1,
+        1,
+        false
+    )]
+    #[case::ignores_missing(&[(2, "Bob", None)], 1, 2, true)]
+    fn apply_member_remove_cases(
+        #[case] members: &[(u64, &str, Option<&str>)],
+        #[case] remove_id: u64,
+        #[case] check_id: u64,
+        #[case] expect_present: bool,
+    ) {
         let guild_id = GuildId::new(1);
-        let member = create_test_member_info(1, "OldName", Some("OldNick"));
-        let provider = setup_provider_with_members(guild_id, vec![member]);
-
-        let updated_member = create_test_member_info(1, "NewName", Some("NewNick"));
-        provider.apply_member_update(guild_id, updated_member);
-
-        let result = provider.display_names_for_guild(guild_id, vec![MemberId(1)]);
-        assert_eq!(result.get(&MemberId(1)), Some(&"NewNick".to_string()));
-    }
-
-    #[test]
-    fn apply_member_remove_deletes_member() {
-        let guild_id = GuildId::new(1);
-        let members = vec![
-            create_test_member_info(1, "Alice", None),
-            create_test_member_info(2, "Bob", None),
-        ];
+        let members = members
+            .iter()
+            .map(|(id, name, nick)| create_test_member_info(*id, name, *nick))
+            .collect();
         let provider = setup_provider_with_members(guild_id, members);
 
-        provider.apply_member_remove(guild_id, MemberId(1));
+        provider.apply_member_remove(guild_id, MemberId(remove_id));
 
-        let result = provider.display_names_for_guild(guild_id, vec![MemberId(1)]);
-        assert!(!result.contains_key(&MemberId(1)));
-    }
-
-    #[test]
-    fn apply_member_remove_nonexistent_is_noop() {
-        let guild_id = GuildId::new(1);
-        let members = vec![create_test_member_info(2, "Bob", None)];
-        let provider = setup_provider_with_members(guild_id, members);
-
-        provider.apply_member_remove(guild_id, MemberId(1));
-
-        let result = provider.display_names_for_guild(guild_id, vec![MemberId(2)]);
-        assert!(result.contains_key(&MemberId(2)));
+        let result = provider.display_names_for_guild(guild_id, vec![MemberId(check_id)]);
+        assert_eq!(result.contains_key(&MemberId(check_id)), expect_present);
     }
 }

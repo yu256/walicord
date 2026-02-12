@@ -1,4 +1,5 @@
 use fxhash::FxHashSet;
+use smallvec::SmallVec;
 use std::{
     borrow::Cow,
     collections::BTreeMap,
@@ -46,6 +47,77 @@ pub enum ProgramBuildError<'a> {
     FailedToEvaluateGroup { name: &'a str, line: usize },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RemainderPolicy {
+    /// Distribute remainder one unit at a time, starting from the front
+    FrontLoad,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AmountExpr {
+    ops: SmallVec<[AmountOp; 1]>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AmountOp {
+    Literal(u64),
+    Add,
+    Sub,
+    Mul,
+    Div,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AmountError {
+    Overflow,
+    DivisionByZero,
+    NonIntegerDivision,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SplitError {
+    ZeroRecipients,
+    EmptyRatios,
+    ZeroTotalRatio,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Ratios {
+    weights: Vec<u64>,
+    total: u64,
+}
+
+impl Ratios {
+    pub fn try_new(weights: Vec<u64>) -> Result<Self, SplitError> {
+        if weights.is_empty() {
+            return Err(SplitError::EmptyRatios);
+        }
+
+        let total: u64 = weights.iter().sum();
+        if total == 0 {
+            return Err(SplitError::ZeroTotalRatio);
+        }
+
+        Ok(Self { weights, total })
+    }
+
+    pub fn len(&self) -> usize {
+        self.weights.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.weights.is_empty()
+    }
+
+    pub fn weights(&self) -> &[u64] {
+        &self.weights
+    }
+
+    pub fn total(&self) -> u64 {
+        self.total
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Money(i64);
 
@@ -56,10 +128,6 @@ impl Money {
 
     pub fn from_i64(value: i64) -> Self {
         Self(value)
-    }
-
-    pub fn from_u64(value: u64) -> Self {
-        Self(value as i64)
     }
 
     pub fn amount(self) -> i64 {
@@ -76,6 +144,157 @@ impl Money {
 
     pub fn signum(self) -> i64 {
         self.0.signum()
+    }
+
+    /// Split amount evenly among `n` recipients; remainder is distributed per policy
+    pub fn split_even(self, n: usize, policy: RemainderPolicy) -> Result<Vec<Self>, SplitError> {
+        if n == 0 {
+            return Err(SplitError::ZeroRecipients);
+        }
+
+        let total = self.0;
+        let divisor = n as i64;
+        let base = total / divisor;
+        let remainder = total - base * divisor;
+
+        let mut result = vec![Self(base); n];
+        apply_remainder(policy, &mut result, remainder);
+        Ok(result)
+    }
+
+    /// Split amount by `ratios`; remainder is distributed per policy from the front
+    pub fn split_ratio(self, ratios: &Ratios, policy: RemainderPolicy) -> Vec<Self> {
+        let total = self.0 as i128;
+        let sum = ratios.total() as i128;
+
+        let mut allocated: Vec<Self> = ratios
+            .weights()
+            .iter()
+            .map(|&w| Self((total * w as i128 / sum) as i64))
+            .collect();
+
+        let distributed: i64 = allocated.iter().map(|m| m.0).sum();
+        let remainder = self.0 - distributed;
+        apply_remainder(policy, &mut allocated, remainder);
+
+        allocated
+    }
+}
+
+impl TryFrom<u64> for Money {
+    type Error = AmountError;
+
+    fn try_from(value: u64) -> Result<Self, Self::Error> {
+        if value <= i64::MAX as u64 {
+            Ok(Self(value as i64))
+        } else {
+            Err(AmountError::Overflow)
+        }
+    }
+}
+
+impl AmountExpr {
+    pub fn new<I>(ops: I) -> Self
+    where
+        I: IntoIterator<Item = AmountOp>,
+        <I as IntoIterator>::IntoIter: ExactSizeIterator,
+    {
+        let iter = ops.into_iter();
+        let mut values = SmallVec::with_capacity(iter.len());
+        values.extend(iter);
+        Self { ops: values }
+    }
+
+    pub fn ops(&self) -> &[AmountOp] {
+        &self.ops
+    }
+
+    pub fn evaluate(&self) -> Result<Money, AmountError> {
+        let value = self.evaluate_i128()?;
+        if value > i64::MAX as i128 || value < i64::MIN as i128 {
+            return Err(AmountError::Overflow);
+        }
+        Ok(Money::from_i64(value as i64))
+    }
+
+    fn evaluate_i128(&self) -> Result<i128, AmountError> {
+        let mut stack: Vec<i128> = Vec::with_capacity(self.ops.len());
+        for op in &self.ops {
+            match op {
+                AmountOp::Literal(value) => stack.push(*value as i128),
+                AmountOp::Add => apply_binary(&mut stack, checked_add)?,
+                AmountOp::Sub => apply_binary(&mut stack, checked_sub)?,
+                AmountOp::Mul => apply_binary(&mut stack, checked_mul)?,
+                AmountOp::Div => apply_binary(&mut stack, checked_div)?,
+            }
+        }
+
+        if stack.len() == 1 {
+            Ok(stack.pop().unwrap_or(0))
+        } else {
+            Err(AmountError::Overflow)
+        }
+    }
+}
+
+fn apply_binary(
+    stack: &mut Vec<i128>,
+    op: fn(i128, i128) -> Result<i128, AmountError>,
+) -> Result<(), AmountError> {
+    let rhs = stack.pop().ok_or(AmountError::Overflow)?;
+    let lhs = stack.pop().ok_or(AmountError::Overflow)?;
+    stack.push(op(lhs, rhs)?);
+    Ok(())
+}
+
+fn checked_add(lhs: i128, rhs: i128) -> Result<i128, AmountError> {
+    lhs.checked_add(rhs).ok_or(AmountError::Overflow)
+}
+
+fn checked_sub(lhs: i128, rhs: i128) -> Result<i128, AmountError> {
+    lhs.checked_sub(rhs).ok_or(AmountError::Overflow)
+}
+
+fn checked_mul(lhs: i128, rhs: i128) -> Result<i128, AmountError> {
+    lhs.checked_mul(rhs).ok_or(AmountError::Overflow)
+}
+
+fn checked_div(lhs: i128, rhs: i128) -> Result<i128, AmountError> {
+    if rhs == 0 {
+        return Err(AmountError::DivisionByZero);
+    }
+    let remainder = lhs.checked_rem(rhs).ok_or(AmountError::Overflow)?;
+    if remainder != 0 {
+        return Err(AmountError::NonIntegerDivision);
+    }
+    lhs.checked_div(rhs).ok_or(AmountError::Overflow)
+}
+
+impl fmt::Display for AmountError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            AmountError::Overflow => write!(f, "amount is out of range"),
+            AmountError::DivisionByZero => write!(f, "division by zero"),
+            AmountError::NonIntegerDivision => write!(f, "division must be exact"),
+        }
+    }
+}
+
+fn apply_remainder(policy: RemainderPolicy, slots: &mut [Money], remainder: i64) {
+    if remainder == 0 {
+        return;
+    }
+
+    let bump = remainder.signum();
+    let count = remainder.unsigned_abs() as usize;
+
+    match policy {
+        RemainderPolicy::FrontLoad => {
+            for idx in 0..count {
+                let slot = idx % slots.len();
+                slots[slot].0 += bump;
+            }
+        }
     }
 }
 
@@ -138,7 +357,7 @@ pub enum MemberSetOp<'a> {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct MemberSetExpr<'a> {
-    ops: Vec<MemberSetOp<'a>>,
+    ops: SmallVec<[MemberSetOp<'a>; 3]>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -181,19 +400,145 @@ impl MemberInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
-    #[test]
-    fn member_info_effective_name_returns_display_name() {
+    #[rstest]
+    #[case::literal(AmountExpr::new(vec![AmountOp::Literal(100)]), 100)]
+    #[case::add(
+        AmountExpr::new(vec![AmountOp::Literal(100), AmountOp::Literal(50), AmountOp::Add]),
+        150
+    )]
+    #[case::mul(
+        AmountExpr::new(vec![AmountOp::Literal(20), AmountOp::Literal(5), AmountOp::Mul]),
+        100
+    )]
+    #[case::mixed(
+        AmountExpr::new(vec![
+            AmountOp::Literal(100),
+            AmountOp::Literal(200),
+            AmountOp::Literal(3),
+            AmountOp::Mul,
+            AmountOp::Add,
+        ]),
+        700
+    )]
+    fn amount_expr_evaluates(#[case] expr: AmountExpr, #[case] expected: i64) {
+        let money = expr.evaluate().expect("amount expr should evaluate");
+        assert_eq!(money.amount(), expected);
+    }
+
+    #[rstest]
+    #[case::division_by_zero(AmountExpr::new(vec![
+        AmountOp::Literal(10),
+        AmountOp::Literal(0),
+        AmountOp::Div,
+    ]))]
+    #[case::non_integer_division(AmountExpr::new(vec![
+        AmountOp::Literal(10),
+        AmountOp::Literal(3),
+        AmountOp::Div,
+    ]))]
+    fn amount_expr_rejects_invalid(#[case] expr: AmountExpr) {
+        let result = expr.evaluate();
+        assert!(result.is_err());
+    }
+
+    #[rstest]
+    #[case::negative_result(
+        AmountExpr::new(vec![AmountOp::Literal(10), AmountOp::Literal(20), AmountOp::Sub]),
+        -10
+    )]
+    fn amount_expr_allows_negative(#[case] expr: AmountExpr, #[case] expected: i64) {
+        let money = expr.evaluate().expect("amount expr should allow negative");
+        assert_eq!(money.amount(), expected);
+    }
+
+    #[rstest]
+    #[case::even_3(100, 3, vec![34, 33, 33])]
+    #[case::even_2(100, 2, vec![50, 50])]
+    #[case::even_1(100, 1, vec![100])]
+    #[case::no_remainder(99, 3, vec![33, 33, 33])]
+    #[case::zero_amount(0, 3, vec![0, 0, 0])]
+    fn split_even_distributes_correctly(
+        #[case] amount: i64,
+        #[case] n: usize,
+        #[case] expected: Vec<i64>,
+    ) {
+        let money = Money::from_i64(amount);
+        let result = money
+            .split_even(n, RemainderPolicy::FrontLoad)
+            .expect("non-zero recipient count");
+        let amounts: Vec<i64> = result.iter().map(|m| m.amount()).collect();
+        assert_eq!(amounts, expected);
+        assert_eq!(
+            result.iter().map(|m| m.amount()).sum::<i64>(),
+            amount,
+            "sum must equal original"
+        );
+    }
+
+    #[rstest]
+    fn split_even_zero_count_rejects() {
+        let result = Money::from_i64(100).split_even(0, RemainderPolicy::FrontLoad);
+        assert_eq!(result, Err(SplitError::ZeroRecipients));
+    }
+
+    #[rstest]
+    #[case::negative_even(-100, 3, vec![-34, -33, -33])]
+    #[case::negative_no_remainder(-99, 3, vec![-33, -33, -33])]
+    fn split_even_negative(#[case] amount: i64, #[case] n: usize, #[case] expected: Vec<i64>) {
+        let money = Money::from_i64(amount);
+        let result = money
+            .split_even(n, RemainderPolicy::FrontLoad)
+            .expect("non-zero recipient count");
+        let amounts: Vec<i64> = result.iter().map(|m| m.amount()).collect();
+        assert_eq!(amounts, expected);
+        assert_eq!(result.iter().map(|m| m.amount()).sum::<i64>(), amount);
+    }
+
+    #[rstest]
+    #[case::ratio_2_1(100, vec![2, 1], vec![67, 33])]
+    #[case::ratio_1_1(100, vec![1, 1], vec![50, 50])]
+    #[case::ratio_1_1_1(100, vec![1, 1, 1], vec![34, 33, 33])]
+    #[case::ratio_3_1(100, vec![3, 1], vec![75, 25])]
+    fn split_ratio_distributes_correctly(
+        #[case] amount: i64,
+        #[case] ratios: Vec<u64>,
+        #[case] expected: Vec<i64>,
+    ) {
+        let money = Money::from_i64(amount);
+        let ratios = Ratios::try_new(ratios).expect("ratios must be non-empty and non-zero");
+        let result = money.split_ratio(&ratios, RemainderPolicy::FrontLoad);
+        let amounts: Vec<i64> = result.iter().map(|m| m.amount()).collect();
+        assert_eq!(amounts, expected);
+        assert_eq!(result.iter().map(|m| m.amount()).sum::<i64>(), amount);
+    }
+
+    #[rstest]
+    fn ratios_reject_empty() {
+        let result = Ratios::try_new(vec![]);
+        assert_eq!(result, Err(SplitError::EmptyRatios));
+    }
+
+    #[rstest]
+    fn ratios_reject_zero_sum() {
+        let result = Ratios::try_new(vec![0, 0]);
+        assert_eq!(result, Err(SplitError::ZeroTotalRatio));
+    }
+
+    #[rstest]
+    #[case::display_name("Nickname")]
+    fn member_info_effective_name_returns_display_name(#[case] display_name: &str) {
         let info = MemberInfo {
             id: MemberId(1),
-            display_name: Arc::from("Nickname"),
+            display_name: Arc::from(display_name),
             username: Arc::from("username"),
             avatar_url: None,
         };
-        assert_eq!(info.effective_name(), "Nickname");
+        assert_eq!(info.effective_name(), display_name);
     }
 
-    #[test]
+    #[rstest]
     fn member_info_clone_shares_arc() {
         let info1 = MemberInfo {
             id: MemberId(1),
@@ -205,11 +550,85 @@ mod tests {
 
         assert_eq!(info1.display_name.as_ptr(), info2.display_name.as_ptr());
     }
+
+    #[rstest]
+    #[case::payment_undefined_group(
+        StatementWithLine {
+            line: 1,
+            statement: Statement::Payment(Payment {
+                amount: Money::try_from(100).expect("amount should fit in i64"),
+                payer: MemberSetExpr::new(vec![MemberSetOp::PushGroup("team")]),
+                payee: MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(1))]),
+            }),
+        },
+        "team",
+        1
+    )]
+    #[case::declaration_undefined_group(
+        StatementWithLine {
+            line: 1,
+            statement: Statement::Declaration(Declaration {
+                name: "group_b",
+                expression: MemberSetExpr::new(vec![MemberSetOp::PushGroup("group_a")]),
+            }),
+        },
+        "group_a",
+        1
+    )]
+    fn program_rejects_undefined_group_references(
+        #[case] statement: StatementWithLine<'static>,
+        #[case] expected_name: &str,
+        #[case] expected_line: usize,
+    ) {
+        let result = Program::try_new(vec![statement], &[]);
+
+        match result {
+            Err(ProgramBuildError::UndefinedGroup { name, line }) => {
+                assert_eq!(name, expected_name);
+                assert_eq!(line, expected_line);
+            }
+            _ => panic!("expected undefined group error"),
+        }
+    }
+
+    #[rstest]
+    fn program_accepts_declaration_then_reference() {
+        let declaration = StatementWithLine {
+            line: 1,
+            statement: Statement::Declaration(Declaration {
+                name: "group_a",
+                expression: MemberSetExpr::new(vec![
+                    MemberSetOp::Push(MemberId(1)),
+                    MemberSetOp::Push(MemberId(2)),
+                    MemberSetOp::Union,
+                ]),
+            }),
+        };
+        let payment = StatementWithLine {
+            line: 2,
+            statement: Statement::Payment(Payment {
+                amount: Money::try_from(120).expect("amount should fit in i64"),
+                payer: MemberSetExpr::new(vec![MemberSetOp::PushGroup("group_a")]),
+                payee: MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(3))]),
+            }),
+        };
+
+        let result = Program::try_new(vec![declaration, payment], &[]);
+
+        assert!(result.is_ok());
+    }
 }
 
 impl<'a> MemberSetExpr<'a> {
-    pub fn new(ops: Vec<MemberSetOp<'a>>) -> Self {
-        Self { ops }
+    pub fn new<I>(ops: I) -> Self
+    where
+        I: IntoIterator<Item = MemberSetOp<'a>>,
+        <I as IntoIterator>::IntoIter: ExactSizeIterator,
+    {
+        let iter = ops.into_iter();
+        let mut values = SmallVec::with_capacity(iter.len());
+        values.extend(iter);
+        Self { ops: values }
     }
 
     /// Evaluate the expression to produce a set of member IDs
@@ -437,17 +856,13 @@ pub fn distribute_balances(
         return;
     }
 
-    let member_count = members.members().len() as i64;
-    let total_amount = amount.amount();
-    let base = total_amount / member_count;
-    let remainder = (total_amount % member_count).unsigned_abs() as usize;
+    let shares = match amount.split_even(members.members().len(), RemainderPolicy::FrontLoad) {
+        Ok(shares) => shares,
+        Err(_) => return,
+    };
 
-    for (idx, member) in members.iter().enumerate() {
-        let mut share = base;
-        if idx < remainder {
-            share += 1;
-        }
-        let signed = share * direction;
-        *balances.entry(member).or_insert(Money::zero()) += Money::from_i64(signed);
+    for (member, share) in members.iter().zip(shares) {
+        let signed = Money::from_i64(share.amount() * direction);
+        *balances.entry(member).or_insert(Money::zero()) += signed;
     }
 }

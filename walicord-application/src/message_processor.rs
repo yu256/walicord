@@ -30,6 +30,7 @@ pub enum ProcessingOutcome<'a> {
     UndefinedMember { id: u64, line: usize },
     SyntaxError { line: usize, detail: String },
     MissingContextForImplicitPayment { line: usize },
+    InvalidAmountExpression { line: usize, detail: String },
 }
 
 fn line_count_increment(content: &str, prior_ended_with_newline: bool) -> usize {
@@ -109,43 +110,31 @@ impl<'a> MessageProcessor<'a> {
         ProcessingOutcome::Success(Script::new(member_ids, statements))
     }
 
-    pub fn calculate_balances<'b>(&self, program: &'b Script<'b>) -> MemberBalances
-    where
-        'a: 'b,
-    {
+    pub fn calculate_balances(&self, program: &Script<'_>) -> MemberBalances {
         self.apply_statements(program, None, false).balances
     }
 
-    pub fn calculate_balances_for_prefix<'b>(
+    pub fn calculate_balances_for_prefix(
         &self,
-        program: &'b Script<'b>,
+        program: &Script<'_>,
         prefix_len: usize,
-    ) -> MemberBalances
-    where
-        'a: 'b,
-    {
+    ) -> MemberBalances {
         self.apply_statements(program, Some(prefix_len), false)
             .balances
     }
 
-    pub fn build_settlement_result<'b>(
+    pub fn build_settlement_result(
         &self,
-        program: &'b Script<'b>,
-    ) -> Result<SettlementResult, SettlementOptimizationError>
-    where
-        'a: 'b,
-    {
+        program: &Script<'_>,
+    ) -> Result<SettlementResult, SettlementOptimizationError> {
         self.build_settlement_result_from_apply(self.apply_statements(program, None, true))
     }
 
-    pub fn build_settlement_result_for_prefix<'b>(
+    pub fn build_settlement_result_for_prefix(
         &self,
-        program: &'b Script<'b>,
+        program: &Script<'_>,
         prefix_len: usize,
-    ) -> Result<SettlementResult, SettlementOptimizationError>
-    where
-        'a: 'b,
-    {
+    ) -> Result<SettlementResult, SettlementOptimizationError> {
         self.build_settlement_result_from_apply(self.apply_statements(
             program,
             Some(prefix_len),
@@ -176,15 +165,12 @@ impl<'a> MessageProcessor<'a> {
         })
     }
 
-    fn apply_statements<'b>(
+    fn apply_statements(
         &self,
-        program: &'b Script<'b>,
+        program: &Script<'_>,
         prefix_len: Option<usize>,
         apply_settle: bool,
-    ) -> ApplyResult
-    where
-        'a: 'b,
-    {
+    ) -> ApplyResult {
         let statements = program.statements();
         let end = match prefix_len {
             Some(prefix_len) => self.prefix_end(statements, prefix_len),
@@ -299,6 +285,12 @@ impl<'a> MessageProcessor<'a> {
                     line: line + offset,
                 }
             }
+            ProgramParseError::InvalidAmountExpression { line, detail } => {
+                ProcessingOutcome::InvalidAmountExpression {
+                    line: line + offset,
+                    detail,
+                }
+            }
         }
     }
 }
@@ -335,7 +327,7 @@ mod tests {
                 ScriptStatementWithLine {
                     line: 1,
                     statement: ScriptStatement::Domain(Statement::Payment(Payment {
-                        amount: Money::from_u64(60),
+                        amount: Money::try_from(60).expect("amount should fit in i64"),
                         payer: MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(1))]),
                         payee: MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(3))]),
                     })),
@@ -343,7 +335,7 @@ mod tests {
                 ScriptStatementWithLine {
                     line: 2,
                     statement: ScriptStatement::Domain(Statement::Payment(Payment {
-                        amount: Money::from_u64(40),
+                        amount: Money::try_from(40).expect("amount should fit in i64"),
                         payer: MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(2))]),
                         payee: MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(3))]),
                     })),

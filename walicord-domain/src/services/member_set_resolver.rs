@@ -76,3 +76,84 @@ impl<'a> Default for MemberSetResolver<'a> {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{MemberSetExpr, MemberSetOp};
+    use rstest::rstest;
+
+    #[test]
+    fn evaluate_members_uses_default_members_for_members_keyword() {
+        let resolver = MemberSetResolver::new_with_members([MemberId(2), MemberId(1)]);
+        let expr = MemberSetExpr::new(vec![MemberSetOp::PushGroup("MEMBERS")]);
+
+        let members = resolver
+            .evaluate_members(&expr)
+            .expect("members should resolve");
+
+        assert_eq!(members.members(), [MemberId(1), MemberId(2)]);
+    }
+
+    #[test]
+    fn evaluate_members_sorts_group_members() {
+        let mut resolver = MemberSetResolver::new();
+        resolver.register_group_members("team", [MemberId(3), MemberId(1), MemberId(2)]);
+        let expr = MemberSetExpr::new(vec![MemberSetOp::PushGroup("team")]);
+
+        let members = resolver
+            .evaluate_members(&expr)
+            .expect("members should resolve");
+
+        assert_eq!(members.members(), [MemberId(1), MemberId(2), MemberId(3)]);
+    }
+
+    #[rstest]
+    #[case::union(
+        vec![
+            MemberSetOp::PushGroup("A"),
+            MemberSetOp::PushGroup("B"),
+            MemberSetOp::Union,
+        ],
+        vec![MemberId(1), MemberId(2), MemberId(3)]
+    )]
+    #[case::intersection(
+        vec![
+            MemberSetOp::PushGroup("A"),
+            MemberSetOp::PushGroup("B"),
+            MemberSetOp::Intersection,
+        ],
+        vec![MemberId(2)]
+    )]
+    #[case::difference(
+        vec![
+            MemberSetOp::PushGroup("A"),
+            MemberSetOp::PushGroup("B"),
+            MemberSetOp::Difference,
+        ],
+        vec![MemberId(1)]
+    )]
+    fn evaluate_members_supports_set_operations(
+        #[case] ops: Vec<MemberSetOp<'static>>,
+        #[case] expected: Vec<MemberId>,
+    ) {
+        let mut resolver = MemberSetResolver::new();
+        resolver.register_group_members("A", [MemberId(1), MemberId(2)]);
+        resolver.register_group_members("B", [MemberId(2), MemberId(3)]);
+
+        let expr = MemberSetExpr::new(ops);
+        let members = resolver
+            .evaluate_members(&expr)
+            .expect("members should resolve");
+
+        assert_eq!(members.members(), expected.as_slice());
+    }
+
+    #[test]
+    fn evaluate_members_returns_none_for_unknown_group() {
+        let resolver = MemberSetResolver::new();
+        let expr = MemberSetExpr::new(vec![MemberSetOp::PushGroup("missing")]);
+
+        assert!(resolver.evaluate_members(&expr).is_none());
+    }
+}
