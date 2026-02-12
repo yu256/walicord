@@ -15,7 +15,7 @@ use serenity::{
     async_trait,
     model::{
         channel::{Message, ReactionType},
-        event::GuildMemberUpdateEvent,
+        event::{GuildMemberUpdateEvent, MessageUpdateEvent},
         gateway::Ready,
         guild::Member,
         id::{ChannelId, GuildId},
@@ -26,7 +26,7 @@ use serenity::{
 use std::{collections::HashMap, env};
 use walicord_application::{
     Command as ProgramCommand, MessageProcessor, ProcessingOutcome, ScriptStatement,
-    SettlementOptimizationError, SettlementResult,
+    ScriptStatementWithLine, SettlementOptimizationError, SettlementResult,
 };
 use walicord_domain::model::MemberId;
 use walicord_infrastructure::{WalicordProgramParser, WalicordSettlementOptimizer};
@@ -67,6 +67,23 @@ struct Handler<'a> {
     channel_service: DiscordChannelService,
     roster_provider: MemberRosterProvider,
     processor: MessageProcessor<'a>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReactionState {
+    Clear,
+    Valid,
+    Invalid,
+}
+
+enum MessageUpdateResolution {
+    Message(Box<Message>),
+    Fetch,
+}
+
+struct CacheRebuildPlan {
+    cache: IndexMap<MessageId, Message>,
+    reactions: Vec<(Message, ReactionState)>,
 }
 
 impl<'a> Handler<'a> {
@@ -187,6 +204,110 @@ impl<'a> Handler<'a> {
     async fn react(&self, ctx: &Context, msg: &Message, emoji: char) {
         if let Err(e) = msg.react(ctx, emoji).await {
             tracing::error!("Failed to add reaction: {:?}", e);
+        }
+    }
+
+    async fn delete_reaction(&self, ctx: &Context, msg: &Message, emoji: char) {
+        if let Err(e) = msg
+            .delete_reaction(&ctx.http, None, ReactionType::Unicode(emoji.to_string()))
+            .await
+        {
+            tracing::warn!("Failed to remove reaction: {:?}", e);
+        }
+    }
+
+    fn has_own_reaction(msg: &Message, emoji: char) -> bool {
+        let target = emoji.to_string();
+        msg.reactions
+            .iter()
+            .any(|r| r.me && matches!(&r.reaction_type, ReactionType::Unicode(s) if s == &target))
+    }
+
+    async fn update_reaction_state(&self, ctx: &Context, msg: &Message, desired: ReactionState) {
+        let has_check = Self::has_own_reaction(msg, '✅');
+        let has_cross = Self::has_own_reaction(msg, '❎');
+
+        match desired {
+            ReactionState::Valid => {
+                if has_cross {
+                    self.delete_reaction(ctx, msg, '❎').await;
+                }
+                if !has_check {
+                    self.react(ctx, msg, '✅').await;
+                }
+            }
+            ReactionState::Invalid => {
+                if has_check {
+                    self.delete_reaction(ctx, msg, '✅').await;
+                }
+                if !has_cross {
+                    self.react(ctx, msg, '❎').await;
+                }
+            }
+            ReactionState::Clear => {
+                if has_check {
+                    self.delete_reaction(ctx, msg, '✅').await;
+                }
+                if has_cross {
+                    self.delete_reaction(ctx, msg, '❎').await;
+                }
+            }
+        }
+    }
+
+    async fn rebuild_channel_cache(
+        &self,
+        ctx: &Context,
+        channel_id: ChannelId,
+        updated_message: Option<Message>,
+    ) {
+        let mut messages: Vec<Message> = match self.message_cache.get(&channel_id) {
+            Some(messages) => messages.iter().map(|(_, m)| m.clone()).collect(),
+            None => Vec::new(),
+        };
+
+        if let Some(updated_message) = updated_message {
+            if let Some(pos) = messages.iter().position(|m| m.id == updated_message.id) {
+                messages[pos] = updated_message;
+            } else {
+                messages.push(updated_message);
+            }
+        }
+
+        if messages.is_empty() {
+            self.message_cache.remove(&channel_id);
+            return;
+        }
+
+        messages.sort_by_key(|m| m.id.get());
+
+        let member_ids = match self
+            .roster_provider
+            .roster_for_channel(ctx, channel_id)
+            .await
+        {
+            Ok(member_ids) => member_ids,
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to fetch channel member IDs for {}: {:?}",
+                    channel_id,
+                    e
+                );
+                Vec::new()
+            }
+        };
+
+        let plan = plan_cache_rebuild(&self.processor, &member_ids, messages);
+
+        for (message, desired_reaction) in plan.reactions {
+            self.update_reaction_state(ctx, &message, desired_reaction)
+                .await;
+        }
+
+        if plan.cache.is_empty() {
+            self.message_cache.remove(&channel_id);
+        } else {
+            self.message_cache.insert(channel_id, plan.cache);
         }
     }
 
@@ -454,6 +575,103 @@ impl<'a> Handler<'a> {
     }
 }
 
+fn non_empty_line_count(content: &str) -> usize {
+    content
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .count()
+}
+
+fn reaction_state_for_statements(new_statements: &[ScriptStatementWithLine<'_>]) -> ReactionState {
+    let has_effect_statement = new_statements.iter().any(|stmt| match &stmt.statement {
+        ScriptStatement::Domain(_) => true,
+        ScriptStatement::Command(command) => matches!(command, ProgramCommand::SettleUp(_)),
+    });
+
+    if has_effect_statement {
+        ReactionState::Valid
+    } else {
+        ReactionState::Clear
+    }
+}
+
+fn plan_cache_rebuild(
+    processor: &MessageProcessor,
+    member_ids: &[MemberId],
+    mut messages: Vec<Message>,
+) -> CacheRebuildPlan {
+    messages.sort_by_key(|m| m.id.get());
+
+    let mut cache: IndexMap<MessageId, Message> = IndexMap::new();
+    let mut reactions = Vec::new();
+    let mut statement_count = 0usize;
+
+    for message in messages {
+        if message.author.bot {
+            continue;
+        }
+
+        let author_id = MemberId(message.author.id.get());
+        let mut inputs: Vec<(String, Option<MemberId>)> = cache
+            .iter()
+            .map(|(_, m)| (m.content.clone(), Some(MemberId(m.author.id.get()))))
+            .collect();
+        inputs.push((message.content.clone(), Some(author_id)));
+
+        let outcome = processor.parse_program_sequence(
+            member_ids,
+            inputs
+                .iter()
+                .map(|(content, author_id)| (content.as_str(), *author_id)),
+        );
+
+        let (desired_reaction, should_store) = match outcome {
+            ProcessingOutcome::Success(program) => {
+                let statements = program.statements();
+                let new_statements = if statements.len() >= statement_count {
+                    &statements[statement_count..]
+                } else {
+                    &[]
+                };
+
+                let should_store = !new_statements.is_empty();
+                let desired = reaction_state_for_statements(new_statements);
+                (desired, should_store)
+            }
+            _ => (ReactionState::Invalid, false),
+        };
+
+        reactions.push((message.clone(), desired_reaction));
+
+        if should_store {
+            statement_count += non_empty_line_count(&message.content);
+            cache.insert(message.id, message);
+        }
+    }
+
+    CacheRebuildPlan { cache, reactions }
+}
+
+fn resolve_message_update(
+    event: &MessageUpdateEvent,
+    new: Option<Message>,
+    old: Option<Message>,
+    cached: Option<Message>,
+) -> MessageUpdateResolution {
+    if let Some(message) = new {
+        return MessageUpdateResolution::Message(Box::new(message));
+    }
+    if let Some(message) = old {
+        return MessageUpdateResolution::Message(Box::new(message));
+    }
+    if let Some(mut message) = cached {
+        event.apply_to_message(&mut message);
+        return MessageUpdateResolution::Message(Box::new(message));
+    }
+
+    MessageUpdateResolution::Fetch
+}
+
 #[async_trait]
 impl EventHandler for Handler<'_> {
     async fn message(&self, ctx: Context, msg: Message) {
@@ -599,6 +817,49 @@ impl EventHandler for Handler<'_> {
             }
         }
     }
+
+    async fn message_update(
+        &self,
+        ctx: Context,
+        old_if_available: Option<Message>,
+        new: Option<Message>,
+        event: MessageUpdateEvent,
+    ) {
+        if !self.is_target_channel(event.channel_id) {
+            return;
+        }
+
+        let cached_message = self
+            .message_cache
+            .get(&event.channel_id)
+            .and_then(|messages| messages.get(&event.id).cloned());
+
+        let updated_message =
+            match resolve_message_update(&event, new, old_if_available, cached_message) {
+                MessageUpdateResolution::Message(message) => *message,
+                MessageUpdateResolution::Fetch => {
+                    match event.channel_id.message(&ctx.http, event.id).await {
+                        Ok(message) => message,
+                        Err(e) => {
+                            tracing::warn!(
+                                "Failed to fetch updated message {} in {}: {:?}",
+                                event.id,
+                                event.channel_id,
+                                e
+                            );
+                            return;
+                        }
+                    }
+                }
+            };
+
+        if updated_message.author.bot {
+            return;
+        }
+
+        self.rebuild_channel_cache(&ctx, event.channel_id, Some(updated_message))
+            .await;
+    }
 }
 
 #[tokio::main]
@@ -644,5 +905,175 @@ async fn main() {
 
     for handle in handles {
         let _ = handle.await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use serenity::model::id::UserId;
+    use walicord_application::{ProgramParseError, ProgramParser, Script, SettlementOptimizer};
+    use walicord_domain::{MemberSetExpr, MemberSetOp, Money, Payment, Statement, Transfer};
+
+    struct StubParser;
+
+    impl ProgramParser for StubParser {
+        fn parse<'a>(
+            &self,
+            _member_ids: &'a [MemberId],
+            content: &'a str,
+            _author_id: Option<MemberId>,
+        ) -> Result<Script<'a>, ProgramParseError<'a>> {
+            match content {
+                "PAY" => {
+                    let payment = Payment {
+                        amount: Money::try_from(100).expect("amount should fit in i64"),
+                        payer: MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(1))]),
+                        payee: MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(2))]),
+                    };
+                    Ok(Script::new(
+                        &[],
+                        vec![ScriptStatementWithLine {
+                            line: 1,
+                            statement: ScriptStatement::Domain(Statement::Payment(payment)),
+                        }],
+                    ))
+                }
+                "SETTLE" => Ok(Script::new(
+                    &[],
+                    vec![ScriptStatementWithLine {
+                        line: 1,
+                        statement: ScriptStatement::Command(ProgramCommand::SettleUp(
+                            MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(1))]),
+                        )),
+                    }],
+                )),
+                "REVIEW" => Ok(Script::new(
+                    &[],
+                    vec![ScriptStatementWithLine {
+                        line: 1,
+                        statement: ScriptStatement::Command(ProgramCommand::Review),
+                    }],
+                )),
+                "EMPTY" => Ok(Script::new(&[], Vec::new())),
+                "BAD" => Err(ProgramParseError::SyntaxError {
+                    line: 1,
+                    detail: "bad".to_string(),
+                }),
+                _ => Ok(Script::new(&[], Vec::new())),
+            }
+        }
+    }
+
+    struct NoopOptimizer;
+
+    impl SettlementOptimizer for NoopOptimizer {
+        fn optimize(
+            &self,
+            _balances: &[walicord_application::PersonBalance],
+        ) -> Result<Vec<Transfer>, walicord_application::SettlementOptimizationError> {
+            Ok(Vec::new())
+        }
+    }
+
+    fn make_message(id: u64, channel_id: u64, author_id: u64, content: &str) -> Message {
+        let mut message = Message::default();
+        message.id = MessageId::new(id);
+        message.channel_id = ChannelId::new(channel_id);
+        message.author = User::default();
+        message.author.id = UserId::new(author_id);
+        message.content = content.to_string();
+        message
+    }
+
+    fn message_update_event(
+        channel_id: u64,
+        message_id: u64,
+        content: Option<&str>,
+    ) -> MessageUpdateEvent {
+        let mut value = json!({
+            "id": message_id.to_string(),
+            "channel_id": channel_id.to_string()
+        });
+        if let Some(content) = content {
+            value["content"] = json!(content);
+        }
+        serde_json::from_value(value).expect("MessageUpdateEvent should deserialize")
+    }
+
+    #[test]
+    fn plan_cache_rebuild_reacts_and_caches_messages() {
+        let processor = MessageProcessor::new(&StubParser, &NoopOptimizer);
+        let members: [MemberId; 0] = [];
+        let messages = vec![
+            make_message(3, 1, 1, "PAY"),
+            make_message(1, 1, 1, "PAY"),
+            make_message(2, 1, 1, "BAD"),
+        ];
+
+        let plan = plan_cache_rebuild(&processor, &members, messages);
+        let reaction_states: Vec<(u64, ReactionState)> = plan
+            .reactions
+            .iter()
+            .map(|(message, state)| (message.id.get(), *state))
+            .collect();
+
+        assert_eq!(
+            reaction_states,
+            vec![
+                (1, ReactionState::Valid),
+                (2, ReactionState::Invalid),
+                (3, ReactionState::Valid),
+            ]
+        );
+        assert_eq!(
+            plan.cache.keys().map(|id| id.get()).collect::<Vec<_>>(),
+            vec![1, 3]
+        );
+    }
+
+    #[test]
+    fn resolve_message_update_prefers_new_then_old_then_cached() {
+        let event = message_update_event(1, 10, Some("edited"));
+        let new_message = make_message(10, 1, 1, "new");
+        let old_message = make_message(10, 1, 1, "old");
+        let cached_message = make_message(10, 1, 1, "cached");
+
+        let resolved = resolve_message_update(
+            &event,
+            Some(new_message.clone()),
+            Some(old_message.clone()),
+            Some(cached_message.clone()),
+        );
+        let MessageUpdateResolution::Message(message) = resolved else {
+            panic!("expected message resolution");
+        };
+        assert_eq!(message.content, "new");
+
+        let resolved = resolve_message_update(
+            &event,
+            None,
+            Some(old_message.clone()),
+            Some(cached_message.clone()),
+        );
+        let MessageUpdateResolution::Message(message) = resolved else {
+            panic!("expected message resolution");
+        };
+        assert_eq!(message.content, "old");
+
+        let resolved = resolve_message_update(&event, None, None, Some(cached_message));
+        let MessageUpdateResolution::Message(message) = resolved else {
+            panic!("expected message resolution");
+        };
+        assert_eq!(message.content, "edited");
+    }
+
+    #[test]
+    fn resolve_message_update_falls_back_to_fetch_when_empty() {
+        let event = message_update_event(1, 10, None);
+
+        let resolved = resolve_message_update(&event, None, None, None);
+        assert!(matches!(resolved, MessageUpdateResolution::Fetch));
     }
 }
