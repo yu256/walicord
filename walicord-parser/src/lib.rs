@@ -55,62 +55,6 @@ impl<'a> SetExpr<'a> {
             _ => None,
         })
     }
-
-    pub fn to_infix_string(&self) -> Option<String> {
-        let mut stack: Vec<String> = Vec::new();
-
-        for op in &self.ops {
-            match op {
-                SetOp::Push(id) => stack.push(format!("<@{id}>")),
-                SetOp::PushGroup(name) => stack.push((*name).to_string()),
-                SetOp::Union => {
-                    let b = stack.pop()?;
-                    let a = stack.pop()?;
-                    stack.push(format!("({a} ∪ {b})"));
-                }
-                SetOp::Intersection => {
-                    let b = stack.pop()?;
-                    let a = stack.pop()?;
-                    stack.push(format!("({a} ∩ {b})"));
-                }
-                SetOp::Difference => {
-                    let b = stack.pop()?;
-                    let a = stack.pop()?;
-                    stack.push(format!("({a} - {b})"));
-                }
-            }
-        }
-
-        if stack.len() == 1 {
-            let mut result = stack.pop()?;
-            if is_fully_wrapped(&result) {
-                result = result[1..result.len() - 1].to_string();
-            }
-            Some(result)
-        } else {
-            None
-        }
-    }
-}
-
-fn is_fully_wrapped(value: &str) -> bool {
-    if !value.starts_with('(') || !value.ends_with(')') || value.len() <= 1 {
-        return false;
-    }
-
-    let mut depth = 0;
-    for (i, c) in value.char_indices() {
-        if c == '(' {
-            depth += 1;
-        } else if c == ')' {
-            depth -= 1;
-            if depth == 0 && i != value.len() - 1 {
-                return false;
-            }
-        }
-    }
-
-    depth == 0
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -146,15 +90,6 @@ pub enum AmountOp {
 }
 
 impl AmountExpr {
-    pub fn new<I>(ops: I) -> Self
-    where
-        I: IntoIterator<Item = AmountOp>,
-    {
-        let mut values = SmallVec::new();
-        values.extend(ops);
-        Self { ops: values }
-    }
-
     pub fn literal(value: u64) -> Self {
         Self {
             ops: smallvec![AmountOp::Literal(value)],
@@ -639,17 +574,6 @@ mod tests {
     fn test_accepts_union_separators(#[case] input: &str) {
         let result = parse_program(input);
         assert!(result.is_ok(), "Should accept union separators");
-    }
-
-    #[rstest]
-    #[case::nested_intersection("(<@65> ∪ <@66>) ∩ <@67>", "(<@65> ∪ <@66>) ∩ <@67>")]
-    #[case::difference_union("<@65> - <@66> ∪ <@67>", "(<@65> - <@66>) ∪ <@67>")]
-    #[case::single("<@65>", "<@65>")]
-    #[case::union_with_intersection("<@65> ∪ (<@66> ∩ <@67>)", "<@65> ∪ (<@66> ∩ <@67>)")]
-    fn test_infix_string(#[case] input: &str, #[case] expected: &str) {
-        let (_, expr) = set_expr(input).unwrap();
-        let infix = expr.to_infix_string().unwrap();
-        assert_eq!(infix, expected);
     }
 
     #[rstest]
