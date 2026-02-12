@@ -26,6 +26,8 @@ jobs:
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: true
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@v2
