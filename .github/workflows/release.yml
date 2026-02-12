@@ -53,6 +53,9 @@ jobs:
           toolchain: stable
           target: ${{ matrix.target }}
 
+      - name: Update Cargo.lock
+        run: cargo update
+
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
