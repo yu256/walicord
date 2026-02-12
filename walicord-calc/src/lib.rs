@@ -128,20 +128,7 @@ pub fn minimize_transactions(
 }
 
 fn round_bankers(value: f64) -> i64 {
-    let sign = if value.is_sign_negative() { -1.0 } else { 1.0 };
-    let abs = value.abs();
-    let floor = abs.floor();
-    let frac = abs - floor;
-    let rounded = if frac < 0.5 {
-        floor
-    } else if frac > 0.5 {
-        floor + 1.0
-    } else if (floor as i64) % 2 == 0 {
-        floor
-    } else {
-        floor + 1.0
-    };
-    (rounded * sign) as i64
+    value.round_ties_even() as i64
 }
 
 #[cfg(test)]
