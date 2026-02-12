@@ -210,12 +210,103 @@ fn escape_xml(s: &str) -> Cow<'_, str> {
     Cow::Owned(result)
 }
 
+pub fn combine_svgs_vertically(svgs: &[&str]) -> Option<String> {
+    if svgs.is_empty() {
+        return None;
+    }
+
+    const SPACING: u32 = 20;
+    const SVG_WRAPPER_OVERHEAD: usize = 512;
+    const GROUP_TAG_OVERHEAD: usize = 64;
+
+    let mut total_height = 0u32;
+    let mut max_width = 0u32;
+    let mut svg_data = Vec::new();
+
+    for svg in svgs {
+        let width = extract_svg_dimension(svg, "width")?;
+        let height = extract_svg_dimension(svg, "height")?;
+        let content = extract_svg_content(svg)?;
+
+        max_width = max_width.max(width);
+        svg_data.push((width, height, content));
+    }
+
+    for (idx, (_, height, _)) in svg_data.iter().enumerate() {
+        total_height += height;
+        if idx > 0 {
+            total_height += SPACING;
+        }
+    }
+
+    let base_capacity = svgs.iter().map(|s| s.len()).sum::<usize>();
+    let group_overhead = svg_data.len() * GROUP_TAG_OVERHEAD;
+    let mut combined = String::with_capacity(base_capacity + SVG_WRAPPER_OVERHEAD + group_overhead);
+
+    let _ = writeln!(
+        &mut combined,
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{max_width}" height="{total_height}" viewBox="0 0 {max_width} {total_height}">"#
+    );
+    let _ = writeln!(
+        &mut combined,
+        r#"<style>text {{ font-family: {FONT_FAMILY}; font-size: {FONT_SIZE}px; }}</style>"#
+    );
+
+    let mut y_offset = 0u32;
+    for (width, height, content) in svg_data {
+        let x_offset = (max_width - width) / 2;
+        let _ = writeln!(
+            &mut combined,
+            r#"<g transform="translate({x_offset}, {y_offset})">"#
+        );
+        combined.push_str(&content);
+        combined.push_str("</g>\n");
+        y_offset += height + SPACING;
+    }
+
+    combined.push_str("</svg>");
+    Some(combined)
+}
+
+fn extract_svg_dimension(svg: &str, attr: &str) -> Option<u32> {
+    let pattern = format!("{attr}=\"");
+    let start = svg.find(&pattern)? + pattern.len();
+    let end = svg[start..].find('"')? + start;
+    svg[start..end].parse().ok()
+}
+
+fn extract_svg_content(svg: &str) -> Option<String> {
+    const STYLE_TAG_CLOSE: &str = "</style>";
+
+    let start = svg.find('>')? + 1;
+    let end = svg.rfind("</svg>")?;
+    let content = &svg[start..end];
+
+    let content = if let Some(style_start) = content.find("<style>") {
+        if let Some(style_end) = content.find(STYLE_TAG_CLOSE) {
+            let before_style = &content[..style_start];
+            let after_style = &content[style_end + STYLE_TAG_CLOSE.len()..];
+            format!("{before_style}{after_style}")
+        } else {
+            content.to_string()
+        }
+    } else {
+        content.to_string()
+    };
+
+    Some(content)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use rstest::rstest;
 
-    #[rstest]
+    const SVG_SIMPLE_A: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="50"><text>First</text></svg>"#;
+    const SVG_SIMPLE_B: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="120" height="60"><text>Second</text></svg>"#;
+    const SVG_STYLE_INNER: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="50"><style>.foo { fill: red; }</style><text>First</text></svg>"#;
+
+    #[test]
     fn test_simple_table() {
         let svg = SvgTableBuilder::new()
             .alignments(&[Alignment::Left, Alignment::Right])
@@ -238,5 +329,52 @@ mod tests {
     fn test_escape_xml(#[case] input: &str, #[case] expected: &str) {
         let result = escape_xml(input);
         assert_eq!(result, expected);
+    }
+
+    #[rstest]
+    #[case::empty(vec![], None, &[])]
+    #[case::simple(
+        vec![SVG_SIMPLE_A, SVG_SIMPLE_B],
+        Some(&[
+            "<svg",
+            "</svg>",
+            "First",
+            "Second",
+            "width=\"120\"",
+            "height=\"130\"",
+        ][..]),
+        &[],
+    )]
+    #[case::centering(
+        vec![SVG_SIMPLE_A, SVG_SIMPLE_B],
+        Some(&[
+            "transform=\"translate(10, 0)\"",
+            "transform=\"translate(0, 70)\"",
+        ][..]),
+        &[],
+    )]
+    #[case::strips_style(
+        vec![SVG_STYLE_INNER, SVG_SIMPLE_B],
+        Some(&["<style>"][..]),
+        &["fill: red"],
+    )]
+    fn test_combine_svgs_vertically_cases(
+        #[case] svgs: Vec<&str>,
+        #[case] expect_contains: Option<&[&str]>,
+        #[case] expect_not: &[&str],
+    ) {
+        let combined = combine_svgs_vertically(&svgs);
+        match expect_contains {
+            None => assert!(combined.is_none()),
+            Some(expect_contains) => {
+                let combined = combined.expect("combined svg");
+                for expected in expect_contains {
+                    assert!(combined.contains(expected));
+                }
+                for unexpected in expect_not {
+                    assert!(!combined.contains(unexpected));
+                }
+            }
+        }
     }
 }

@@ -174,23 +174,14 @@ impl<'a> Handler<'a> {
 
         let message_builder = CreateMessage::new().reference_message(msg);
 
-        let attachments = {
-            fn svg_to_attachment(
-                filename: &str,
-            ) -> impl Fn(&String) -> Option<CreateAttachment> + '_ {
-                move |svg| svg_to_png(svg).map(|png| CreateAttachment::bytes(png, filename))
-            }
-            std::iter::once(&response.balance_table_svg)
-                .filter_map(svg_to_attachment("balance.png"))
-                .chain(
-                    response
-                        .transfer_table_svg
-                        .iter()
-                        .filter_map(svg_to_attachment("transfers.png")),
-                )
-        };
+        let attachment = svg_to_png(&response.combined_svg)
+            .map(|png| CreateAttachment::bytes(png, "settlement.png"));
 
-        let message_builder = attachments.fold(message_builder, |m, a| m.add_file(a));
+        let message_builder = if let Some(a) = attachment {
+            message_builder.add_file(a)
+        } else {
+            message_builder
+        };
 
         if let Err(e) = msg
             .channel_id

@@ -7,8 +7,7 @@ use walicord_i18n as i18n;
 pub struct SettlementPresenter;
 
 pub struct SettlementView {
-    pub balance_table_svg: String,
-    pub transfer_table_svg: Option<String>,
+    pub combined_svg: String,
 }
 
 impl SettlementPresenter {
@@ -21,6 +20,8 @@ impl SettlementPresenter {
         result: &SettlementResult,
         member_directory: &dyn MemberDirectory,
     ) -> SettlementView {
+        use crate::svg_table::combine_svgs_vertically;
+
         let balance_table_svg = Self::build_balance_table_svg(&result.balances, member_directory);
 
         if let Some(settle_up) = &result.settle_up {
@@ -29,8 +30,7 @@ impl SettlementPresenter {
 
             if !has_any_transfers {
                 return SettlementView {
-                    balance_table_svg,
-                    transfer_table_svg: None,
+                    combined_svg: balance_table_svg,
                 };
             }
 
@@ -67,24 +67,22 @@ impl SettlementPresenter {
                 member_directory,
             );
 
-            return SettlementView {
-                balance_table_svg,
-                transfer_table_svg: Some(transfer_table_svg),
-            };
+            let combined_svg = combine_svgs_vertically(&[&balance_table_svg, &transfer_table_svg])
+                .unwrap_or(balance_table_svg);
+
+            return SettlementView { combined_svg };
         }
 
         if result.optimized_transfers.is_empty() {
             SettlementView {
-                balance_table_svg,
-                transfer_table_svg: None,
+                combined_svg: balance_table_svg,
             }
         } else {
             let transfer_table_svg =
                 Self::build_transfer_table_svg(&result.optimized_transfers, member_directory);
-            SettlementView {
-                balance_table_svg,
-                transfer_table_svg: Some(transfer_table_svg),
-            }
+            let combined_svg = combine_svgs_vertically(&[&balance_table_svg, &transfer_table_svg])
+                .unwrap_or(balance_table_svg);
+            SettlementView { combined_svg }
         }
     }
 
@@ -256,15 +254,10 @@ mod tests {
 
         let view = SettlementPresenter::render_with_members(&sample_result(), &directory);
 
-        assert!(view.balance_table_svg.contains(expected_balance_contains));
+        assert!(view.combined_svg.contains(expected_balance_contains));
         if let Some(forbidden) = forbidden_balance {
-            assert!(!view.balance_table_svg.contains(forbidden));
+            assert!(!view.combined_svg.contains(forbidden));
         }
-        assert!(
-            view.transfer_table_svg
-                .as_ref()
-                .expect("transfer table")
-                .contains(expected_transfer_contains)
-        );
+        assert!(view.combined_svg.contains(expected_transfer_contains));
     }
 }
