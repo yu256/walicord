@@ -375,8 +375,8 @@ impl<'a> Handler<'a> {
 
         let messages_guard = self.message_cache.get(&msg.channel_id);
 
-        let previous_line_offset = match &messages_guard {
-            Some(messages) => next_message_offset(messages.iter().map(|(_, m)| m)),
+        let next_line_offset = match &messages_guard {
+            Some(messages) => next_line_offset(messages.iter().map(|(_, m)| m)),
             None => 0,
         };
 
@@ -406,7 +406,7 @@ impl<'a> Handler<'a> {
                     for (stmt_index, stmt) in statements
                         .iter()
                         .enumerate()
-                        .filter(|(_, stmt)| stmt.line > previous_line_offset)
+                        .filter(|(_, stmt)| stmt.line > next_line_offset)
                     {
                         should_store = true;
                         match &stmt.statement {
@@ -604,11 +604,11 @@ impl<'a> Handler<'a> {
     }
 }
 
-fn line_count_increment(content: &str, prior_ended_with_newline: bool) -> usize {
+fn line_count_with_prior_newline(content: &str, prior_ended_with_newline: bool) -> usize {
     content.lines().count() + if prior_ended_with_newline { 1 } else { 0 }
 }
 
-fn next_message_offset<'a, I>(messages: I) -> usize
+fn next_line_offset<'a, I>(messages: I) -> usize
 where
     I: IntoIterator<Item = &'a Message>,
 {
@@ -619,7 +619,7 @@ where
     for message in messages {
         let content = message.content.as_str();
         if has_any {
-            line_count += line_count_increment(content, ends_with_newline);
+            line_count += line_count_with_prior_newline(content, ends_with_newline);
         } else {
             line_count = content.lines().count();
         }
@@ -711,7 +711,7 @@ fn plan_cache_rebuild(
             cache.insert(message.id, message);
             inputs.push((message_content.clone(), Some(author_id)));
             if has_any {
-                line_count += line_count_increment(&message_content, ends_with_newline);
+                line_count += line_count_with_prior_newline(&message_content, ends_with_newline);
             } else {
                 line_count = message_content.lines().count();
             }
