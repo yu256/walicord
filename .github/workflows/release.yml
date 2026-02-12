@@ -53,6 +53,10 @@ jobs:
           toolchain: stable
           target: ${{ matrix.target }}
 
+      - name: Use Wild linker
+        if: ${{ matrix.os == 'ubuntu-latest' }}
+        uses: davidlattimore/wild-action@latest
+
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
@@ -62,7 +66,16 @@ jobs:
       - name: Build release
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Create archive
+      - name: Create archive (Windows)
+        if: ${{ matrix.os == 'windows-latest' }}
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force release | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/walicord.exe" release/
+          Compress-Archive -Path release/* -DestinationPath "release-walicord-${{ matrix.target }}.zip"
+
+      - name: Create archive (Unix)
+        if: ${{ matrix.os != 'windows-latest' }}
         shell: bash
         run: |
           mkdir -p release

@@ -21,6 +21,9 @@ jobs:
         with:
           components: clippy
 
+      - name: Use Wild linker
+        uses: davidlattimore/wild-action@latest
+
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
