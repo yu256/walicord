@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/yu256/walicord/compare/walicord-v0.2.1...walicord-v0.3.0) (2026-02-12)
+
+
+### Features
+
+* Combine balance and transfer tables into single PNG output ([#24](https://github.com/yu256/walicord/issues/24)) ([9d8f64f](https://github.com/yu256/walicord/commit/9d8f64fded07338815633b8006a806d1593f3312))
+
 ## [0.2.1](https://github.com/yu256/walicord/compare/walicord-v0.2.0...walicord-v0.2.1) (2026-02-12)
 
 
