@@ -302,7 +302,11 @@ mod tests {
     use super::*;
     use rstest::rstest;
 
-    #[rstest]
+    const SVG_SIMPLE_A: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="50"><text>First</text></svg>"#;
+    const SVG_SIMPLE_B: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="120" height="60"><text>Second</text></svg>"#;
+    const SVG_STYLE_INNER: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="50"><style>.foo { fill: red; }</style><text>First</text></svg>"#;
+
+    #[test]
     fn test_simple_table() {
         let svg = SvgTableBuilder::new()
             .alignments(&[Alignment::Left, Alignment::Right])
@@ -328,22 +332,49 @@ mod tests {
     }
 
     #[rstest]
-    fn test_combine_svgs_vertically() {
-        let svg1 = r#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="50"><text>First</text></svg>"#;
-        let svg2 = r#"<svg xmlns="http://www.w3.org/2000/svg" width="120" height="60"><text>Second</text></svg>"#;
-
-        let combined = combine_svgs_vertically(&[svg1, svg2]).expect("combined svg");
-
-        assert!(combined.contains("<svg"));
-        assert!(combined.contains("</svg>"));
-        assert!(combined.contains("First"));
-        assert!(combined.contains("Second"));
-        assert!(combined.contains("width=\"120\""));
-        assert!(combined.contains("height=\"130\""));
-    }
-
-    #[rstest]
-    fn test_combine_svgs_empty() {
-        assert!(combine_svgs_vertically(&[]).is_none());
+    #[case::empty(vec![], None, &[])]
+    #[case::simple(
+        vec![SVG_SIMPLE_A, SVG_SIMPLE_B],
+        Some(&[
+            "<svg",
+            "</svg>",
+            "First",
+            "Second",
+            "width=\"120\"",
+            "height=\"130\"",
+        ][..]),
+        &[],
+    )]
+    #[case::centering(
+        vec![SVG_SIMPLE_A, SVG_SIMPLE_B],
+        Some(&[
+            "transform=\"translate(10, 0)\"",
+            "transform=\"translate(0, 70)\"",
+        ][..]),
+        &[],
+    )]
+    #[case::strips_style(
+        vec![SVG_STYLE_INNER, SVG_SIMPLE_B],
+        Some(&["<style>"][..]),
+        &["fill: red"],
+    )]
+    fn test_combine_svgs_vertically_cases(
+        #[case] svgs: Vec<&str>,
+        #[case] expect_contains: Option<&[&str]>,
+        #[case] expect_not: &[&str],
+    ) {
+        let combined = combine_svgs_vertically(&svgs);
+        match expect_contains {
+            None => assert!(combined.is_none()),
+            Some(expect_contains) => {
+                let combined = combined.expect("combined svg");
+                for expected in expect_contains {
+                    assert!(combined.contains(expected));
+                }
+                for unexpected in expect_not {
+                    assert!(!combined.contains(unexpected));
+                }
+            }
+        }
     }
 }
