@@ -210,6 +210,85 @@ fn escape_xml(s: &str) -> Cow<'_, str> {
     Cow::Owned(result)
 }
 
+pub fn combine_svgs_vertically(svgs: &[&str]) -> Option<String> {
+    if svgs.is_empty() {
+        return None;
+    }
+
+    let spacing = 20u32;
+    let mut total_height = 0u32;
+    let mut max_width = 0u32;
+    let mut svg_data = Vec::new();
+
+    for svg in svgs {
+        let width = extract_svg_dimension(svg, "width")?;
+        let height = extract_svg_dimension(svg, "height")?;
+        let content = extract_svg_content(svg)?;
+
+        max_width = max_width.max(width);
+        svg_data.push((width, height, content));
+    }
+
+    for (idx, (_, height, _)) in svg_data.iter().enumerate() {
+        total_height += height;
+        if idx > 0 {
+            total_height += spacing;
+        }
+    }
+
+    let mut combined = String::with_capacity(svgs.iter().map(|s| s.len()).sum::<usize>() + 1024);
+    let _ = writeln!(
+        &mut combined,
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{max_width}" height="{total_height}" viewBox="0 0 {max_width} {total_height}">"#
+    );
+    let _ = writeln!(
+        &mut combined,
+        r#"<style>text {{ font-family: {FONT_FAMILY}; font-size: {FONT_SIZE}px; }}</style>"#
+    );
+
+    let mut y_offset = 0u32;
+    for (width, height, content) in svg_data {
+        let x_offset = (max_width - width) / 2;
+        let _ = writeln!(
+            &mut combined,
+            r#"<g transform="translate({x_offset}, {y_offset})">"#
+        );
+        combined.push_str(&content);
+        combined.push_str("</g>\n");
+        y_offset += height + spacing;
+    }
+
+    combined.push_str("</svg>");
+    Some(combined)
+}
+
+fn extract_svg_dimension(svg: &str, attr: &str) -> Option<u32> {
+    let pattern = format!("{attr}=\"");
+    let start = svg.find(&pattern)? + pattern.len();
+    let end = svg[start..].find('"')? + start;
+    svg[start..end].parse().ok()
+}
+
+fn extract_svg_content(svg: &str) -> Option<String> {
+    let start = svg.find('>')? + 1;
+    let end = svg.rfind("</svg>")?;
+    let content = &svg[start..end];
+
+    let content = if let Some(style_start) = content.find("<style>") {
+        if let Some(style_end) = content.find("</style>") {
+            let before_style = &content[..style_start];
+            let after_style = &content[style_end + 8..];
+            format!("{before_style}{after_style}")
+        } else {
+            content.to_string()
+        }
+    } else {
+        content.to_string()
+    };
+
+    Some(content)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -238,5 +317,25 @@ mod tests {
     fn test_escape_xml(#[case] input: &str, #[case] expected: &str) {
         let result = escape_xml(input);
         assert_eq!(result, expected);
+    }
+
+    #[rstest]
+    fn test_combine_svgs_vertically() {
+        let svg1 = r#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="50"><text>First</text></svg>"#;
+        let svg2 = r#"<svg xmlns="http://www.w3.org/2000/svg" width="120" height="60"><text>Second</text></svg>"#;
+
+        let combined = combine_svgs_vertically(&[svg1, svg2]).expect("combined svg");
+
+        assert!(combined.contains("<svg"));
+        assert!(combined.contains("</svg>"));
+        assert!(combined.contains("First"));
+        assert!(combined.contains("Second"));
+        assert!(combined.contains("width=\"120\""));
+        assert!(combined.contains("height=\"130\""));
+    }
+
+    #[rstest]
+    fn test_combine_svgs_empty() {
+        assert!(combine_svgs_vertically(&[]).is_none());
     }
 }
