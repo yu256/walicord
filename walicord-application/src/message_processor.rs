@@ -327,7 +327,7 @@ mod tests {
                 ScriptStatementWithLine {
                     line: 1,
                     statement: ScriptStatement::Domain(Statement::Payment(Payment {
-                        amount: Money::from_u64(60),
+                        amount: Money::try_from(60).expect("amount should fit in i64"),
                         payer: MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(1))]),
                         payee: MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(3))]),
                     })),
@@ -335,7 +335,7 @@ mod tests {
                 ScriptStatementWithLine {
                     line: 2,
                     statement: ScriptStatement::Domain(Statement::Payment(Payment {
-                        amount: Money::from_u64(40),
+                        amount: Money::try_from(40).expect("amount should fit in i64"),
                         payer: MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(2))]),
                         payee: MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(3))]),
                     })),

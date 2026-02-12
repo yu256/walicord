@@ -130,11 +130,6 @@ impl Money {
         Self(value)
     }
 
-    pub fn from_u64(value: u64) -> Self {
-        debug_assert!(value <= i64::MAX as u64, "Money::from_u64 overflow");
-        Self(value as i64)
-    }
-
     pub fn amount(self) -> i64 {
         self.0
     }
@@ -183,6 +178,18 @@ impl Money {
         apply_remainder(policy, &mut allocated, remainder);
 
         allocated
+    }
+}
+
+impl TryFrom<u64> for Money {
+    type Error = AmountError;
+
+    fn try_from(value: u64) -> Result<Self, Self::Error> {
+        if value <= i64::MAX as u64 {
+            Ok(Self(value as i64))
+        } else {
+            Err(AmountError::Overflow)
+        }
     }
 }
 
@@ -549,7 +556,7 @@ mod tests {
         StatementWithLine {
             line: 1,
             statement: Statement::Payment(Payment {
-                amount: Money::from_u64(100),
+                amount: Money::try_from(100).expect("amount should fit in i64"),
                 payer: MemberSetExpr::new(vec![MemberSetOp::PushGroup("team")]),
                 payee: MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(1))]),
             }),
@@ -600,7 +607,7 @@ mod tests {
         let payment = StatementWithLine {
             line: 2,
             statement: Statement::Payment(Payment {
-                amount: Money::from_u64(120),
+                amount: Money::try_from(120).expect("amount should fit in i64"),
                 payer: MemberSetExpr::new(vec![MemberSetOp::PushGroup("group_a")]),
                 payee: MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(3))]),
             }),
