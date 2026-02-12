@@ -67,6 +67,16 @@ impl DiscordChannelService {
         let mut all_messages = IndexMap::new();
         let mut last_message_id = None;
 
+        fn is_command_prefix(content: &str, cmd: &str) -> bool {
+            if cmd.is_ascii() {
+                return content
+                    .get(..cmd.len())
+                    .is_some_and(|head| head.eq_ignore_ascii_case(cmd));
+            }
+
+            content.starts_with(cmd)
+        }
+
         fn should_ignore(message: &Message) -> bool {
             message.author.bot
                 || message.reactions.iter().any(|r| {
@@ -77,7 +87,7 @@ impl DiscordChannelService {
                 })
                 || COMMAND_PREFIXES
                     .iter()
-                    .any(|&cmd| message.content.starts_with(cmd))
+                    .any(|&cmd| is_command_prefix(&message.content, cmd))
         }
 
         loop {
