@@ -217,6 +217,7 @@ pub fn combine_svgs_vertically(svgs: &[&str]) -> Option<String> {
 
     const SPACING: u32 = 20;
     const SVG_WRAPPER_OVERHEAD: usize = 512;
+    const GROUP_TAG_OVERHEAD: usize = 64;
 
     let mut total_height = 0u32;
     let mut max_width = 0u32;
@@ -239,7 +240,7 @@ pub fn combine_svgs_vertically(svgs: &[&str]) -> Option<String> {
     }
 
     let base_capacity = svgs.iter().map(|s| s.len()).sum::<usize>();
-    let group_overhead = svg_data.len() * 64;
+    let group_overhead = svg_data.len() * GROUP_TAG_OVERHEAD;
     let mut combined = String::with_capacity(base_capacity + SVG_WRAPPER_OVERHEAD + group_overhead);
 
     let _ = writeln!(
