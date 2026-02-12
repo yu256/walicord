@@ -215,7 +215,9 @@ pub fn combine_svgs_vertically(svgs: &[&str]) -> Option<String> {
         return None;
     }
 
-    let spacing = 20u32;
+    const SPACING: u32 = 20;
+    const SVG_WRAPPER_OVERHEAD: usize = 512;
+
     let mut total_height = 0u32;
     let mut max_width = 0u32;
     let mut svg_data = Vec::new();
@@ -232,11 +234,14 @@ pub fn combine_svgs_vertically(svgs: &[&str]) -> Option<String> {
     for (idx, (_, height, _)) in svg_data.iter().enumerate() {
         total_height += height;
         if idx > 0 {
-            total_height += spacing;
+            total_height += SPACING;
         }
     }
 
-    let mut combined = String::with_capacity(svgs.iter().map(|s| s.len()).sum::<usize>() + 1024);
+    let base_capacity = svgs.iter().map(|s| s.len()).sum::<usize>();
+    let group_overhead = svg_data.len() * 64;
+    let mut combined = String::with_capacity(base_capacity + SVG_WRAPPER_OVERHEAD + group_overhead);
+
     let _ = writeln!(
         &mut combined,
         r#"<svg xmlns="http://www.w3.org/2000/svg" width="{max_width}" height="{total_height}" viewBox="0 0 {max_width} {total_height}">"#
@@ -255,7 +260,7 @@ pub fn combine_svgs_vertically(svgs: &[&str]) -> Option<String> {
         );
         combined.push_str(&content);
         combined.push_str("</g>\n");
-        y_offset += height + spacing;
+        y_offset += height + SPACING;
     }
 
     combined.push_str("</svg>");
@@ -270,14 +275,16 @@ fn extract_svg_dimension(svg: &str, attr: &str) -> Option<u32> {
 }
 
 fn extract_svg_content(svg: &str) -> Option<String> {
+    const STYLE_TAG_CLOSE: &str = "</style>";
+
     let start = svg.find('>')? + 1;
     let end = svg.rfind("</svg>")?;
     let content = &svg[start..end];
 
     let content = if let Some(style_start) = content.find("<style>") {
-        if let Some(style_end) = content.find("</style>") {
+        if let Some(style_end) = content.find(STYLE_TAG_CLOSE) {
             let before_style = &content[..style_start];
-            let after_style = &content[style_end + 8..];
+            let after_style = &content[style_end + STYLE_TAG_CLOSE.len()..];
             format!("{before_style}{after_style}")
         } else {
             content.to_string()
