@@ -9,8 +9,8 @@ use serenity::{
     prelude::*,
 };
 use std::sync::Arc;
+use walicord_application::is_command_message;
 use walicord_domain::model::{MemberId, MemberInfo};
-use walicord_parser::is_command_message;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ChannelError {
