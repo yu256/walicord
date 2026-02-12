@@ -55,6 +55,9 @@ fn format_settlement_error(err: SettlementOptimizationError) -> String {
         SettlementOptimizationError::NoSolution => {
             walicord_i18n::SETTLEMENT_CALCULATION_FAILED.to_string()
         }
+        SettlementOptimizationError::RoundingMismatch => {
+            walicord_i18n::SETTLEMENT_CALCULATION_FAILED.to_string()
+        }
     }
 }
 
@@ -428,6 +431,20 @@ impl<'a> Handler<'a> {
                         "{} {}",
                         msg.author.mention(),
                         walicord_i18n::implicit_payer_missing(line)
+                    ),
+                )
+                .await;
+                false
+            }
+            ProcessingOutcome::InvalidAmountExpression { line, detail } => {
+                self.react(ctx, msg, '❎').await;
+                self.reply(
+                    ctx,
+                    msg,
+                    format!(
+                        "{} {}",
+                        msg.author.mention(),
+                        walicord_i18n::invalid_amount_expression(line, detail)
                     ),
                 )
                 .await;

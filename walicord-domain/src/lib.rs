@@ -4,8 +4,9 @@ pub mod model;
 pub mod services;
 
 pub use model::{
-    BalanceAccumulator, Declaration, MemberBalances, MemberSet, MemberSetExpr, MemberSetOp, Money,
-    Payment, Program, ProgramBuildError, Settlement, Statement, StatementWithLine, Transfer,
+    AmountError, AmountExpr, AmountOp, BalanceAccumulator, Declaration, MemberBalances, MemberSet,
+    MemberSetExpr, MemberSetOp, Money, Payment, Program, ProgramBuildError, Ratios,
+    RemainderPolicy, Settlement, SplitError, Statement, StatementWithLine, Transfer,
     distribute_balances,
 };
 pub use services::{MemberSetResolver, SettleUpPolicy, SettlementCalculator};

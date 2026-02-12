@@ -3,13 +3,13 @@ use walicord_application::{
     Command, ProgramParseError, ProgramParser, Script, ScriptStatement, ScriptStatementWithLine,
 };
 use walicord_domain::{
-    Declaration, Payment, Program as DomainProgram, Statement as DomainStatement,
-    StatementWithLine as DomainStatementWithLine,
-    model::{MemberId, MemberSetExpr, MemberSetOp, Money},
+    AmountExpr, AmountOp, Declaration, Payment, Program as DomainProgram,
+    Statement as DomainStatement, StatementWithLine as DomainStatementWithLine,
+    model::{MemberId, MemberSetExpr, MemberSetOp},
 };
 use walicord_parser::{
-    Command as ParserCommand, ParseError, PayerSpec, SetOp, Statement as ParserStatement,
-    parse_program,
+    AmountExpr as ParserAmountExpr, AmountOp as ParserAmountOp, Command as ParserCommand,
+    ParseError, PayerSpec, SetOp, Statement as ParserStatement, parse_program,
 };
 
 #[derive(Default)]
@@ -58,6 +58,13 @@ impl ProgramParser for WalicordProgramParser {
                                 payer,
                                 payee,
                             } = parser_payment;
+                            let amount_expr = to_amount_expr(amount);
+                            let amount_money = amount_expr.evaluate().map_err(|err| {
+                                ProgramParseError::InvalidAmountExpression {
+                                    line,
+                                    detail: err.to_string(),
+                                }
+                            })?;
                             let payer_expr = match payer {
                                 PayerSpec::Explicit(expr) => to_member_set_expr(expr),
                                 PayerSpec::Implicit => {
@@ -73,12 +80,12 @@ impl ProgramParser for WalicordProgramParser {
                             };
                             let payee_expr = to_member_set_expr(payee);
                             let app_payment = Payment {
-                                amount: Money::from_u64(amount),
+                                amount: amount_money,
                                 payer: payer_expr.clone(),
                                 payee: payee_expr.clone(),
                             };
                             let domain_payment = Payment {
-                                amount: Money::from_u64(amount),
+                                amount: amount_money,
                                 payer: payer_expr,
                                 payee: payee_expr,
                             };
@@ -134,18 +141,25 @@ impl ProgramParser for WalicordProgramParser {
 }
 
 fn to_member_set_expr<'a>(expr: walicord_parser::SetExpr<'a>) -> MemberSetExpr<'a> {
-    let ops = expr
-        .ops()
-        .iter()
-        .map(|op| match op {
-            SetOp::Push(id) => MemberSetOp::Push(MemberId(*id)),
-            SetOp::PushGroup(name) => MemberSetOp::PushGroup(name),
-            SetOp::Union => MemberSetOp::Union,
-            SetOp::Intersection => MemberSetOp::Intersection,
-            SetOp::Difference => MemberSetOp::Difference,
-        })
-        .collect();
+    let ops = expr.ops().iter().map(|op| match op {
+        SetOp::Push(id) => MemberSetOp::Push(MemberId(*id)),
+        SetOp::PushGroup(name) => MemberSetOp::PushGroup(name),
+        SetOp::Union => MemberSetOp::Union,
+        SetOp::Intersection => MemberSetOp::Intersection,
+        SetOp::Difference => MemberSetOp::Difference,
+    });
     MemberSetExpr::new(ops)
+}
+
+fn to_amount_expr(expr: ParserAmountExpr) -> AmountExpr {
+    let ops = expr.ops().iter().map(|op| match op {
+        ParserAmountOp::Literal(value) => AmountOp::Literal(*value),
+        ParserAmountOp::Add => AmountOp::Add,
+        ParserAmountOp::Sub => AmountOp::Sub,
+        ParserAmountOp::Mul => AmountOp::Mul,
+        ParserAmountOp::Div => AmountOp::Div,
+    });
+    AmountExpr::new(ops)
 }
 
 #[cfg(test)]

@@ -21,6 +21,7 @@ impl SettlementOptimizer for WalicordSettlementOptimizer {
                     SettlementOptimizationError::ImbalancedTotal(total)
                 }
                 SettlementError::NoSolution => SettlementOptimizationError::NoSolution,
+                SettlementError::RoundingMismatch => SettlementOptimizationError::RoundingMismatch,
             })?;
 
         let optimized_transfers = settlements

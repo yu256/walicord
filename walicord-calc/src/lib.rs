@@ -13,6 +13,8 @@ pub enum SettlementError {
     ImbalancedTotal(i64),
     #[error("Solver failed to find an optimal solution")]
     NoSolution,
+    #[error("LP solver rounding caused balance mismatch")]
+    RoundingMismatch,
 }
 
 pub fn minimize_transactions(
@@ -91,7 +93,7 @@ pub fn minimize_transactions(
 
     let mut results = Vec::with_capacity(pairs.len());
     for (idx, &(i, j, _)) in pairs.iter().enumerate() {
-        let amount = solution.value(how_much[idx]).round() as i64;
+        let amount = round_bankers(solution.value(how_much[idx]));
         if amount > 0 {
             results.push(Payment {
                 from: people[i].id,
@@ -101,12 +103,37 @@ pub fn minimize_transactions(
         }
     }
 
+    let mut index_by_id = std::collections::HashMap::with_capacity(people.len());
+    for (idx, person) in people.iter().enumerate() {
+        index_by_id.insert(person.id, idx);
+    }
+
+    let mut net = vec![0i64; people.len()];
+    for p in &results {
+        let Some(&from_idx) = index_by_id.get(&p.from) else {
+            return Err(SettlementError::RoundingMismatch);
+        };
+        let Some(&to_idx) = index_by_id.get(&p.to) else {
+            return Err(SettlementError::RoundingMismatch);
+        };
+        net[from_idx] -= p.amount;
+        net[to_idx] += p.amount;
+    }
+    let expected = people.iter().map(|p| p.balance).collect::<Vec<_>>();
+    if net != expected {
+        return Err(SettlementError::RoundingMismatch);
+    }
+
     Ok(results)
+}
+
+fn round_bankers(value: f64) -> i64 {
+    value.round_ties_even() as i64
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Payment, PersonBalance, SettlementError, minimize_transactions};
+    use super::{Payment, PersonBalance, SettlementError, minimize_transactions, round_bankers};
     use proptest::prelude::*;
     use rstest::rstest;
     use std::collections::HashMap;
@@ -237,6 +264,18 @@ mod tests {
             minimize_transactions(people.iter().copied(), alpha, beta).expect("expected solution");
 
         assert_balances_match(&people, &payments);
+    }
+
+    #[rstest]
+    #[case::tie_to_even_low(0.5, 0)]
+    #[case::tie_to_even_high(1.5, 2)]
+    #[case::tie_to_even_upper(2.5, 2)]
+    #[case::negative_tie(-0.5, 0)]
+    #[case::negative_high(-1.5, -2)]
+    #[case::non_tie_up(2.6, 3)]
+    #[case::non_tie_down(-2.4, -2)]
+    fn bankers_rounding(#[case] value: f64, #[case] expected: i64) {
+        assert_eq!(round_bankers(value), expected);
     }
 
     proptest! {

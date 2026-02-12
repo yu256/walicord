@@ -105,12 +105,21 @@ pub struct ImplicitPayerMissingMessage {
     line: usize,
 }
 
+pub struct AmountExpressionErrorMessage {
+    line: usize,
+    detail: String,
+}
+
 pub fn syntax_error(line: usize, detail: String) -> SyntaxErrorMessage {
     SyntaxErrorMessage { line, detail }
 }
 
 pub fn implicit_payer_missing(line: usize) -> ImplicitPayerMissingMessage {
     ImplicitPayerMissingMessage { line }
+}
+
+pub fn invalid_amount_expression(line: usize, detail: String) -> AmountExpressionErrorMessage {
+    AmountExpressionErrorMessage { line, detail }
 }
 
 #[cfg(feature = "ja")]
@@ -131,10 +140,28 @@ impl std::fmt::Display for ImplicitPayerMissingMessage {
     }
 }
 
+#[cfg(feature = "ja")]
+impl std::fmt::Display for AmountExpressionErrorMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "金額の式が不正です (行 {}): {}", self.line, self.detail)
+    }
+}
+
 #[cfg(feature = "en")]
 impl std::fmt::Display for SyntaxErrorMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Syntax error at line {}: {}", self.line, self.detail)
+    }
+}
+
+#[cfg(feature = "en")]
+impl std::fmt::Display for AmountExpressionErrorMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Invalid amount expression at line {}: {}",
+            self.line, self.detail
+        )
     }
 }
 
