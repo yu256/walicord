@@ -1,0 +1,9 @@
+{
+  "packages": {
+    ".": {
+      "release-type": "rust",
+      "bump-minor-pre-release": "beta",
+      "bump-patch-pre-release": "alpha"
+    }
+  }
+}

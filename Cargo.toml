@@ -1,6 +1,7 @@
 [workspace]
 description = "Walicord - Discord bot for expense settlement"
 version = "0.1.0"
+license = "MIT"
 members = [
     "walicord",
     "walicord-application",

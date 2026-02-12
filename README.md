@@ -42,13 +42,42 @@ Discord上で共有経費を追跡し、グループメンバー間の最適な�
 
 ## セットアップ
 
+Discordボットが必要です。以下の手順でボットを作成・設定してください。
+
+### オプション1: バイナリを直接ダウンロード（推奨）
+
+1. [Releases](https://github.com/yu256/walicord/releases) から最新バージョンをダウンロード
+2. `.env`ファイルにDiscordボットトークンと対象チャンネルIDを設定（後述）
+3. バイナリを実行
+
+### オプション2: ソースからビルド
+
 1. Rustをインストール
-2. `.env`ファイルにDiscordボットトークンと対象チャンネルIDを設定:
-   ```
-   DISCORD_TOKEN="YOUR_DISCORD_BOT_TOKEN"
-   TARGET_CHANNEL_IDS="CHANNEL_ID_1,CHANNEL_ID_2" # カンマ区切りで複数指定可能
-   ```
+2. `.env`ファイルにDiscordボットトークンと対象チャンネルIDを設定（後述）
 3. `cargo run --release`で実行
+
+### Discordボットの作成
+
+1. [Discord Developer Portal](https://discord.com/developers/applications)で新しいアプリケーションを作成（Botユーザーは同時に作成されます）
+2. **Bot** タブでBotを構成:
+   - **Message Content Intent** にチェック（Privileged Intent）
+   - **Server Members Intent** にチェック（Privileged Intent）
+   - トークンをコピーして保存
+3. **OAuth2 > URL Generator** タブでBotをサーバーに招待:
+   - **bot** スコープを選択
+   - 以下の権限を付与:
+     - `Read Message History`
+     - `Send Messages`
+     - `Add Reactions`
+   - 生成されたURLでBotをサーバーに招待
+
+### 環境設定
+
+`.env`ファイルにDiscordボットトークンと対象チャンネルIDを設定:
+```
+DISCORD_TOKEN="YOUR_DISCORD_BOT_TOKEN"
+TARGET_CHANNEL_IDS="CHANNEL_ID_1,CHANNEL_ID_2" # カンマ区切りで複数指定可能
+```
 
 ### 言語切り替え（features）
 
