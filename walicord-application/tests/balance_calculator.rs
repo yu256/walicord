@@ -251,7 +251,7 @@ fn settle_up_post_balances(
 )]
 #[case::japanese_tatekae_alt(
     &EMPTY_MEMBERS,
-    "<@1> が <@2> に 100 立て替えた",
+    "<@1> が <@2> に 100 たてかえた",
     &[(1, 100), (2, -100)],
 )]
 #[case::same_payer_payee_group(
