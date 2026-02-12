@@ -181,19 +181,21 @@ impl MemberInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
-    #[test]
-    fn member_info_effective_name_returns_display_name() {
+    #[rstest]
+    #[case::display_name("Nickname")]
+    fn member_info_effective_name_returns_display_name(#[case] display_name: &str) {
         let info = MemberInfo {
             id: MemberId(1),
-            display_name: Arc::from("Nickname"),
+            display_name: Arc::from(display_name),
             username: Arc::from("username"),
             avatar_url: None,
         };
-        assert_eq!(info.effective_name(), "Nickname");
+        assert_eq!(info.effective_name(), display_name);
     }
 
-    #[test]
+    #[rstest]
     fn member_info_clone_shares_arc() {
         let info1 = MemberInfo {
             id: MemberId(1),
@@ -204,6 +206,73 @@ mod tests {
         let info2 = info1.clone();
 
         assert_eq!(info1.display_name.as_ptr(), info2.display_name.as_ptr());
+    }
+
+    #[rstest]
+    #[case::payment_undefined_group(
+        StatementWithLine {
+            line: 1,
+            statement: Statement::Payment(Payment {
+                amount: Money::from_u64(100),
+                payer: MemberSetExpr::new(vec![MemberSetOp::PushGroup("team")]),
+                payee: MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(1))]),
+            }),
+        },
+        "team",
+        1
+    )]
+    #[case::declaration_undefined_group(
+        StatementWithLine {
+            line: 1,
+            statement: Statement::Declaration(Declaration {
+                name: "group_b",
+                expression: MemberSetExpr::new(vec![MemberSetOp::PushGroup("group_a")]),
+            }),
+        },
+        "group_a",
+        1
+    )]
+    fn program_rejects_undefined_group_references(
+        #[case] statement: StatementWithLine<'static>,
+        #[case] expected_name: &str,
+        #[case] expected_line: usize,
+    ) {
+        let result = Program::try_new(vec![statement], &[]);
+
+        match result {
+            Err(ProgramBuildError::UndefinedGroup { name, line }) => {
+                assert_eq!(name, expected_name);
+                assert_eq!(line, expected_line);
+            }
+            _ => panic!("expected undefined group error"),
+        }
+    }
+
+    #[rstest]
+    fn program_accepts_declaration_then_reference() {
+        let declaration = StatementWithLine {
+            line: 1,
+            statement: Statement::Declaration(Declaration {
+                name: "group_a",
+                expression: MemberSetExpr::new(vec![
+                    MemberSetOp::Push(MemberId(1)),
+                    MemberSetOp::Push(MemberId(2)),
+                    MemberSetOp::Union,
+                ]),
+            }),
+        };
+        let payment = StatementWithLine {
+            line: 2,
+            statement: Statement::Payment(Payment {
+                amount: Money::from_u64(120),
+                payer: MemberSetExpr::new(vec![MemberSetOp::PushGroup("group_a")]),
+                payee: MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(3))]),
+            }),
+        };
+
+        let result = Program::try_new(vec![declaration, payment], &[]);
+
+        assert!(result.is_ok());
     }
 }
 

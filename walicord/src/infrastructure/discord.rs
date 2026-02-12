@@ -110,6 +110,7 @@ impl DiscordChannelService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
     use serenity::model::id::UserId;
 
     fn create_test_member(
@@ -126,37 +127,35 @@ mod tests {
         member
     }
 
-    #[test]
-    fn to_member_info_uses_nick_when_available() {
-        let member = create_test_member(1, "username", Some("global"), Some("nick"));
+    #[rstest]
+    #[case::nick(Some("global"), Some("nick"), "nick")]
+    #[case::global(Some("global"), None, "global")]
+    #[case::username(None, None, "username")]
+    fn to_member_info_picks_effective_name(
+        #[case] global_name: Option<&str>,
+        #[case] nick: Option<&str>,
+        #[case] expected: &str,
+    ) {
+        let member = create_test_member(1, "username", global_name, nick);
         let info = to_member_info(&member);
 
         assert_eq!(info.id, MemberId(1));
-        assert_eq!(info.effective_name(), "nick");
+        assert_eq!(info.effective_name(), expected);
         assert_eq!(info.username.as_ref(), "username");
     }
 
-    #[test]
-    fn to_member_info_uses_global_name_when_no_nick() {
-        let member = create_test_member(1, "username", Some("global"), None);
+    #[rstest]
+    #[case::display_name_from_nick(Some("global"), Some("nick"), "nick")]
+    #[case::display_name_from_global(Some("global"), None, "global")]
+    #[case::display_name_from_username(None, None, "username")]
+    fn to_member_info_sets_display_name(
+        #[case] global_name: Option<&str>,
+        #[case] nick: Option<&str>,
+        #[case] expected: &str,
+    ) {
+        let member = create_test_member(1, "username", global_name, nick);
         let info = to_member_info(&member);
 
-        assert_eq!(info.effective_name(), "global");
-    }
-
-    #[test]
-    fn to_member_info_uses_username_as_fallback() {
-        let member = create_test_member(1, "username", None, None);
-        let info = to_member_info(&member);
-
-        assert_eq!(info.effective_name(), "username");
-    }
-
-    #[test]
-    fn to_member_info_creates_arc_str() {
-        let member = create_test_member(1, "username", None, Some("nick"));
-        let info = to_member_info(&member);
-
-        assert_eq!(info.display_name.as_ref(), "nick");
+        assert_eq!(info.display_name.as_ref(), expected);
     }
 }

@@ -2700,6 +2700,7 @@ dependencies = [
 name = "walicord-presentation"
 version = "0.1.0"
 dependencies = [
+ "rstest",
  "walicord-application",
  "walicord-domain",
  "walicord-i18n",
