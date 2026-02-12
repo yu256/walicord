@@ -6,7 +6,7 @@ use walicord_domain::{
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command<'a> {
     Variables,
-    Evaluate,
+    Review,
     SettleUp(MemberSetExpr<'a>),
 }
 

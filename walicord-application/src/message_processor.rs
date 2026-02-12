@@ -211,7 +211,7 @@ impl<'a> MessageProcessor<'a> {
                         continue;
                     }
                     match command {
-                        Command::Variables | Command::Evaluate => {}
+                        Command::Variables | Command::Review => {}
                         Command::SettleUp(expr) => {
                             last_settle_members.clear();
                             last_settle_transfers.clear();

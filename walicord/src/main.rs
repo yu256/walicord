@@ -284,7 +284,7 @@ impl<'a> Handler<'a> {
                             );
                             self.reply(ctx, msg, reply).await;
                         }
-                        ProgramCommand::Evaluate => {
+                        ProgramCommand::Review => {
                             match self
                                 .processor
                                 .build_settlement_result_for_prefix(&program, stmt_index)

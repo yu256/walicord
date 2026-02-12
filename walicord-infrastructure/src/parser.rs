@@ -95,7 +95,7 @@ impl ProgramParser for WalicordProgramParser {
                         ParserStatement::Command(parser_command) => {
                             let command = match parser_command {
                                 ParserCommand::Variables => Command::Variables,
-                                ParserCommand::Evaluate => Command::Evaluate,
+                                ParserCommand::Review => Command::Review,
                                 ParserCommand::SettleUp(expr) => {
                                     Command::SettleUp(to_member_set_expr(expr))
                                 }
