@@ -2619,7 +2619,7 @@ dependencies = [
 
 [[package]]
 name = "walicord"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "dashmap 6.1.0",
  "dotenvy",

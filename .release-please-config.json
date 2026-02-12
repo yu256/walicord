@@ -1,4 +1,7 @@
 {
+  "plugins": [
+    "cargo-workspace"
+  ],
   "packages": {
     "walicord": {
       "release-type": "rust",

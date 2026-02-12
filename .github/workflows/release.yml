@@ -15,9 +15,9 @@ jobs:
     name: Release
     runs-on: ubuntu-latest
     outputs:
-      release_created: ${{ steps.release.outputs.release_created }}
-      tag_name: ${{ steps.release.outputs.tag_name }}
-      body: ${{ steps.release.outputs.body }}
+      release_created: ${{ steps.release.outputs['walicord--release_created'] }}
+      tag_name: ${{ steps.release.outputs['walicord--tag_name'] }}
+      body: ${{ steps.release.outputs['walicord--body'] }}
     steps:
       - id: release
         uses: googleapis/release-please-action@v4
@@ -52,9 +52,6 @@ jobs:
         with:
           toolchain: stable
           target: ${{ matrix.target }}
-
-      - name: Update Cargo.lock
-        run: cargo update
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
