@@ -68,13 +68,22 @@ impl DiscordChannelService {
         let mut last_message_id = None;
 
         fn is_command_prefix(content: &str, cmd: &str) -> bool {
-            if cmd.is_ascii() {
-                return content
+            let is_prefix = if cmd.is_ascii() {
+                content
                     .get(..cmd.len())
-                    .is_some_and(|head| head.eq_ignore_ascii_case(cmd));
+                    .is_some_and(|head| head.eq_ignore_ascii_case(cmd))
+            } else {
+                content.starts_with(cmd)
+            };
+
+            if !is_prefix {
+                return false;
             }
 
-            content.starts_with(cmd)
+            content
+                .get(cmd.len()..)
+                .and_then(|rest| rest.chars().next())
+                .is_none_or(char::is_whitespace)
         }
 
         fn should_ignore(message: &Message) -> bool {
