@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/yu256/walicord/compare/walicord-v0.3.0...walicord-v0.4.0) (2026-02-13)
+
+
+### Features
+
+* implement deterministic settlement quantization ([#32](https://github.com/yu256/walicord/issues/32)) ([28f0ea9](https://github.com/yu256/walicord/commit/28f0ea91937108454ef900c8e5963ce5b70c8690))
+
 ## [0.3.0](https://github.com/yu256/walicord/compare/walicord-v0.2.1...walicord-v0.3.0) (2026-02-12)
 
 
