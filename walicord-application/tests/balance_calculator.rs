@@ -3,7 +3,7 @@ use walicord_application::{
     MessageProcessor, PersonBalance, ProgramParseError, ProgramParser, Script,
     SettlementOptimizationError, SettlementOptimizer,
 };
-use walicord_domain::{MemberBalances, Transfer, model::MemberId};
+use walicord_domain::{MemberBalances, Money, SettlementContext, Transfer, model::MemberId};
 use walicord_infrastructure::WalicordProgramParser;
 
 struct NoopOptimizer;
@@ -12,6 +12,7 @@ impl SettlementOptimizer for NoopOptimizer {
     fn optimize(
         &self,
         _balances: &[PersonBalance],
+        _context: SettlementContext,
     ) -> Result<Vec<Transfer>, SettlementOptimizationError> {
         Ok(Vec::new())
     }
@@ -72,8 +73,8 @@ fn assert_parse_undefined_group(members: &[MemberId], content: &str, name: &str,
 fn assert_balances(balances: &MemberBalances, expected: &[(u64, i64)]) {
     for (id, balance) in expected {
         assert_eq!(
-            balances.get(&MemberId(*id)).map(|money| money.amount()),
-            Some(*balance)
+            balances.get(&MemberId(*id)),
+            Some(&Money::from_i64(*balance))
         );
     }
 }
@@ -210,12 +211,12 @@ fn settle_up_post_balances(
 #[case::remainder_distribution(
     &EMPTY_MEMBERS,
     "<@1> paid 100 to <@1> <@2> <@3>",
-    &[(1, 66), (2, -33), (3, -33)],
+    &[(1, 67), (2, -34), (3, -33)],
 )]
 #[case::remainder_distribution_four(
     &EMPTY_MEMBERS,
     "<@1> paid 10 to <@1> <@2> <@3> <@4>",
-    &[(1, 7), (2, -3), (3, -2), (4, -2)],
+    &[(1, 8), (2, -3), (3, -3), (4, -2)],
 )]
 #[case::complex_set_expr_payee(
     &EMPTY_MEMBERS,

@@ -5,7 +5,10 @@ edition = "2024"
 
 [dependencies]
 fxhash = "0.2.1"
+rust_decimal = "1.36.0"
+sha2 = "0.10.9"
 smallvec = "1.15.1"
+tracing = "0.1.41"
 
 [dev-dependencies]
 proptest = "1.6.0"

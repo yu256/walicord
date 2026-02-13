@@ -1,5 +1,6 @@
 use crate::model::{MemberBalances, MemberId, Money, Settlement, Transfer};
 use fxhash::FxHashSet;
+use rust_decimal::Decimal;
 
 /// Settlement calculation service
 pub struct SettlementCalculator;
@@ -27,14 +28,14 @@ impl SettlementCalculator {
                 _ => continue,
             };
 
-            let (from_member, to_member, target_sign) = if balance.amount() > 0 {
+            let (from_member, to_member, target_sign) = if balance.signum() > 0 {
                 (true, false, -1)
             } else {
                 (false, true, 1)
             };
 
             let mut remaining = balance.abs();
-            let mut transferred = 0;
+            let mut transferred = Money::ZERO;
 
             for &other in settle_members {
                 if other == member {
@@ -42,9 +43,9 @@ impl SettlementCalculator {
                 }
                 if let Some(other_balance) = working_balances.get_mut(&other) {
                     let can_transfer = if target_sign < 0 {
-                        other_balance.amount() < 0
+                        other_balance.signum() < 0
                     } else {
-                        other_balance.amount() > 0
+                        other_balance.signum() > 0
                     };
                     if !can_transfer {
                         continue;
@@ -52,32 +53,32 @@ impl SettlementCalculator {
 
                     let available = other_balance.abs();
                     let amount = remaining.min(available);
-                    if amount > 0 {
-                        *other_balance -= Money::from_i64(target_sign * amount);
+                    if !amount.is_zero() {
+                        *other_balance -= amount * Decimal::from(target_sign);
                         remaining -= amount;
                         transferred += amount;
                         transfers.push(Transfer {
                             from: if from_member { member } else { other },
                             to: if to_member { member } else { other },
-                            amount: Money::from_i64(amount),
+                            amount,
                         });
                     }
-                    if remaining == 0 {
+                    if remaining.is_zero() {
                         break;
                     }
                 }
             }
 
-            if remaining > 0 {
+            if !remaining.is_zero() {
                 for &other in &participants {
                     if other == member || settle_lookup.contains(&other) {
                         continue;
                     }
                     if let Some(other_balance) = working_balances.get_mut(&other) {
                         let can_transfer = if target_sign < 0 {
-                            other_balance.amount() < 0
+                            other_balance.signum() < 0
                         } else {
-                            other_balance.amount() > 0
+                            other_balance.signum() > 0
                         };
                         if !can_transfer {
                             continue;
@@ -85,17 +86,17 @@ impl SettlementCalculator {
 
                         let available = other_balance.abs();
                         let amount = remaining.min(available);
-                        if amount > 0 {
-                            *other_balance -= Money::from_i64(target_sign * amount);
+                        if !amount.is_zero() {
+                            *other_balance -= amount * Decimal::from(target_sign);
                             remaining -= amount;
                             transferred += amount;
                             transfers.push(Transfer {
                                 from: if from_member { member } else { other },
                                 to: if to_member { member } else { other },
-                                amount: Money::from_i64(amount),
+                                amount,
                             });
                         }
-                        if remaining == 0 {
+                        if remaining.is_zero() {
                             break;
                         }
                     }
@@ -103,13 +104,13 @@ impl SettlementCalculator {
             }
 
             if let Some(member_balance) = working_balances.get_mut(&member) {
-                *member_balance = if remaining == 0 {
-                    Money::zero()
+                *member_balance = if remaining.is_zero() {
+                    Money::ZERO
                 } else {
-                    Money::from_i64(balance.signum() * (balance.abs() - transferred))
+                    (balance.abs() - transferred) * Decimal::from(balance.signum())
                 };
             }
-            debug_assert_eq!(remaining, 0);
+            debug_assert!(remaining.is_zero());
         }
 
         Settlement {
@@ -125,10 +126,6 @@ mod tests {
     use crate::model::MemberBalances;
     use rstest::{fixture, rstest};
 
-    fn id(n: u64) -> MemberId {
-        MemberId(n)
-    }
-
     #[fixture]
     fn calculator() -> SettlementCalculator {
         SettlementCalculator
@@ -137,81 +134,81 @@ mod tests {
     #[rstest]
     #[case::simple_positive_balance(
         MemberBalances::from_iter([
-            (id(1), Money::from_i64(100)),
-            (id(2), Money::from_i64(-100)),
+            (MemberId(1), Money::from_i64(100)),
+            (MemberId(2), Money::from_i64(-100)),
         ]),
-        &[id(1)],
-        MemberBalances::from_iter([(id(1), Money::zero()), (id(2), Money::zero())]),
-        vec![(id(1), id(2), 100)]
+        &[MemberId(1)],
+        MemberBalances::from_iter([(MemberId(1), Money::ZERO), (MemberId(2), Money::ZERO)]),
+        vec![(MemberId(1), MemberId(2), 100)]
     )]
     #[case::simple_negative_balance(
         MemberBalances::from_iter([
-            (id(1), Money::from_i64(-100)),
-            (id(2), Money::from_i64(100)),
+            (MemberId(1), Money::from_i64(-100)),
+            (MemberId(2), Money::from_i64(100)),
         ]),
-        &[id(1)],
-        MemberBalances::from_iter([(id(1), Money::zero()), (id(2), Money::zero())]),
-        vec![(id(2), id(1), 100)]
+        &[MemberId(1)],
+        MemberBalances::from_iter([(MemberId(1), Money::ZERO), (MemberId(2), Money::ZERO)]),
+        vec![(MemberId(2), MemberId(1), 100)]
     )]
     #[case::zero_balance(
-        MemberBalances::from_iter([(id(1), Money::zero()), (id(2), Money::zero())]),
-        &[id(1)],
-        MemberBalances::from_iter([(id(1), Money::zero()), (id(2), Money::zero())]),
+        MemberBalances::from_iter([(MemberId(1), Money::ZERO), (MemberId(2), Money::ZERO)]),
+        &[MemberId(1)],
+        MemberBalances::from_iter([(MemberId(1), Money::ZERO), (MemberId(2), Money::ZERO)]),
         vec![]
     )]
     #[case::multiple_settle_members(
         MemberBalances::from_iter([
-            (id(1), Money::from_i64(100)),
-            (id(2), Money::from_i64(100)),
-            (id(3), Money::from_i64(-200)),
+            (MemberId(1), Money::from_i64(100)),
+            (MemberId(2), Money::from_i64(100)),
+            (MemberId(3), Money::from_i64(-200)),
         ]),
-        &[id(1), id(2)],
+        &[MemberId(1), MemberId(2)],
         MemberBalances::from_iter([
-            (id(1), Money::zero()),
-            (id(2), Money::zero()),
-            (id(3), Money::zero()),
+            (MemberId(1), Money::ZERO),
+            (MemberId(2), Money::ZERO),
+            (MemberId(3), Money::ZERO),
         ]),
-        vec![(id(1), id(3), 100), (id(2), id(3), 100)]
+        vec![(MemberId(1), MemberId(3), 100), (MemberId(2), MemberId(3), 100)]
     )]
     #[case::cross_group_transfer(
         MemberBalances::from_iter([
-            (id(1), Money::from_i64(100)),
-            (id(2), Money::from_i64(-50)),
-            (id(3), Money::from_i64(-50)),
+            (MemberId(1), Money::from_i64(100)),
+            (MemberId(2), Money::from_i64(-50)),
+            (MemberId(3), Money::from_i64(-50)),
         ]),
-        &[id(1)],
+        &[MemberId(1)],
         MemberBalances::from_iter([
-            (id(1), Money::zero()),
-            (id(2), Money::zero()),
-            (id(3), Money::zero()),
+            (MemberId(1), Money::ZERO),
+            (MemberId(2), Money::ZERO),
+            (MemberId(3), Money::ZERO),
         ]),
-        vec![(id(1), id(2), 50), (id(1), id(3), 50)]
+        vec![(MemberId(1), MemberId(2), 50), (MemberId(1), MemberId(3), 50)]
     )]
     #[case::empty_settle_members(
         MemberBalances::from_iter([
-            (id(1), Money::from_i64(100)),
-            (id(2), Money::from_i64(-100)),
+            (MemberId(1), Money::from_i64(100)),
+            (MemberId(2), Money::from_i64(-100)),
         ]),
         &[],
         MemberBalances::from_iter([
-            (id(1), Money::from_i64(100)),
-            (id(2), Money::from_i64(-100)),
+            (MemberId(1), Money::from_i64(100)),
+            (MemberId(2), Money::from_i64(-100)),
         ]),
         vec![]
     )]
     #[case::missing_balance_member(
         MemberBalances::from_iter([
-            (id(1), Money::from_i64(100)),
-            (id(2), Money::from_i64(-100)),
-            (id(3), Money::zero()),
+            (MemberId(1), Money::from_i64(100)),
+            (MemberId(2), Money::from_i64(-100)),
+            (MemberId(3), Money::ZERO),
         ]),
-        &[id(1), id(3)],
+        &[MemberId(1), MemberId(3)],
         MemberBalances::from_iter([
-            (id(1), Money::zero()),
-            (id(2), Money::zero()),
-            (id(3), Money::zero()),
+            (MemberId(1), Money::ZERO),
+            (MemberId(2), Money::ZERO),
+            (MemberId(3), Money::ZERO),
         ]),
-        vec![(id(1), id(2), 100)]
+        vec![(MemberId(1), MemberId(2), 100)]
     )]
     fn settlement_calculator_cases(
         calculator: SettlementCalculator,

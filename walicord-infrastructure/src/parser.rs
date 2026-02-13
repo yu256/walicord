@@ -15,6 +15,17 @@ use walicord_parser::{
 #[derive(Default)]
 pub struct WalicordProgramParser;
 
+fn map_parse_error<'a>(err: ParseError) -> ProgramParseError<'a> {
+    match err {
+        ParseError::SyntaxError { line, detail } => ProgramParseError::SyntaxError { line, detail },
+        ParseError::UndefinedGroup { name, line } => ProgramParseError::UndefinedGroup {
+            name: Cow::Owned(name),
+            line,
+        },
+        ParseError::UndefinedMember { id, line } => ProgramParseError::UndefinedMember { id, line },
+    }
+}
+
 impl ProgramParser for WalicordProgramParser {
     fn parse<'a>(
         &self,
@@ -119,23 +130,7 @@ impl ProgramParser for WalicordProgramParser {
                     .map_err(ProgramParseError::from)?;
                 Ok(Script::new(member_ids, app_statements))
             }
-            Err(err) => {
-                // Handle error conversion
-                match err {
-                    ParseError::SyntaxError { line, detail } => {
-                        Err(ProgramParseError::SyntaxError { line, detail })
-                    }
-                    ParseError::UndefinedGroup { name, line } => {
-                        Err(ProgramParseError::UndefinedGroup {
-                            name: Cow::Owned(name),
-                            line,
-                        })
-                    }
-                    ParseError::UndefinedMember { id, line } => {
-                        Err(ProgramParseError::UndefinedMember { id, line })
-                    }
-                }
-            }
+            Err(err) => Err(map_parse_error(err)),
         }
     }
 }

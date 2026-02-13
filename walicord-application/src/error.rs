@@ -1,5 +1,12 @@
 use std::borrow::Cow;
-use walicord_domain::ProgramBuildError;
+use walicord_domain::{ProgramBuildError, SettlementRoundingError};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailureKind {
+    UserInput,
+    Misconfiguration,
+    InternalBug,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProgramParseError<'a> {
@@ -33,4 +40,144 @@ pub enum SettlementOptimizationError {
     ImbalancedTotal(i64),
     NoSolution,
     RoundingMismatch,
+    QuantizationImbalancedTotal { total: walicord_domain::Money },
+    QuantizationInvalidAdjustmentCount,
+    QuantizationInsufficientCandidates,
+    QuantizationZeroSumInvariantViolation,
+    QuantizationNonIntegral,
+    QuantizationOutOfRange,
+    QuantizationUnsupportedScale { scale: u32, max_supported: u32 },
+}
+
+impl SettlementOptimizationError {
+    pub fn kind(&self) -> FailureKind {
+        match self {
+            SettlementOptimizationError::ImbalancedTotal(_)
+            | SettlementOptimizationError::NoSolution
+            | SettlementOptimizationError::RoundingMismatch
+            | SettlementOptimizationError::QuantizationImbalancedTotal { .. }
+            | SettlementOptimizationError::QuantizationInvalidAdjustmentCount
+            | SettlementOptimizationError::QuantizationInsufficientCandidates
+            | SettlementOptimizationError::QuantizationZeroSumInvariantViolation
+            | SettlementOptimizationError::QuantizationNonIntegral
+            | SettlementOptimizationError::QuantizationOutOfRange => FailureKind::InternalBug,
+            SettlementOptimizationError::QuantizationUnsupportedScale { .. } => {
+                FailureKind::Misconfiguration
+            }
+        }
+    }
+}
+
+impl ProgramParseError<'_> {
+    pub fn kind(&self) -> FailureKind {
+        match self {
+            ProgramParseError::MissingContextForImplicitPayment { .. } => {
+                FailureKind::Misconfiguration
+            }
+            ProgramParseError::FailedToEvaluateGroup { .. }
+            | ProgramParseError::UndefinedGroup { .. }
+            | ProgramParseError::UndefinedMember { .. }
+            | ProgramParseError::SyntaxError { .. }
+            | ProgramParseError::InvalidAmountExpression { .. } => FailureKind::UserInput,
+        }
+    }
+}
+
+impl From<SettlementRoundingError> for SettlementOptimizationError {
+    fn from(err: SettlementRoundingError) -> Self {
+        match err {
+            SettlementRoundingError::ImbalancedTotal(total) => {
+                SettlementOptimizationError::QuantizationImbalancedTotal { total }
+            }
+            SettlementRoundingError::InvalidAdjustmentCount => {
+                SettlementOptimizationError::QuantizationInvalidAdjustmentCount
+            }
+            SettlementRoundingError::InsufficientCandidates => {
+                SettlementOptimizationError::QuantizationInsufficientCandidates
+            }
+            SettlementRoundingError::ZeroSumInvariantViolation => {
+                SettlementOptimizationError::QuantizationZeroSumInvariantViolation
+            }
+            SettlementRoundingError::NonIntegral => {
+                SettlementOptimizationError::QuantizationNonIntegral
+            }
+            SettlementRoundingError::UnsupportedScale {
+                scale,
+                max_supported,
+            } => SettlementOptimizationError::QuantizationUnsupportedScale {
+                scale,
+                max_supported,
+            },
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rstest::rstest;
+
+    #[rstest]
+    #[case::missing_context(
+        ProgramParseError::MissingContextForImplicitPayment { line: 1 },
+        FailureKind::Misconfiguration
+    )]
+    #[case::syntax_error(
+        ProgramParseError::SyntaxError {
+            line: 1,
+            detail: "unexpected token".to_string(),
+        },
+        FailureKind::UserInput
+    )]
+    fn program_parse_error_kind_matches_intent(
+        #[case] err: ProgramParseError<'static>,
+        #[case] expected: FailureKind,
+    ) {
+        assert_eq!(err.kind(), expected);
+    }
+
+    #[rstest]
+    #[case::quantization_non_integral(
+        SettlementOptimizationError::QuantizationNonIntegral,
+        FailureKind::InternalBug
+    )]
+    #[case::quantization_out_of_range(
+        SettlementOptimizationError::QuantizationOutOfRange,
+        FailureKind::InternalBug
+    )]
+    #[case::unsupported_scale(
+        SettlementOptimizationError::QuantizationUnsupportedScale {
+            scale: 30,
+            max_supported: 22,
+        },
+        FailureKind::Misconfiguration
+    )]
+    fn settlement_optimization_error_kind_matches_intent(
+        #[case] err: SettlementOptimizationError,
+        #[case] expected: FailureKind,
+    ) {
+        assert_eq!(err.kind(), expected);
+    }
+
+    #[rstest]
+    #[case::rounding_non_integral(
+        SettlementRoundingError::NonIntegral,
+        SettlementOptimizationError::QuantizationNonIntegral
+    )]
+    #[case::rounding_unsupported_scale(
+        SettlementRoundingError::UnsupportedScale {
+            scale: 30,
+            max_supported: 22,
+        },
+        SettlementOptimizationError::QuantizationUnsupportedScale {
+            scale: 30,
+            max_supported: 22,
+        }
+    )]
+    fn settlement_rounding_error_maps_to_application_error(
+        #[case] input: SettlementRoundingError,
+        #[case] expected: SettlementOptimizationError,
+    ) {
+        assert_eq!(SettlementOptimizationError::from(input), expected);
+    }
 }

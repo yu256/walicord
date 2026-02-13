@@ -4,7 +4,7 @@ use crate::{
     model::PersonBalance,
 };
 use std::collections::HashMap;
-use walicord_domain::{Transfer, model::MemberId};
+use walicord_domain::{SettlementContext, Transfer, model::MemberId};
 
 pub trait ProgramParser: Send + Sync {
     fn parse<'a>(
@@ -19,6 +19,7 @@ pub trait SettlementOptimizer: Send + Sync {
     fn optimize(
         &self,
         balances: &[PersonBalance],
+        context: SettlementContext,
     ) -> Result<Vec<Transfer>, SettlementOptimizationError>;
 }
 

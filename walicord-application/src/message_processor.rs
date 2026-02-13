@@ -8,13 +8,15 @@ use crate::{
 };
 use std::borrow::Cow;
 use walicord_domain::{
-    BalanceAccumulator, MemberBalances, SettleUpPolicy, Transfer, model::MemberId,
+    BalanceAccumulator, MemberBalances, SettleUpPolicy, SettlementContext, Transfer,
+    model::MemberId, quantize_balances,
 };
 
 pub struct SettlementResult {
     pub balances: Vec<PersonBalance>,
     pub optimized_transfers: Vec<Transfer>,
     pub settle_up: Option<SettleUpContext>,
+    pub quantization_scale: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -40,9 +42,16 @@ fn line_count_increment(content: &str, prior_ended_with_newline: bool) -> usize 
 struct ApplyResult {
     balances: MemberBalances,
     settle_up: Option<SettleUpContext>,
+    quantization_scale: u32,
 }
 
 impl<'a> MessageProcessor<'a> {
+    // Keep settlement policy selection at the application boundary so domain/infrastructure
+    // can stay policy-agnostic and receive context explicitly.
+    fn settlement_context() -> SettlementContext {
+        SettlementContext::jpy_default()
+    }
+
     pub fn new(parser: &'a dyn ProgramParser, optimizer: &'a dyn SettlementOptimizer) -> Self {
         Self { parser, optimizer }
     }
@@ -111,7 +120,11 @@ impl<'a> MessageProcessor<'a> {
     }
 
     pub fn calculate_balances(&self, program: &Script<'_>) -> MemberBalances {
-        self.apply_statements(program, None, false).balances
+        // apply_settle=false skips settle-up quantization/optimization paths, so rounding-related
+        // failures are not expected in this code path.
+        self.apply_statements(program, None, false)
+            .expect("apply_statements should not fail without settlement")
+            .balances
     }
 
     pub fn calculate_balances_for_prefix(
@@ -119,7 +132,10 @@ impl<'a> MessageProcessor<'a> {
         program: &Script<'_>,
         prefix_len: usize,
     ) -> MemberBalances {
+        // apply_settle=false skips settle-up quantization/optimization paths, so rounding-related
+        // failures are not expected in this code path.
         self.apply_statements(program, Some(prefix_len), false)
+            .expect("apply_statements should not fail without settlement")
             .balances
     }
 
@@ -127,7 +143,8 @@ impl<'a> MessageProcessor<'a> {
         &self,
         program: &Script<'_>,
     ) -> Result<SettlementResult, SettlementOptimizationError> {
-        self.build_settlement_result_from_apply(self.apply_statements(program, None, true))
+        let apply_result = self.apply_statements(program, None, true)?;
+        self.build_settlement_result_from_apply(apply_result)
     }
 
     pub fn build_settlement_result_for_prefix(
@@ -135,11 +152,8 @@ impl<'a> MessageProcessor<'a> {
         program: &Script<'_>,
         prefix_len: usize,
     ) -> Result<SettlementResult, SettlementOptimizationError> {
-        self.build_settlement_result_from_apply(self.apply_statements(
-            program,
-            Some(prefix_len),
-            true,
-        ))
+        let apply_result = self.apply_statements(program, Some(prefix_len), true)?;
+        self.build_settlement_result_from_apply(apply_result)
     }
 
     fn build_settlement_result_from_apply(
@@ -156,12 +170,17 @@ impl<'a> MessageProcessor<'a> {
             .collect();
         person_balances.sort_by_key(|p| p.id);
 
-        let optimized_transfers = self.optimizer.optimize(&person_balances)?;
+        let context = SettlementContext {
+            scale: apply_result.quantization_scale,
+            ..Self::settlement_context()
+        };
+        let optimized_transfers = self.optimizer.optimize(&person_balances, context)?;
 
         Ok(SettlementResult {
             balances: person_balances,
             optimized_transfers,
             settle_up: apply_result.settle_up,
+            quantization_scale: apply_result.quantization_scale,
         })
     }
 
@@ -170,7 +189,7 @@ impl<'a> MessageProcessor<'a> {
         program: &Script<'_>,
         prefix_len: Option<usize>,
         apply_settle: bool,
-    ) -> ApplyResult {
+    ) -> Result<ApplyResult, SettlementOptimizationError> {
         let statements = program.statements();
         let end = match prefix_len {
             Some(prefix_len) => self.prefix_end(statements, prefix_len),
@@ -219,7 +238,9 @@ impl<'a> MessageProcessor<'a> {
                                     .copied()
                                     .chain(settle_members.iter()),
                                 settle_members.members(),
-                            );
+                                Self::settlement_context(),
+                            )
+                            .map_err(SettlementOptimizationError::from)?;
                             accumulator.set_balances(result.new_balances);
                             last_settle_transfers.extend(result.transfers);
                         }
@@ -237,10 +258,19 @@ impl<'a> MessageProcessor<'a> {
             None
         };
 
-        ApplyResult {
-            balances: accumulator.into_balances(),
+        let context = Self::settlement_context();
+        let balances = accumulator.into_balances();
+        let balances = if apply_settle {
+            quantize_balances(&balances, context).map_err(SettlementOptimizationError::from)?
+        } else {
+            balances
+        };
+
+        Ok(ApplyResult {
+            balances,
             settle_up,
-        }
+            quantization_scale: context.scale,
+        })
     }
 
     fn prefix_end<'b>(
@@ -358,6 +388,7 @@ mod tests {
         fn optimize(
             &self,
             _balances: &[PersonBalance],
+            _context: SettlementContext,
         ) -> Result<Vec<Transfer>, SettlementOptimizationError> {
             Ok(Vec::new())
         }
@@ -412,6 +443,77 @@ mod tests {
 
         let settle_up = result.settle_up.expect("expected settle up context");
         assert!(!settle_up.immediate_transfers.is_empty());
+    }
+
+    #[rstest]
+    #[case::jpy_thirds(100, 67, -34, -33)]
+    fn apply_statements_quantizes_balances_when_settlement_enabled(
+        #[case] amount: i64,
+        #[case] expected_member_1: i64,
+        #[case] expected_member_2: i64,
+        #[case] expected_member_3: i64,
+    ) {
+        let processor = MessageProcessor::new(&StubParser, &NoopOptimizer);
+        let script = Script::new(
+            &[],
+            vec![ScriptStatementWithLine {
+                line: 1,
+                statement: ScriptStatement::Domain(Statement::Payment(Payment {
+                    amount: Money::from_i64(amount),
+                    payer: MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(1))]),
+                    payee: MemberSetExpr::new(vec![
+                        MemberSetOp::Push(MemberId(1)),
+                        MemberSetOp::Push(MemberId(2)),
+                        MemberSetOp::Union,
+                        MemberSetOp::Push(MemberId(3)),
+                        MemberSetOp::Union,
+                    ]),
+                })),
+            }],
+        );
+
+        let apply = processor
+            .apply_statements(&script, None, true)
+            .expect("apply should succeed");
+
+        assert_eq!(
+            apply.balances.get(&MemberId(1)),
+            Some(&Money::from_i64(expected_member_1))
+        );
+        assert_eq!(
+            apply.balances.get(&MemberId(2)),
+            Some(&Money::from_i64(expected_member_2))
+        );
+        assert_eq!(
+            apply.balances.get(&MemberId(3)),
+            Some(&Money::from_i64(expected_member_3))
+        );
+    }
+
+    #[rstest]
+    #[case::zero_sum_invariant_violation(
+        walicord_domain::SettlementRoundingError::ZeroSumInvariantViolation,
+        SettlementOptimizationError::QuantizationZeroSumInvariantViolation
+    )]
+    #[case::non_integral(
+        walicord_domain::SettlementRoundingError::NonIntegral,
+        SettlementOptimizationError::QuantizationNonIntegral
+    )]
+    #[case::unsupported_scale(
+        walicord_domain::SettlementRoundingError::UnsupportedScale {
+            scale: 30,
+            max_supported: 22,
+        },
+        SettlementOptimizationError::QuantizationUnsupportedScale {
+            scale: 30,
+            max_supported: 22,
+        }
+    )]
+    fn settlement_optimization_error_from_rounding_error(
+        #[case] input: walicord_domain::SettlementRoundingError,
+        #[case] expected: SettlementOptimizationError,
+    ) {
+        assert_eq!(SettlementOptimizationError::from(input), expected);
     }
 
     #[rstest]

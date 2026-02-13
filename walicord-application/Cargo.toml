@@ -10,4 +10,5 @@ walicord-domain = { path = "../walicord-domain" }
 [dev-dependencies]
 proptest = "1.10.0"
 rstest = "0.26.1"
+rust_decimal = "1.36.0"
 walicord-infrastructure = { path = "../walicord-infrastructure" }
