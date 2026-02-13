@@ -53,10 +53,6 @@ jobs:
           toolchain: stable
           target: ${{ matrix.target }}
 
-      - name: Use Wild linker
-        if: ${{ matrix.os == 'ubuntu-latest' }}
-        uses: davidlattimore/wild-action@latest
-
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
