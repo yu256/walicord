@@ -58,6 +58,21 @@ fn format_settlement_error(err: SettlementOptimizationError) -> String {
         SettlementOptimizationError::RoundingMismatch => {
             walicord_i18n::SETTLEMENT_CALCULATION_FAILED.to_string()
         }
+        SettlementOptimizationError::QuantizationImbalancedTotal { total } => {
+            walicord_i18n::settlement_quantization_imbalanced(total).to_string()
+        }
+        SettlementOptimizationError::QuantizationInvalidAdjustmentCount => {
+            walicord_i18n::SETTLEMENT_QUANTIZATION_INVALID_ADJUSTMENT.to_string()
+        }
+        SettlementOptimizationError::QuantizationInsufficientCandidates => {
+            walicord_i18n::SETTLEMENT_QUANTIZATION_INSUFFICIENT_CANDIDATES.to_string()
+        }
+        SettlementOptimizationError::QuantizationZeroSumInvariantViolation => {
+            walicord_i18n::SETTLEMENT_QUANTIZATION_ZERO_SUM_INVARIANT.to_string()
+        }
+        SettlementOptimizationError::QuantizationNonIntegral => {
+            walicord_i18n::SETTLEMENT_QUANTIZATION_NON_INTEGRAL.to_string()
+        }
     }
 }
 
@@ -1037,6 +1052,7 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
     use serde_json::json;
     use serenity::model::id::UserId;
     use walicord_application::{
@@ -1115,6 +1131,7 @@ mod tests {
         fn optimize(
             &self,
             _balances: &[walicord_application::PersonBalance],
+            _context: walicord_domain::SettlementContext,
         ) -> Result<Vec<Transfer>, walicord_application::SettlementOptimizationError> {
             Ok(Vec::new())
         }
@@ -1164,15 +1181,32 @@ mod tests {
         serde_json::from_value(value).expect("MessageUpdateEvent should deserialize")
     }
 
-    #[test]
-    fn plan_cache_rebuild_reacts_and_caches_messages() {
+    #[rstest]
+    #[case::mixed_order_and_invalid(
+        vec![(3, "PAY"), (1, "PAY"), (2, "BAD")],
+        vec![
+            (1, ReactionState::Valid),
+            (2, ReactionState::Invalid),
+            (3, ReactionState::Valid),
+        ],
+        vec![1, 3],
+    )]
+    #[case::multiline_offsets(
+        vec![(1, "MULTI\nCOMMENT"), (2, "PAY")],
+        vec![(1, ReactionState::Valid), (2, ReactionState::Valid)],
+        vec![1, 2],
+    )]
+    fn plan_cache_rebuild_cases(
+        #[case] entries: Vec<(u64, &'static str)>,
+        #[case] expected_reactions: Vec<(u64, ReactionState)>,
+        #[case] expected_cache_ids: Vec<u64>,
+    ) {
         let processor = MessageProcessor::new(&StubParser, &NoopOptimizer);
         let members: [MemberId; 0] = [];
-        let messages = vec![
-            make_message(3, 1, 1, "PAY"),
-            make_message(1, 1, 1, "PAY"),
-            make_message(2, 1, 1, "BAD"),
-        ];
+        let messages = entries
+            .into_iter()
+            .map(|(id, content)| make_message(id, 1, 1, content))
+            .collect();
 
         let plan = plan_cache_rebuild(&processor, &members, messages);
         let reaction_states: Vec<(u64, ReactionState)> = plan
@@ -1181,85 +1215,59 @@ mod tests {
             .map(|(message, state)| (message.id.get(), *state))
             .collect();
 
-        assert_eq!(
-            reaction_states,
-            vec![
-                (1, ReactionState::Valid),
-                (2, ReactionState::Invalid),
-                (3, ReactionState::Valid),
-            ]
-        );
+        assert_eq!(reaction_states, expected_reactions);
         assert_eq!(
             plan.cache.keys().map(|id| id.get()).collect::<Vec<_>>(),
-            vec![1, 3]
+            expected_cache_ids
         );
     }
 
-    #[test]
-    fn plan_cache_rebuild_handles_multiline_offsets() {
-        let processor = MessageProcessor::new(&StubParser, &NoopOptimizer);
-        let members: [MemberId; 0] = [];
-        let messages = vec![
-            make_message(1, 1, 1, "MULTI\nCOMMENT"),
-            make_message(2, 1, 1, "PAY"),
-        ];
+    #[rstest]
+    #[case::existing_entry(
+        vec![make_reaction("✅", 1, 1, 0, false, false)],
+        true,
+        vec![(2, true, 2)],
+    )]
+    #[case::missing_entry(vec![], false, vec![])]
+    fn update_cached_reaction_add_cases(
+        #[case] initial: Vec<serenity::all::MessageReaction>,
+        #[case] expected_updated: bool,
+        #[case] expected_snapshot: Vec<(u64, bool, u64)>,
+    ) {
+        let mut message = Message::default();
+        message.reactions = initial;
 
-        let plan = plan_cache_rebuild(&processor, &members, messages);
-        let reaction_states: Vec<(u64, ReactionState)> = plan
+        let updated = Handler::update_cached_reaction_add(
+            &mut message,
+            &ReactionType::Unicode("✅".to_string()),
+            true,
+            false,
+        );
+
+        let snapshot: Vec<(u64, bool, u64)> = message
             .reactions
             .iter()
-            .map(|(message, state)| (message.id.get(), *state))
+            .map(|reaction| (reaction.count, reaction.me, reaction.count_details.normal))
             .collect();
 
-        assert_eq!(
-            reaction_states,
-            vec![(1, ReactionState::Valid), (2, ReactionState::Valid)]
-        );
-        assert_eq!(
-            plan.cache.keys().map(|id| id.get()).collect::<Vec<_>>(),
-            vec![1, 2]
-        );
+        assert_eq!(updated, expected_updated);
+        assert_eq!(snapshot, expected_snapshot);
     }
 
-    #[test]
-    fn update_cached_reaction_add_updates_existing_entry() {
+    #[rstest]
+    #[case::delete_when_count_reaches_zero(
+        vec![make_reaction("✅", 1, 1, 0, true, false)],
+        true,
+        vec![],
+    )]
+    #[case::missing_entry(vec![], false, vec![])]
+    fn update_cached_reaction_remove_cases(
+        #[case] initial: Vec<serenity::all::MessageReaction>,
+        #[case] expected_updated: bool,
+        #[case] expected_snapshot: Vec<(u64, bool, u64)>,
+    ) {
         let mut message = Message::default();
-        message.reactions = vec![make_reaction("✅", 1, 1, 0, false, false)];
-
-        let updated = Handler::update_cached_reaction_add(
-            &mut message,
-            &ReactionType::Unicode("✅".to_string()),
-            true,
-            false,
-        );
-
-        assert!(updated);
-        assert_eq!(message.reactions.len(), 1);
-        let reaction = &message.reactions[0];
-        assert_eq!(reaction.count, 2);
-        assert!(reaction.me);
-        assert_eq!(reaction.count_details.normal, 2);
-    }
-
-    #[test]
-    fn update_cached_reaction_add_returns_false_when_missing() {
-        let mut message = Message::default();
-
-        let updated = Handler::update_cached_reaction_add(
-            &mut message,
-            &ReactionType::Unicode("✅".to_string()),
-            true,
-            false,
-        );
-
-        assert!(!updated);
-        assert!(message.reactions.is_empty());
-    }
-
-    #[test]
-    fn update_cached_reaction_remove_deletes_entry_when_count_reaches_zero() {
-        let mut message = Message::default();
-        message.reactions = vec![make_reaction("✅", 1, 1, 0, true, false)];
+        message.reactions = initial;
 
         let updated = Handler::update_cached_reaction_remove(
             &mut message,
@@ -1268,66 +1276,72 @@ mod tests {
             false,
         );
 
-        assert!(updated);
-        assert!(message.reactions.is_empty());
+        let snapshot: Vec<(u64, bool, u64)> = message
+            .reactions
+            .iter()
+            .map(|reaction| (reaction.count, reaction.me, reaction.count_details.normal))
+            .collect();
+
+        assert_eq!(updated, expected_updated);
+        assert_eq!(snapshot, expected_snapshot);
     }
 
-    #[test]
-    fn update_cached_reaction_remove_returns_false_when_missing() {
-        let mut message = Message::default();
-
-        let updated = Handler::update_cached_reaction_remove(
-            &mut message,
-            &ReactionType::Unicode("✅".to_string()),
-            true,
-            false,
-        );
-
-        assert!(!updated);
-        assert!(message.reactions.is_empty());
-    }
-
-    #[test]
-    fn resolve_message_update_prefers_new_then_old_then_cached() {
+    #[rstest]
+    #[case::prefers_new_over_old_and_cached(
+        Some(make_message(10, 1, 1, "new")),
+        Some(make_message(10, 1, 1, "old")),
+        Some(make_message(10, 1, 1, "cached")),
+        "new"
+    )]
+    #[case::uses_old_when_new_missing(
+        None,
+        Some(make_message(10, 1, 1, "old")),
+        Some(make_message(10, 1, 1, "cached")),
+        "edited"
+    )]
+    #[case::uses_cached_when_only_cached_present(
+        None,
+        None,
+        Some(make_message(10, 1, 1, "cached")),
+        "edited"
+    )]
+    fn resolve_message_update_message_cases(
+        #[case] new_message: Option<Message>,
+        #[case] old_message: Option<Message>,
+        #[case] cached_message: Option<Message>,
+        #[case] expected_content: &str,
+    ) {
         let event = message_update_event(1, 10, Some("edited"));
-        let new_message = make_message(10, 1, 1, "new");
-        let old_message = make_message(10, 1, 1, "old");
-        let cached_message = make_message(10, 1, 1, "cached");
-
-        let resolved = resolve_message_update(
-            &event,
-            Some(new_message.clone()),
-            Some(old_message.clone()),
-            Some(cached_message.clone()),
-        );
+        let resolved = resolve_message_update(&event, new_message, old_message, cached_message);
         let MessageUpdateResolution::Message(message) = resolved else {
             panic!("expected message resolution");
         };
-        assert_eq!(message.content, "new");
-
-        let resolved = resolve_message_update(
-            &event,
-            None,
-            Some(old_message.clone()),
-            Some(cached_message.clone()),
-        );
-        let MessageUpdateResolution::Message(message) = resolved else {
-            panic!("expected message resolution");
-        };
-        assert_eq!(message.content, "edited");
-
-        let resolved = resolve_message_update(&event, None, None, Some(cached_message));
-        let MessageUpdateResolution::Message(message) = resolved else {
-            panic!("expected message resolution");
-        };
-        assert_eq!(message.content, "edited");
+        assert_eq!(message.content, expected_content);
     }
 
-    #[test]
-    fn resolve_message_update_falls_back_to_fetch_when_empty() {
+    #[rstest]
+    #[case::no_sources(())]
+    fn resolve_message_update_falls_back_to_fetch_when_empty(#[case] _case: ()) {
         let event = message_update_event(1, 10, None);
 
         let resolved = resolve_message_update(&event, None, None, None);
         assert!(matches!(resolved, MessageUpdateResolution::Fetch));
+    }
+
+    #[rstest]
+    #[case::zero_sum_invariant(
+        SettlementOptimizationError::QuantizationZeroSumInvariantViolation,
+        walicord_i18n::SETTLEMENT_QUANTIZATION_ZERO_SUM_INVARIANT
+    )]
+    #[case::non_integral(
+        SettlementOptimizationError::QuantizationNonIntegral,
+        walicord_i18n::SETTLEMENT_QUANTIZATION_NON_INTEGRAL
+    )]
+    fn format_settlement_error_uses_quantization_message(
+        #[case] error: SettlementOptimizationError,
+        #[case] expected: &str,
+    ) {
+        let message = format_settlement_error(error);
+        assert_eq!(message, expected);
     }
 }

@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use walicord_domain::ProgramBuildError;
+use walicord_domain::{ProgramBuildError, SettlementRoundingError};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProgramParseError<'a> {
@@ -33,4 +33,31 @@ pub enum SettlementOptimizationError {
     ImbalancedTotal(i64),
     NoSolution,
     RoundingMismatch,
+    QuantizationImbalancedTotal { total: walicord_domain::Money },
+    QuantizationInvalidAdjustmentCount,
+    QuantizationInsufficientCandidates,
+    QuantizationZeroSumInvariantViolation,
+    QuantizationNonIntegral,
+}
+
+impl From<SettlementRoundingError> for SettlementOptimizationError {
+    fn from(err: SettlementRoundingError) -> Self {
+        match err {
+            SettlementRoundingError::ImbalancedTotal(total) => {
+                SettlementOptimizationError::QuantizationImbalancedTotal { total }
+            }
+            SettlementRoundingError::InvalidAdjustmentCount => {
+                SettlementOptimizationError::QuantizationInvalidAdjustmentCount
+            }
+            SettlementRoundingError::InsufficientCandidates => {
+                SettlementOptimizationError::QuantizationInsufficientCandidates
+            }
+            SettlementRoundingError::ZeroSumInvariantViolation => {
+                SettlementOptimizationError::QuantizationZeroSumInvariantViolation
+            }
+            SettlementRoundingError::NonIntegral => {
+                SettlementOptimizationError::QuantizationNonIntegral
+            }
+        }
+    }
 }

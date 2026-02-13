@@ -1,4 +1,5 @@
 use fxhash::FxHashSet;
+use rust_decimal::{Decimal, prelude::ToPrimitive};
 use smallvec::SmallVec;
 use std::{
     borrow::Cow,
@@ -50,6 +51,7 @@ pub enum ProgramBuildError<'a> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RemainderPolicy {
     /// Distribute remainder one unit at a time, starting from the front
+    /// (currently unused with deferred rounding).
     FrontLoad,
 }
 
@@ -60,7 +62,7 @@ pub struct AmountExpr {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AmountOp {
-    Literal(u64),
+    Literal(Decimal),
     Add,
     Sub,
     Mul,
@@ -71,7 +73,6 @@ pub enum AmountOp {
 pub enum AmountError {
     Overflow,
     DivisionByZero,
-    NonIntegerDivision,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -119,65 +120,168 @@ impl Ratios {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Money(i64);
+/// Money type with high-precision decimal arithmetic.
+///
+/// Uses 28-digit precision internally to ensure accurate financial calculations.
+/// Supports fractions during intermediate calculations, with rounding deferred until settlement.
+///
+/// # Design Principles
+/// * **Internal precision**: Keep full precision during calculations (splits, aggregations)
+/// * **Deferred rounding**: Only round at settlement time
+/// * **Zero-sum invariant**: Settlement ensures sum of balances equals zero
+///
+/// # Example
+/// ```
+/// use walicord_domain::{Money, RemainderPolicy};
+///
+/// let amount = Money::new(1005, 1); // 100.5
+/// let shares: Vec<_> = amount.split_even(3, RemainderPolicy::FrontLoad).collect();
+/// // Each share has full precision: 33.5 exactly
+/// ```
+pub struct Money(Decimal);
 
 impl Money {
-    pub fn zero() -> Self {
-        Self(0)
+    /// Zero value (0.0).
+    pub const ZERO: Self = Self(Decimal::ZERO);
+
+    /// Creates a Money value from an i64.
+    ///
+    /// # Example
+    /// ```
+    /// use walicord_domain::Money;
+    ///
+    /// let money = Money::from_i64(100);
+    /// ```
+    pub fn from_i64(value: i64) -> Self {
+        Self(Decimal::from(value))
     }
 
-    pub fn from_i64(value: i64) -> Self {
+    /// Creates a Money value from mantissa and scale.
+    ///
+    /// The value is calculated as: `mantissa * 10^(-scale)`
+    ///
+    /// # Example
+    /// ```
+    /// use walicord_domain::Money;
+    ///
+    /// // 100.5 = 1005 * 10^-1
+    /// let money = Money::new(1005, 1);
+    /// assert_eq!(money.to_string(), "100.5");
+    ///
+    /// // 100 = 100 * 10^0
+    /// let integer = Money::new(100, 0);
+    /// assert_eq!(integer.to_string(), "100");
+    ///
+    /// // -50.25 = -5025 * 10^-2
+    /// let negative = Money::new(-5025, 2);
+    /// assert_eq!(negative.to_string(), "-50.25");
+    /// ```
+    pub fn new(mantissa: i64, scale: u32) -> Self {
+        Self(Decimal::new(mantissa, scale))
+    }
+
+    /// Creates a Money value from a Decimal.
+    ///
+    /// This is intended for advanced use cases where you need to perform
+    /// operations not directly supported by the Money API. Prefer `new()`
+    /// or `from_i64()` for standard use.
+    pub fn from_decimal(value: Decimal) -> Self {
         Self(value)
     }
 
-    pub fn amount(self) -> i64 {
+    /// Returns the underlying Decimal value.
+    ///
+    /// This is intended for advanced use cases where you need to perform
+    /// operations not directly supported by the Money API (e.g., custom rounding
+    /// or serialization). Prefer using Money's standard methods when possible.
+    pub fn as_decimal(self) -> Decimal {
         self.0
     }
 
-    pub fn abs(self) -> i64 {
-        self.0.abs()
+    /// Returns the absolute value.
+    pub fn abs(self) -> Self {
+        Self(self.0.abs())
     }
 
+    /// Returns true if the value is zero.
     pub fn is_zero(self) -> bool {
-        self.0 == 0
+        self == Self::ZERO
     }
 
+    /// Returns the sign of the value: -1, 0, or 1.
     pub fn signum(self) -> i64 {
-        self.0.signum()
-    }
-
-    /// Split amount evenly among `n` recipients; remainder is distributed per policy
-    pub fn split_even(self, n: usize, policy: RemainderPolicy) -> Result<Vec<Self>, SplitError> {
-        if n == 0 {
-            return Err(SplitError::ZeroRecipients);
+        if self.0 > Decimal::ZERO {
+            1
+        } else if self.0 < Decimal::ZERO {
+            -1
+        } else {
+            0
         }
-
-        let total = self.0;
-        let divisor = n as i64;
-        let base = total / divisor;
-        let remainder = total - base * divisor;
-
-        let mut result = vec![Self(base); n];
-        apply_remainder(policy, &mut result, remainder);
-        Ok(result)
     }
 
-    /// Split amount by `ratios`; remainder is distributed per policy from the front
-    pub fn split_ratio(self, ratios: &Ratios, policy: RemainderPolicy) -> Vec<Self> {
-        let total = self.0 as i128;
-        let sum = ratios.total() as i128;
+    /// Converts to i64 if the value has no fractional part.
+    ///
+    /// Returns `None` if the value has a fractional component.
+    pub fn to_i64_checked(self) -> Option<i64> {
+        if self.0.fract() != Decimal::ZERO {
+            return None;
+        }
+        self.0.to_i64()
+    }
 
-        let mut allocated: Vec<Self> = ratios
+    /// Rounds to the specified number of decimal places.
+    ///
+    /// Used for display and settlement. Note that rounding during settlement
+    /// requires additional adjustment to maintain zero-sum invariant.
+    ///
+    /// # Arguments
+    /// * `scale` - Number of decimal places (0 for JPY, 2 for USD)
+    pub fn round(self, scale: u32) -> Self {
+        Self(self.0.round_dp(scale))
+    }
+
+    /// Splits the amount evenly among `n` recipients with full precision.
+    ///
+    /// # Safety
+    /// * `n` must be > 0 (panics if zero).
+    ///
+    /// # Semantics
+    /// * **Logical split, not monetary distribution.**
+    /// * This represents balance allocation (accounting), not physical payment units.
+    /// * Each share has the exact same value: `self / n`
+    /// * The sum of shares equals the original amount (within epsilon for Decimal precision)
+    ///
+    /// # Example
+    /// ```
+    /// use walicord_domain::{Money, RemainderPolicy};
+    ///
+    /// let amount = Money::from_i64(100);
+    /// let shares: Vec<_> = amount.split_even(3, RemainderPolicy::FrontLoad).collect();
+    /// // Each share is 33.33333333333333333333333333 (28-digit precision)
+    /// ```
+    pub fn split_even(self, n: usize, _policy: RemainderPolicy) -> impl Iterator<Item = Money> {
+        assert!(n > 0, "Cannot split by zero");
+        let share = self.0 / Decimal::from(n as i64);
+        std::iter::repeat_n(Self(share), n)
+    }
+
+    /// Splits the amount by the given ratios with full precision.
+    ///
+    /// Each recipient gets a proportion of the total based on their weight.
+    /// Shares are calculated as: `amount * weight / sum(weights)`
+    ///
+    /// # Arguments
+    /// * `ratios` - The ratio weights for distribution
+    /// * `policy` - Remainder distribution policy (currently unused with deferred rounding)
+    pub fn split_ratio(self, ratios: &Ratios, policy: RemainderPolicy) -> Vec<Self> {
+        let _ = policy;
+        let total = self.0;
+        let sum = Decimal::from(ratios.total());
+        ratios
             .weights()
             .iter()
-            .map(|&w| Self((total * w as i128 / sum) as i64))
-            .collect();
-
-        let distributed: i64 = allocated.iter().map(|m| m.0).sum();
-        let remainder = self.0 - distributed;
-        apply_remainder(policy, &mut allocated, remainder);
-
-        allocated
+            .map(|&w| Self(total * Decimal::from(w) / sum))
+            .collect()
     }
 }
 
@@ -185,11 +289,7 @@ impl TryFrom<u64> for Money {
     type Error = AmountError;
 
     fn try_from(value: u64) -> Result<Self, Self::Error> {
-        if value <= i64::MAX as u64 {
-            Ok(Self(value as i64))
-        } else {
-            Err(AmountError::Overflow)
-        }
+        Ok(Self(Decimal::from(value)))
     }
 }
 
@@ -210,18 +310,15 @@ impl AmountExpr {
     }
 
     pub fn evaluate(&self) -> Result<Money, AmountError> {
-        let value = self.evaluate_i128()?;
-        if value > i64::MAX as i128 || value < i64::MIN as i128 {
-            return Err(AmountError::Overflow);
-        }
-        Ok(Money::from_i64(value as i64))
+        let value = self.evaluate_decimal()?;
+        Ok(Money::from_decimal(value))
     }
 
-    fn evaluate_i128(&self) -> Result<i128, AmountError> {
-        let mut stack: Vec<i128> = Vec::with_capacity(self.ops.len());
+    fn evaluate_decimal(&self) -> Result<Decimal, AmountError> {
+        let mut stack: Vec<Decimal> = Vec::with_capacity(self.ops.len());
         for op in &self.ops {
             match op {
-                AmountOp::Literal(value) => stack.push(*value as i128),
+                AmountOp::Literal(value) => stack.push(*value),
                 AmountOp::Add => apply_binary(&mut stack, checked_add)?,
                 AmountOp::Sub => apply_binary(&mut stack, checked_sub)?,
                 AmountOp::Mul => apply_binary(&mut stack, checked_mul)?,
@@ -230,7 +327,7 @@ impl AmountExpr {
         }
 
         if stack.len() == 1 {
-            Ok(stack.pop().unwrap_or(0))
+            Ok(stack.pop().unwrap_or(Decimal::ZERO))
         } else {
             Err(AmountError::Overflow)
         }
@@ -238,8 +335,8 @@ impl AmountExpr {
 }
 
 fn apply_binary(
-    stack: &mut Vec<i128>,
-    op: fn(i128, i128) -> Result<i128, AmountError>,
+    stack: &mut Vec<Decimal>,
+    op: fn(Decimal, Decimal) -> Result<Decimal, AmountError>,
 ) -> Result<(), AmountError> {
     let rhs = stack.pop().ok_or(AmountError::Overflow)?;
     let lhs = stack.pop().ok_or(AmountError::Overflow)?;
@@ -247,25 +344,21 @@ fn apply_binary(
     Ok(())
 }
 
-fn checked_add(lhs: i128, rhs: i128) -> Result<i128, AmountError> {
+fn checked_add(lhs: Decimal, rhs: Decimal) -> Result<Decimal, AmountError> {
     lhs.checked_add(rhs).ok_or(AmountError::Overflow)
 }
 
-fn checked_sub(lhs: i128, rhs: i128) -> Result<i128, AmountError> {
+fn checked_sub(lhs: Decimal, rhs: Decimal) -> Result<Decimal, AmountError> {
     lhs.checked_sub(rhs).ok_or(AmountError::Overflow)
 }
 
-fn checked_mul(lhs: i128, rhs: i128) -> Result<i128, AmountError> {
+fn checked_mul(lhs: Decimal, rhs: Decimal) -> Result<Decimal, AmountError> {
     lhs.checked_mul(rhs).ok_or(AmountError::Overflow)
 }
 
-fn checked_div(lhs: i128, rhs: i128) -> Result<i128, AmountError> {
-    if rhs == 0 {
+fn checked_div(lhs: Decimal, rhs: Decimal) -> Result<Decimal, AmountError> {
+    if rhs == Decimal::ZERO {
         return Err(AmountError::DivisionByZero);
-    }
-    let remainder = lhs.checked_rem(rhs).ok_or(AmountError::Overflow)?;
-    if remainder != 0 {
-        return Err(AmountError::NonIntegerDivision);
     }
     lhs.checked_div(rhs).ok_or(AmountError::Overflow)
 }
@@ -275,25 +368,6 @@ impl fmt::Display for AmountError {
         match self {
             AmountError::Overflow => write!(f, "amount is out of range"),
             AmountError::DivisionByZero => write!(f, "division by zero"),
-            AmountError::NonIntegerDivision => write!(f, "division must be exact"),
-        }
-    }
-}
-
-fn apply_remainder(policy: RemainderPolicy, slots: &mut [Money], remainder: i64) {
-    if remainder == 0 {
-        return;
-    }
-
-    let bump = remainder.signum();
-    let count = remainder.unsigned_abs() as usize;
-
-    match policy {
-        RemainderPolicy::FrontLoad => {
-            for idx in 0..count {
-                let slot = idx % slots.len();
-                slots[slot].0 += bump;
-            }
         }
     }
 }
@@ -337,6 +411,34 @@ impl Neg for Money {
 
     fn neg(self) -> Self::Output {
         Self(-self.0)
+    }
+}
+
+impl std::iter::Sum for Money {
+    fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
+        iter.fold(Self::ZERO, Self::add)
+    }
+}
+
+impl<'a> std::iter::Sum<&'a Money> for Money {
+    fn sum<I: Iterator<Item = &'a Money>>(iter: I) -> Self {
+        iter.fold(Self::ZERO, |acc, value| acc + *value)
+    }
+}
+
+impl std::ops::Mul<Decimal> for Money {
+    type Output = Self;
+
+    fn mul(self, rhs: Decimal) -> Self::Output {
+        Self(self.0 * rhs)
+    }
+}
+
+impl std::ops::Div<Decimal> for Money {
+    type Output = Self;
+
+    fn div(self, rhs: Decimal) -> Self::Output {
+        Self(self.0 / rhs)
     }
 }
 
@@ -401,22 +503,34 @@ impl MemberInfo {
 mod tests {
     use super::*;
     use rstest::rstest;
+    use rust_decimal::Decimal;
+
+    fn dec(value: i64) -> Decimal {
+        Decimal::from(value)
+    }
+
+    fn assert_sum_within_epsilon(values: &[Money], expected: Decimal) {
+        let sum: Money = values.iter().sum();
+        let epsilon = Decimal::new(1, 6);
+        let diff = (sum.as_decimal() - expected).abs();
+        assert!(diff <= epsilon, "sum must be within epsilon (diff: {diff})");
+    }
 
     #[rstest]
-    #[case::literal(AmountExpr::new(vec![AmountOp::Literal(100)]), 100)]
+    #[case::literal(AmountExpr::new(vec![AmountOp::Literal(dec(100))]), 100)]
     #[case::add(
-        AmountExpr::new(vec![AmountOp::Literal(100), AmountOp::Literal(50), AmountOp::Add]),
+        AmountExpr::new(vec![AmountOp::Literal(dec(100)), AmountOp::Literal(dec(50)), AmountOp::Add]),
         150
     )]
     #[case::mul(
-        AmountExpr::new(vec![AmountOp::Literal(20), AmountOp::Literal(5), AmountOp::Mul]),
+        AmountExpr::new(vec![AmountOp::Literal(dec(20)), AmountOp::Literal(dec(5)), AmountOp::Mul]),
         100
     )]
     #[case::mixed(
         AmountExpr::new(vec![
-            AmountOp::Literal(100),
-            AmountOp::Literal(200),
-            AmountOp::Literal(3),
+            AmountOp::Literal(dec(100)),
+            AmountOp::Literal(dec(200)),
+            AmountOp::Literal(dec(3)),
             AmountOp::Mul,
             AmountOp::Add,
         ]),
@@ -424,18 +538,13 @@ mod tests {
     )]
     fn amount_expr_evaluates(#[case] expr: AmountExpr, #[case] expected: i64) {
         let money = expr.evaluate().expect("amount expr should evaluate");
-        assert_eq!(money.amount(), expected);
+        assert_eq!(money.as_decimal(), dec(expected));
     }
 
     #[rstest]
     #[case::division_by_zero(AmountExpr::new(vec![
-        AmountOp::Literal(10),
-        AmountOp::Literal(0),
-        AmountOp::Div,
-    ]))]
-    #[case::non_integer_division(AmountExpr::new(vec![
-        AmountOp::Literal(10),
-        AmountOp::Literal(3),
+        AmountOp::Literal(dec(10)),
+        AmountOp::Literal(dec(0)),
         AmountOp::Div,
     ]))]
     fn amount_expr_rejects_invalid(#[case] expr: AmountExpr) {
@@ -445,73 +554,65 @@ mod tests {
 
     #[rstest]
     #[case::negative_result(
-        AmountExpr::new(vec![AmountOp::Literal(10), AmountOp::Literal(20), AmountOp::Sub]),
+        AmountExpr::new(vec![AmountOp::Literal(dec(10)), AmountOp::Literal(dec(20)), AmountOp::Sub]),
         -10
     )]
     fn amount_expr_allows_negative(#[case] expr: AmountExpr, #[case] expected: i64) {
         let money = expr.evaluate().expect("amount expr should allow negative");
-        assert_eq!(money.amount(), expected);
+        assert_eq!(money.as_decimal(), dec(expected));
     }
 
     #[rstest]
-    #[case::even_3(100, 3, vec![34, 33, 33])]
-    #[case::even_2(100, 2, vec![50, 50])]
-    #[case::even_1(100, 1, vec![100])]
-    #[case::no_remainder(99, 3, vec![33, 33, 33])]
-    #[case::zero_amount(0, 3, vec![0, 0, 0])]
-    fn split_even_distributes_correctly(
-        #[case] amount: i64,
-        #[case] n: usize,
-        #[case] expected: Vec<i64>,
-    ) {
+    #[case::even_3(100, 3)]
+    #[case::even_2(100, 2)]
+    #[case::even_1(100, 1)]
+    #[case::no_remainder(99, 3)]
+    #[case::zero_amount(0, 3)]
+    fn split_even_distributes_correctly(#[case] amount: i64, #[case] n: usize) {
         let money = Money::from_i64(amount);
-        let result = money
-            .split_even(n, RemainderPolicy::FrontLoad)
-            .expect("non-zero recipient count");
-        let amounts: Vec<i64> = result.iter().map(|m| m.amount()).collect();
-        assert_eq!(amounts, expected);
-        assert_eq!(
-            result.iter().map(|m| m.amount()).sum::<i64>(),
-            amount,
-            "sum must equal original"
-        );
+        let result: Vec<_> = money.split_even(n, RemainderPolicy::FrontLoad).collect();
+        let expected = dec(amount) / dec(n as i64);
+        for share in &result {
+            assert_eq!(share.as_decimal(), expected);
+        }
+        assert_sum_within_epsilon(&result, dec(amount));
     }
 
     #[rstest]
-    fn split_even_zero_count_rejects() {
-        let result = Money::from_i64(100).split_even(0, RemainderPolicy::FrontLoad);
-        assert_eq!(result, Err(SplitError::ZeroRecipients));
+    #[should_panic(expected = "Cannot split by zero")]
+    fn split_even_zero_count_panics() {
+        let _ = Money::from_i64(100).split_even(0, RemainderPolicy::FrontLoad);
     }
 
     #[rstest]
-    #[case::negative_even(-100, 3, vec![-34, -33, -33])]
-    #[case::negative_no_remainder(-99, 3, vec![-33, -33, -33])]
-    fn split_even_negative(#[case] amount: i64, #[case] n: usize, #[case] expected: Vec<i64>) {
+    #[case::negative_even(-100, 3)]
+    #[case::negative_no_remainder(-99, 3)]
+    fn split_even_negative(#[case] amount: i64, #[case] n: usize) {
         let money = Money::from_i64(amount);
-        let result = money
-            .split_even(n, RemainderPolicy::FrontLoad)
-            .expect("non-zero recipient count");
-        let amounts: Vec<i64> = result.iter().map(|m| m.amount()).collect();
-        assert_eq!(amounts, expected);
-        assert_eq!(result.iter().map(|m| m.amount()).sum::<i64>(), amount);
+        let result: Vec<_> = money.split_even(n, RemainderPolicy::FrontLoad).collect();
+        let expected = dec(amount) / dec(n as i64);
+        for share in &result {
+            assert_eq!(share.as_decimal(), expected);
+        }
+        assert_sum_within_epsilon(&result, dec(amount));
     }
 
     #[rstest]
-    #[case::ratio_2_1(100, vec![2, 1], vec![67, 33])]
-    #[case::ratio_1_1(100, vec![1, 1], vec![50, 50])]
-    #[case::ratio_1_1_1(100, vec![1, 1, 1], vec![34, 33, 33])]
-    #[case::ratio_3_1(100, vec![3, 1], vec![75, 25])]
-    fn split_ratio_distributes_correctly(
-        #[case] amount: i64,
-        #[case] ratios: Vec<u64>,
-        #[case] expected: Vec<i64>,
-    ) {
+    #[case::ratio_2_1(100, vec![2, 1])]
+    #[case::ratio_1_1(100, vec![1, 1])]
+    #[case::ratio_1_1_1(100, vec![1, 1, 1])]
+    #[case::ratio_3_1(100, vec![3, 1])]
+    fn split_ratio_distributes_correctly(#[case] amount: i64, #[case] ratios: Vec<u64>) {
         let money = Money::from_i64(amount);
         let ratios = Ratios::try_new(ratios).expect("ratios must be non-empty and non-zero");
         let result = money.split_ratio(&ratios, RemainderPolicy::FrontLoad);
-        let amounts: Vec<i64> = result.iter().map(|m| m.amount()).collect();
-        assert_eq!(amounts, expected);
-        assert_eq!(result.iter().map(|m| m.amount()).sum::<i64>(), amount);
+        let total = dec(amount);
+        let sum = dec(ratios.total() as i64);
+        for (share, &weight) in result.iter().zip(ratios.weights()) {
+            let expected = total * dec(weight as i64) / sum;
+            assert_eq!(share.as_decimal(), expected);
+        }
+        assert_sum_within_epsilon(&result, dec(amount));
     }
 
     #[rstest]
@@ -614,8 +715,8 @@ mod tests {
         };
 
         let result = Program::try_new(vec![declaration, payment], &[]);
-
-        assert!(result.is_ok());
+        let program = result.expect("program should accept declaration before reference");
+        assert_eq!(program.statements().len(), 2);
     }
 }
 
@@ -784,13 +885,13 @@ impl<'a> BalanceAccumulator<'a> {
         match statement {
             Statement::Declaration(decl) => {
                 for member_id in decl.expression.referenced_ids() {
-                    self.balances.entry(member_id).or_insert(Money::zero());
+                    self.balances.entry(member_id).or_insert(Money::ZERO);
                 }
                 let Some(members_vec) = self.resolver.evaluate_members(&decl.expression) else {
                     return;
                 };
                 for member in members_vec.iter() {
-                    self.balances.entry(member).or_insert(Money::zero());
+                    self.balances.entry(member).or_insert(Money::ZERO);
                 }
                 self.resolver
                     .register_group_members(decl.name, members_vec.iter());
@@ -801,7 +902,7 @@ impl<'a> BalanceAccumulator<'a> {
                     .referenced_ids()
                     .chain(payment.payee.referenced_ids())
                 {
-                    self.balances.entry(member_id).or_insert(Money::zero());
+                    self.balances.entry(member_id).or_insert(Money::ZERO);
                 }
                 let Some(payer_members) = self.resolver.evaluate_members(&payment.payer) else {
                     return;
@@ -846,6 +947,40 @@ pub struct Settlement {
     pub transfers: Vec<Transfer>,
 }
 
+/// Distributes an amount evenly among members, updating their balances.
+///
+/// This function performs a logical split of the amount and adds/subtracts
+/// shares from each member's balance. It uses deferred rounding - shares
+/// maintain full precision, with rounding only happening at settlement time.
+///
+/// # Arguments
+/// * `balances` - Map of member balances to update
+/// * `members` - Set of members to distribute among
+/// * `amount` - Total amount to distribute
+/// * `direction` - +1 for credit (payer), -1 for debit (payee)
+///
+/// # Semantics
+/// * Uses `split_even` to divide amount with full precision
+/// * Each member gets exactly `amount / n` (no remainder absorption)
+/// * Guarantees sum of shares equals original amount (within Decimal epsilon)
+///
+/// # Example
+/// ```
+/// use walicord_domain::model::{MemberBalances, MemberSet, MemberId, Money, distribute_balances};
+/// use rust_decimal::Decimal;
+///
+/// let mut balances = MemberBalances::new();
+/// let members = MemberSet::new(vec![MemberId(1), MemberId(2), MemberId(3)]);
+/// let amount = Money::from_decimal(Decimal::new(100, 0));
+///
+/// // Credit (payer)
+/// distribute_balances(&mut balances, &members, amount, 1);
+/// // Each member's balance is +33.33333333333333333333333333
+///
+/// // Debit (payee)
+/// distribute_balances(&mut balances, &members, amount, -1);
+/// // Each member's balance is 0 (credited then debited)
+/// ```
 pub fn distribute_balances(
     balances: &mut MemberBalances,
     members: &MemberSet,
@@ -856,13 +991,10 @@ pub fn distribute_balances(
         return;
     }
 
-    let shares = match amount.split_even(members.members().len(), RemainderPolicy::FrontLoad) {
-        Ok(shares) => shares,
-        Err(_) => return,
-    };
+    let shares = amount.split_even(members.members().len(), RemainderPolicy::FrontLoad);
 
     for (member, share) in members.iter().zip(shares) {
-        let signed = Money::from_i64(share.amount() * direction);
-        *balances.entry(member).or_insert(Money::zero()) += signed;
+        let signed = share * Decimal::from(direction);
+        *balances.entry(member).or_insert(Money::ZERO) += signed;
     }
 }

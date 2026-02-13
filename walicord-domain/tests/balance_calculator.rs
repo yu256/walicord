@@ -1,6 +1,7 @@
 use proptest::prelude::*;
+use rust_decimal::Decimal;
 use walicord_domain::{
-    MemberSetResolver, Program, SettleUpPolicy, StatementWithLine,
+    MemberSetResolver, Program, SettleUpPolicy, SettlementContext, StatementWithLine,
     model::{MemberId, MemberSetExpr, MemberSetOp, Money, Payment, Statement},
 };
 
@@ -33,8 +34,9 @@ proptest! {
 
         let program = Program::try_new(statements, &[]).expect("program build failed");
         let balances = program.calculate_balances();
-        let total: i64 = balances.values().map(|money| money.amount()).sum();
-        prop_assert_eq!(total, 0);
+        let total: Money = balances.values().sum();
+        let epsilon = Decimal::new(1, 6);
+        prop_assert!(total.as_decimal().abs() <= epsilon);
     }
 }
 
@@ -100,7 +102,9 @@ proptest! {
             balances,
             all_members.into_iter().chain(settle_members.iter()),
             settle_members.members(),
-        );
+            SettlementContext::jpy_default(),
+        )
+        .expect("settle should succeed");
         let balances = settlement.new_balances;
 
         for idx in 0..member_count {
@@ -108,8 +112,8 @@ proptest! {
                 continue;
             }
             let member = MemberId(idx as u64 + 1);
-            let balance = balances.get(&member).copied().unwrap_or_else(Money::zero);
-            prop_assert_eq!(balance.amount(), 0);
+            let balance = balances.get(&member).copied().unwrap_or(Money::ZERO);
+            prop_assert!(balance.is_zero());
         }
     }
 }

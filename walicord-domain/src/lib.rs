@@ -9,4 +9,7 @@ pub use model::{
     RemainderPolicy, Settlement, SplitError, Statement, StatementWithLine, Transfer,
     distribute_balances,
 };
-pub use services::{MemberSetResolver, SettleUpPolicy, SettlementCalculator};
+pub use services::{
+    FairnessPolicy, MemberSetResolver, RoundingMode, SettleUpPolicy, SettlementCalculator,
+    SettlementContext, SettlementRoundingError, quantize_balances,
+};

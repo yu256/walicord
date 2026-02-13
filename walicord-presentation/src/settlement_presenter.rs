@@ -1,7 +1,7 @@
 use crate::svg_table::{Alignment, SvgTableBuilder};
 use std::{borrow::Cow, collections::HashSet};
 use walicord_application::{MemberDirectory, PersonBalance, SettlementResult};
-use walicord_domain::{Transfer, model::MemberId};
+use walicord_domain::{Money, Transfer, model::MemberId};
 use walicord_i18n as i18n;
 
 pub struct SettlementPresenter;
@@ -22,7 +22,11 @@ impl SettlementPresenter {
     ) -> SettlementView {
         use crate::svg_table::combine_svgs_vertically;
 
-        let balance_table_svg = Self::build_balance_table_svg(&result.balances, member_directory);
+        let balance_table_svg = Self::build_balance_table_svg(
+            &result.balances,
+            member_directory,
+            result.quantization_scale,
+        );
 
         if let Some(settle_up) = &result.settle_up {
             let has_any_transfers =
@@ -65,6 +69,7 @@ impl SettlementPresenter {
                 &receive_for_settle,
                 &other_settlements,
                 member_directory,
+                result.quantization_scale,
             );
 
             let combined_svg = combine_svgs_vertically(&[&balance_table_svg, &transfer_table_svg])
@@ -78,8 +83,11 @@ impl SettlementPresenter {
                 combined_svg: balance_table_svg,
             }
         } else {
-            let transfer_table_svg =
-                Self::build_transfer_table_svg(&result.optimized_transfers, member_directory);
+            let transfer_table_svg = Self::build_transfer_table_svg(
+                &result.optimized_transfers,
+                member_directory,
+                result.quantization_scale,
+            );
             let combined_svg = combine_svgs_vertically(&[&balance_table_svg, &transfer_table_svg])
                 .unwrap_or(balance_table_svg);
             SettlementView { combined_svg }
@@ -89,20 +97,24 @@ impl SettlementPresenter {
     pub fn build_balance_table_svg(
         person_balances: &[PersonBalance],
         member_directory: &dyn MemberDirectory,
+        quantization_scale: u32,
     ) -> String {
         let mut builder = SvgTableBuilder::new()
             .alignments(&[Alignment::Left, Alignment::Right])
             .headers(&[Cow::Borrowed(i18n::MEMBER), Cow::Borrowed(i18n::BALANCE)]);
 
         for person in person_balances {
-            let sign = if person.balance.amount() >= 0 {
+            let sign = if person.balance.signum() >= 0 {
                 "+"
             } else {
                 ""
             };
             builder = builder.row([
                 format_member_label(person.id, member_directory),
-                Cow::Owned(format!("{sign}{}", person.balance.amount())),
+                Cow::Owned(format!(
+                    "{sign}{}",
+                    format_money_for_display(person.balance, quantization_scale)
+                )),
             ]);
         }
 
@@ -112,6 +124,7 @@ impl SettlementPresenter {
     pub fn build_transfer_table_svg(
         transfers: &[Transfer],
         member_directory: &dyn MemberDirectory,
+        quantization_scale: u32,
     ) -> String {
         let mut builder = SvgTableBuilder::new()
             .alignments(&[Alignment::Left, Alignment::Left, Alignment::Right])
@@ -125,7 +138,9 @@ impl SettlementPresenter {
             builder = builder.row([
                 format_member_label(transfer.from, member_directory),
                 format_member_label(transfer.to, member_directory),
-                Cow::Owned(transfer.amount.to_string()),
+                Cow::Owned(
+                    format_money_for_display(transfer.amount, quantization_scale).to_string(),
+                ),
             ]);
         }
 
@@ -137,6 +152,7 @@ impl SettlementPresenter {
         receive_for_settle: &[Transfer],
         other_settlements: &[Transfer],
         member_directory: &dyn MemberDirectory,
+        quantization_scale: u32,
     ) -> String {
         let mut builder = SvgTableBuilder::new()
             .alignments(&[
@@ -157,7 +173,9 @@ impl SettlementPresenter {
                 Cow::Borrowed(i18n::SETTLEMENT_PAYMENT),
                 format_member_label(transfer.from, member_directory),
                 format_member_label(transfer.to, member_directory),
-                Cow::Owned(transfer.amount.to_string()),
+                Cow::Owned(
+                    format_money_for_display(transfer.amount, quantization_scale).to_string(),
+                ),
             ]);
         }
 
@@ -166,7 +184,9 @@ impl SettlementPresenter {
                 Cow::Borrowed(i18n::PAYMENT_TO_SETTLOR),
                 format_member_label(transfer.from, member_directory),
                 format_member_label(transfer.to, member_directory),
-                Cow::Owned(transfer.amount.to_string()),
+                Cow::Owned(
+                    format_money_for_display(transfer.amount, quantization_scale).to_string(),
+                ),
             ]);
         }
 
@@ -175,7 +195,9 @@ impl SettlementPresenter {
                 Cow::Borrowed(i18n::PENDING),
                 format_member_label(transfer.from, member_directory),
                 format_member_label(transfer.to, member_directory),
-                Cow::Owned(transfer.amount.to_string()),
+                Cow::Owned(
+                    format_money_for_display(transfer.amount, quantization_scale).to_string(),
+                ),
             ]);
         }
 
@@ -215,6 +237,15 @@ fn sort_transfers(transfers: &mut [Transfer]) {
     })
 }
 
+fn format_money_for_display(amount: Money, quantization_scale: u32) -> impl std::fmt::Display {
+    let value = amount.as_decimal();
+    if quantization_scale == 0 || value.fract().is_zero() {
+        value.trunc()
+    } else {
+        value.round_dp(quantization_scale).normalize()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -235,6 +266,7 @@ mod tests {
                 amount: Money::from_i64(50),
             }],
             settle_up: None,
+            quantization_scale: 0,
         }
     }
 
@@ -259,5 +291,21 @@ mod tests {
             assert!(!view.combined_svg.contains(forbidden));
         }
         assert!(view.combined_svg.contains(expected_transfer_contains));
+    }
+
+    #[test]
+    fn formats_decimal_balance_with_quantization_scale() {
+        let result = SettlementResult {
+            balances: vec![PersonBalance {
+                id: MemberId(1),
+                balance: Money::from_decimal("1.123456789".parse().expect("decimal")),
+            }],
+            optimized_transfers: vec![],
+            settle_up: None,
+            quantization_scale: 6,
+        };
+
+        let view = SettlementPresenter::render(&result);
+        assert!(view.combined_svg.contains("+1.123457"));
     }
 }

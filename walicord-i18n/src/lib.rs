@@ -13,6 +13,16 @@ pub mod strings {
     pub const PAYMENT_TO_SETTLOR: &str = "確定者への支払い";
     pub const PENDING: &str = "保留";
     pub const SETTLEMENT_CALCULATION_FAILED: &str = "清算の計算に失敗しました";
+    pub const SETTLEMENT_QUANTIZATION_FAILED: &str = "清算の丸めに失敗しました";
+    pub const SETTLEMENT_QUANTIZATION_IMBALANCED: &str = "清算の丸めに失敗しました (合計: {total})";
+    pub const SETTLEMENT_QUANTIZATION_INVALID_ADJUSTMENT: &str =
+        "清算の丸めに失敗しました (調整回数が不正です)";
+    pub const SETTLEMENT_QUANTIZATION_INSUFFICIENT_CANDIDATES: &str =
+        "清算の丸めに失敗しました (調整候補が不足しています)";
+    pub const SETTLEMENT_QUANTIZATION_ZERO_SUM_INVARIANT: &str =
+        "清算の丸めに失敗しました (ゼロサム整合性を満たせませんでした)";
+    pub const SETTLEMENT_QUANTIZATION_NON_INTEGRAL: &str =
+        "清算の丸めに失敗しました (整数化できません)";
     pub const MISSING_MEMBERS_DECLARATION: &str =
         "チャンネルのtopicに `MEMBERS := ...` の宣言が見つかりません。";
 }
@@ -29,6 +39,17 @@ pub mod strings {
     pub const PAYMENT_TO_SETTLOR: &str = "Payment to Settlor";
     pub const PENDING: &str = "Pending";
     pub const SETTLEMENT_CALCULATION_FAILED: &str = "Settlement calculation failed";
+    pub const SETTLEMENT_QUANTIZATION_FAILED: &str = "Settlement quantization failed";
+    pub const SETTLEMENT_QUANTIZATION_IMBALANCED: &str =
+        "Settlement quantization failed (total: {total})";
+    pub const SETTLEMENT_QUANTIZATION_INVALID_ADJUSTMENT: &str =
+        "Settlement quantization failed (invalid adjustment count)";
+    pub const SETTLEMENT_QUANTIZATION_INSUFFICIENT_CANDIDATES: &str =
+        "Settlement quantization failed (insufficient candidates)";
+    pub const SETTLEMENT_QUANTIZATION_ZERO_SUM_INVARIANT: &str =
+        "Settlement quantization failed (zero-sum invariant violation)";
+    pub const SETTLEMENT_QUANTIZATION_NON_INTEGRAL: &str =
+        "Settlement quantization failed (non-integral amount)";
     pub const MISSING_MEMBERS_DECLARATION: &str =
         "Could not find `MEMBERS := ...` declaration in the channel topic.";
 }
@@ -45,6 +66,17 @@ pub mod strings {
     pub const PAYMENT_TO_SETTLOR: &str = "Payment to Settlor";
     pub const PENDING: &str = "Pending";
     pub const SETTLEMENT_CALCULATION_FAILED: &str = "Settlement calculation failed";
+    pub const SETTLEMENT_QUANTIZATION_FAILED: &str = "Settlement quantization failed";
+    pub const SETTLEMENT_QUANTIZATION_IMBALANCED: &str =
+        "Settlement quantization failed (total: {total})";
+    pub const SETTLEMENT_QUANTIZATION_INVALID_ADJUSTMENT: &str =
+        "Settlement quantization failed (invalid adjustment count)";
+    pub const SETTLEMENT_QUANTIZATION_INSUFFICIENT_CANDIDATES: &str =
+        "Settlement quantization failed (insufficient candidates)";
+    pub const SETTLEMENT_QUANTIZATION_ZERO_SUM_INVARIANT: &str =
+        "Settlement quantization failed (zero-sum invariant violation)";
+    pub const SETTLEMENT_QUANTIZATION_NON_INTEGRAL: &str =
+        "Settlement quantization failed (non-integral amount)";
     pub const MISSING_MEMBERS_DECLARATION: &str =
         "Could not find `MEMBERS := ...` declaration in the channel topic.";
 }
@@ -110,6 +142,10 @@ pub struct AmountExpressionErrorMessage {
     detail: String,
 }
 
+pub struct SettlementQuantizationImbalancedMessage<Dec> {
+    total: Dec,
+}
+
 pub fn syntax_error(line: usize, detail: String) -> SyntaxErrorMessage {
     SyntaxErrorMessage { line, detail }
 }
@@ -120,6 +156,12 @@ pub fn implicit_payer_missing(line: usize) -> ImplicitPayerMissingMessage {
 
 pub fn invalid_amount_expression(line: usize, detail: String) -> AmountExpressionErrorMessage {
     AmountExpressionErrorMessage { line, detail }
+}
+
+pub fn settlement_quantization_imbalanced<Dec: std::fmt::Display>(
+    total: Dec,
+) -> SettlementQuantizationImbalancedMessage<Dec> {
+    SettlementQuantizationImbalancedMessage { total }
 }
 
 #[cfg(feature = "ja")]
@@ -144,6 +186,13 @@ impl std::fmt::Display for ImplicitPayerMissingMessage {
 impl std::fmt::Display for AmountExpressionErrorMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "金額の式が不正です (行 {}): {}", self.line, self.detail)
+    }
+}
+
+#[cfg(feature = "ja")]
+impl<Dec: std::fmt::Display> std::fmt::Display for SettlementQuantizationImbalancedMessage<Dec> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "清算の丸めに失敗しました (合計: {})", self.total)
     }
 }
 
@@ -176,6 +225,13 @@ impl std::fmt::Display for ImplicitPayerMissingMessage {
     }
 }
 
+#[cfg(feature = "en")]
+impl<Dec: std::fmt::Display> std::fmt::Display for SettlementQuantizationImbalancedMessage<Dec> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Settlement quantization failed (total: {})", self.total)
+    }
+}
+
 #[cfg(not(any(feature = "ja", feature = "en")))]
 impl std::fmt::Display for SyntaxErrorMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -191,5 +247,12 @@ impl std::fmt::Display for ImplicitPayerMissingMessage {
             "Payer is missing at line {}. Use explicit payer syntax, for example `Alice paid 1000 to Bob`.",
             self.line
         )
+    }
+}
+
+#[cfg(not(any(feature = "ja", feature = "en")))]
+impl<Dec: std::fmt::Display> std::fmt::Display for SettlementQuantizationImbalancedMessage<Dec> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Settlement quantization failed (total: {})", self.total)
     }
 }
