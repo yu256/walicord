@@ -45,6 +45,7 @@ pub enum SettlementOptimizationError {
     QuantizationInsufficientCandidates,
     QuantizationZeroSumInvariantViolation,
     QuantizationNonIntegral,
+    QuantizationOutOfRange,
     QuantizationUnsupportedScale { scale: u32, max_supported: u32 },
 }
 
@@ -58,7 +59,8 @@ impl SettlementOptimizationError {
             | SettlementOptimizationError::QuantizationInvalidAdjustmentCount
             | SettlementOptimizationError::QuantizationInsufficientCandidates
             | SettlementOptimizationError::QuantizationZeroSumInvariantViolation
-            | SettlementOptimizationError::QuantizationNonIntegral => FailureKind::InternalBug,
+            | SettlementOptimizationError::QuantizationNonIntegral
+            | SettlementOptimizationError::QuantizationOutOfRange => FailureKind::InternalBug,
             SettlementOptimizationError::QuantizationUnsupportedScale { .. } => {
                 FailureKind::Misconfiguration
             }
@@ -113,25 +115,69 @@ impl From<SettlementRoundingError> for SettlementOptimizationError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
-    #[test]
-    fn missing_implicit_context_is_misconfiguration() {
-        let err = ProgramParseError::MissingContextForImplicitPayment { line: 1 };
-        assert_eq!(err.kind(), FailureKind::Misconfiguration);
+    #[rstest]
+    #[case::missing_context(
+        ProgramParseError::MissingContextForImplicitPayment { line: 1 },
+        FailureKind::Misconfiguration
+    )]
+    #[case::syntax_error(
+        ProgramParseError::SyntaxError {
+            line: 1,
+            detail: "unexpected token".to_string(),
+        },
+        FailureKind::UserInput
+    )]
+    fn program_parse_error_kind_matches_intent(
+        #[case] err: ProgramParseError<'static>,
+        #[case] expected: FailureKind,
+    ) {
+        assert_eq!(err.kind(), expected);
     }
 
-    #[test]
-    fn quantization_error_is_internal_bug() {
-        let err = SettlementOptimizationError::QuantizationNonIntegral;
-        assert_eq!(err.kind(), FailureKind::InternalBug);
-    }
-
-    #[test]
-    fn unsupported_scale_is_misconfiguration() {
-        let err = SettlementOptimizationError::QuantizationUnsupportedScale {
+    #[rstest]
+    #[case::quantization_non_integral(
+        SettlementOptimizationError::QuantizationNonIntegral,
+        FailureKind::InternalBug
+    )]
+    #[case::quantization_out_of_range(
+        SettlementOptimizationError::QuantizationOutOfRange,
+        FailureKind::InternalBug
+    )]
+    #[case::unsupported_scale(
+        SettlementOptimizationError::QuantizationUnsupportedScale {
             scale: 30,
             max_supported: 22,
-        };
-        assert_eq!(err.kind(), FailureKind::Misconfiguration);
+        },
+        FailureKind::Misconfiguration
+    )]
+    fn settlement_optimization_error_kind_matches_intent(
+        #[case] err: SettlementOptimizationError,
+        #[case] expected: FailureKind,
+    ) {
+        assert_eq!(err.kind(), expected);
+    }
+
+    #[rstest]
+    #[case::rounding_non_integral(
+        SettlementRoundingError::NonIntegral,
+        SettlementOptimizationError::QuantizationNonIntegral
+    )]
+    #[case::rounding_unsupported_scale(
+        SettlementRoundingError::UnsupportedScale {
+            scale: 30,
+            max_supported: 22,
+        },
+        SettlementOptimizationError::QuantizationUnsupportedScale {
+            scale: 30,
+            max_supported: 22,
+        }
+    )]
+    fn settlement_rounding_error_maps_to_application_error(
+        #[case] input: SettlementRoundingError,
+        #[case] expected: SettlementOptimizationError,
+    ) {
+        assert_eq!(SettlementOptimizationError::from(input), expected);
     }
 }

@@ -66,14 +66,36 @@ impl SettlementContext {
     }
 
     /// Converts a money amount to integer atomic units under this context scale.
-    pub fn to_atomic_units_i64(self, amount: Money) -> Option<i64> {
-        let factor = Decimal::from_i128_with_scale(10_i128.checked_pow(self.scale)?, 0);
-        let units = amount.as_decimal().checked_mul(factor)?;
-        if units.fract() != Decimal::ZERO {
-            return None;
+    pub fn to_atomic_units_i64(self, amount: Money) -> Result<i64, AtomicUnitConversionError> {
+        if self.scale > MAX_SETTLEMENT_SCALE {
+            return Err(AtomicUnitConversionError::UnsupportedScale {
+                scale: self.scale,
+                max_supported: MAX_SETTLEMENT_SCALE,
+            });
         }
-        units.to_i64()
+
+        let factor = Decimal::from_i128_with_scale(
+            10_i128
+                .checked_pow(self.scale)
+                .ok_or(AtomicUnitConversionError::OutOfRange)?,
+            0,
+        );
+        let units = amount
+            .as_decimal()
+            .checked_mul(factor)
+            .ok_or(AtomicUnitConversionError::OutOfRange)?;
+        if units.fract() != Decimal::ZERO {
+            return Err(AtomicUnitConversionError::NonIntegral);
+        }
+        units.to_i64().ok_or(AtomicUnitConversionError::OutOfRange)
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AtomicUnitConversionError {
+    NonIntegral,
+    OutOfRange,
+    UnsupportedScale { scale: u32, max_supported: u32 },
 }
 
 /// Errors that can occur during settlement quantization.
@@ -529,14 +551,42 @@ mod tests {
     #[test]
     fn settlement_context_converts_to_atomic_units() {
         let jpy = SettlementContext::jpy_default();
-        assert_eq!(jpy.to_atomic_units_i64(Money::from_i64(42)), Some(42));
+        assert_eq!(jpy.to_atomic_units_i64(Money::from_i64(42)), Ok(42));
 
         let usd = SettlementContext {
             scale: 2,
             ..SettlementContext::jpy_default()
         };
-        assert_eq!(usd.to_atomic_units_i64(Money::new(123, 2)), Some(123));
-        assert_eq!(usd.to_atomic_units_i64(Money::new(1234, 3)), None);
+        assert_eq!(usd.to_atomic_units_i64(Money::new(123, 2)), Ok(123));
+        assert_eq!(
+            usd.to_atomic_units_i64(Money::new(1234, 3)),
+            Err(AtomicUnitConversionError::NonIntegral)
+        );
+    }
+
+    #[test]
+    fn settlement_context_rejects_unsupported_scale_for_atomic_conversion() {
+        let context = SettlementContext {
+            scale: MAX_SETTLEMENT_SCALE + 1,
+            ..SettlementContext::jpy_default()
+        };
+        assert_eq!(
+            context.to_atomic_units_i64(Money::from_i64(1)),
+            Err(AtomicUnitConversionError::UnsupportedScale {
+                scale: MAX_SETTLEMENT_SCALE + 1,
+                max_supported: MAX_SETTLEMENT_SCALE,
+            })
+        );
+    }
+
+    #[test]
+    fn settlement_context_rejects_out_of_range_atomic_conversion() {
+        let context = SettlementContext::jpy_default();
+        let huge = Money::from_decimal("10000000000000000000".parse().expect("decimal"));
+        assert_eq!(
+            context.to_atomic_units_i64(huge),
+            Err(AtomicUnitConversionError::OutOfRange)
+        );
     }
 
     #[test]

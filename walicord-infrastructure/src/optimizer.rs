@@ -1,6 +1,6 @@
 use walicord_application::{PersonBalance, SettlementOptimizationError, SettlementOptimizer};
 use walicord_calc::{PersonBalance as CalcBalance, SettlementError, minimize_transactions};
-use walicord_domain::{Money, SettlementContext, Transfer};
+use walicord_domain::{AtomicUnitConversionError, Money, SettlementContext, Transfer};
 
 #[derive(Default)]
 pub struct WalicordSettlementOptimizer;
@@ -15,6 +15,24 @@ fn map_calc_settlement_error(err: SettlementError) -> SettlementOptimizationErro
     }
 }
 
+fn map_atomic_unit_error(err: AtomicUnitConversionError) -> SettlementOptimizationError {
+    match err {
+        AtomicUnitConversionError::NonIntegral => {
+            SettlementOptimizationError::QuantizationNonIntegral
+        }
+        AtomicUnitConversionError::OutOfRange => {
+            SettlementOptimizationError::QuantizationOutOfRange
+        }
+        AtomicUnitConversionError::UnsupportedScale {
+            scale,
+            max_supported,
+        } => SettlementOptimizationError::QuantizationUnsupportedScale {
+            scale,
+            max_supported,
+        },
+    }
+}
+
 impl SettlementOptimizer for WalicordSettlementOptimizer {
     fn optimize(
         &self,
@@ -24,7 +42,7 @@ impl SettlementOptimizer for WalicordSettlementOptimizer {
         let calc_balances = balances.iter().map(|balance| {
             let amount = context
                 .to_atomic_units_i64(balance.balance)
-                .ok_or(SettlementOptimizationError::QuantizationNonIntegral);
+                .map_err(map_atomic_unit_error);
             amount.map(|value| CalcBalance {
                 id: balance.id.0,
                 balance: value,
@@ -56,13 +74,30 @@ mod tests {
     use rstest::rstest;
 
     #[rstest]
-    #[case::jpy_integer(Money::from_i64(42), 0, Some(42))]
-    #[case::usd_two_dp(Money::new(123, 2), 2, Some(123))]
-    #[case::usd_non_integral_units(Money::new(1234, 3), 2, None)]
+    #[case::jpy_integer(Money::from_i64(42), 0, Ok(42))]
+    #[case::usd_two_dp(Money::new(123, 2), 2, Ok(123))]
+    #[case::usd_non_integral_units(
+        Money::new(1234, 3),
+        2,
+        Err(AtomicUnitConversionError::NonIntegral)
+    )]
+    #[case::unsupported_scale(
+        Money::from_i64(42),
+        30,
+        Err(AtomicUnitConversionError::UnsupportedScale {
+            scale: 30,
+            max_supported: 22,
+        })
+    )]
+    #[case::out_of_range(
+        Money::from_decimal("10000000000000000000".parse().expect("decimal")),
+        0,
+        Err(AtomicUnitConversionError::OutOfRange)
+    )]
     fn to_atomic_units_i64_converts_by_scale(
         #[case] amount: Money,
         #[case] scale: u32,
-        #[case] expected: Option<i64>,
+        #[case] expected: Result<i64, AtomicUnitConversionError>,
     ) {
         let context = SettlementContext {
             scale,

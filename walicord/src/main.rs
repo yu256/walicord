@@ -73,6 +73,9 @@ fn format_settlement_error(err: SettlementOptimizationError) -> String {
         SettlementOptimizationError::QuantizationNonIntegral => {
             walicord_i18n::SETTLEMENT_QUANTIZATION_NON_INTEGRAL.to_string()
         }
+        SettlementOptimizationError::QuantizationOutOfRange => {
+            walicord_i18n::SETTLEMENT_QUANTIZATION_FAILED.to_string()
+        }
         SettlementOptimizationError::QuantizationUnsupportedScale {
             scale,
             max_supported,
@@ -1381,6 +1384,10 @@ mod tests {
     #[case::non_integral(
         SettlementOptimizationError::QuantizationNonIntegral,
         walicord_i18n::SETTLEMENT_QUANTIZATION_NON_INTEGRAL.to_string()
+    )]
+    #[case::out_of_range(
+        SettlementOptimizationError::QuantizationOutOfRange,
+        walicord_i18n::SETTLEMENT_QUANTIZATION_FAILED.to_string()
     )]
     #[case::unsupported_scale(
         SettlementOptimizationError::QuantizationUnsupportedScale {

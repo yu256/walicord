@@ -10,6 +10,6 @@ pub use model::{
     distribute_balances,
 };
 pub use services::{
-    FairnessPolicy, MemberSetResolver, RoundingMode, SettleUpPolicy, SettlementCalculator,
-    SettlementContext, SettlementRoundingError, quantize_balances,
+    AtomicUnitConversionError, FairnessPolicy, MemberSetResolver, RoundingMode, SettleUpPolicy,
+    SettlementCalculator, SettlementContext, SettlementRoundingError, quantize_balances,
 };

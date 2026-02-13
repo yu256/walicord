@@ -239,7 +239,15 @@ fn sort_transfers(transfers: &mut [Transfer]) {
 
 fn format_money_for_display(amount: Money, quantization_scale: u32) -> impl std::fmt::Display {
     let value = amount.as_decimal();
-    if quantization_scale == 0 || value.fract().is_zero() {
+    if quantization_scale == 0 {
+        return if value.fract().is_zero() {
+            value.trunc()
+        } else {
+            value.round_dp(0)
+        };
+    }
+
+    if value.fract().is_zero() {
         value.trunc()
     } else {
         value.round_dp(quantization_scale).normalize()
@@ -307,5 +315,21 @@ mod tests {
 
         let view = SettlementPresenter::render(&result);
         assert!(view.combined_svg.contains("+1.123457"));
+    }
+
+    #[test]
+    fn scale_zero_uses_rounding_for_non_integral_fallback() {
+        let result = SettlementResult {
+            balances: vec![PersonBalance {
+                id: MemberId(1),
+                balance: Money::from_decimal("1.6".parse().expect("decimal")),
+            }],
+            optimized_transfers: vec![],
+            settle_up: None,
+            quantization_scale: 0,
+        };
+
+        let view = SettlementPresenter::render(&result);
+        assert!(view.combined_svg.contains("+2"));
     }
 }
