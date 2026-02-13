@@ -21,7 +21,8 @@ Current settle-up note: for partial settle-up commands, quantization remains glo
 
 - Quantization and repair are defined on the full group balance vector.
 - Partial settle-up uses the same global quantization/repair and only changes candidate priority via `preferred_set`.
-- Subset-level settlement completion is produced by transfer construction, not by quantization itself.
+- **Subset-level settlement completion is produced by transfer construction, not by quantization itself.**
+- For details on how transfers are generated from valid balances, see [Transaction Construction](transaction-construction.md).
 
 ## Reading Guide
 
