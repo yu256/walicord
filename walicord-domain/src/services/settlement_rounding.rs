@@ -159,6 +159,7 @@ pub fn quantize_balances_with_preferred_members(
     match context.fairness_policy {
         FairnessPolicy::ZeroSumMinimalAdjustment => {}
     }
+    let atomic_unit = Decimal::new(1, context.scale);
     let epsilon = settlement_epsilon(context.scale);
     let original_sum: Money = balances.values().sum();
     let sum_original = original_sum.as_decimal();
@@ -166,7 +167,7 @@ pub fn quantize_balances_with_preferred_members(
         tracing::error!(
             reject_reason = "input_imbalance",
             member_count = balances.len(),
-            atomic_unit = %Decimal::new(1, context.scale),
+            atomic_unit = %atomic_unit,
             epsilon = %epsilon,
             rounding_mode = ?context.rounding_mode,
             sum_original = %sum_original,
@@ -180,7 +181,6 @@ pub fn quantize_balances_with_preferred_members(
         RoundingMode::HalfEven => RoundingStrategy::MidpointNearestEven,
     };
 
-    let atomic_unit = Decimal::new(1, context.scale);
     let preferred_lookup: FxHashSet<MemberId> = preferred_members.iter().copied().collect();
 
     tracing::debug!(
@@ -450,14 +450,14 @@ fn stable_key(member_id: MemberId, context: SettlementContext) -> [u8; 32] {
         FairnessPolicy::ZeroSumMinimalAdjustment => 0_u8,
     };
 
-    let mut framed = Vec::with_capacity(1 + 8 + 4 + 1 + 1);
-    framed.push(1_u8); // format version
-    framed.extend_from_slice(&member_id.0.to_be_bytes());
-    framed.extend_from_slice(&context.scale.to_be_bytes());
-    framed.push(rounding_mode_tag);
-    framed.push(fairness_policy_tag);
+    let mut framed = [0_u8; 15];
+    framed[0] = 1_u8; // format version
+    framed[1..9].copy_from_slice(&member_id.0.to_be_bytes());
+    framed[9..13].copy_from_slice(&context.scale.to_be_bytes());
+    framed[13] = rounding_mode_tag;
+    framed[14] = fairness_policy_tag;
 
-    let digest = Sha256::digest(&framed);
+    let digest = Sha256::digest(framed);
     let mut out = [0_u8; 32];
     out.copy_from_slice(&digest);
     out
