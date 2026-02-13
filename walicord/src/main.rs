@@ -25,7 +25,7 @@ use serenity::{
 };
 use std::{collections::HashMap, env};
 use walicord_application::{
-    Command as ProgramCommand, MessageProcessor, ProcessingOutcome, ScriptStatement,
+    Command as ProgramCommand, FailureKind, MessageProcessor, ProcessingOutcome, ScriptStatement,
     SettlementOptimizationError, SettlementResult,
 };
 use walicord_domain::model::MemberId;
@@ -73,6 +73,11 @@ fn format_settlement_error(err: SettlementOptimizationError) -> String {
         SettlementOptimizationError::QuantizationNonIntegral => {
             walicord_i18n::SETTLEMENT_QUANTIZATION_NON_INTEGRAL.to_string()
         }
+        SettlementOptimizationError::QuantizationUnsupportedScale {
+            scale,
+            max_supported,
+        } => walicord_i18n::settlement_quantization_unsupported_scale(scale, max_supported)
+            .to_string(),
     }
 }
 
@@ -477,6 +482,26 @@ impl<'a> Handler<'a> {
                                     self.reply_with_settlement(ctx, msg, view).await
                                 }
                                 Err(err) => {
+                                    match err.kind() {
+                                        FailureKind::InternalBug => {
+                                            tracing::error!(
+                                                error = ?err,
+                                                "Settlement processing failed due to internal bug"
+                                            );
+                                        }
+                                        FailureKind::Misconfiguration => {
+                                            tracing::warn!(
+                                                error = ?err,
+                                                "Settlement processing failed due to misconfiguration"
+                                            );
+                                        }
+                                        FailureKind::UserInput => {
+                                            tracing::info!(
+                                                error = ?err,
+                                                "Settlement processing failed due to user input"
+                                            );
+                                        }
+                                    }
                                     self.reply(ctx, msg, format_settlement_error(err)).await
                                 }
                             }
@@ -513,6 +538,26 @@ impl<'a> Handler<'a> {
                                     self.reply_with_settlement(ctx, msg, view).await
                                 }
                                 Err(err) => {
+                                    match err.kind() {
+                                        FailureKind::InternalBug => {
+                                            tracing::error!(
+                                                error = ?err,
+                                                "Settlement processing failed due to internal bug"
+                                            );
+                                        }
+                                        FailureKind::Misconfiguration => {
+                                            tracing::warn!(
+                                                error = ?err,
+                                                "Settlement processing failed due to misconfiguration"
+                                            );
+                                        }
+                                        FailureKind::UserInput => {
+                                            tracing::info!(
+                                                error = ?err,
+                                                "Settlement processing failed due to user input"
+                                            );
+                                        }
+                                    }
                                     self.reply(ctx, msg, format_settlement_error(err)).await
                                 }
                             }
@@ -1331,15 +1376,22 @@ mod tests {
     #[rstest]
     #[case::zero_sum_invariant(
         SettlementOptimizationError::QuantizationZeroSumInvariantViolation,
-        walicord_i18n::SETTLEMENT_QUANTIZATION_ZERO_SUM_INVARIANT
+        walicord_i18n::SETTLEMENT_QUANTIZATION_ZERO_SUM_INVARIANT.to_string()
     )]
     #[case::non_integral(
         SettlementOptimizationError::QuantizationNonIntegral,
-        walicord_i18n::SETTLEMENT_QUANTIZATION_NON_INTEGRAL
+        walicord_i18n::SETTLEMENT_QUANTIZATION_NON_INTEGRAL.to_string()
+    )]
+    #[case::unsupported_scale(
+        SettlementOptimizationError::QuantizationUnsupportedScale {
+            scale: 30,
+            max_supported: 22,
+        },
+        walicord_i18n::settlement_quantization_unsupported_scale(30, 22).to_string()
     )]
     fn format_settlement_error_uses_quantization_message(
         #[case] error: SettlementOptimizationError,
-        #[case] expected: &str,
+        #[case] expected: String,
     ) {
         let message = format_settlement_error(error);
         assert_eq!(message, expected);

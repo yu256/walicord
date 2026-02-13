@@ -499,6 +499,16 @@ mod tests {
         walicord_domain::SettlementRoundingError::NonIntegral,
         SettlementOptimizationError::QuantizationNonIntegral
     )]
+    #[case::unsupported_scale(
+        walicord_domain::SettlementRoundingError::UnsupportedScale {
+            scale: 30,
+            max_supported: 22,
+        },
+        SettlementOptimizationError::QuantizationUnsupportedScale {
+            scale: 30,
+            max_supported: 22,
+        }
+    )]
     fn settlement_optimization_error_from_rounding_error(
         #[case] input: walicord_domain::SettlementRoundingError,
         #[case] expected: SettlementOptimizationError,

@@ -92,12 +92,15 @@ pub enum SettlementRoundingError {
     ZeroSumInvariantViolation,
     /// Quantized units could not be represented as integral values.
     NonIntegral,
+    /// Settlement context scale is not supported by decimal precision constraints.
+    UnsupportedScale { scale: u32, max_supported: u32 },
 }
 
 const STABLE_KEY_PROFILE_VERSION: &str = "stable_key_v1_sha256_member_context_be";
 const STABLE_KEY_PROFILE_FIELD_SET: &str = "member_id,scale,rounding_mode,fairness_policy";
 const EPSILON_OP_COUNT_BUDGET: i64 = 1_000_000;
 const EPSILON_SAFETY_FACTOR: i64 = 100;
+const MAX_SETTLEMENT_SCALE: u32 = 22;
 
 /// Quantizes member balances to the atomic unit with zero-sum constraint.
 ///
@@ -156,6 +159,7 @@ pub fn quantize_balances_with_preferred_members(
     context: SettlementContext,
     preferred_members: &[MemberId],
 ) -> Result<MemberBalances, SettlementRoundingError> {
+    validate_scale(context.scale)?;
     match context.fairness_policy {
         FairnessPolicy::ZeroSumMinimalAdjustment => {}
     }
@@ -441,6 +445,16 @@ fn settlement_epsilon(scale: u32) -> Decimal {
     baseline.max(epsilon_min)
 }
 
+fn validate_scale(scale: u32) -> Result<(), SettlementRoundingError> {
+    if scale <= MAX_SETTLEMENT_SCALE {
+        return Ok(());
+    }
+    Err(SettlementRoundingError::UnsupportedScale {
+        scale,
+        max_supported: MAX_SETTLEMENT_SCALE,
+    })
+}
+
 fn stable_key(member_id: MemberId, context: SettlementContext) -> [u8; 32] {
     let rounding_mode_tag = match context.rounding_mode {
         RoundingMode::HalfUp => 0_u8,
@@ -523,6 +537,24 @@ mod tests {
         };
         assert_eq!(usd.to_atomic_units_i64(Money::new(123, 2)), Some(123));
         assert_eq!(usd.to_atomic_units_i64(Money::new(1234, 3)), None);
+    }
+
+    #[test]
+    fn rejects_unsupported_scale() {
+        let mut balances = MemberBalances::default();
+        balances.insert(MemberId(1), Money::ZERO);
+        let context = SettlementContext {
+            scale: MAX_SETTLEMENT_SCALE + 1,
+            ..SettlementContext::jpy_default()
+        };
+
+        assert_eq!(
+            quantize_balances(&balances, context),
+            Err(SettlementRoundingError::UnsupportedScale {
+                scale: MAX_SETTLEMENT_SCALE + 1,
+                max_supported: MAX_SETTLEMENT_SCALE,
+            })
+        );
     }
 
     fn dec(value: &str) -> Decimal {

@@ -14,7 +14,6 @@ pub mod strings {
     pub const PENDING: &str = "保留";
     pub const SETTLEMENT_CALCULATION_FAILED: &str = "清算の計算に失敗しました";
     pub const SETTLEMENT_QUANTIZATION_FAILED: &str = "清算の丸めに失敗しました";
-    pub const SETTLEMENT_QUANTIZATION_IMBALANCED: &str = "清算の丸めに失敗しました (合計: {total})";
     pub const SETTLEMENT_QUANTIZATION_INVALID_ADJUSTMENT: &str =
         "清算の丸めに失敗しました (調整回数が不正です)";
     pub const SETTLEMENT_QUANTIZATION_INSUFFICIENT_CANDIDATES: &str =
@@ -40,8 +39,6 @@ pub mod strings {
     pub const PENDING: &str = "Pending";
     pub const SETTLEMENT_CALCULATION_FAILED: &str = "Settlement calculation failed";
     pub const SETTLEMENT_QUANTIZATION_FAILED: &str = "Settlement quantization failed";
-    pub const SETTLEMENT_QUANTIZATION_IMBALANCED: &str =
-        "Settlement quantization failed (total: {total})";
     pub const SETTLEMENT_QUANTIZATION_INVALID_ADJUSTMENT: &str =
         "Settlement quantization failed (invalid adjustment count)";
     pub const SETTLEMENT_QUANTIZATION_INSUFFICIENT_CANDIDATES: &str =
@@ -67,8 +64,6 @@ pub mod strings {
     pub const PENDING: &str = "Pending";
     pub const SETTLEMENT_CALCULATION_FAILED: &str = "Settlement calculation failed";
     pub const SETTLEMENT_QUANTIZATION_FAILED: &str = "Settlement quantization failed";
-    pub const SETTLEMENT_QUANTIZATION_IMBALANCED: &str =
-        "Settlement quantization failed (total: {total})";
     pub const SETTLEMENT_QUANTIZATION_INVALID_ADJUSTMENT: &str =
         "Settlement quantization failed (invalid adjustment count)";
     pub const SETTLEMENT_QUANTIZATION_INSUFFICIENT_CANDIDATES: &str =
@@ -146,6 +141,11 @@ pub struct SettlementQuantizationImbalancedMessage<Dec> {
     total: Dec,
 }
 
+pub struct SettlementQuantizationUnsupportedScaleMessage {
+    scale: u32,
+    max_supported: u32,
+}
+
 pub fn syntax_error(line: usize, detail: String) -> SyntaxErrorMessage {
     SyntaxErrorMessage { line, detail }
 }
@@ -162,6 +162,16 @@ pub fn settlement_quantization_imbalanced<Dec: std::fmt::Display>(
     total: Dec,
 ) -> SettlementQuantizationImbalancedMessage<Dec> {
     SettlementQuantizationImbalancedMessage { total }
+}
+
+pub fn settlement_quantization_unsupported_scale(
+    scale: u32,
+    max_supported: u32,
+) -> SettlementQuantizationUnsupportedScaleMessage {
+    SettlementQuantizationUnsupportedScaleMessage {
+        scale,
+        max_supported,
+    }
 }
 
 #[cfg(feature = "ja")]
@@ -193,6 +203,17 @@ impl std::fmt::Display for AmountExpressionErrorMessage {
 impl<Dec: std::fmt::Display> std::fmt::Display for SettlementQuantizationImbalancedMessage<Dec> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "清算の丸めに失敗しました (合計: {})", self.total)
+    }
+}
+
+#[cfg(feature = "ja")]
+impl std::fmt::Display for SettlementQuantizationUnsupportedScaleMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "清算の丸めに失敗しました (scale={}, max={})",
+            self.scale, self.max_supported
+        )
     }
 }
 
@@ -232,6 +253,17 @@ impl<Dec: std::fmt::Display> std::fmt::Display for SettlementQuantizationImbalan
     }
 }
 
+#[cfg(feature = "en")]
+impl std::fmt::Display for SettlementQuantizationUnsupportedScaleMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Settlement quantization failed (scale={}, max={})",
+            self.scale, self.max_supported
+        )
+    }
+}
+
 #[cfg(not(any(feature = "ja", feature = "en")))]
 impl std::fmt::Display for SyntaxErrorMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -254,5 +286,16 @@ impl std::fmt::Display for ImplicitPayerMissingMessage {
 impl<Dec: std::fmt::Display> std::fmt::Display for SettlementQuantizationImbalancedMessage<Dec> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Settlement quantization failed (total: {})", self.total)
+    }
+}
+
+#[cfg(not(any(feature = "ja", feature = "en")))]
+impl std::fmt::Display for SettlementQuantizationUnsupportedScaleMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Settlement quantization failed (scale={}, max={})",
+            self.scale, self.max_supported
+        )
     }
 }
