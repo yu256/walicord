@@ -30,7 +30,7 @@ impl TransferConstructor {
 
         // Invariant for deterministic transfer tie-break:
         // `MemberBalances` is a BTreeMap keyed by MemberId, so iteration order is stable.
-        let calc_balances: Vec<PersonBalance> = balances
+        let calc_balances: Vec<PersonBalance<MemberId>> = balances
             .iter()
             .map(|(member, balance)| {
                 context
@@ -49,14 +49,11 @@ impl TransferConstructor {
                         },
                     })
                     .map(|atomic| PersonBalance {
-                        id: member.0,
+                        id: *member,
                         balance: atomic,
                     })
             })
             .collect::<Result<Vec<_>, _>>()?;
-
-        let settle_ids: Vec<u64> = settle_members.iter().map(|member| member.0).collect();
-        let cash_ids: Vec<u64> = cash_members.iter().map(|member| member.0).collect();
 
         // NOTE: cash-divisibility objectives are intentionally fixed to JPY-style
         // 1000/100-unit grid in the current domain service.
@@ -64,8 +61,8 @@ impl TransferConstructor {
         // are supported end-to-end.
         let payments = construct_settlement_transfers(
             calc_balances,
-            &settle_ids,
-            &cash_ids,
+            settle_members,
+            cash_members,
             CASH_GRID_G1_JPY,
             CASH_GRID_G2_JPY,
         )
@@ -74,8 +71,8 @@ impl TransferConstructor {
         let mut transfers: Vec<Transfer> = payments
             .into_iter()
             .map(|payment| Transfer {
-                from: MemberId(payment.from),
-                to: MemberId(payment.to),
+                from: payment.from,
+                to: payment.to,
                 amount: Money::new(payment.amount, context.scale),
             })
             .collect();

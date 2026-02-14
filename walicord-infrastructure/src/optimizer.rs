@@ -55,35 +55,28 @@ impl SettlementOptimizer for WalicordSettlementOptimizer {
         cash_members: &[MemberId],
         context: SettlementContext,
     ) -> Result<Vec<Transfer>, SettlementOptimizationError> {
-        let calc_balances = balances.iter().map(|balance| {
-            let amount = context
-                .to_atomic_units_i64(balance.balance)
-                .map_err(map_atomic_unit_error);
-            amount.map(|value| CalcBalance {
-                id: balance.id.0,
-                balance: value,
-            })
-        });
+        let calc_balances = balances
+            .iter()
+            .map(
+                |balance| match context.to_atomic_units_i64(balance.balance) {
+                    Ok(value) => Ok(CalcBalance {
+                        id: balance.id,
+                        balance: value,
+                    }),
+                    Err(err) => Err(map_atomic_unit_error(err)),
+                },
+            )
+            .collect::<Result<Vec<_>, SettlementOptimizationError>>()?;
 
-        let calc_balances: Result<Vec<_>, _> = calc_balances.collect();
-        let calc_balances = calc_balances?;
-
-        let settle_member_ids: Vec<u64> = settle_members.iter().map(|member| member.0).collect();
-        let cash_member_ids: Vec<u64> = cash_members.iter().map(|member| member.0).collect();
-        let settlements = construct_settlement_transfers(
-            calc_balances,
-            &settle_member_ids,
-            &cash_member_ids,
-            1000,
-            100,
-        )
-        .map_err(map_calc_settlement_error)?;
+        let settlements =
+            construct_settlement_transfers(calc_balances, settle_members, cash_members, 1000, 100)
+                .map_err(map_calc_settlement_error)?;
 
         let optimized_transfers = settlements
             .iter()
             .map(|payment| Transfer {
-                from: walicord_domain::model::MemberId(payment.from),
-                to: walicord_domain::model::MemberId(payment.to),
+                from: payment.from,
+                to: payment.to,
                 amount: Money::new(payment.amount, context.scale),
             })
             .collect();

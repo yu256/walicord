@@ -7,6 +7,9 @@ use thiserror::Error;
 
 pub use model::{Payment, PersonBalance};
 
+pub trait MemberIdTrait: Copy + Eq + std::hash::Hash + Ord {}
+impl MemberIdTrait for u64 {}
+
 #[derive(Debug, Error)]
 pub enum SettlementError {
     #[error("Sum of balances must be zero (found {0})")]
@@ -25,12 +28,12 @@ pub enum SettlementError {
 
 const MAX_LEXICOGRAPHIC_EDGES: usize = 120;
 
-pub fn minimize_transactions(
-    people: impl IntoIterator<Item = PersonBalance>,
+pub fn minimize_transactions<MemberId: MemberIdTrait>(
+    people: impl IntoIterator<Item = PersonBalance<MemberId>>,
     alpha: f64,
     beta: f64,
-) -> Result<Vec<Payment>, SettlementError> {
-    let people: Vec<PersonBalance> = people.into_iter().collect();
+) -> Result<Vec<Payment<MemberId>>, SettlementError> {
+    let people: Vec<PersonBalance<MemberId>> = people.into_iter().collect();
     let total: i64 = people.iter().map(|p| p.balance).sum();
     if total != 0 {
         return Err(SettlementError::ImbalancedTotal(total));
@@ -137,14 +140,14 @@ pub fn minimize_transactions(
     Ok(results)
 }
 
-pub fn construct_settlement_transfers(
-    people: impl IntoIterator<Item = PersonBalance>,
-    settle_members: &[u64],
-    cash_members: &[u64],
+pub fn construct_settlement_transfers<MemberId: MemberIdTrait>(
+    people: impl IntoIterator<Item = PersonBalance<MemberId>>,
+    settle_members: &[MemberId],
+    cash_members: &[MemberId],
     g1: i64,
     g2: i64,
-) -> Result<Vec<Payment>, SettlementError> {
-    let mut people: Vec<PersonBalance> = people.into_iter().collect();
+) -> Result<Vec<Payment<MemberId>>, SettlementError> {
+    let mut people: Vec<PersonBalance<MemberId>> = people.into_iter().collect();
     people.sort_unstable_by_key(|person| person.id);
     let total: i64 = people.iter().map(|p| p.balance).sum();
     if total != 0 {
@@ -173,7 +176,7 @@ pub fn construct_settlement_transfers(
         return Err(SettlementError::NoSolution);
     };
 
-    let mut transfers: Vec<Payment> = model
+    let mut transfers: Vec<Payment<MemberId>> = model
         .edges
         .iter()
         .zip(lex_fixed)
@@ -198,16 +201,16 @@ pub fn construct_settlement_transfers(
     Ok(transfers)
 }
 
-fn is_transfer_result_consistent(
-    people: &[PersonBalance],
-    settle_members: &[u64],
-    transfers: &[Payment],
+fn is_transfer_result_consistent<MemberId: MemberIdTrait>(
+    people: &[PersonBalance<MemberId>],
+    settle_members: &[MemberId],
+    transfers: &[Payment<MemberId>],
 ) -> bool {
-    let initial_balances: std::collections::HashMap<u64, i64> = people
+    let initial_balances: std::collections::HashMap<MemberId, i64> = people
         .iter()
         .map(|person| (person.id, person.balance))
         .collect();
-    let mut balances: std::collections::HashMap<u64, i64> = people
+    let mut balances: std::collections::HashMap<MemberId, i64> = people
         .iter()
         .map(|person| (person.id, person.balance))
         .collect();
@@ -244,7 +247,11 @@ fn is_transfer_result_consistent(
         .all(|member| balances.get(member).copied().unwrap_or(0) == 0)
 }
 
-fn solve_full_lexicographic(model: &TransferModel, g1: i64, g2: i64) -> Option<Vec<f64>> {
+fn solve_full_lexicographic<MemberId: MemberIdTrait>(
+    model: &TransferModel<MemberId>,
+    g1: i64,
+    g2: i64,
+) -> Option<Vec<f64>> {
     let mut fixed = FixedTargets::default();
 
     let has_cash_objective = model.edges.iter().any(|edge| edge.payer_is_cash);
@@ -292,28 +299,33 @@ struct FixedTargets {
 }
 
 #[derive(Clone, Copy)]
-struct Edge {
-    from: u64,
-    to: u64,
+struct Edge<MemberId> {
+    from: MemberId,
+    to: MemberId,
     upper_bound: i64,
     payer_is_cash: bool,
     touches_non_settle: bool,
 }
 
-struct TransferModel {
-    payers: Vec<(u64, i64)>,
-    receivers: Vec<(u64, i64)>,
-    edges: Vec<Edge>,
+struct TransferModel<MemberId> {
+    payers: Vec<(MemberId, i64)>,
+    receivers: Vec<(MemberId, i64)>,
+    edges: Vec<Edge<MemberId>>,
     payer_edges: Vec<Vec<usize>>,
     receiver_edges: Vec<Vec<usize>>,
-    settle_lookup: std::collections::HashSet<u64>,
+    settle_lookup: std::collections::HashSet<MemberId>,
 }
 
-impl TransferModel {
-    fn from_people(people: &[PersonBalance], settle_members: &[u64], cash_members: &[u64]) -> Self {
-        let settle_lookup: std::collections::HashSet<u64> =
+impl<MemberId: MemberIdTrait> TransferModel<MemberId> {
+    fn from_people(
+        people: &[PersonBalance<MemberId>],
+        settle_members: &[MemberId],
+        cash_members: &[MemberId],
+    ) -> Self {
+        let settle_lookup: std::collections::HashSet<MemberId> =
             settle_members.iter().copied().collect();
-        let cash_lookup: std::collections::HashSet<u64> = cash_members.iter().copied().collect();
+        let cash_lookup: std::collections::HashSet<MemberId> =
+            cash_members.iter().copied().collect();
 
         let mut payers = Vec::new();
         let mut receivers = Vec::new();
@@ -364,7 +376,10 @@ struct StageSolution {
     x_values: Vec<f64>,
 }
 
-fn build_obj1_expr(model: &TransferModel, z1_vars: &[Variable]) -> Expression {
+fn build_obj1_expr<MemberId: MemberIdTrait>(
+    model: &TransferModel<MemberId>,
+    z1_vars: &[Variable],
+) -> Expression {
     let mut expr = Expression::default();
     for (edge_idx, edge) in model.edges.iter().enumerate() {
         if edge.payer_is_cash {
@@ -374,7 +389,10 @@ fn build_obj1_expr(model: &TransferModel, z1_vars: &[Variable]) -> Expression {
     expr
 }
 
-fn build_obj2_expr(model: &TransferModel, z2_vars: &[Variable]) -> Expression {
+fn build_obj2_expr<MemberId: MemberIdTrait>(
+    model: &TransferModel<MemberId>,
+    z2_vars: &[Variable],
+) -> Expression {
     let mut expr = Expression::default();
     for (edge_idx, edge) in model.edges.iter().enumerate() {
         if edge.payer_is_cash {
@@ -384,7 +402,10 @@ fn build_obj2_expr(model: &TransferModel, z2_vars: &[Variable]) -> Expression {
     expr
 }
 
-fn build_objw_expr(model: &TransferModel, y_vars: &[Variable]) -> Expression {
+fn build_objw_expr<MemberId: MemberIdTrait>(
+    model: &TransferModel<MemberId>,
+    y_vars: &[Variable],
+) -> Expression {
     let mut expr = Expression::default();
     for (edge_idx, edge) in model.edges.iter().enumerate() {
         if edge.touches_non_settle {
@@ -403,8 +424,8 @@ fn build_obj3_expr(y_vars: &[Variable]) -> Expression {
 }
 
 #[allow(clippy::too_many_lines)]
-fn solve_transfer_stage(
-    model: &TransferModel,
+fn solve_transfer_stage<MemberId: MemberIdTrait>(
+    model: &TransferModel<MemberId>,
     objective_kind: ObjectiveKind,
     fixed: &FixedTargets,
     lex_prefix: &[f64],
