@@ -313,10 +313,24 @@ fn solve_full_lexicographic<MemberId: MemberIdTrait>(
     fixed.obj3 = Some(round_count_objective(stage4.obj3));
 
     let mut lex_fixed: Vec<f64> = Vec::with_capacity(model.edges.len());
-    for idx in 0..model.edges.len() {
+    let max_upper = model
+        .edges
+        .iter()
+        .map(|edge| edge.upper_bound)
+        .max()
+        .unwrap_or(0);
+    let lex_base = (max_upper + 1) as f64;
+    let lex_block_size = choose_lex_block_size(max_upper);
+
+    for start in (0..model.edges.len()).step_by(lex_block_size) {
+        let end = (start + lex_block_size).min(model.edges.len());
         let stage = solve_transfer_stage(
             model,
-            ObjectiveKind::Lex(idx),
+            ObjectiveKind::LexBlock {
+                start,
+                end,
+                base: lex_base,
+            },
             &fixed,
             &lex_fixed,
             warm_start.as_ref(),
@@ -324,9 +338,30 @@ fn solve_full_lexicographic<MemberId: MemberIdTrait>(
             g2,
         )?;
         warm_start = Some(stage.warm_start.clone());
-        lex_fixed.push(stage.x_values[idx]);
+        for idx in start..end {
+            lex_fixed.push(stage.x_values[idx]);
+        }
     }
     Some(lex_fixed)
+}
+
+fn choose_lex_block_size(max_upper: i64) -> usize {
+    const TARGET_BLOCK_SIZE: usize = 10;
+    const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_992.0;
+
+    let base = (max_upper + 1) as f64;
+    if !base.is_finite() || base <= 1.0 {
+        return TARGET_BLOCK_SIZE;
+    }
+
+    let mut safe_size = 1usize;
+    let mut objective_bound = base;
+    while safe_size < TARGET_BLOCK_SIZE && objective_bound * base <= MAX_SAFE_INTEGER {
+        objective_bound *= base;
+        safe_size += 1;
+    }
+
+    safe_size
 }
 
 #[derive(Clone, Copy)]
@@ -335,7 +370,7 @@ enum ObjectiveKind {
     Obj2,
     ObjW,
     Obj3,
-    Lex(usize),
+    LexBlock { start: usize, end: usize, base: f64 },
 }
 
 #[derive(Default)]
@@ -552,9 +587,16 @@ fn solve_transfer_stage<MemberId: MemberIdTrait>(
             .take()
             .unwrap_or_else(|| build_objw_expr(model, &y_vars)),
         ObjectiveKind::Obj3 => obj3_expr.take().unwrap_or_else(|| build_obj3_expr(&y_vars)),
-        ObjectiveKind::Lex(index) => {
+        ObjectiveKind::LexBlock { start, end, base } => {
             let mut expr = Expression::default();
-            expr.add_mul(1.0, x_vars[index]);
+            let mut weight = 1.0;
+            for _ in (start + 1)..end {
+                weight *= base;
+            }
+            for idx in start..end {
+                expr.add_mul(weight, x_vars[idx]);
+                weight /= base;
+            }
             expr
         }
     };
