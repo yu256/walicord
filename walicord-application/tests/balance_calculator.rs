@@ -13,6 +13,7 @@ impl SettlementOptimizer for NoopOptimizer {
         &self,
         _balances: &[PersonBalance],
         _settle_members: &[MemberId],
+        _cash_members: &[MemberId],
         _context: SettlementContext,
     ) -> Result<Vec<Transfer>, SettlementOptimizationError> {
         Ok(Vec::new())

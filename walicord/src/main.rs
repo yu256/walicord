@@ -1197,6 +1197,7 @@ mod tests {
             &self,
             _balances: &[walicord_application::PersonBalance],
             _settle_members: &[MemberId],
+            _cash_members: &[MemberId],
             _context: walicord_domain::SettlementContext,
         ) -> Result<Vec<Transfer>, walicord_application::SettlementOptimizationError> {
             Ok(Vec::new())

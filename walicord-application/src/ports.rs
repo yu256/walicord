@@ -20,6 +20,7 @@ pub trait SettlementOptimizer: Send + Sync {
         &self,
         balances: &[PersonBalance],
         settle_members: &[MemberId],
+        cash_members: &[MemberId],
         context: SettlementContext,
     ) -> Result<Vec<Transfer>, SettlementOptimizationError>;
 }

@@ -42,6 +42,7 @@ fn line_count_increment(content: &str, prior_ended_with_newline: bool) -> usize 
 struct ApplyResult {
     balances: MemberBalances,
     settle_up: Option<SettleUpContext>,
+    settle_up_cash_members: Vec<MemberId>,
     quantization_scale: u32,
 }
 
@@ -175,15 +176,17 @@ impl<'a> MessageProcessor<'a> {
             ..Self::settlement_context()
         };
         let optimized_transfers = match apply_result.settle_up.as_ref() {
-            Some(settle_up) => {
-                self.optimizer
-                    .optimize(&person_balances, &settle_up.settle_members, context)?
-            }
+            Some(settle_up) => self.optimizer.optimize(
+                &person_balances,
+                &settle_up.settle_members,
+                &apply_result.settle_up_cash_members,
+                context,
+            )?,
             None => {
                 let all_members: Vec<MemberId> =
                     person_balances.iter().map(|balance| balance.id).collect();
                 self.optimizer
-                    .optimize(&person_balances, &all_members, context)?
+                    .optimize(&person_balances, &all_members, &[], context)?
             }
         };
 
@@ -209,6 +212,7 @@ impl<'a> MessageProcessor<'a> {
 
         let mut accumulator = BalanceAccumulator::new_with_members(program.members());
         let mut last_settle_members: Vec<MemberId> = Vec::new();
+        let mut last_settle_cash_members: Vec<MemberId> = Vec::new();
         let mut last_settle_transfers: Vec<Transfer> = Vec::new();
         let last_is_settle = apply_settle
             && end > 0
@@ -247,6 +251,7 @@ impl<'a> MessageProcessor<'a> {
                             cash_members,
                         } => {
                             last_settle_members.clear();
+                            last_settle_cash_members.clear();
                             last_settle_transfers.clear();
 
                             let Some(settle_members) = accumulator.evaluate_members(members) else {
@@ -270,17 +275,22 @@ impl<'a> MessageProcessor<'a> {
                                     None
                                 };
 
+                            let mut effective_cash_members: Vec<MemberId> =
+                                script_local_cash_members.iter().copied().collect();
+                            effective_cash_members
+                                .extend(command_cash_members.iter().flat_map(|set| set.iter()));
+                            effective_cash_members.sort_unstable();
+                            effective_cash_members.dedup();
+
                             let result = SettleUpPolicy::settle(
                                 accumulator.balances(),
                                 settle_members.members(),
-                                script_local_cash_members
-                                    .iter()
-                                    .copied()
-                                    .chain(command_cash_members.iter().flat_map(|set| set.iter())),
+                                effective_cash_members.iter().copied(),
                                 Self::settlement_context(),
                             )
                             .map_err(SettlementOptimizationError::from)?;
                             accumulator.set_balances(result.new_balances);
+                            last_settle_cash_members.extend(effective_cash_members);
                             last_settle_transfers.extend(result.transfers);
                         }
                     }
@@ -308,6 +318,7 @@ impl<'a> MessageProcessor<'a> {
         Ok(ApplyResult {
             balances,
             settle_up,
+            settle_up_cash_members: last_settle_cash_members,
             quantization_scale: context.scale,
         })
     }
@@ -429,6 +440,7 @@ mod tests {
             &self,
             _balances: &[PersonBalance],
             _settle_members: &[MemberId],
+            _cash_members: &[MemberId],
             _context: SettlementContext,
         ) -> Result<Vec<Transfer>, SettlementOptimizationError> {
             Ok(Vec::new())
@@ -444,9 +456,29 @@ mod tests {
             &self,
             _balances: &[PersonBalance],
             settle_members: &[MemberId],
+            _cash_members: &[MemberId],
             _context: SettlementContext,
         ) -> Result<Vec<Transfer>, SettlementOptimizationError> {
             assert_eq!(settle_members, self.expected.as_slice());
+            Ok(Vec::new())
+        }
+    }
+
+    struct AssertSettleAndCashMembersOptimizer {
+        expected_settle: Vec<MemberId>,
+        expected_cash: Vec<MemberId>,
+    }
+
+    impl SettlementOptimizer for AssertSettleAndCashMembersOptimizer {
+        fn optimize(
+            &self,
+            _balances: &[PersonBalance],
+            settle_members: &[MemberId],
+            cash_members: &[MemberId],
+            _context: SettlementContext,
+        ) -> Result<Vec<Transfer>, SettlementOptimizationError> {
+            assert_eq!(settle_members, self.expected_settle.as_slice());
+            assert_eq!(cash_members, self.expected_cash.as_slice());
             Ok(Vec::new())
         }
     }
@@ -546,6 +578,43 @@ mod tests {
                         payer: MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(2))]),
                         payee: MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(3))]),
                     })),
+                },
+            ],
+        );
+
+        let _ = processor
+            .build_settlement_result(&script)
+            .expect("result generation failed");
+    }
+
+    #[test]
+    fn build_settlement_result_passes_effective_cash_members_to_optimizer() {
+        let optimizer = AssertSettleAndCashMembersOptimizer {
+            expected_settle: vec![MemberId(1), MemberId(2), MemberId(3), MemberId(4)],
+            expected_cash: vec![MemberId(1), MemberId(2)],
+        };
+        let processor = MessageProcessor::new(&StubParser, &optimizer);
+
+        let script = Script::new(
+            &[],
+            vec![
+                payment_stmt(1, 1, 3, 700),
+                payment_stmt(2, 1, 4, 600),
+                payment_stmt(3, 2, 3, 50),
+                payment_stmt(4, 2, 4, 50),
+                ScriptStatementWithLine {
+                    line: 5,
+                    statement: ScriptStatement::Command(Command::MemberSetCash {
+                        members: union_members(&[1]),
+                        enabled: true,
+                    }),
+                },
+                ScriptStatementWithLine {
+                    line: 6,
+                    statement: ScriptStatement::Command(Command::SettleUp {
+                        members: union_members(&[1, 2, 3, 4]),
+                        cash_members: Some(union_members(&[2])),
+                    }),
                 },
             ],
         );

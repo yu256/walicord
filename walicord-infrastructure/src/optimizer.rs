@@ -52,6 +52,7 @@ impl SettlementOptimizer for WalicordSettlementOptimizer {
         &self,
         balances: &[PersonBalance],
         settle_members: &[MemberId],
+        cash_members: &[MemberId],
         context: SettlementContext,
     ) -> Result<Vec<Transfer>, SettlementOptimizationError> {
         let calc_balances = balances.iter().map(|balance| {
@@ -68,9 +69,15 @@ impl SettlementOptimizer for WalicordSettlementOptimizer {
         let calc_balances = calc_balances?;
 
         let settle_member_ids: Vec<u64> = settle_members.iter().map(|member| member.0).collect();
-        let settlements =
-            construct_settlement_transfers(calc_balances, &settle_member_ids, &[], 1000, 100)
-                .map_err(map_calc_settlement_error)?;
+        let cash_member_ids: Vec<u64> = cash_members.iter().map(|member| member.0).collect();
+        let settlements = construct_settlement_transfers(
+            calc_balances,
+            &settle_member_ids,
+            &cash_member_ids,
+            1000,
+            100,
+        )
+        .map_err(map_calc_settlement_error)?;
 
         let optimized_transfers = settlements
             .iter()
@@ -145,7 +152,7 @@ mod tests {
 
         let subset = [MemberId(3)];
         let subset_result = optimizer
-            .optimize(&balances, &subset, context)
+            .optimize(&balances, &subset, &[], context)
             .expect("subset optimization should succeed");
         assert!(
             subset_result.is_empty(),
@@ -154,7 +161,7 @@ mod tests {
 
         let all = [MemberId(1), MemberId(2), MemberId(3)];
         let all_result = optimizer
-            .optimize(&balances, &all, context)
+            .optimize(&balances, &all, &[], context)
             .expect("full optimization should succeed");
         assert_eq!(all_result.len(), 1);
         assert_eq!(all_result[0].from, MemberId(1));
