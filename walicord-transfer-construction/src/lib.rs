@@ -302,7 +302,6 @@ fn solve_full_lexicographic<MemberId: MemberIdTrait>(
             model,
             ObjectiveKind::Obj1,
             &fixed,
-            &[],
             warm_start.as_ref(),
             g1,
             g2,
@@ -314,7 +313,6 @@ fn solve_full_lexicographic<MemberId: MemberIdTrait>(
             model,
             ObjectiveKind::Obj2,
             &fixed,
-            &[],
             warm_start.as_ref(),
             g1,
             g2,
@@ -330,7 +328,6 @@ fn solve_full_lexicographic<MemberId: MemberIdTrait>(
         model,
         ObjectiveKind::ObjW,
         &fixed,
-        &[],
         warm_start.as_ref(),
         g1,
         g2,
@@ -342,64 +339,17 @@ fn solve_full_lexicographic<MemberId: MemberIdTrait>(
         model,
         ObjectiveKind::Obj3,
         &fixed,
-        &[],
         warm_start.as_ref(),
         g1,
         g2,
     )?;
-    warm_start = Some(stage4.warm_start.clone());
-    fixed.obj3 = Some(round_count_objective(stage4.obj3));
-
-    let mut lex_fixed: Vec<f64> = Vec::with_capacity(model.edges.len());
-    let max_upper = model
-        .edges
-        .iter()
-        .map(|edge| edge.upper_bound)
-        .max()
-        .unwrap_or(0);
-    let lex_base = (max_upper + 1) as f64;
-    let lex_block_size = choose_lex_block_size(max_upper);
-
-    for start in (0..model.edges.len()).step_by(lex_block_size) {
-        let end = (start + lex_block_size).min(model.edges.len());
-        let stage = solve_transfer_stage(
-            model,
-            ObjectiveKind::LexBlock {
-                start,
-                end,
-                base: lex_base,
-            },
-            &fixed,
-            &lex_fixed,
-            warm_start.as_ref(),
-            g1,
-            g2,
-        )?;
-        warm_start = Some(stage.warm_start.clone());
-        for idx in start..end {
-            lex_fixed.push(round_bankers(stage.x_values[idx]) as f64);
-        }
-    }
-    Some(lex_fixed)
-}
-
-fn choose_lex_block_size(max_upper: i64) -> usize {
-    const TARGET_BLOCK_SIZE: usize = 10;
-    const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_992.0;
-
-    let base = (max_upper + 1) as f64;
-    if !base.is_finite() || base <= 1.0 {
-        return TARGET_BLOCK_SIZE;
-    }
-
-    let mut safe_size = 1usize;
-    let mut objective_bound = base;
-    while safe_size < TARGET_BLOCK_SIZE && objective_bound * base <= MAX_SAFE_INTEGER {
-        objective_bound *= base;
-        safe_size += 1;
-    }
-
-    safe_size
+    Some(
+        stage4
+            .x_values
+            .into_iter()
+            .map(|value| round_bankers(value) as f64)
+            .collect(),
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -408,7 +358,6 @@ enum ObjectiveKind {
     Obj2,
     ObjW,
     Obj3,
-    LexBlock { start: usize, end: usize, base: f64 },
 }
 
 #[derive(Default)]
@@ -416,7 +365,6 @@ struct FixedTargets {
     obj1: Option<f64>,
     obj2: Option<f64>,
     objw: Option<f64>,
-    obj3: Option<f64>,
 }
 
 #[derive(Clone, Copy)]
@@ -512,7 +460,6 @@ struct StageSolution {
     obj1: f64,
     obj2: f64,
     objw: f64,
-    obj3: f64,
     x_values: Vec<f64>,
     warm_start: WarmStartValues,
 }
@@ -564,19 +511,6 @@ fn build_obj3_expr(y_vars: &[Variable]) -> Expression {
     let mut expr = Expression::default();
     for var in y_vars {
         expr.add_mul(1.0, *var);
-    }
-    expr
-}
-
-fn build_lex_block_expr(x_vars: &[Variable], start: usize, end: usize, base: f64) -> Expression {
-    let mut expr = Expression::default();
-    let mut weight = 1.0;
-    for _ in (start + 1)..end {
-        weight *= base;
-    }
-    for var in x_vars.iter().take(end).skip(start) {
-        expr.add_mul(weight, *var);
-        weight /= base;
     }
     expr
 }
@@ -682,7 +616,6 @@ fn solve_transfer_stage<MemberId: MemberIdTrait>(
     model: &TransferModel<MemberId>,
     objective_kind: ObjectiveKind,
     fixed: &FixedTargets,
-    lex_prefix: &[f64],
     warm_start: Option<&WarmStartValues>,
     g1: i64,
     g2: i64,
@@ -752,9 +685,6 @@ fn solve_transfer_stage<MemberId: MemberIdTrait>(
             .take()
             .unwrap_or_else(|| build_objw_expr(model, &y_vars)),
         ObjectiveKind::Obj3 => obj3_expr.take().unwrap_or_else(|| build_obj3_expr(&y_vars)),
-        ObjectiveKind::LexBlock { start, end, base } => {
-            build_lex_block_expr(&x_vars, start, end, base)
-        }
     };
 
     let mut problem = vars.minimise(objective_expr).using(default_solver);
@@ -840,14 +770,6 @@ fn solve_transfer_stage<MemberId: MemberIdTrait>(
             .unwrap_or_else(|| build_objw_expr(model, &y_vars));
         problem = problem.with(expr.leq(round_count_objective(target) + EPS));
     }
-    if let Some(target) = fixed.obj3 {
-        let expr = obj3_expr.take().unwrap_or_else(|| build_obj3_expr(&y_vars));
-        problem = problem.with(expr.leq(round_count_objective(target) + EPS));
-    }
-    for (idx, center) in lex_prefix.iter().copied().enumerate() {
-        problem = problem.with((x_vars[idx] - center).eq(0.0));
-    }
-
     let solution = problem.solve().ok()?;
     let x_values: Vec<f64> = x_vars.iter().map(|var| solution.value(*var)).collect();
     let y_values: Vec<f64> = y_vars.iter().map(|var| solution.value(*var)).collect();
@@ -868,8 +790,6 @@ fn solve_transfer_stage<MemberId: MemberIdTrait>(
         .filter(|(_, edge)| edge.touches_non_settle)
         .map(|(idx, _)| solution.value(y_vars[idx]))
         .sum();
-    let obj3 = y_vars.iter().map(|var| solution.value(*var)).sum();
-
     let warm_start = WarmStartValues {
         x_values: x_values.clone(),
         y_values,
@@ -887,7 +807,6 @@ fn solve_transfer_stage<MemberId: MemberIdTrait>(
         obj1,
         obj2,
         objw,
-        obj3,
         x_values,
         warm_start,
     })
