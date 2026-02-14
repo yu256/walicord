@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.5.0](https://github.com/yu256/walicord/compare/walicord-v0.4.0...walicord-v0.5.0) (2026-02-14)
+
+
+### Features
+
+* rework settle-up with transfer-construction engine ([#33](https://github.com/yu256/walicord/issues/33)) ([#39](https://github.com/yu256/walicord/issues/39)) ([3284e94](https://github.com/yu256/walicord/commit/3284e945799d02648c4cd0045841f08809e1c870))
+
+
+### Bug Fixes
+
+* propagate solver selection through workspace dependencies ([#44](https://github.com/yu256/walicord/issues/44)) ([71fb63b](https://github.com/yu256/walicord/commit/71fb63ba32d6c287d9a2733a4fa0fae6a9142e58))
+* remove highs from default features to allow solver selection ([#46](https://github.com/yu256/walicord/issues/46)) ([3a6ccbb](https://github.com/yu256/walicord/commit/3a6ccbba5bf43d1ebb2f81e9e42064b61975fe0d)), closes [#41](https://github.com/yu256/walicord/issues/41)
+
 ## [0.4.0](https://github.com/yu256/walicord/compare/walicord-v0.3.0...walicord-v0.4.0) (2026-02-13)
 
 
