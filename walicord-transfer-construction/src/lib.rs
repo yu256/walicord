@@ -377,7 +377,7 @@ fn solve_full_lexicographic<MemberId: MemberIdTrait>(
         )?;
         warm_start = Some(stage.warm_start.clone());
         for idx in start..end {
-            lex_fixed.push(stage.x_values[idx]);
+            lex_fixed.push(round_bankers(stage.x_values[idx]) as f64);
         }
     }
     Some(lex_fixed)
@@ -845,9 +845,7 @@ fn solve_transfer_stage<MemberId: MemberIdTrait>(
         problem = problem.with(expr.leq(round_count_objective(target) + EPS));
     }
     for (idx, center) in lex_prefix.iter().copied().enumerate() {
-        problem = problem
-            .with((x_vars[idx] - center).leq(1e-6))
-            .with((center - x_vars[idx]).leq(1e-6));
+        problem = problem.with((x_vars[idx] - center).eq(0.0));
     }
 
     let solution = problem.solve().ok()?;
