@@ -42,11 +42,24 @@ pub fn minimize_transactions<MemberId: MemberIdTrait>(
         return Err(SettlementError::ImbalancedTotal(total));
     }
 
+    let amount_scale = scaling_divisor_for_balances(&people);
+    let solver_people: Vec<PersonBalance<MemberId>> = if amount_scale > 1 {
+        people
+            .iter()
+            .map(|person| PersonBalance {
+                id: person.id,
+                balance: person.balance / amount_scale,
+            })
+            .collect()
+    } else {
+        people.clone()
+    };
+
     let mut vars = variables!();
 
     let mut debtors = Vec::new();
     let mut creditors = Vec::new();
-    for (idx, person) in people.iter().enumerate() {
+    for (idx, person) in solver_people.iter().enumerate() {
         if person.balance < 0 {
             debtors.push((idx, -person.balance));
         } else if person.balance > 0 {
@@ -97,7 +110,7 @@ pub fn minimize_transactions<MemberId: MemberIdTrait>(
     }
 
     // Balance constraints: inflow - outflow = balance
-    for (member_idx, person) in people.iter().enumerate() {
+    for (member_idx, person) in solver_people.iter().enumerate() {
         let mut constraint = Expression::default();
         for &edge_idx in &in_edges[member_idx] {
             constraint.add_mul(1.0, how_much[edge_idx]);
@@ -114,7 +127,9 @@ pub fn minimize_transactions<MemberId: MemberIdTrait>(
 
     let mut results = Vec::with_capacity(pairs.len());
     for (idx, &(i, j, _)) in pairs.iter().enumerate() {
-        let amount = round_bankers(solution.value(how_much[idx]));
+        let amount = round_bankers(solution.value(how_much[idx]))
+            .checked_mul(amount_scale)
+            .ok_or(SettlementError::RoundingMismatch)?;
         if amount > 0 {
             results.push(Payment {
                 from: people[i].id,
@@ -169,7 +184,25 @@ pub fn construct_settlement_transfers<MemberId: MemberIdTrait>(
         return Err(SettlementError::InvalidGrid { g1, g2 });
     }
 
-    let model = TransferModel::from_people(&people, settle_members, cash_members);
+    let amount_scale = scaling_divisor_for_balances_and_grid(&people, g1, g2);
+    let (solver_people, solver_g1, solver_g2): (Vec<PersonBalance<MemberId>>, i64, i64) =
+        if amount_scale > 1 {
+            (
+                people
+                    .iter()
+                    .map(|person| PersonBalance {
+                        id: person.id,
+                        balance: person.balance / amount_scale,
+                    })
+                    .collect(),
+                g1 / amount_scale,
+                g2 / amount_scale,
+            )
+        } else {
+            (people.clone(), g1, g2)
+        };
+
+    let model = TransferModel::from_people(&solver_people, settle_members, cash_members);
     if model.edges.is_empty() {
         return Ok(Vec::new());
     }
@@ -180,26 +213,24 @@ pub fn construct_settlement_transfers<MemberId: MemberIdTrait>(
         });
     }
 
-    let Some(lex_fixed) = solve_full_lexicographic(&model, g1, g2) else {
+    let Some(lex_fixed) = solve_full_lexicographic(&model, solver_g1, solver_g2) else {
         return Err(SettlementError::NoSolution);
     };
 
-    let mut transfers: Vec<Payment<MemberId>> = model
-        .edges
-        .iter()
-        .zip(lex_fixed)
-        .filter_map(|(edge, amount)| {
-            let amount = round_bankers(amount);
-            if amount <= 0 {
-                return None;
-            }
-            Some(Payment {
-                from: edge.from,
-                to: edge.to,
-                amount,
-            })
-        })
-        .collect();
+    let mut transfers: Vec<Payment<MemberId>> = Vec::new();
+    for (edge, amount) in model.edges.iter().zip(lex_fixed) {
+        let amount = round_bankers(amount)
+            .checked_mul(amount_scale)
+            .ok_or(SettlementError::RoundingMismatch)?;
+        if amount <= 0 {
+            continue;
+        }
+        transfers.push(Payment {
+            from: edge.from,
+            to: edge.to,
+            amount,
+        });
+    }
     transfers.sort_unstable_by_key(|payment| (payment.from, payment.to));
 
     if !is_transfer_result_consistent(&people, settle_members, &transfers) {
@@ -859,6 +890,49 @@ fn solve_transfer_stage<MemberId: MemberIdTrait>(
         x_values,
         warm_start,
     })
+}
+
+fn gcd_u64(mut lhs: u64, mut rhs: u64) -> u64 {
+    while rhs != 0 {
+        let rem = lhs % rhs;
+        lhs = rhs;
+        rhs = rem;
+    }
+    lhs
+}
+
+fn gcd_of_nonzero_balances<MemberId>(people: &[PersonBalance<MemberId>]) -> u64 {
+    people
+        .iter()
+        .map(|person| person.balance.unsigned_abs())
+        .filter(|&value| value != 0)
+        .reduce(gcd_u64)
+        .unwrap_or(0)
+}
+
+fn normalize_scale(raw_scale: u64) -> i64 {
+    if raw_scale <= 1 || raw_scale > i64::MAX as u64 {
+        return 1;
+    }
+    raw_scale as i64
+}
+
+fn scaling_divisor_for_balances<MemberId>(people: &[PersonBalance<MemberId>]) -> i64 {
+    normalize_scale(gcd_of_nonzero_balances(people))
+}
+
+fn scaling_divisor_for_balances_and_grid<MemberId>(
+    people: &[PersonBalance<MemberId>],
+    g1: i64,
+    g2: i64,
+) -> i64 {
+    let mut scale = gcd_of_nonzero_balances(people);
+    if scale == 0 {
+        return 1;
+    }
+    scale = gcd_u64(scale, g1.unsigned_abs());
+    scale = gcd_u64(scale, g2.unsigned_abs());
+    normalize_scale(scale)
 }
 
 fn round_bankers(value: f64) -> i64 {
