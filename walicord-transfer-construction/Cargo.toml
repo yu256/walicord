@@ -4,13 +4,13 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-good_lp = { version = "1.14.0", default-features = false }
+highs = "2.0.0"
 thiserror = "2.0.17"
+tracing = "0.1.41"
 
 [dev-dependencies]
 proptest = "1.9.0"
 rstest = "0.26.1"
 
 [features]
-coin_cbc = ["good_lp/coin_cbc"]
-highs = ["good_lp/highs"]
+tie_break = []

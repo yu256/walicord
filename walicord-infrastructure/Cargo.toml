@@ -15,7 +15,5 @@ rstest = "0.26.1"
 
 [features]
 default = ["ja"]
-highs = ["walicord-transfer-construction/highs"]
-coin_cbc = ["walicord-transfer-construction/coin_cbc"]
 ja = ["walicord-parser/ja"]
 en = ["walicord-parser/en"]
