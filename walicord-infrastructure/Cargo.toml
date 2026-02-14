@@ -7,7 +7,7 @@ edition = "2024"
 walicord-application = { path = "../walicord-application" }
 walicord-domain = { path = "../walicord-domain" }
 walicord-parser = { path = "../walicord-parser" }
-walicord-transfer-construction = { path = "../walicord-transfer-construction" }
+walicord-transfer-construction = { path = "../walicord-transfer-construction", default-features = false }
 
 [dev-dependencies]
 proptest = "1.9.0"

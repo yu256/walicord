@@ -33,6 +33,14 @@ Rustの開発環境がある場合の手順です。
    cargo run --release
    ```
 
+   **線形計画ソルバーの選択**
+
+   デフォルトではHiGHSソルバーを使用します。COIN-OR CBCソルバーを使用する場合は、デフォルトfeatureを無効化して`coin_cbc`を有効化します：
+
+   ```sh
+   cargo run --release --no-default-features --features coin_cbc,ja
+   ```
+
 ## Discordボットの作成
 
 1. [Discord Developer Portal](https://discord.com/developers/applications)にアクセスし、**New Application**をクリックして新しいアプリケーションを作成します。
