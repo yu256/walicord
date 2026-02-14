@@ -100,6 +100,8 @@ pub fn minimize_transactions<MemberId: MemberIdTrait>(
     // Constraint: how_much[i][j] <= big_m * who_pays[i][j]
     for ((&hm, &wp), &(_, _, max_amount)) in how_much.iter().zip(&who_pays).zip(&pairs) {
         problem = problem.with((hm - max_amount * wp).leq(0.0));
+        // y=1 should imply strictly positive flow for integer x.
+        problem = problem.with((hm - wp).geq(0.0));
     }
 
     let mut out_edges: Vec<Vec<usize>> = vec![Vec::new(); people.len()];
@@ -803,6 +805,7 @@ fn solve_transfer_stage<MemberId: MemberIdTrait>(
     for (edge_idx, edge) in model.edges.iter().enumerate() {
         let upper = edge.upper_bound as f64;
         problem = problem.with((x_vars[edge_idx] - upper * y_vars[edge_idx]).leq(0.0));
+        problem = problem.with((x_vars[edge_idx] - y_vars[edge_idx]).geq(0.0));
 
         if let Some(cash_idx) = cash_edge_to_idx[edge_idx] {
             problem = problem
