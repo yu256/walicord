@@ -28,7 +28,7 @@ rstest = "0.26.1"
 serde_json = "1.0"
 
 [features]
-default = ["highs", "ja"]
+default = ["ja"]
 highs = ["walicord-infrastructure/highs"]
 coin_cbc = ["walicord-infrastructure/coin_cbc"]
 ja = ["walicord-infrastructure/ja", "walicord-i18n/ja", "walicord-parser/ja"]

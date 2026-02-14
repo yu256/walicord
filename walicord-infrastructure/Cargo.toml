@@ -14,7 +14,7 @@ proptest = "1.9.0"
 rstest = "0.26.1"
 
 [features]
-default = ["highs", "ja"]
+default = ["ja"]
 highs = ["walicord-transfer-construction/highs"]
 coin_cbc = ["walicord-transfer-construction/coin_cbc"]
 ja = ["walicord-parser/ja"]
