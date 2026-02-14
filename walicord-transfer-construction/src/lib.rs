@@ -2,7 +2,10 @@
 
 mod model;
 
-use good_lp::{Expression, Solution, SolverModel, Variable, default_solver, variable, variables};
+use good_lp::{
+    Expression, Solution, SolverModel, Variable, WithInitialSolution, default_solver, variable,
+    variables,
+};
 use thiserror::Error;
 
 pub use model::{Payment, PersonBalance};
@@ -67,8 +70,8 @@ pub fn minimize_transactions<MemberId: MemberIdTrait>(
     let mut who_pays: Vec<Variable> = Vec::with_capacity(pairs.len());
     let mut objective = Expression::with_capacity(pairs.len() * 2);
 
-    for _ in 0..pairs.len() {
-        let flow_var = vars.add(variable().integer().min(0.0));
+    for &(_, _, max_amount) in &pairs {
+        let flow_var = vars.add(variable().integer().min(0.0).max(max_amount));
         objective.add_mul(beta, flow_var);
         how_much.push(flow_var);
 
@@ -253,29 +256,74 @@ fn solve_full_lexicographic<MemberId: MemberIdTrait>(
     g2: i64,
 ) -> Option<Vec<f64>> {
     let mut fixed = FixedTargets::default();
+    let mut warm_start: Option<WarmStartValues> = None;
 
     let has_cash_objective = model.edges.iter().any(|edge| edge.payer_is_cash);
     if has_cash_objective {
-        let stage1 = solve_transfer_stage(model, ObjectiveKind::Obj1, &fixed, &[], g1, g2)?;
+        let stage1 = solve_transfer_stage(
+            model,
+            ObjectiveKind::Obj1,
+            &fixed,
+            &[],
+            warm_start.as_ref(),
+            g1,
+            g2,
+        )?;
+        warm_start = Some(stage1.warm_start.clone());
         fixed.obj1 = Some(round_count_objective(stage1.obj1));
 
-        let stage2 = solve_transfer_stage(model, ObjectiveKind::Obj2, &fixed, &[], g1, g2)?;
+        let stage2 = solve_transfer_stage(
+            model,
+            ObjectiveKind::Obj2,
+            &fixed,
+            &[],
+            warm_start.as_ref(),
+            g1,
+            g2,
+        )?;
+        warm_start = Some(stage2.warm_start.clone());
         fixed.obj2 = Some(round_count_objective(stage2.obj2));
     } else {
         fixed.obj1 = Some(0.0);
         fixed.obj2 = Some(0.0);
     }
 
-    let stage3 = solve_transfer_stage(model, ObjectiveKind::ObjW, &fixed, &[], g1, g2)?;
+    let stage3 = solve_transfer_stage(
+        model,
+        ObjectiveKind::ObjW,
+        &fixed,
+        &[],
+        warm_start.as_ref(),
+        g1,
+        g2,
+    )?;
+    warm_start = Some(stage3.warm_start.clone());
     fixed.objw = Some(round_count_objective(stage3.objw));
 
-    let stage4 = solve_transfer_stage(model, ObjectiveKind::Obj3, &fixed, &[], g1, g2)?;
+    let stage4 = solve_transfer_stage(
+        model,
+        ObjectiveKind::Obj3,
+        &fixed,
+        &[],
+        warm_start.as_ref(),
+        g1,
+        g2,
+    )?;
+    warm_start = Some(stage4.warm_start.clone());
     fixed.obj3 = Some(round_count_objective(stage4.obj3));
 
     let mut lex_fixed: Vec<f64> = Vec::with_capacity(model.edges.len());
     for idx in 0..model.edges.len() {
-        let stage =
-            solve_transfer_stage(model, ObjectiveKind::Lex(idx), &fixed, &lex_fixed, g1, g2)?;
+        let stage = solve_transfer_stage(
+            model,
+            ObjectiveKind::Lex(idx),
+            &fixed,
+            &lex_fixed,
+            warm_start.as_ref(),
+            g1,
+            g2,
+        )?;
+        warm_start = Some(stage.warm_start.clone());
         lex_fixed.push(stage.x_values[idx]);
     }
     Some(lex_fixed)
@@ -374,6 +422,21 @@ struct StageSolution {
     objw: f64,
     obj3: f64,
     x_values: Vec<f64>,
+    warm_start: WarmStartValues,
+}
+
+#[derive(Clone)]
+struct WarmStartValues {
+    x_values: Vec<f64>,
+    y_values: Vec<f64>,
+    z1_values: Vec<f64>,
+    z2_values: Vec<f64>,
+    a1_values: Vec<f64>,
+    a2_values: Vec<f64>,
+    r1_values: Vec<f64>,
+    r2_values: Vec<f64>,
+    s_values: Vec<f64>,
+    t_values: Vec<f64>,
 }
 
 fn build_obj1_expr<MemberId: MemberIdTrait>(
@@ -429,6 +492,7 @@ fn solve_transfer_stage<MemberId: MemberIdTrait>(
     objective_kind: ObjectiveKind,
     fixed: &FixedTargets,
     lex_prefix: &[f64],
+    warm_start: Option<&WarmStartValues>,
     g1: i64,
     g2: i64,
 ) -> Option<StageSolution> {
@@ -444,25 +508,32 @@ fn solve_transfer_stage<MemberId: MemberIdTrait>(
     let mut r1_vars: Vec<Variable> = Vec::with_capacity(model.edges.len());
     let mut r2_vars: Vec<Variable> = Vec::with_capacity(model.edges.len());
 
-    for _ in &model.edges {
-        x_vars.push(vars.add(variable().integer().min(0.0)));
+    let g1f = g1 as f64;
+    let g2f = g2 as f64;
+    let max_a2 = ((g1 - 1) / g2) as f64;
+
+    for edge in &model.edges {
+        let upper = edge.upper_bound as f64;
+        let max_a1 = (edge.upper_bound / g1) as f64;
+
+        x_vars.push(vars.add(variable().integer().min(0.0).max(upper)));
         y_vars.push(vars.add(variable().binary()));
         z1_vars.push(vars.add(variable().binary()));
         z2_vars.push(vars.add(variable().binary()));
-        a1_vars.push(vars.add(variable().integer().min(0.0)));
-        a2_vars.push(vars.add(variable().integer().min(0.0)));
-        r1_vars.push(vars.add(variable().integer().min(0.0)));
-        r2_vars.push(vars.add(variable().integer().min(0.0)));
+        a1_vars.push(vars.add(variable().integer().min(0.0).max(max_a1)));
+        a2_vars.push(vars.add(variable().integer().min(0.0).max(max_a2)));
+        r1_vars.push(vars.add(variable().integer().min(0.0).max((g1 - 1) as f64)));
+        r2_vars.push(vars.add(variable().integer().min(0.0).max((g2 - 1) as f64)));
     }
 
     let mut s_vars: Vec<Variable> = Vec::with_capacity(model.payers.len());
-    for _ in &model.payers {
-        s_vars.push(vars.add(variable().integer().min(0.0)));
+    for (_, pay) in &model.payers {
+        s_vars.push(vars.add(variable().integer().min(0.0).max(*pay as f64)));
     }
 
     let mut t_vars: Vec<Variable> = Vec::with_capacity(model.receivers.len());
-    for _ in &model.receivers {
-        t_vars.push(vars.add(variable().integer().min(0.0)));
+    for (_, recv) in &model.receivers {
+        t_vars.push(vars.add(variable().integer().min(0.0).max(*recv as f64)));
     }
 
     let mut obj1_expr = Some(build_obj1_expr(model, &z1_vars));
@@ -489,6 +560,21 @@ fn solve_transfer_stage<MemberId: MemberIdTrait>(
     };
 
     let mut problem = vars.minimise(objective_expr).using(default_solver);
+    if let Some(seed) = warm_start {
+        let mut initial_solution: Vec<(Variable, f64)> =
+            Vec::with_capacity(seed.x_values.len() * 8 + seed.s_values.len() + seed.t_values.len());
+        initial_solution.extend(x_vars.iter().copied().zip(seed.x_values.iter().copied()));
+        initial_solution.extend(y_vars.iter().copied().zip(seed.y_values.iter().copied()));
+        initial_solution.extend(z1_vars.iter().copied().zip(seed.z1_values.iter().copied()));
+        initial_solution.extend(z2_vars.iter().copied().zip(seed.z2_values.iter().copied()));
+        initial_solution.extend(a1_vars.iter().copied().zip(seed.a1_values.iter().copied()));
+        initial_solution.extend(a2_vars.iter().copied().zip(seed.a2_values.iter().copied()));
+        initial_solution.extend(r1_vars.iter().copied().zip(seed.r1_values.iter().copied()));
+        initial_solution.extend(r2_vars.iter().copied().zip(seed.r2_values.iter().copied()));
+        initial_solution.extend(s_vars.iter().copied().zip(seed.s_values.iter().copied()));
+        initial_solution.extend(t_vars.iter().copied().zip(seed.t_values.iter().copied()));
+        problem = problem.with_initial_solution(initial_solution);
+    }
 
     for (payer_idx, (payer, pay)) in model.payers.iter().enumerate() {
         let mut flow = Expression::default();
@@ -520,16 +606,12 @@ fn solve_transfer_stage<MemberId: MemberIdTrait>(
 
         if edge.payer_is_cash {
             problem = problem
-                .with(
-                    (x_vars[edge_idx] - (g1 as f64) * a1_vars[edge_idx] - r1_vars[edge_idx])
-                        .eq(0.0),
-                )
-                .with(
-                    (r1_vars[edge_idx] - (g2 as f64) * a2_vars[edge_idx] - r2_vars[edge_idx])
-                        .eq(0.0),
-                )
+                .with((x_vars[edge_idx] - g1f * a1_vars[edge_idx] - r1_vars[edge_idx]).eq(0.0))
+                .with((r1_vars[edge_idx] - g2f * a2_vars[edge_idx] - r2_vars[edge_idx]).eq(0.0))
                 .with((r1_vars[edge_idx] - ((g1 - 1) as f64) * z1_vars[edge_idx]).leq(0.0))
                 .with((r2_vars[edge_idx] - ((g2 - 1) as f64) * z2_vars[edge_idx]).leq(0.0))
+                .with((r1_vars[edge_idx] - z1_vars[edge_idx]).geq(0.0))
+                .with((r2_vars[edge_idx] - z2_vars[edge_idx]).geq(0.0))
                 .with((z2_vars[edge_idx] - z1_vars[edge_idx]).leq(0.0))
                 .with((z1_vars[edge_idx] - y_vars[edge_idx]).leq(0.0))
                 .with((z2_vars[edge_idx] - y_vars[edge_idx]).leq(0.0));
@@ -574,6 +656,15 @@ fn solve_transfer_stage<MemberId: MemberIdTrait>(
 
     let solution = problem.solve().ok()?;
     let x_values: Vec<f64> = x_vars.iter().map(|var| solution.value(*var)).collect();
+    let y_values: Vec<f64> = y_vars.iter().map(|var| solution.value(*var)).collect();
+    let z1_values: Vec<f64> = z1_vars.iter().map(|var| solution.value(*var)).collect();
+    let z2_values: Vec<f64> = z2_vars.iter().map(|var| solution.value(*var)).collect();
+    let a1_values: Vec<f64> = a1_vars.iter().map(|var| solution.value(*var)).collect();
+    let a2_values: Vec<f64> = a2_vars.iter().map(|var| solution.value(*var)).collect();
+    let r1_values: Vec<f64> = r1_vars.iter().map(|var| solution.value(*var)).collect();
+    let r2_values: Vec<f64> = r2_vars.iter().map(|var| solution.value(*var)).collect();
+    let s_values: Vec<f64> = s_vars.iter().map(|var| solution.value(*var)).collect();
+    let t_values: Vec<f64> = t_vars.iter().map(|var| solution.value(*var)).collect();
     let obj1 = model
         .edges
         .iter()
@@ -597,12 +688,26 @@ fn solve_transfer_stage<MemberId: MemberIdTrait>(
         .sum();
     let obj3 = y_vars.iter().map(|var| solution.value(*var)).sum();
 
+    let warm_start = WarmStartValues {
+        x_values: x_values.clone(),
+        y_values,
+        z1_values,
+        z2_values,
+        a1_values,
+        a2_values,
+        r1_values,
+        r2_values,
+        s_values,
+        t_values,
+    };
+
     Some(StageSolution {
         obj1,
         obj2,
         objw,
         obj3,
         x_values,
+        warm_start,
     })
 }
 
