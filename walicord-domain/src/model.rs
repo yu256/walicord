@@ -957,7 +957,7 @@ pub struct Settlement {
 /// * `balances` - Map of member balances to update
 /// * `members` - Set of members to distribute among
 /// * `amount` - Total amount to distribute
-/// * `direction` - +1 for credit (payer), -1 for debit (payee)
+/// * `direction` - +1 for debt/net-pay side (payer), -1 for credit/net-receive side (payee)
 ///
 /// # Semantics
 /// * Uses `split_even` to divide amount with full precision
@@ -973,11 +973,11 @@ pub struct Settlement {
 /// let members = MemberSet::new(vec![MemberId(1), MemberId(2), MemberId(3)]);
 /// let amount = Money::from_decimal(Decimal::new(100, 0));
 ///
-/// // Credit (payer)
+/// // Debt side (payer)
 /// distribute_balances(&mut balances, &members, amount, 1);
 /// // Each member's balance is +33.33333333333333333333333333
 ///
-/// // Debit (payee)
+/// // Credit side (payee)
 /// distribute_balances(&mut balances, &members, amount, -1);
 /// // Each member's balance is 0 (credited then debited)
 /// ```

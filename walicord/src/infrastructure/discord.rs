@@ -9,7 +9,7 @@ use serenity::{
     prelude::*,
 };
 use std::sync::Arc;
-use walicord_application::is_command_message;
+use walicord_application::{is_command_message, is_command_prefix};
 use walicord_domain::model::{MemberId, MemberInfo};
 
 #[derive(Debug, thiserror::Error)]
@@ -23,6 +23,17 @@ pub enum ChannelError {
 }
 
 pub struct DiscordChannelService;
+
+fn should_ignore_history_message(message: &Message) -> bool {
+    let command_without_state_effect =
+        is_command_message(&message.content) && !is_command_prefix(&message.content, "!member");
+    message.author.bot
+        || message
+            .reactions
+            .iter()
+            .any(|r| matches!(&r.reaction_type, ReactionType::Unicode(s) if s == "❎" && r.me))
+        || command_without_state_effect
+}
 
 /// Convert serenity::Member to MemberInfo
 pub fn to_member_info(member: &Member) -> MemberInfo {
@@ -67,17 +78,6 @@ impl DiscordChannelService {
         let mut all_messages = IndexMap::new();
         let mut last_message_id = None;
 
-        fn should_ignore(message: &Message) -> bool {
-            message.author.bot
-                || message.reactions.iter().any(|r| {
-                    matches!(
-                        &r.reaction_type,
-                        ReactionType::Unicode(s) if s == "❎" && r.me
-                    )
-                })
-                || is_command_message(&message.content)
-        }
-
         loop {
             let mut builder = GetMessages::new().limit(100);
             if let Some(before) = last_message_id {
@@ -97,7 +97,7 @@ impl DiscordChannelService {
             all_messages.extend(
                 messages
                     .into_iter()
-                    .filter(|m| !should_ignore(m))
+                    .filter(|m| !should_ignore_history_message(m))
                     .map(|m| (m.id, m)),
             );
         }
@@ -157,5 +157,19 @@ mod tests {
         let info = to_member_info(&member);
 
         assert_eq!(info.display_name.as_ref(), expected);
+    }
+
+    #[rstest]
+    #[case::member_cash_command_kept("!member set <@1> cash on", false)]
+    #[case::settleup_command_ignored("!settleup <@1>", true)]
+    fn history_filter_keeps_stateful_member_commands(
+        #[case] content: &str,
+        #[case] expected_ignored: bool,
+    ) {
+        let mut message = Message::default();
+        message.content = content.to_string();
+        message.author.bot = false;
+
+        assert_eq!(should_ignore_history_message(&message), expected_ignored);
     }
 }

@@ -38,6 +38,8 @@ impl<'a> From<ProgramBuildError<'a>> for ProgramParseError<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SettlementOptimizationError {
     ImbalancedTotal(i64),
+    InvalidGrid { g1: i64, g2: i64 },
+    ModelTooLarge { edge_count: usize, max_edges: usize },
     NoSolution,
     RoundingMismatch,
     QuantizationImbalancedTotal { total: walicord_domain::Money },
@@ -61,7 +63,9 @@ impl SettlementOptimizationError {
             | SettlementOptimizationError::QuantizationZeroSumInvariantViolation
             | SettlementOptimizationError::QuantizationNonIntegral
             | SettlementOptimizationError::QuantizationOutOfRange => FailureKind::InternalBug,
-            SettlementOptimizationError::QuantizationUnsupportedScale { .. } => {
+            SettlementOptimizationError::InvalidGrid { .. }
+            | SettlementOptimizationError::ModelTooLarge { .. }
+            | SettlementOptimizationError::QuantizationUnsupportedScale { .. } => {
                 FailureKind::Misconfiguration
             }
         }
@@ -108,6 +112,25 @@ impl From<SettlementRoundingError> for SettlementOptimizationError {
                 scale,
                 max_supported,
             },
+            SettlementRoundingError::TransferConstructionNoSolution => {
+                SettlementOptimizationError::NoSolution
+            }
+            SettlementRoundingError::TransferConstructionInvalidGrid { g1, g2 } => {
+                SettlementOptimizationError::InvalidGrid { g1, g2 }
+            }
+            SettlementRoundingError::TransferConstructionModelTooLarge {
+                edge_count,
+                max_edges,
+            } => SettlementOptimizationError::ModelTooLarge {
+                edge_count,
+                max_edges,
+            },
+            SettlementRoundingError::TransferConstructionRoundingMismatch => {
+                SettlementOptimizationError::RoundingMismatch
+            }
+            SettlementRoundingError::TransferConstructionImbalancedTotal(total) => {
+                SettlementOptimizationError::ImbalancedTotal(total)
+            }
         }
     }
 }
@@ -152,6 +175,17 @@ mod tests {
         },
         FailureKind::Misconfiguration
     )]
+    #[case::invalid_grid(
+        SettlementOptimizationError::InvalidGrid { g1: 1000, g2: 300 },
+        FailureKind::Misconfiguration
+    )]
+    #[case::model_too_large(
+        SettlementOptimizationError::ModelTooLarge {
+            edge_count: 121,
+            max_edges: 120,
+        },
+        FailureKind::Misconfiguration
+    )]
     fn settlement_optimization_error_kind_matches_intent(
         #[case] err: SettlementOptimizationError,
         #[case] expected: FailureKind,
@@ -163,6 +197,32 @@ mod tests {
     #[case::rounding_non_integral(
         SettlementRoundingError::NonIntegral,
         SettlementOptimizationError::QuantizationNonIntegral
+    )]
+    #[case::transfer_no_solution(
+        SettlementRoundingError::TransferConstructionNoSolution,
+        SettlementOptimizationError::NoSolution
+    )]
+    #[case::transfer_invalid_grid(
+        SettlementRoundingError::TransferConstructionInvalidGrid { g1: 1000, g2: 300 },
+        SettlementOptimizationError::InvalidGrid { g1: 1000, g2: 300 }
+    )]
+    #[case::transfer_model_too_large(
+        SettlementRoundingError::TransferConstructionModelTooLarge {
+            edge_count: 121,
+            max_edges: 120,
+        },
+        SettlementOptimizationError::ModelTooLarge {
+            edge_count: 121,
+            max_edges: 120,
+        }
+    )]
+    #[case::transfer_rounding_mismatch(
+        SettlementRoundingError::TransferConstructionRoundingMismatch,
+        SettlementOptimizationError::RoundingMismatch
+    )]
+    #[case::transfer_imbalanced_total(
+        SettlementRoundingError::TransferConstructionImbalancedTotal(7),
+        SettlementOptimizationError::ImbalancedTotal(7)
     )]
     #[case::rounding_unsupported_scale(
         SettlementRoundingError::UnsupportedScale {

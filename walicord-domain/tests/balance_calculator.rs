@@ -97,11 +97,10 @@ proptest! {
             return Ok(());
         }
 
-        let all_members: Vec<MemberId> = balances.keys().copied().collect();
         let settlement = SettleUpPolicy::settle(
-            balances,
-            all_members.into_iter().chain(settle_members.iter()),
+            &balances,
             settle_members.members(),
+            std::iter::empty(),
             SettlementContext::jpy_default(),
         )
         .expect("settle should succeed");

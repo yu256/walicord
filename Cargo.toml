@@ -2,7 +2,7 @@
 members = [
     "walicord",
     "walicord-application",
-    "walicord-calc",
+    "walicord-transfer-construction",
     "walicord-domain",
     "walicord-i18n",
     "walicord-infrastructure",

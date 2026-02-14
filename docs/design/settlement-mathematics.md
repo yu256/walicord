@@ -36,7 +36,8 @@ Terminology used in this document:
 - **quantization**: per-participant rounding to atomic-unit grid (`q_i`, `rounded[i]`)
 - **rounding**: used as a synonym for quantization unless explicitly stated otherwise
 - **repair**: post-quantization zero-sum restoration (`adjusted[i]`)
-- **balance sign convention**: positive = credit (net receive), negative = debt (net pay)
+- **balance sign convention**: positive = debt (net pay), negative = credit (net receive)
+- **transfer-direction semantics**: positive side pays negative side
 
 ### 1. Deferred Rounding
 

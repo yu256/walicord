@@ -19,6 +19,7 @@ pub trait SettlementOptimizer: Send + Sync {
     fn optimize(
         &self,
         balances: &[PersonBalance],
+        settle_members: &[MemberId],
         context: SettlementContext,
     ) -> Result<Vec<Transfer>, SettlementOptimizationError>;
 }
