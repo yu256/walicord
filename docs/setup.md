@@ -29,16 +29,17 @@ Rustの開発環境がある場合の手順です。
    ```
 3. **設定**: `.env`ファイルを作成し、必要な設定を行います。
 4. **実行**:
-   ```sh
-   cargo run --release
-   ```
 
    **線形計画ソルバーの選択**
 
-   デフォルトではHiGHSソルバーを使用します。COIN-OR CBCソルバーを使用する場合は、デフォルトfeatureを無効化して`coin_cbc`を有効化します：
+   ソルバーと言語をfeatureフラグで指定します：
 
    ```sh
-   cargo run --release --no-default-features --features coin_cbc,ja
+   # HiGHSソルバー（推奨）
+   cargo run --release --features highs,ja
+
+   # COIN-OR CBCソルバー
+   cargo run --release --features coin_cbc,ja
    ```
 
 ## Discordボットの作成
