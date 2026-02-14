@@ -7,7 +7,14 @@ use walicord_domain::{
 pub enum Command<'a> {
     Variables,
     Review,
-    SettleUp(MemberSetExpr<'a>),
+    MemberSetCash {
+        members: MemberSetExpr<'a>,
+        enabled: bool,
+    },
+    SettleUp {
+        members: MemberSetExpr<'a>,
+        cash_members: Option<MemberSetExpr<'a>>,
+    },
 }
 
 pub enum ScriptStatement<'a> {

@@ -52,6 +52,21 @@ fn format_settlement_error(err: SettlementOptimizationError) -> String {
                 walicord_i18n::SETTLEMENT_CALCULATION_FAILED
             )
         }
+        SettlementOptimizationError::InvalidGrid { g1, g2 } => {
+            format!(
+                "{} (invalid grid: g1={g1}, g2={g2})",
+                walicord_i18n::SETTLEMENT_CALCULATION_FAILED
+            )
+        }
+        SettlementOptimizationError::ModelTooLarge {
+            edge_count,
+            max_edges,
+        } => {
+            format!(
+                "{} (model too large: edges={edge_count}, max={max_edges})",
+                walicord_i18n::SETTLEMENT_CALCULATION_FAILED
+            )
+        }
         SettlementOptimizationError::NoSolution => {
             walicord_i18n::SETTLEMENT_CALCULATION_FAILED.to_string()
         }
@@ -428,7 +443,7 @@ impl<'a> Handler<'a> {
                                 has_effect_statement = true;
                             }
                             ScriptStatement::Command(command) => {
-                                if matches!(command, ProgramCommand::SettleUp(_)) {
+                                if matches!(command, ProgramCommand::SettleUp { .. }) {
                                     has_effect_statement = true;
                                 }
                                 commands.push((stmt_index, command.clone()));
@@ -509,7 +524,7 @@ impl<'a> Handler<'a> {
                                 }
                             }
                         }
-                        ProgramCommand::SettleUp(_) => {
+                        ProgramCommand::SettleUp { .. } => {
                             match self
                                 .processor
                                 .build_settlement_result_for_prefix(&program, stmt_index)
@@ -565,6 +580,7 @@ impl<'a> Handler<'a> {
                                 }
                             }
                         }
+                        ProgramCommand::MemberSetCash { .. } => {}
                     }
                 }
 
@@ -740,7 +756,7 @@ fn plan_cache_rebuild(
                                 has_effect_statement = true;
                             }
                             ScriptStatement::Command(command) => {
-                                if matches!(command, ProgramCommand::SettleUp(_)) {
+                                if matches!(command, ProgramCommand::SettleUp { .. }) {
                                     has_effect_statement = true;
                                 }
                             }
@@ -1151,9 +1167,10 @@ mod tests {
                     &[],
                     vec![ScriptStatementWithLine {
                         line: 1,
-                        statement: ScriptStatement::Command(ProgramCommand::SettleUp(
-                            MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(1))]),
-                        )),
+                        statement: ScriptStatement::Command(ProgramCommand::SettleUp {
+                            members: MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(1))]),
+                            cash_members: None,
+                        }),
                     }],
                 )),
                 "REVIEW" => Ok(Script::new(
@@ -1179,6 +1196,8 @@ mod tests {
         fn optimize(
             &self,
             _balances: &[walicord_application::PersonBalance],
+            _settle_members: &[MemberId],
+            _cash_members: &[MemberId],
             _context: walicord_domain::SettlementContext,
         ) -> Result<Vec<Transfer>, walicord_application::SettlementOptimizationError> {
             Ok(Vec::new())
@@ -1395,6 +1414,23 @@ mod tests {
             max_supported: 22,
         },
         walicord_i18n::settlement_quantization_unsupported_scale(30, 22).to_string()
+    )]
+    #[case::invalid_grid(
+        SettlementOptimizationError::InvalidGrid { g1: 1000, g2: 300 },
+        format!(
+            "{} (invalid grid: g1=1000, g2=300)",
+            walicord_i18n::SETTLEMENT_CALCULATION_FAILED
+        )
+    )]
+    #[case::model_too_large(
+        SettlementOptimizationError::ModelTooLarge {
+            edge_count: 121,
+            max_edges: 120,
+        },
+        format!(
+            "{} (model too large: edges=121, max=120)",
+            walicord_i18n::SETTLEMENT_CALCULATION_FAILED
+        )
     )]
     fn format_settlement_error_uses_quantization_message(
         #[case] error: SettlementOptimizationError,

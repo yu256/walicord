@@ -1,5 +1,5 @@
 [package]
-name = "walicord-calc"
+name = "walicord-transfer-construction"
 version = "0.1.0"
 edition = "2024"
 
@@ -12,6 +12,6 @@ proptest = "1.9.0"
 rstest = "0.26.1"
 
 [features]
-default = ["microlp"]
-microlp = ["good_lp/microlp"]
+default = ["highs"]
 coin_cbc = ["good_lp/coin_cbc"]
+highs = ["good_lp/highs"]

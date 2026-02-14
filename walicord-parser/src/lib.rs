@@ -5,7 +5,7 @@ mod i18n;
 use nom::{
     IResult, Parser,
     branch::alt,
-    bytes::complete::{tag, tag_no_case, take_till, take_until, take_while1},
+    bytes::complete::{tag, tag_no_case, take_till, take_until, take_while, take_while1},
     character::complete::{char, digit1, multispace1, u64},
     combinator::{map_res, opt, recognize},
     multi::many0,
@@ -128,7 +128,14 @@ impl<'a> Payment<'a> {
 pub enum Command<'a> {
     Variables,
     Review,
-    SettleUp(SetExpr<'a>),
+    MemberSetCash {
+        members: SetExpr<'a>,
+        enabled: bool,
+    },
+    SettleUp {
+        members: SetExpr<'a>,
+        cash_members: Option<SetExpr<'a>>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -184,7 +191,11 @@ fn mention_sequence(input: &str) -> IResult<&str, SetExpr<'_>> {
 }
 
 fn identifier(input: &str) -> IResult<&str, &str> {
-    take_while1(|c: char| c.is_alphanumeric() || c == '_' || c == '-' || is_japanese_char(c))(input)
+    recognize((
+        take_while1(|c: char| c.is_alphanumeric() || c == '_' || is_japanese_char(c)),
+        take_while(|c: char| c.is_alphanumeric() || c == '_' || c == '-' || is_japanese_char(c)),
+    ))
+    .parse(input)
 }
 
 fn is_japanese_char(c: char) -> bool {
@@ -452,11 +463,32 @@ fn command(input: &str) -> IResult<&str, Command<'_>> {
         tag_no_case("!review").map(|_| Command::Review),
         tag("!清算確認").map(|_| Command::Review),
         (
+            tag_no_case("!member"),
+            sp,
+            tag_no_case("set"),
+            sp,
+            set_expr,
+            sp,
+            tag_no_case("cash"),
+            sp,
+            alt((tag_no_case("on"), tag_no_case("off"))),
+        )
+            .map(
+                |(_, _, _, _, members, _, _, _, state)| Command::MemberSetCash {
+                    members,
+                    enabled: state.eq_ignore_ascii_case("on"),
+                },
+            ),
+        (
             alt((tag_no_case("!settleup"), tag_no_case("!確定"))),
             sp,
             set_expr,
+            opt((sp, tag_no_case("--cash"), sp, set_expr)),
         )
-            .map(|(_, _, expr)| Command::SettleUp(expr)),
+            .map(|(_, _, members, cash)| Command::SettleUp {
+                members,
+                cash_members: cash.map(|(_, _, _, set)| set),
+            }),
     ))
     .parse(input)
 }
@@ -601,13 +633,93 @@ mod tests {
 
     #[rstest]
     #[case::settleup_difference("!settleup <@999> - <@111>")]
+    #[case::kakutei_difference("!確定 <@999> - <@111>")]
     fn test_parse_kakutei_command(#[case] input: &str) {
         let (_, stmt) = statement(input).expect("settleup command should parse");
         let mut expected_expr = SetExpr::new();
         expected_expr.push(SetOp::Push(999));
         expected_expr.push(SetOp::Push(111));
         expected_expr.push(SetOp::Difference);
-        assert_eq!(stmt, Statement::Command(Command::SettleUp(expected_expr)));
+        assert_eq!(
+            stmt,
+            Statement::Command(Command::SettleUp {
+                members: expected_expr,
+                cash_members: None,
+            })
+        );
+    }
+
+    #[rstest]
+    #[case::settleup_alias("!settleup <@1> <@2> --cash <@3> ∪ <@4>")]
+    #[case::kakutei_alias("!確定 <@1> <@2> --cash <@3> ∪ <@4>")]
+    fn test_parse_settleup_with_cash_option(#[case] input: &str) {
+        let (_, stmt) = statement(input).expect("settleup with cash should parse");
+
+        let mut members = SetExpr::new();
+        members.push(SetOp::Push(1));
+        members.push(SetOp::Push(2));
+        members.push(SetOp::Union);
+
+        let mut cash = SetExpr::new();
+        cash.push(SetOp::Push(3));
+        cash.push(SetOp::Push(4));
+        cash.push(SetOp::Union);
+
+        assert_eq!(
+            stmt,
+            Statement::Command(Command::SettleUp {
+                members,
+                cash_members: Some(cash),
+            })
+        );
+    }
+
+    #[rstest]
+    #[case::cash_on("!member set <@10> ∪ <@11> cash on", true)]
+    #[case::cash_off("!member set <@10> ∪ <@11> cash off", false)]
+    fn test_parse_member_cash_command(#[case] input: &str, #[case] enabled: bool) {
+        let (_, stmt) = statement(input).expect("member cash command should parse");
+
+        let mut members = SetExpr::new();
+        members.push(SetOp::Push(10));
+        members.push(SetOp::Push(11));
+        members.push(SetOp::Union);
+
+        assert_eq!(
+            stmt,
+            Statement::Command(Command::MemberSetCash { members, enabled })
+        );
+    }
+
+    #[rstest]
+    #[case::member_cash_invalid_state("!member set <@1> cash maybe")]
+    #[case::settleup_cash_missing_expr("!settleup <@1> --cash")]
+    fn test_reject_invalid_command_syntax(#[case] input: &str) {
+        let result = parse_program(input);
+        assert!(matches!(result, Err(ParseError::SyntaxError { .. })));
+    }
+
+    #[rstest]
+    #[case::identifier_internal_hyphen("team-alpha := <@1>", "team-alpha")]
+    #[case::identifier_underscore_prefix("_ops-team := <@1>", "_ops-team")]
+    fn test_declaration_identifier_accepts_valid_patterns(
+        #[case] input: &str,
+        #[case] expected_name: &str,
+    ) {
+        let program = parse_program(input).expect("valid declaration should parse");
+        assert_eq!(program.statements.len(), 1);
+        match &program.statements[0].statement {
+            Statement::Declaration(decl) => assert_eq!(decl.name, expected_name),
+            _ => panic!("expected declaration statement"),
+        }
+    }
+
+    #[rstest]
+    #[case::leading_hyphen("-team := <@1>")]
+    #[case::hyphen_only("- := <@1>")]
+    fn test_declaration_identifier_rejects_invalid_patterns(#[case] input: &str) {
+        let result = parse_program(input);
+        assert!(matches!(result, Err(ParseError::SyntaxError { .. })));
     }
 
     // Tests for mention-based parsing (Discord ID)
@@ -710,13 +822,27 @@ mod tests {
     )]
     #[case::inline_comment_settleup(
         "!settleup /*除外*/ <@999> - <@111>",
-        Statement::Command(Command::SettleUp({
+        Statement::Command(Command::SettleUp {
+            members: {
             let mut expr = SetExpr::new();
             expr.push(SetOp::Push(999));
             expr.push(SetOp::Push(111));
             expr.push(SetOp::Difference);
             expr
-        }))
+            },
+            cash_members: None,
+        })
+    )]
+    #[case::inline_comment_member_cash(
+        "!member set <@10> /*メモ*/ cash on",
+        Statement::Command(Command::MemberSetCash {
+            members: {
+            let mut expr = SetExpr::new();
+            expr.push(SetOp::Push(10));
+            expr
+            },
+            enabled: true,
+        })
     )]
     #[case::inline_comment_adjacent(
         "1000円/*ランチ*/<@456>",
@@ -770,11 +896,14 @@ mod tests {
     )]
     #[case::line_comment_settleup(
         "!settleup <@999> // 除外",
-        Statement::Command(Command::SettleUp({
+        Statement::Command(Command::SettleUp {
+            members: {
             let mut expr = SetExpr::new();
             expr.push(SetOp::Push(999));
             expr
-        }))
+            },
+            cash_members: None,
+        })
     )]
     fn test_accepts_line_comments(
         #[case] input: &'static str,

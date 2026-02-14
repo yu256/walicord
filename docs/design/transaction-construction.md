@@ -1,74 +1,166 @@
 # Transaction Construction
 
-This document describes how Walicord constructs the set of transfers (transactions) to resolve optimized balances derived from the settlement process.
+This document defines how Walicord constructs settlement transfers from final balances produced by settlement mathematics.
+
+Unlike a design note, this page is written as a product-facing specification: it defines behavior, guarantees, and command semantics in terms that can be exposed in README-level documentation.
 
 ## Overview
 
-After "Settlement Mathematics" logic determines the *final net balances* for all participants (ensuring zero-sum and atomic units), the **Transaction Construction** algorithm determines *who pays whom* to reach those states from the current states.
+Settlement in Walicord has two layers:
 
-Specifically, in Walicord's current architecture (`SettlementCalculator`), the logic simplifies the debt graph by matching creditors and debtors greedily, with a preference for settling members within the requested subset.
+1. **Settlement mathematics** computes final balances on the atomic-unit grid with exact zero-sum.
+2. **Transaction construction** converts those balances into concrete transfers `(from, to, amount)`.
 
-## Algorithm Description
+This document covers layer (2) only.
 
-The algorithm takes:
-1. **Current Balances**: The starting state of all members.
-2. **Target Settlement Members**: A subset of members who explicitly requested to settle up (e.g., via `!settleup @A @B`).
+## Background
 
-It produces:
-- A list of **Transfers** (Person A pays Person B amount X).
-- A **New Balance** map (updated balances after transfers are applied).
+Historically, split-payment products often focused on one of two goals:
 
-### The Process
+- keep the number of transfers small,
+- keep transfer amounts human-friendly for cash handling.
 
-The core logic (`SettlementCalculator::calculate`) works as follows:
+In practice, these goals can conflict. A transfer plan with fewer edges can still create awkward payer-side amounts (for example, many non-`100`/non-`1000` units), while a cash-friendly plan can increase counterpart involvement.
 
-1. **Identify Settle Candidates**: Iterate through the provided `settle_members`.
-2. **Determine Direction**: For each member, check if they have a non-zero balance.
-   - If `balance > 0`: They are a **payer** (have a surplus/debt to the pool).
-   - If `balance < 0`: They are a **receiver** (have a deficit/credit from the pool).
-   - Target direction is the opposite of their sign (e.g., a payer needs to transfer money out to reduce their positive balance to zero).
+Walicord therefore defines an explicit objective order instead of relying on implicit heuristics.
 
-3. **Priority Matching (Within Settle Group)**:
-   - The algorithm first attempts to match the current member's balance against other members *within the same `settle_members` list*.
-   - It looks for members with the opposite sign (e.g., if A is +100, look for B with -50).
-   - **Greedy Transfer**: It transfers the minimum of `|current_balance|` and `|target_balance|` to satisfy as much as possible.
-   - This "clears" debts between the people who explicitly asked to settle.
+## Inputs and Outputs
 
-4. **Global Matching (Outside Settle Group)**:
-   - If the current member *still* has a remaining balance after step 3 (and they are in the `settle_members` list), it implies their net position cannot be cleared solely by other settling members.
-   - The algorithm then searches the **entire participant list** (all members with balances).
-   - It repeats the greedy matching process against any available participant with an opposite sign.
+### Inputs
 
-5. **Result**:
-   - The generated transfers ensure that the members in `settle_members` reach a zero balance (or as close as possible if the system wasn't zero-sum to begin with, though the Settlement Mathematics layer guarantees zero-sum inputs).
-   - Non-settling members may see their balances shift (e.g., their credit is transferred from A to B), but the global net zero is preserved.
+- `b[m]: Money` — quantized final balance per member.
+- `settle_members: Set<MemberId>` — members explicitly requested to settle now.
+- `cash_members: Set<MemberId>` — members whose payer-side transfers should avoid loose change.
+
+Input contract for this layer:
+
+- `b[m]` must already be on the settlement atomic-unit grid and convertible to i64 atomic units.
+- This contract is guaranteed by the settlement mathematics (quantization) layer before
+  transaction construction is invoked.
+
+### Sign Convention (Authoritative for this layer)
+
+- `b[m] > 0` => `m` is a **payer**.
+- `b[m] < 0` => `m` is a **receiver**.
+
+### Outputs
+
+- `transfers: List<(from, to, amount)>`
+- `new_balances: Map<MemberId, Money>` after applying `transfers`.
+
+## Core Guarantees
+
+For valid input balances, transaction construction guarantees:
+
+1. **No rebalance of input balances**: the input `b[m]` is treated as fixed.
+2. **Atomic-unit transfers**: every transfer amount is on the settlement atomic-unit grid.
+3. **Conservation**: transfers preserve total money flow exactly.
+4. **Partial settlement**:
+   - every member in `settle_members` is settled to exactly zero,
+   - members outside `settle_members` may remain non-zero.
+5. **Determinism**: identical inputs produce identical transfer content and ordering.
+
+## Complexity Guardrail
+
+The current implementation solves lexicographic objectives by repeated MILP calls.
+To bound latency for chat-bot usage, the solver rejects oversized bipartite edge sets.
+
+- Let `E = #payers * #receivers` in the transfer model.
+- If `E > 120`, transfer construction is rejected as `ModelTooLarge` (operational limit).
+
+This bound is an operational safety guard, not a mathematical infeasibility condition.
+
+## Error Modes and User Guidance
+
+Transaction construction may return the following operational errors:
+
+- `InvalidGrid`: cash-grid configuration is invalid (`g1 <= 0`, `g2 <= 0`, or `g1 % g2 != 0`).
+  - Operator action: fix configuration values first.
+- `ModelTooLarge`: transfer graph exceeds the operational edge budget (`E > 120`).
+  - User/operator action:
+    1. split settle-up into smaller member subsets,
+    2. reduce `cash_members` scope when possible,
+    3. retry with fewer active payer/receiver combinations.
+- `NoSolution`: solver failed to produce an optimal solution under valid model constraints.
+  - Operator action: retry, then inspect runtime/solver environment if persistent.
+- `RoundingMismatch`: post-solve rounding consistency check failed.
+  - Operator action: treat as integrity failure; retry and investigate numerics/runtime.
+
+## Optimization Policy
+
+Walicord uses exact lexicographic optimization (not greedy matching).
+
+Current runtime profile uses fixed JPY-style cash grids: `G1=1000`, `G2=100`.
+Cash-friendliness is evaluated only for payers in `cash_members`.
+
+Future extension note: when non-JPY settlement profiles are introduced end-to-end,
+`G1/G2` should be derived from settlement context instead of fixed constants.
+
+The solver minimizes, in this strict order:
+
+1. **OBJ1**: number of cash-payer transfers not divisible by `G1`.
+2. **OBJ2**: among OBJ1-optimal solutions, number of cash-payer transfers not divisible by `G2`.
+3. **OBJW**: among OBJ1/OBJ2-optimal solutions, number of transfers involving non-`settle_members` counterparts.
+4. **OBJ3**: among OBJ1/OBJ2/OBJW-optimal solutions, total transfer count.
+5. **Tie-break**: deterministic lexicographic minimization of edge amounts in fixed `(from asc, to asc)` order.
+
+## Why this approach
+
+- **Cash intent is explicit**: users can mark cash-oriented payers, and the solver optimizes their payer-side divisibility first.
+- **Settle intent is preserved**: after cash objectives, `OBJW` prefers plans that avoid pulling in non-`settle_members` counterparts when possible.
+- **Determinism for trust and UX**: the same input always yields the same transfer list and ordering, which is important for chat-based workflows and audits.
+- **Exactness over heuristics**: lexicographic optimization provides globally optimal outcomes under the declared objective order.
+
+## Transfer Extraction Rules
+
+After optimization:
+
+- emit one transfer per positive edge (`amount > 0`),
+- do not emit duplicate `(from, to)` pairs,
+- sort output by `(from, to)` ascending member ID,
+- compute `new_balances` by applying transfers exactly once.
 
 ## Example
 
-**Scenario**:
-- A: +100 (Payer/Debtor)
-- B: +50 (Payer/Debtor)
-- C: -150 (Receiver/Creditor)
+**Balances**
 
-**Command**: `!settleup @A`
+- A: `+1200` (payer)
+- B: `-1000` (receiver)
+- C: `-200` (receiver)
+- `settle_members = {A, B, C}`
+- `cash_members = {A}`
 
-**Execution**:
-1. Focus on **A**. Balance +100. Needs to pay 100 to clear.
-2. **Priority Match**: Look for other names in command. None.
-3. **Global Match**: Look at all members.
-   - B is +50 (Same sign, skip).
-   - C is -150 (Opposite sign, valid).
-4. **Transfer**:
-   - Amount = min(|100|, |-150|) = 100.
-   - Construct Transfer: **A pays C 100**.
-   - Update A: +100 -> 0.
-   - Update C: -150 -> -50.
-5. **Result**: 
-   - A is settled (0).
-   - B (+50) and C (-50) remain.
+**Result shape**
 
-## Why this approach?
+- A pays B `1000`
+- A pays C `200`
 
-- **Local Optimality**: By prioritizing the `settle_members` group, we avoid involving unrelated third parties if the debt can be resolved internally.
-- **Completeness**: Falling back to the global list ensures that a member *can* settle up even if their specific debtor isn't in the command (e.g., "I want to leave the group, clear my balance").
-- **Determinism**: The iteration order dictates the graph structure. While not explicitly minimizing the *number* of transactions (which would require a min-cost max-flow solver or similar), the greedy approach is computationally cheap (O(N^2)) and practically sufficient for small groups.
+This is preferred over splits that increase non-`G1`/non-`G2` cash transfers or introduce non-settle counterparts.
+
+## Command Surface
+
+Walicord exposes cash preference in two script-level forms.
+
+- Script-local persisted flag (effective while scanning the current script in order):
+  - `!member set <set_expr> cash on`
+  - `!member set <set_expr> cash off`
+- Per-command option:
+  - `!settleup <set_expr> [--cash <set_expr>]`
+
+Effective cash set at execution time:
+
+- `effective_cash_members = script_local_cash_members ∪ command_cash_members`
+
+Here, "script-local persisted" means state is carried across earlier commands in the same
+evaluated script sequence. It is not durable storage across independent executions.
+
+Cash membership affects transaction construction only. It does not alter settlement mathematics.
+
+## Relationship to Settlement Mathematics
+
+Settlement mathematics and transaction construction intentionally separate responsibilities:
+
+- settlement mathematics guarantees valid final balances,
+- transaction construction guarantees transfer realization under cash/settle objectives.
+
+For quantization and repair details, see `docs/design/settlement-mathematics.md`.

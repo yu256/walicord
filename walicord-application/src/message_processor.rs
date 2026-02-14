@@ -6,7 +6,7 @@ use crate::{
     },
     ports::{ProgramParser, SettlementOptimizer},
 };
-use std::borrow::Cow;
+use std::{borrow::Cow, collections::HashSet};
 use walicord_domain::{
     BalanceAccumulator, MemberBalances, SettleUpPolicy, SettlementContext, Transfer,
     model::MemberId, quantize_balances,
@@ -42,6 +42,7 @@ fn line_count_increment(content: &str, prior_ended_with_newline: bool) -> usize 
 struct ApplyResult {
     balances: MemberBalances,
     settle_up: Option<SettleUpContext>,
+    settle_up_cash_members: Vec<MemberId>,
     quantization_scale: u32,
 }
 
@@ -174,7 +175,20 @@ impl<'a> MessageProcessor<'a> {
             scale: apply_result.quantization_scale,
             ..Self::settlement_context()
         };
-        let optimized_transfers = self.optimizer.optimize(&person_balances, context)?;
+        let optimized_transfers = match apply_result.settle_up.as_ref() {
+            Some(settle_up) => self.optimizer.optimize(
+                &person_balances,
+                &settle_up.settle_members,
+                &apply_result.settle_up_cash_members,
+                context,
+            )?,
+            None => {
+                let all_members: Vec<MemberId> =
+                    person_balances.iter().map(|balance| balance.id).collect();
+                self.optimizer
+                    .optimize(&person_balances, &all_members, &[], context)?
+            }
+        };
 
         Ok(SettlementResult {
             balances: person_balances,
@@ -198,13 +212,16 @@ impl<'a> MessageProcessor<'a> {
 
         let mut accumulator = BalanceAccumulator::new_with_members(program.members());
         let mut last_settle_members: Vec<MemberId> = Vec::new();
+        let mut last_settle_cash_members: Vec<MemberId> = Vec::new();
         let mut last_settle_transfers: Vec<Transfer> = Vec::new();
         let last_is_settle = apply_settle
             && end > 0
             && matches!(
                 statements[end - 1].statement,
-                ScriptStatement::Command(Command::SettleUp(_))
+                ScriptStatement::Command(Command::SettleUp { .. })
             );
+        // Script-local cash preference state while scanning commands in order.
+        let mut script_local_cash_members: HashSet<MemberId> = HashSet::new();
 
         for stmt in &statements[..end] {
             match &stmt.statement {
@@ -217,11 +234,27 @@ impl<'a> MessageProcessor<'a> {
                     }
                     match command {
                         Command::Variables | Command::Review => {}
-                        Command::SettleUp(expr) => {
+                        Command::MemberSetCash { members, enabled } => {
+                            let Some(target_members) = accumulator.evaluate_members(members) else {
+                                continue;
+                            };
+                            for member in target_members.iter() {
+                                if *enabled {
+                                    script_local_cash_members.insert(member);
+                                } else {
+                                    script_local_cash_members.remove(&member);
+                                }
+                            }
+                        }
+                        Command::SettleUp {
+                            members,
+                            cash_members,
+                        } => {
                             last_settle_members.clear();
+                            last_settle_cash_members.clear();
                             last_settle_transfers.clear();
 
-                            let Some(settle_members) = accumulator.evaluate_members(expr) else {
+                            let Some(settle_members) = accumulator.evaluate_members(members) else {
                                 continue;
                             };
                             if settle_members.is_empty() {
@@ -230,18 +263,34 @@ impl<'a> MessageProcessor<'a> {
 
                             last_settle_members.extend(settle_members.iter());
 
+                            let command_cash_members =
+                                if let Some(command_cash_members) = cash_members {
+                                    let Some(command_set) =
+                                        accumulator.evaluate_members(command_cash_members)
+                                    else {
+                                        continue;
+                                    };
+                                    Some(command_set)
+                                } else {
+                                    None
+                                };
+
+                            let mut effective_cash_members: Vec<MemberId> =
+                                script_local_cash_members.iter().copied().collect();
+                            effective_cash_members
+                                .extend(command_cash_members.iter().flat_map(|set| set.iter()));
+                            effective_cash_members.sort_unstable();
+                            effective_cash_members.dedup();
+
                             let result = SettleUpPolicy::settle(
-                                accumulator.balances().clone(),
-                                accumulator
-                                    .balances()
-                                    .keys()
-                                    .copied()
-                                    .chain(settle_members.iter()),
+                                accumulator.balances(),
                                 settle_members.members(),
+                                effective_cash_members.iter().copied(),
                                 Self::settlement_context(),
                             )
                             .map_err(SettlementOptimizationError::from)?;
                             accumulator.set_balances(result.new_balances);
+                            last_settle_cash_members.extend(effective_cash_members);
                             last_settle_transfers.extend(result.transfers);
                         }
                     }
@@ -269,6 +318,7 @@ impl<'a> MessageProcessor<'a> {
         Ok(ApplyResult {
             balances,
             settle_up,
+            settle_up_cash_members: last_settle_cash_members,
             quantization_scale: context.scale,
         })
     }
@@ -372,9 +422,10 @@ mod tests {
                 },
                 ScriptStatementWithLine {
                     line: 3,
-                    statement: ScriptStatement::Command(Command::SettleUp(MemberSetExpr::new(
-                        vec![MemberSetOp::Push(MemberId(1))],
-                    ))),
+                    statement: ScriptStatement::Command(Command::SettleUp {
+                        members: MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(1))]),
+                        cash_members: None,
+                    }),
                 },
             ];
 
@@ -388,8 +439,46 @@ mod tests {
         fn optimize(
             &self,
             _balances: &[PersonBalance],
+            _settle_members: &[MemberId],
+            _cash_members: &[MemberId],
             _context: SettlementContext,
         ) -> Result<Vec<Transfer>, SettlementOptimizationError> {
+            Ok(Vec::new())
+        }
+    }
+
+    struct AssertSettleMembersOptimizer {
+        expected: Vec<MemberId>,
+    }
+
+    impl SettlementOptimizer for AssertSettleMembersOptimizer {
+        fn optimize(
+            &self,
+            _balances: &[PersonBalance],
+            settle_members: &[MemberId],
+            _cash_members: &[MemberId],
+            _context: SettlementContext,
+        ) -> Result<Vec<Transfer>, SettlementOptimizationError> {
+            assert_eq!(settle_members, self.expected.as_slice());
+            Ok(Vec::new())
+        }
+    }
+
+    struct AssertSettleAndCashMembersOptimizer {
+        expected_settle: Vec<MemberId>,
+        expected_cash: Vec<MemberId>,
+    }
+
+    impl SettlementOptimizer for AssertSettleAndCashMembersOptimizer {
+        fn optimize(
+            &self,
+            _balances: &[PersonBalance],
+            settle_members: &[MemberId],
+            cash_members: &[MemberId],
+            _context: SettlementContext,
+        ) -> Result<Vec<Transfer>, SettlementOptimizationError> {
+            assert_eq!(settle_members, self.expected_settle.as_slice());
+            assert_eq!(cash_members, self.expected_cash.as_slice());
             Ok(Vec::new())
         }
     }
@@ -443,6 +532,358 @@ mod tests {
 
         let settle_up = result.settle_up.expect("expected settle up context");
         assert!(!settle_up.immediate_transfers.is_empty());
+    }
+
+    #[test]
+    fn build_settlement_result_passes_settle_members_to_optimizer() {
+        let parser = StubParser;
+        let optimizer = AssertSettleMembersOptimizer {
+            expected: vec![MemberId(1)],
+        };
+        let processor = MessageProcessor::new(&parser, &optimizer);
+
+        let members: [MemberId; 0] = [];
+        let program = match processor.parse_program(&members, "unused", None) {
+            ProcessingOutcome::Success(program) => program,
+            _ => panic!("unexpected parse outcome"),
+        };
+
+        let _ = processor
+            .build_settlement_result(&program)
+            .expect("result generation failed");
+    }
+
+    #[test]
+    fn build_settlement_result_without_settleup_passes_all_members_to_optimizer() {
+        let optimizer = AssertSettleMembersOptimizer {
+            expected: vec![MemberId(1), MemberId(2), MemberId(3)],
+        };
+        let processor = MessageProcessor::new(&StubParser, &optimizer);
+
+        let script = Script::new(
+            &[],
+            vec![
+                ScriptStatementWithLine {
+                    line: 1,
+                    statement: ScriptStatement::Domain(Statement::Payment(Payment {
+                        amount: Money::from_i64(60),
+                        payer: MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(1))]),
+                        payee: MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(3))]),
+                    })),
+                },
+                ScriptStatementWithLine {
+                    line: 2,
+                    statement: ScriptStatement::Domain(Statement::Payment(Payment {
+                        amount: Money::from_i64(40),
+                        payer: MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(2))]),
+                        payee: MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(3))]),
+                    })),
+                },
+            ],
+        );
+
+        let _ = processor
+            .build_settlement_result(&script)
+            .expect("result generation failed");
+    }
+
+    #[test]
+    fn build_settlement_result_passes_effective_cash_members_to_optimizer() {
+        let optimizer = AssertSettleAndCashMembersOptimizer {
+            expected_settle: vec![MemberId(1), MemberId(2), MemberId(3), MemberId(4)],
+            expected_cash: vec![MemberId(1), MemberId(2)],
+        };
+        let processor = MessageProcessor::new(&StubParser, &optimizer);
+
+        let script = Script::new(
+            &[],
+            vec![
+                payment_stmt(1, 1, 3, 700),
+                payment_stmt(2, 1, 4, 600),
+                payment_stmt(3, 2, 3, 50),
+                payment_stmt(4, 2, 4, 50),
+                ScriptStatementWithLine {
+                    line: 5,
+                    statement: ScriptStatement::Command(Command::MemberSetCash {
+                        members: union_members(&[1]),
+                        enabled: true,
+                    }),
+                },
+                ScriptStatementWithLine {
+                    line: 6,
+                    statement: ScriptStatement::Command(Command::SettleUp {
+                        members: union_members(&[1, 2, 3, 4]),
+                        cash_members: Some(union_members(&[2])),
+                    }),
+                },
+            ],
+        );
+
+        let _ = processor
+            .build_settlement_result(&script)
+            .expect("result generation failed");
+    }
+
+    fn payment_stmt(
+        line: usize,
+        payer: u64,
+        payee: u64,
+        amount: i64,
+    ) -> ScriptStatementWithLine<'static> {
+        ScriptStatementWithLine {
+            line,
+            statement: ScriptStatement::Domain(Statement::Payment(Payment {
+                amount: Money::from_i64(amount),
+                payer: MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(payer))]),
+                payee: MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(payee))]),
+            })),
+        }
+    }
+
+    fn union_members(ids: &[u64]) -> MemberSetExpr<'static> {
+        let mut ops = Vec::new();
+        for (idx, id) in ids.iter().copied().enumerate() {
+            ops.push(MemberSetOp::Push(MemberId(id)));
+            if idx > 0 {
+                ops.push(MemberSetOp::Union);
+            }
+        }
+        MemberSetExpr::new(ops)
+    }
+
+    fn base_cash_sensitivity_payments() -> Vec<ScriptStatementWithLine<'static>> {
+        vec![
+            payment_stmt(1, 1, 3, 700),
+            payment_stmt(2, 1, 4, 600),
+            payment_stmt(3, 2, 3, 50),
+            payment_stmt(4, 2, 4, 50),
+        ]
+    }
+
+    fn script_with_persisted_cash() -> Script<'static> {
+        let members = union_members(&[1, 2, 3, 4]);
+        let mut persisted_statements = base_cash_sensitivity_payments();
+        persisted_statements.extend([
+            ScriptStatementWithLine {
+                line: 5,
+                statement: ScriptStatement::Command(Command::MemberSetCash {
+                    members: union_members(&[1]),
+                    enabled: true,
+                }),
+            },
+            ScriptStatementWithLine {
+                line: 6,
+                statement: ScriptStatement::Command(Command::SettleUp {
+                    members: members.clone(),
+                    cash_members: None,
+                }),
+            },
+        ]);
+
+        Script::new(&[], persisted_statements)
+    }
+
+    fn script_with_command_cash() -> Script<'static> {
+        let members = union_members(&[1, 2, 3, 4]);
+        let mut command_statements = base_cash_sensitivity_payments();
+        command_statements.push(ScriptStatementWithLine {
+            line: 5,
+            statement: ScriptStatement::Command(Command::SettleUp {
+                members,
+                cash_members: Some(union_members(&[1])),
+            }),
+        });
+
+        Script::new(&[], command_statements)
+    }
+
+    fn script_with_member_cash_on_off() -> Script<'static> {
+        let members = union_members(&[1, 2, 3, 4]);
+        let mut on_off_statements = base_cash_sensitivity_payments();
+        on_off_statements.extend([
+            ScriptStatementWithLine {
+                line: 5,
+                statement: ScriptStatement::Command(Command::MemberSetCash {
+                    members: union_members(&[1]),
+                    enabled: true,
+                }),
+            },
+            ScriptStatementWithLine {
+                line: 6,
+                statement: ScriptStatement::Command(Command::MemberSetCash {
+                    members: union_members(&[1]),
+                    enabled: false,
+                }),
+            },
+            ScriptStatementWithLine {
+                line: 7,
+                statement: ScriptStatement::Command(Command::SettleUp {
+                    members,
+                    cash_members: None,
+                }),
+            },
+        ]);
+
+        Script::new(&[], on_off_statements)
+    }
+
+    fn script_baseline_no_cash() -> Script<'static> {
+        let members = union_members(&[1, 2, 3, 4]);
+        let mut baseline_statements = base_cash_sensitivity_payments();
+        baseline_statements.push(ScriptStatementWithLine {
+            line: 5,
+            statement: ScriptStatement::Command(Command::SettleUp {
+                members,
+                cash_members: None,
+            }),
+        });
+
+        Script::new(&[], baseline_statements)
+    }
+
+    fn script_with_invalid_member_cash_expr() -> Script<'static> {
+        let members = union_members(&[1, 2, 3, 4]);
+        let mut with_invalid_cash = base_cash_sensitivity_payments();
+        with_invalid_cash.extend([
+            ScriptStatementWithLine {
+                line: 5,
+                statement: ScriptStatement::Command(Command::MemberSetCash {
+                    members: union_members(&[1]),
+                    enabled: true,
+                }),
+            },
+            ScriptStatementWithLine {
+                line: 6,
+                statement: ScriptStatement::Command(Command::MemberSetCash {
+                    members: MemberSetExpr::new(vec![MemberSetOp::PushGroup("unknown")]),
+                    enabled: false,
+                }),
+            },
+            ScriptStatementWithLine {
+                line: 7,
+                statement: ScriptStatement::Command(Command::SettleUp {
+                    members,
+                    cash_members: None,
+                }),
+            },
+        ]);
+
+        Script::new(&[], with_invalid_cash)
+    }
+
+    fn script_with_member_cash_on() -> Script<'static> {
+        let members = union_members(&[1, 2, 3, 4]);
+        let mut baseline = base_cash_sensitivity_payments();
+        baseline.extend([
+            ScriptStatementWithLine {
+                line: 5,
+                statement: ScriptStatement::Command(Command::MemberSetCash {
+                    members: union_members(&[1]),
+                    enabled: true,
+                }),
+            },
+            ScriptStatementWithLine {
+                line: 6,
+                statement: ScriptStatement::Command(Command::SettleUp {
+                    members,
+                    cash_members: None,
+                }),
+            },
+        ]);
+
+        Script::new(&[], baseline)
+    }
+
+    fn assert_settle_transfers_equal(
+        processor: &MessageProcessor<'_>,
+        left: &Script<'_>,
+        right: &Script<'_>,
+    ) {
+        let left_result = processor
+            .build_settlement_result(left)
+            .expect("left settle should succeed");
+        let right_result = processor
+            .build_settlement_result(right)
+            .expect("right settle should succeed");
+
+        let left_transfers = left_result
+            .settle_up
+            .expect("left settle context")
+            .immediate_transfers;
+        let right_transfers = right_result
+            .settle_up
+            .expect("right settle context")
+            .immediate_transfers;
+        assert_eq!(left_transfers, right_transfers);
+    }
+
+    #[rstest]
+    #[case::persisted_and_command_cash(script_with_persisted_cash(), script_with_command_cash())]
+    #[case::cash_off_matches_baseline(script_with_member_cash_on_off(), script_baseline_no_cash())]
+    #[case::invalid_cash_expr_keeps_previous_state(
+        script_with_invalid_member_cash_expr(),
+        script_with_member_cash_on()
+    )]
+    fn cash_configuration_equivalence(
+        #[case] left: Script<'static>,
+        #[case] right: Script<'static>,
+    ) {
+        let processor = MessageProcessor::new(&StubParser, &NoopOptimizer);
+        assert_settle_transfers_equal(&processor, &left, &right);
+    }
+
+    #[test]
+    fn script_local_cash_persists_across_multiple_settleup_commands() {
+        let processor = MessageProcessor::new(&StubParser, &NoopOptimizer);
+        let members = union_members(&[1, 2, 3, 4]);
+
+        let mut statements = base_cash_sensitivity_payments();
+        statements.extend([
+            ScriptStatementWithLine {
+                line: 5,
+                statement: ScriptStatement::Command(Command::MemberSetCash {
+                    members: union_members(&[1]),
+                    enabled: true,
+                }),
+            },
+            ScriptStatementWithLine {
+                line: 6,
+                statement: ScriptStatement::Command(Command::SettleUp {
+                    members: members.clone(),
+                    cash_members: None,
+                }),
+            },
+            payment_stmt(7, 1, 3, 700),
+            payment_stmt(8, 1, 4, 600),
+            payment_stmt(9, 2, 3, 50),
+            payment_stmt(10, 2, 4, 50),
+            ScriptStatementWithLine {
+                line: 11,
+                statement: ScriptStatement::Command(Command::SettleUp {
+                    members,
+                    cash_members: None,
+                }),
+            },
+        ]);
+
+        let script = Script::new(&[], statements);
+
+        let first = processor
+            .build_settlement_result_for_prefix(&script, 5)
+            .expect("first settle should succeed");
+        let second = processor
+            .build_settlement_result_for_prefix(&script, 10)
+            .expect("second settle should succeed");
+
+        let first_transfers = first
+            .settle_up
+            .expect("first settle context")
+            .immediate_transfers;
+        let second_transfers = second
+            .settle_up
+            .expect("second settle context")
+            .immediate_transfers;
+        assert_eq!(first_transfers, second_transfers);
     }
 
     #[rstest]
@@ -507,6 +948,23 @@ mod tests {
         SettlementOptimizationError::QuantizationUnsupportedScale {
             scale: 30,
             max_supported: 22,
+        }
+    )]
+    #[case::transfer_invalid_grid(
+        walicord_domain::SettlementRoundingError::TransferConstructionInvalidGrid {
+            g1: 1000,
+            g2: 300,
+        },
+        SettlementOptimizationError::InvalidGrid { g1: 1000, g2: 300 }
+    )]
+    #[case::transfer_model_too_large(
+        walicord_domain::SettlementRoundingError::TransferConstructionModelTooLarge {
+            edge_count: 121,
+            max_edges: 120,
+        },
+        SettlementOptimizationError::ModelTooLarge {
+            edge_count: 121,
+            max_edges: 120,
         }
     )]
     fn settlement_optimization_error_from_rounding_error(

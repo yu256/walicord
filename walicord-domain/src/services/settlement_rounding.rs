@@ -116,6 +116,16 @@ pub enum SettlementRoundingError {
     NonIntegral,
     /// Settlement context scale is not supported by decimal precision constraints.
     UnsupportedScale { scale: u32, max_supported: u32 },
+    /// Transfer-construction solver failed to find a feasible lexicographic solution.
+    TransferConstructionNoSolution,
+    /// Transfer-construction received invalid grid parameters.
+    TransferConstructionInvalidGrid { g1: i64, g2: i64 },
+    /// Transfer-construction model exceeded operational lexicographic edge budget.
+    TransferConstructionModelTooLarge { edge_count: usize, max_edges: usize },
+    /// Transfer-construction solver produced rounded transfers inconsistent with constraints.
+    TransferConstructionRoundingMismatch,
+    /// Transfer-construction received imbalanced input despite zero-sum quantization contract.
+    TransferConstructionImbalancedTotal(i64),
 }
 
 const STABLE_KEY_PROFILE_VERSION: &str = "stable_key_v1_sha256_member_context_be";

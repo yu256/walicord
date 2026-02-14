@@ -7,15 +7,15 @@ edition = "2024"
 walicord-application = { path = "../walicord-application" }
 walicord-domain = { path = "../walicord-domain" }
 walicord-parser = { path = "../walicord-parser" }
-walicord-calc = { path = "../walicord-calc" }
+walicord-transfer-construction = { path = "../walicord-transfer-construction" }
 
 [dev-dependencies]
 proptest = "1.9.0"
 rstest = "0.26.1"
 
 [features]
-default = ["microlp", "ja"]
-microlp = ["walicord-calc/microlp"]
-coin_cbc = ["walicord-calc/coin_cbc"]
+default = ["highs", "ja"]
+highs = ["walicord-transfer-construction/highs"]
+coin_cbc = ["walicord-transfer-construction/coin_cbc"]
 ja = ["walicord-parser/ja"]
 en = ["walicord-parser/en"]

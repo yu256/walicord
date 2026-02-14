@@ -1,6 +1,10 @@
 use walicord_application::{PersonBalance, SettlementOptimizationError, SettlementOptimizer};
-use walicord_calc::{PersonBalance as CalcBalance, SettlementError, minimize_transactions};
-use walicord_domain::{AtomicUnitConversionError, Money, SettlementContext, Transfer};
+use walicord_domain::{
+    AtomicUnitConversionError, Money, SettlementContext, Transfer, model::MemberId,
+};
+use walicord_transfer_construction::{
+    PersonBalance as CalcBalance, SettlementError, construct_settlement_transfers,
+};
 
 #[derive(Default)]
 pub struct WalicordSettlementOptimizer;
@@ -10,6 +14,16 @@ fn map_calc_settlement_error(err: SettlementError) -> SettlementOptimizationErro
         SettlementError::ImbalancedTotal(total) => {
             SettlementOptimizationError::ImbalancedTotal(total)
         }
+        SettlementError::InvalidGrid { g1, g2 } => {
+            SettlementOptimizationError::InvalidGrid { g1, g2 }
+        }
+        SettlementError::ModelTooLarge {
+            edge_count,
+            max_edges,
+        } => SettlementOptimizationError::ModelTooLarge {
+            edge_count,
+            max_edges,
+        },
         SettlementError::NoSolution => SettlementOptimizationError::NoSolution,
         SettlementError::RoundingMismatch => SettlementOptimizationError::RoundingMismatch,
     }
@@ -37,29 +51,32 @@ impl SettlementOptimizer for WalicordSettlementOptimizer {
     fn optimize(
         &self,
         balances: &[PersonBalance],
+        settle_members: &[MemberId],
+        cash_members: &[MemberId],
         context: SettlementContext,
     ) -> Result<Vec<Transfer>, SettlementOptimizationError> {
-        let calc_balances = balances.iter().map(|balance| {
-            let amount = context
-                .to_atomic_units_i64(balance.balance)
-                .map_err(map_atomic_unit_error);
-            amount.map(|value| CalcBalance {
-                id: balance.id.0,
-                balance: value,
-            })
-        });
-
-        let calc_balances: Result<Vec<_>, _> = calc_balances.collect();
-        let calc_balances = calc_balances?;
+        let calc_balances = balances
+            .iter()
+            .map(
+                |balance| match context.to_atomic_units_i64(balance.balance) {
+                    Ok(value) => Ok(CalcBalance {
+                        id: balance.id,
+                        balance: value,
+                    }),
+                    Err(err) => Err(map_atomic_unit_error(err)),
+                },
+            )
+            .collect::<Result<Vec<_>, SettlementOptimizationError>>()?;
 
         let settlements =
-            minimize_transactions(calc_balances, 1.0, 0.001).map_err(map_calc_settlement_error)?;
+            construct_settlement_transfers(calc_balances, settle_members, cash_members, 1000, 100)
+                .map_err(map_calc_settlement_error)?;
 
         let optimized_transfers = settlements
             .iter()
             .map(|payment| Transfer {
-                from: walicord_domain::model::MemberId(payment.from),
-                to: walicord_domain::model::MemberId(payment.to),
+                from: payment.from,
+                to: payment.to,
                 amount: Money::new(payment.amount, context.scale),
             })
             .collect();
@@ -105,5 +122,43 @@ mod tests {
         };
         let converted = context.to_atomic_units_i64(amount);
         assert_eq!(converted, expected);
+    }
+
+    #[test]
+    fn optimize_respects_settle_member_subset() {
+        let optimizer = WalicordSettlementOptimizer;
+        let context = SettlementContext::jpy_default();
+        let balances = [
+            PersonBalance {
+                id: MemberId(1),
+                balance: Money::from_i64(100),
+            },
+            PersonBalance {
+                id: MemberId(2),
+                balance: Money::from_i64(-100),
+            },
+            PersonBalance {
+                id: MemberId(3),
+                balance: Money::ZERO,
+            },
+        ];
+
+        let subset = [MemberId(3)];
+        let subset_result = optimizer
+            .optimize(&balances, &subset, &[], context)
+            .expect("subset optimization should succeed");
+        assert!(
+            subset_result.is_empty(),
+            "non-target members should not be forced to settle"
+        );
+
+        let all = [MemberId(1), MemberId(2), MemberId(3)];
+        let all_result = optimizer
+            .optimize(&balances, &all, &[], context)
+            .expect("full optimization should succeed");
+        assert_eq!(all_result.len(), 1);
+        assert_eq!(all_result[0].from, MemberId(1));
+        assert_eq!(all_result[0].to, MemberId(2));
+        assert_eq!(all_result[0].amount, Money::from_i64(100));
     }
 }
