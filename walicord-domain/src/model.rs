@@ -1,11 +1,14 @@
-use fxhash::FxHashSet;
+use fxhash::{FxHashMap, FxHashSet};
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 use smallvec::SmallVec;
 use std::{
     borrow::Cow,
     collections::BTreeMap,
     fmt,
-    ops::{Add, AddAssign, Neg, Sub, SubAssign},
+    ops::{
+        Add, AddAssign, BitAnd, BitAndAssign, BitOr, BitOrAssign, BitXor, BitXorAssign, Neg, Not,
+        Shl, Sub, SubAssign,
+    },
     sync::Arc,
 };
 
@@ -449,6 +452,49 @@ impl walicord_transfer_construction::MemberIdTrait for MemberId {}
 
 pub type MemberBalances = BTreeMap<MemberId, Money>;
 
+trait MaskWord:
+    Copy
+    + Eq
+    + BitOr<Output = Self>
+    + BitOrAssign
+    + BitAnd<Output = Self>
+    + BitAndAssign
+    + BitXor<Output = Self>
+    + BitXorAssign
+    + Not<Output = Self>
+    + Shl<u32, Output = Self>
+{
+    const BITS: usize;
+    const ZERO: Self;
+    const ONE: Self;
+    const COUNT_ONES: fn(Self) -> u32;
+    const TRAILING_ZEROS: fn(Self) -> u32;
+}
+
+impl MaskWord for u32 {
+    const BITS: usize = Self::BITS as usize;
+    const ZERO: Self = 0;
+    const ONE: Self = 1;
+    const COUNT_ONES: fn(Self) -> u32 = Self::count_ones;
+    const TRAILING_ZEROS: fn(Self) -> u32 = Self::trailing_zeros;
+}
+
+impl MaskWord for u64 {
+    const BITS: usize = Self::BITS as usize;
+    const ZERO: Self = 0;
+    const ONE: Self = 1;
+    const COUNT_ONES: fn(Self) -> u32 = Self::count_ones;
+    const TRAILING_ZEROS: fn(Self) -> u32 = Self::trailing_zeros;
+}
+
+impl MaskWord for u128 {
+    const BITS: usize = Self::BITS as usize;
+    const ZERO: Self = 0;
+    const ONE: Self = 1;
+    const COUNT_ONES: fn(Self) -> u32 = Self::count_ones;
+    const TRAILING_ZEROS: fn(Self) -> u32 = Self::trailing_zeros;
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum MemberSetOp<'a> {
     Push(MemberId),     // Discord user ID (from mention)
@@ -466,6 +512,84 @@ pub struct MemberSetExpr<'a> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemberSet {
     members: Vec<MemberId>,
+}
+
+/// Maintains stable index mapping between `MemberId` and bit positions.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MemberIndex {
+    idx_to_id: Vec<MemberId>,
+    id_to_idx: FxHashMap<MemberId, u8>,
+}
+
+impl MemberIndex {
+    fn try_new<M>(members: impl IntoIterator<Item = MemberId>) -> Option<Self>
+    where
+        M: MaskWord,
+    {
+        let members = members.into_iter();
+        let (_, upper) = members.size_hint();
+        let cap = upper.unwrap_or_default().min(M::BITS);
+
+        let mut idx_to_id = Vec::with_capacity(cap);
+        let mut id_to_idx = FxHashMap::with_capacity_and_hasher(cap, Default::default());
+
+        for id in members {
+            let idx = idx_to_id.len();
+            if idx >= M::BITS {
+                return None;
+            }
+
+            if let std::collections::hash_map::Entry::Vacant(entry) = id_to_idx.entry(id) {
+                idx_to_id.push(id);
+                entry.insert(idx as u8);
+            }
+        }
+
+        Some(Self {
+            idx_to_id,
+            id_to_idx,
+        })
+    }
+
+    #[inline]
+    fn bit_of<M>(&self, id: MemberId) -> Option<M>
+    where
+        M: MaskWord,
+    {
+        let idx = *self.id_to_idx.get(&id)? as u32;
+        Some(M::ONE << idx)
+    }
+
+    fn set_to_mask<I, M>(&self, members: I) -> Option<M>
+    where
+        I: IntoIterator<Item = MemberId>,
+        M: MaskWord,
+    {
+        let mut mask = M::ZERO;
+        for id in members {
+            let bit = self.bit_of::<M>(id)?;
+            mask |= bit;
+        }
+        Some(mask)
+    }
+
+    fn mask_to_set<M>(&self, mask: M) -> FxHashSet<MemberId>
+    where
+        M: MaskWord,
+    {
+        let mut out =
+            FxHashSet::with_capacity_and_hasher(M::COUNT_ONES(mask) as usize, Default::default());
+        let mut m = mask;
+        while m != M::ZERO {
+            let idx = M::TRAILING_ZEROS(m);
+            let bit = M::ONE << idx;
+            if let Some(&id) = self.idx_to_id.get(idx as usize) {
+                out.insert(id);
+            }
+            m ^= bit;
+        }
+        out
+    }
 }
 
 impl MemberSet {
@@ -503,6 +627,7 @@ impl MemberInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fxhash::FxHashMap;
     use rstest::rstest;
     use rust_decimal::Decimal;
 
@@ -654,6 +779,73 @@ mod tests {
     }
 
     #[rstest]
+    fn member_index_mask_roundtrip() {
+        let members = [MemberId(10), MemberId(20), MemberId(30)];
+        let index = MemberIndex::try_new::<u32>(members).expect("index should fit u32");
+
+        let mask = index
+            .set_to_mask::<_, u32>([MemberId(30), MemberId(10)])
+            .expect("all members should be indexed");
+        let roundtrip = index.mask_to_set(mask);
+
+        assert_eq!(roundtrip.len(), 2);
+        assert!(roundtrip.contains(&MemberId(10)));
+        assert!(roundtrip.contains(&MemberId(30)));
+    }
+
+    #[rstest]
+    fn member_set_expr_evaluate_mask_supports_set_operations() {
+        let index =
+            MemberIndex::try_new::<u32>([MemberId(1), MemberId(2), MemberId(3)]).expect("fit");
+        let mut groups: FxHashMap<&str, u32> = FxHashMap::default();
+        groups.insert(
+            "A",
+            index
+                .set_to_mask::<_, u32>([MemberId(1), MemberId(2)])
+                .expect("group A members should be indexed"),
+        );
+        groups.insert(
+            "B",
+            index
+                .set_to_mask::<_, u32>([MemberId(2), MemberId(3)])
+                .expect("group B members should be indexed"),
+        );
+
+        let expr = MemberSetExpr::new(vec![
+            MemberSetOp::PushGroup("A"),
+            MemberSetOp::PushGroup("B"),
+            MemberSetOp::Union,
+            MemberSetOp::Push(MemberId(2)),
+            MemberSetOp::Difference,
+        ]);
+
+        let mask = expr
+            .evaluate_mask::<u32, _>(&index, &|name| groups.get(name).copied())
+            .expect("expression should evaluate");
+        let mut result = index.mask_to_set(mask).into_iter().collect::<Vec<_>>();
+        result.sort_unstable();
+
+        assert_eq!(result, vec![MemberId(1), MemberId(3)]);
+    }
+
+    #[rstest]
+    fn member_set_expr_evaluate_returns_none_when_member_count_exceeds_u128() {
+        let member_count = 129usize;
+        let mut ops = Vec::with_capacity(member_count + member_count - 1);
+        for i in 1..=member_count {
+            ops.push(MemberSetOp::Push(MemberId(i as u64)));
+        }
+        for _ in 1..member_count {
+            ops.push(MemberSetOp::Union);
+        }
+
+        let expr = MemberSetExpr::new(ops);
+        let result = expr.evaluate(&|_| None);
+
+        assert!(result.is_none());
+    }
+
+    #[rstest]
     #[case::payment_undefined_group(
         StatementWithLine {
             line: 1,
@@ -741,37 +933,95 @@ impl<'a> MemberSetExpr<'a> {
     where
         F: Fn(&str) -> Option<&'r FxHashSet<MemberId>>,
     {
-        let mut stack: Vec<Cow<'r, FxHashSet<MemberId>>> = Vec::with_capacity(self.ops.len());
+        if self.ops.len() == 1 {
+            return match self.ops[0] {
+                MemberSetOp::Push(id) => {
+                    let mut set = FxHashSet::with_capacity_and_hasher(1, Default::default());
+                    set.insert(id);
+                    Some(Cow::Owned(set))
+                }
+                MemberSetOp::PushGroup(name) => Some(Cow::Borrowed(member_resolver(name)?)),
+                _ => None,
+            };
+        }
+
+        let mut referenced_groups = FxHashMap::default();
+        for name in self.referenced_groups() {
+            if let std::collections::hash_map::Entry::Vacant(entry) = referenced_groups.entry(name)
+            {
+                entry.insert(member_resolver(name)?);
+            }
+        }
+
+        if let Some(result) = self.evaluate_with_mask::<u32>(&referenced_groups) {
+            return Some(Cow::Owned(result));
+        }
+        if let Some(result) = self.evaluate_with_mask::<u64>(&referenced_groups) {
+            return Some(Cow::Owned(result));
+        }
+        if let Some(result) = self.evaluate_with_mask::<u128>(&referenced_groups) {
+            return Some(Cow::Owned(result));
+        }
+
+        None
+    }
+
+    fn evaluate_with_mask<M>(
+        &self,
+        referenced_groups: &FxHashMap<&'a str, &'_ FxHashSet<MemberId>>,
+    ) -> Option<FxHashSet<MemberId>>
+    where
+        M: MaskWord,
+    {
+        let index = MemberIndex::try_new::<M>(
+            self.referenced_ids().chain(
+                referenced_groups
+                    .values()
+                    .flat_map(|set| set.iter().copied()),
+            ),
+        )?;
+
+        let mut group_masks =
+            FxHashMap::with_capacity_and_hasher(referenced_groups.len(), Default::default());
+        for (&name, members) in referenced_groups {
+            group_masks.insert(name, index.set_to_mask::<_, M>(members.iter().copied())?);
+        }
+
+        let mask = self.evaluate_mask::<M, _>(&index, &|name| group_masks.get(name).copied())?;
+        Some(index.mask_to_set(mask))
+    }
+
+    fn evaluate_mask<M, F>(&self, index: &MemberIndex, group_resolver: &F) -> Option<M>
+    where
+        M: MaskWord,
+        F: Fn(&str) -> Option<M>,
+    {
+        let mut stack: Vec<M> = Vec::with_capacity(self.ops.len());
 
         for op in &self.ops {
-            match op {
+            match *op {
                 MemberSetOp::Push(id) => {
-                    // Direct member reference - create singleton set
-                    let mut set = FxHashSet::default();
-                    set.insert(*id);
-                    stack.push(Cow::Owned(set));
+                    let bit = index.bit_of::<M>(id)?;
+                    stack.push(bit);
                 }
                 MemberSetOp::PushGroup(name) => {
-                    let set = member_resolver(name)?;
-                    stack.push(Cow::Borrowed(set));
+                    let mask = group_resolver(name)?;
+                    stack.push(mask);
                 }
                 MemberSetOp::Union => {
-                    let b = stack.pop()?;
-                    let a = stack.pop()?;
-                    let merged = a.union(b.as_ref()).copied().collect();
-                    stack.push(Cow::Owned(merged));
+                    let rhs = stack.pop()?;
+                    let lhs = stack.pop()?;
+                    stack.push(lhs | rhs);
                 }
                 MemberSetOp::Intersection => {
-                    let b = stack.pop()?;
-                    let a = stack.pop()?;
-                    let merged = a.intersection(b.as_ref()).copied().collect();
-                    stack.push(Cow::Owned(merged));
+                    let rhs = stack.pop()?;
+                    let lhs = stack.pop()?;
+                    stack.push(lhs & rhs);
                 }
                 MemberSetOp::Difference => {
-                    let b = stack.pop()?;
-                    let a = stack.pop()?;
-                    let merged = a.difference(b.as_ref()).copied().collect();
-                    stack.push(Cow::Owned(merged));
+                    let rhs = stack.pop()?;
+                    let lhs = stack.pop()?;
+                    stack.push(lhs & !rhs);
                 }
             }
         }
