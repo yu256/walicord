@@ -89,16 +89,21 @@ pub fn minimize_transactions<MemberId: MemberIdTrait>(
         problem = problem.with((hm - max_amount * wp).leq(0.0));
     }
 
+    let mut out_edges: Vec<Vec<usize>> = vec![Vec::new(); people.len()];
+    let mut in_edges: Vec<Vec<usize>> = vec![Vec::new(); people.len()];
+    for (edge_idx, &(from, to, _)) in pairs.iter().enumerate() {
+        out_edges[from].push(edge_idx);
+        in_edges[to].push(edge_idx);
+    }
+
     // Balance constraints: inflow - outflow = balance
-    for (i, person) in people.iter().enumerate() {
+    for (member_idx, person) in people.iter().enumerate() {
         let mut constraint = Expression::default();
-        for (idx, &(from, to, _)) in pairs.iter().enumerate() {
-            if to == i {
-                constraint.add_mul(1.0, how_much[idx]);
-            }
-            if from == i {
-                constraint.add_mul(-1.0, how_much[idx]);
-            }
+        for &edge_idx in &in_edges[member_idx] {
+            constraint.add_mul(1.0, how_much[edge_idx]);
+        }
+        for &edge_idx in &out_edges[member_idx] {
+            constraint.add_mul(-1.0, how_much[edge_idx]);
         }
         problem = problem.with(constraint.eq(person.balance as f64));
     }
@@ -394,6 +399,7 @@ struct TransferModel<MemberId> {
     payers: Vec<(MemberId, i64)>,
     receivers: Vec<(MemberId, i64)>,
     edges: Vec<Edge<MemberId>>,
+    cash_edge_indices: Vec<usize>,
     payer_edges: Vec<Vec<usize>>,
     receiver_edges: Vec<Vec<usize>>,
     settle_lookup: std::collections::HashSet<MemberId>,
@@ -423,18 +429,35 @@ impl<MemberId: MemberIdTrait> TransferModel<MemberId> {
         let mut payer_edges: Vec<Vec<usize>> = vec![Vec::new(); payers.len()];
         let mut receiver_edges: Vec<Vec<usize>> = vec![Vec::new(); receivers.len()];
         let mut edges = Vec::with_capacity(payers.len() * receivers.len());
+        let mut cash_edge_indices = Vec::new();
 
         for (payer_idx, (payer_member, pay)) in payers.iter().enumerate() {
             for (receiver_idx, (receiver_member, recv)) in receivers.iter().enumerate() {
+                let upper_bound = (*pay).min(*recv);
+                if upper_bound <= 0 {
+                    continue;
+                }
+
+                let payer_is_settle = settle_lookup.contains(payer_member);
+                let receiver_is_settle = settle_lookup.contains(receiver_member);
+                // Non-settle <-> non-settle edges cannot help settle requested members,
+                // so we prune them to keep the MILP graph minimal.
+                if !payer_is_settle && !receiver_is_settle {
+                    continue;
+                }
+
+                let payer_is_cash = cash_lookup.contains(payer_member);
                 let edge_idx = edges.len();
                 edges.push(Edge {
                     from: *payer_member,
                     to: *receiver_member,
-                    upper_bound: (*pay).min(*recv),
-                    payer_is_cash: cash_lookup.contains(payer_member),
-                    touches_non_settle: !(settle_lookup.contains(payer_member)
-                        && settle_lookup.contains(receiver_member)),
+                    upper_bound,
+                    payer_is_cash,
+                    touches_non_settle: !(payer_is_settle && receiver_is_settle),
                 });
+                if payer_is_cash {
+                    cash_edge_indices.push(edge_idx);
+                }
                 payer_edges[payer_idx].push(edge_idx);
                 receiver_edges[receiver_idx].push(edge_idx);
             }
@@ -444,6 +467,7 @@ impl<MemberId: MemberIdTrait> TransferModel<MemberId> {
             payers,
             receivers,
             edges,
+            cash_edge_indices,
             payer_edges,
             receiver_edges,
             settle_lookup,
@@ -464,38 +488,28 @@ struct StageSolution {
 struct WarmStartValues {
     x_values: Vec<f64>,
     y_values: Vec<f64>,
-    z1_values: Vec<f64>,
-    z2_values: Vec<f64>,
-    a1_values: Vec<f64>,
-    a2_values: Vec<f64>,
-    r1_values: Vec<f64>,
-    r2_values: Vec<f64>,
+    cash_z1_values: Vec<f64>,
+    cash_z2_values: Vec<f64>,
+    cash_a1_values: Vec<f64>,
+    cash_a2_values: Vec<f64>,
+    cash_r1_values: Vec<f64>,
+    cash_r2_values: Vec<f64>,
     s_values: Vec<f64>,
     t_values: Vec<f64>,
 }
 
-fn build_obj1_expr<MemberId: MemberIdTrait>(
-    model: &TransferModel<MemberId>,
-    z1_vars: &[Variable],
-) -> Expression {
+fn build_obj1_expr(z1_vars: &[Variable]) -> Expression {
     let mut expr = Expression::default();
-    for (edge_idx, edge) in model.edges.iter().enumerate() {
-        if edge.payer_is_cash {
-            expr.add_mul(1.0, z1_vars[edge_idx]);
-        }
+    for var in z1_vars {
+        expr.add_mul(1.0, *var);
     }
     expr
 }
 
-fn build_obj2_expr<MemberId: MemberIdTrait>(
-    model: &TransferModel<MemberId>,
-    z2_vars: &[Variable],
-) -> Expression {
+fn build_obj2_expr(z2_vars: &[Variable]) -> Expression {
     let mut expr = Expression::default();
-    for (edge_idx, edge) in model.edges.iter().enumerate() {
-        if edge.payer_is_cash {
-            expr.add_mul(1.0, z2_vars[edge_idx]);
-        }
+    for var in z2_vars {
+        expr.add_mul(1.0, *var);
     }
     expr
 }
@@ -521,6 +535,115 @@ fn build_obj3_expr(y_vars: &[Variable]) -> Expression {
     expr
 }
 
+fn build_lex_block_expr(x_vars: &[Variable], start: usize, end: usize, base: f64) -> Expression {
+    let mut expr = Expression::default();
+    let mut weight = 1.0;
+    for _ in (start + 1)..end {
+        weight *= base;
+    }
+    for var in x_vars.iter().take(end).skip(start) {
+        expr.add_mul(weight, *var);
+        weight /= base;
+    }
+    expr
+}
+
+struct WarmStartTargets<'a> {
+    x_vars: &'a [Variable],
+    y_vars: &'a [Variable],
+    z1_vars: &'a [Variable],
+    z2_vars: &'a [Variable],
+    a1_vars: &'a [Variable],
+    a2_vars: &'a [Variable],
+    r1_vars: &'a [Variable],
+    r2_vars: &'a [Variable],
+    s_vars: &'a [Variable],
+    t_vars: &'a [Variable],
+}
+
+fn build_warm_start_seed(
+    seed: &WarmStartValues,
+    targets: &WarmStartTargets<'_>,
+) -> Vec<(Variable, f64)> {
+    let mut initial_solution: Vec<(Variable, f64)> = Vec::with_capacity(
+        seed.x_values.len() * 2
+            + seed.cash_z1_values.len() * 6
+            + seed.s_values.len()
+            + seed.t_values.len(),
+    );
+    initial_solution.extend(
+        targets
+            .x_vars
+            .iter()
+            .copied()
+            .zip(seed.x_values.iter().copied()),
+    );
+    initial_solution.extend(
+        targets
+            .y_vars
+            .iter()
+            .copied()
+            .zip(seed.y_values.iter().copied()),
+    );
+    initial_solution.extend(
+        targets
+            .z1_vars
+            .iter()
+            .copied()
+            .zip(seed.cash_z1_values.iter().copied()),
+    );
+    initial_solution.extend(
+        targets
+            .z2_vars
+            .iter()
+            .copied()
+            .zip(seed.cash_z2_values.iter().copied()),
+    );
+    initial_solution.extend(
+        targets
+            .a1_vars
+            .iter()
+            .copied()
+            .zip(seed.cash_a1_values.iter().copied()),
+    );
+    initial_solution.extend(
+        targets
+            .a2_vars
+            .iter()
+            .copied()
+            .zip(seed.cash_a2_values.iter().copied()),
+    );
+    initial_solution.extend(
+        targets
+            .r1_vars
+            .iter()
+            .copied()
+            .zip(seed.cash_r1_values.iter().copied()),
+    );
+    initial_solution.extend(
+        targets
+            .r2_vars
+            .iter()
+            .copied()
+            .zip(seed.cash_r2_values.iter().copied()),
+    );
+    initial_solution.extend(
+        targets
+            .s_vars
+            .iter()
+            .copied()
+            .zip(seed.s_values.iter().copied()),
+    );
+    initial_solution.extend(
+        targets
+            .t_vars
+            .iter()
+            .copied()
+            .zip(seed.t_values.iter().copied()),
+    );
+    initial_solution
+}
+
 #[allow(clippy::too_many_lines)]
 fn solve_transfer_stage<MemberId: MemberIdTrait>(
     model: &TransferModel<MemberId>,
@@ -534,14 +657,16 @@ fn solve_transfer_stage<MemberId: MemberIdTrait>(
     const EPS: f64 = 1e-6;
     let mut vars = variables!();
 
+    // Phase 1: declare variables with tight bounds.
     let mut x_vars: Vec<Variable> = Vec::with_capacity(model.edges.len());
     let mut y_vars: Vec<Variable> = Vec::with_capacity(model.edges.len());
-    let mut z1_vars: Vec<Variable> = Vec::with_capacity(model.edges.len());
-    let mut z2_vars: Vec<Variable> = Vec::with_capacity(model.edges.len());
-    let mut a1_vars: Vec<Variable> = Vec::with_capacity(model.edges.len());
-    let mut a2_vars: Vec<Variable> = Vec::with_capacity(model.edges.len());
-    let mut r1_vars: Vec<Variable> = Vec::with_capacity(model.edges.len());
-    let mut r2_vars: Vec<Variable> = Vec::with_capacity(model.edges.len());
+    let mut cash_edge_to_idx: Vec<Option<usize>> = vec![None; model.edges.len()];
+    let mut z1_vars: Vec<Variable> = Vec::with_capacity(model.cash_edge_indices.len());
+    let mut z2_vars: Vec<Variable> = Vec::with_capacity(model.cash_edge_indices.len());
+    let mut a1_vars: Vec<Variable> = Vec::with_capacity(model.cash_edge_indices.len());
+    let mut a2_vars: Vec<Variable> = Vec::with_capacity(model.cash_edge_indices.len());
+    let mut r1_vars: Vec<Variable> = Vec::with_capacity(model.cash_edge_indices.len());
+    let mut r2_vars: Vec<Variable> = Vec::with_capacity(model.cash_edge_indices.len());
 
     let g1f = g1 as f64;
     let g2f = g2 as f64;
@@ -549,10 +674,15 @@ fn solve_transfer_stage<MemberId: MemberIdTrait>(
 
     for edge in &model.edges {
         let upper = edge.upper_bound as f64;
-        let max_a1 = (edge.upper_bound / g1) as f64;
 
         x_vars.push(vars.add(variable().integer().min(0.0).max(upper)));
         y_vars.push(vars.add(variable().binary()));
+    }
+
+    for &edge_idx in &model.cash_edge_indices {
+        cash_edge_to_idx[edge_idx] = Some(z1_vars.len());
+        let max_a1 = (model.edges[edge_idx].upper_bound / g1) as f64;
+
         z1_vars.push(vars.add(variable().binary()));
         z2_vars.push(vars.add(variable().binary()));
         a1_vars.push(vars.add(variable().integer().min(0.0).max(max_a1)));
@@ -571,53 +701,49 @@ fn solve_transfer_stage<MemberId: MemberIdTrait>(
         t_vars.push(vars.add(variable().integer().min(0.0).max(*recv as f64)));
     }
 
-    let mut obj1_expr = Some(build_obj1_expr(model, &z1_vars));
-    let mut obj2_expr = Some(build_obj2_expr(model, &z2_vars));
+    let mut obj1_expr = Some(build_obj1_expr(&z1_vars));
+    let mut obj2_expr = Some(build_obj2_expr(&z2_vars));
     let mut objw_expr = Some(build_objw_expr(model, &y_vars));
     let mut obj3_expr = Some(build_obj3_expr(&y_vars));
 
+    // Phase 2: pick this stage objective while preserving reusable expressions
+    // for later fixed-target constraints.
     let objective_expr = match objective_kind {
         ObjectiveKind::Obj1 => obj1_expr
             .take()
-            .unwrap_or_else(|| build_obj1_expr(model, &z1_vars)),
+            .unwrap_or_else(|| build_obj1_expr(&z1_vars)),
         ObjectiveKind::Obj2 => obj2_expr
             .take()
-            .unwrap_or_else(|| build_obj2_expr(model, &z2_vars)),
+            .unwrap_or_else(|| build_obj2_expr(&z2_vars)),
         ObjectiveKind::ObjW => objw_expr
             .take()
             .unwrap_or_else(|| build_objw_expr(model, &y_vars)),
         ObjectiveKind::Obj3 => obj3_expr.take().unwrap_or_else(|| build_obj3_expr(&y_vars)),
         ObjectiveKind::LexBlock { start, end, base } => {
-            let mut expr = Expression::default();
-            let mut weight = 1.0;
-            for _ in (start + 1)..end {
-                weight *= base;
-            }
-            for idx in start..end {
-                expr.add_mul(weight, x_vars[idx]);
-                weight /= base;
-            }
-            expr
+            build_lex_block_expr(&x_vars, start, end, base)
         }
     };
 
     let mut problem = vars.minimise(objective_expr).using(default_solver);
+    // Phase 3: warm-start from the previous lexicographic stage.
     if let Some(seed) = warm_start {
-        let mut initial_solution: Vec<(Variable, f64)> =
-            Vec::with_capacity(seed.x_values.len() * 8 + seed.s_values.len() + seed.t_values.len());
-        initial_solution.extend(x_vars.iter().copied().zip(seed.x_values.iter().copied()));
-        initial_solution.extend(y_vars.iter().copied().zip(seed.y_values.iter().copied()));
-        initial_solution.extend(z1_vars.iter().copied().zip(seed.z1_values.iter().copied()));
-        initial_solution.extend(z2_vars.iter().copied().zip(seed.z2_values.iter().copied()));
-        initial_solution.extend(a1_vars.iter().copied().zip(seed.a1_values.iter().copied()));
-        initial_solution.extend(a2_vars.iter().copied().zip(seed.a2_values.iter().copied()));
-        initial_solution.extend(r1_vars.iter().copied().zip(seed.r1_values.iter().copied()));
-        initial_solution.extend(r2_vars.iter().copied().zip(seed.r2_values.iter().copied()));
-        initial_solution.extend(s_vars.iter().copied().zip(seed.s_values.iter().copied()));
-        initial_solution.extend(t_vars.iter().copied().zip(seed.t_values.iter().copied()));
+        let targets = WarmStartTargets {
+            x_vars: &x_vars,
+            y_vars: &y_vars,
+            z1_vars: &z1_vars,
+            z2_vars: &z2_vars,
+            a1_vars: &a1_vars,
+            a2_vars: &a2_vars,
+            r1_vars: &r1_vars,
+            r2_vars: &r2_vars,
+            s_vars: &s_vars,
+            t_vars: &t_vars,
+        };
+        let initial_solution = build_warm_start_seed(seed, &targets);
         problem = problem.with_initial_solution(initial_solution);
     }
 
+    // Phase 4: enforce flow conservation and settle-member exact zeroing.
     for (payer_idx, (payer, pay)) in model.payers.iter().enumerate() {
         let mut flow = Expression::default();
         for &edge_idx in &model.payer_edges[payer_idx] {
@@ -642,42 +768,36 @@ fn solve_transfer_stage<MemberId: MemberIdTrait>(
         }
     }
 
+    // Phase 5: edge activation and cash-divisibility structure.
     for (edge_idx, edge) in model.edges.iter().enumerate() {
         let upper = edge.upper_bound as f64;
         problem = problem.with((x_vars[edge_idx] - upper * y_vars[edge_idx]).leq(0.0));
 
-        if edge.payer_is_cash {
+        if let Some(cash_idx) = cash_edge_to_idx[edge_idx] {
             problem = problem
-                .with((x_vars[edge_idx] - g1f * a1_vars[edge_idx] - r1_vars[edge_idx]).eq(0.0))
-                .with((r1_vars[edge_idx] - g2f * a2_vars[edge_idx] - r2_vars[edge_idx]).eq(0.0))
-                .with((r1_vars[edge_idx] - ((g1 - 1) as f64) * z1_vars[edge_idx]).leq(0.0))
-                .with((r2_vars[edge_idx] - ((g2 - 1) as f64) * z2_vars[edge_idx]).leq(0.0))
-                .with((r1_vars[edge_idx] - z1_vars[edge_idx]).geq(0.0))
-                .with((r2_vars[edge_idx] - z2_vars[edge_idx]).geq(0.0))
-                .with((z2_vars[edge_idx] - z1_vars[edge_idx]).leq(0.0))
-                .with((z1_vars[edge_idx] - y_vars[edge_idx]).leq(0.0))
-                .with((z2_vars[edge_idx] - y_vars[edge_idx]).leq(0.0));
-        } else {
-            problem = problem
-                .with((z1_vars[edge_idx] - 0.0).eq(0.0))
-                .with((z2_vars[edge_idx] - 0.0).eq(0.0))
-                .with((a1_vars[edge_idx] - 0.0).eq(0.0))
-                .with((a2_vars[edge_idx] - 0.0).eq(0.0))
-                .with((r1_vars[edge_idx] - 0.0).eq(0.0))
-                .with((r2_vars[edge_idx] - 0.0).eq(0.0));
+                .with((x_vars[edge_idx] - g1f * a1_vars[cash_idx] - r1_vars[cash_idx]).eq(0.0))
+                .with((r1_vars[cash_idx] - g2f * a2_vars[cash_idx] - r2_vars[cash_idx]).eq(0.0))
+                .with((r1_vars[cash_idx] - ((g1 - 1) as f64) * z1_vars[cash_idx]).leq(0.0))
+                .with((r2_vars[cash_idx] - ((g2 - 1) as f64) * z2_vars[cash_idx]).leq(0.0))
+                .with((r1_vars[cash_idx] - z1_vars[cash_idx]).geq(0.0))
+                .with((r2_vars[cash_idx] - z2_vars[cash_idx]).geq(0.0))
+                .with((z2_vars[cash_idx] - z1_vars[cash_idx]).leq(0.0))
+                .with((z1_vars[cash_idx] - y_vars[edge_idx]).leq(0.0))
+                .with((z2_vars[cash_idx] - y_vars[edge_idx]).leq(0.0));
         }
     }
 
+    // Phase 6: lock objective values from earlier stages and fix lex prefix.
     if let Some(target) = fixed.obj1 {
         let expr = obj1_expr
             .take()
-            .unwrap_or_else(|| build_obj1_expr(model, &z1_vars));
+            .unwrap_or_else(|| build_obj1_expr(&z1_vars));
         problem = problem.with(expr.leq(round_count_objective(target) + EPS));
     }
     if let Some(target) = fixed.obj2 {
         let expr = obj2_expr
             .take()
-            .unwrap_or_else(|| build_obj2_expr(model, &z2_vars));
+            .unwrap_or_else(|| build_obj2_expr(&z2_vars));
         problem = problem.with(expr.leq(round_count_objective(target) + EPS));
     }
     if let Some(target) = fixed.objw {
@@ -699,28 +819,16 @@ fn solve_transfer_stage<MemberId: MemberIdTrait>(
     let solution = problem.solve().ok()?;
     let x_values: Vec<f64> = x_vars.iter().map(|var| solution.value(*var)).collect();
     let y_values: Vec<f64> = y_vars.iter().map(|var| solution.value(*var)).collect();
-    let z1_values: Vec<f64> = z1_vars.iter().map(|var| solution.value(*var)).collect();
-    let z2_values: Vec<f64> = z2_vars.iter().map(|var| solution.value(*var)).collect();
-    let a1_values: Vec<f64> = a1_vars.iter().map(|var| solution.value(*var)).collect();
-    let a2_values: Vec<f64> = a2_vars.iter().map(|var| solution.value(*var)).collect();
-    let r1_values: Vec<f64> = r1_vars.iter().map(|var| solution.value(*var)).collect();
-    let r2_values: Vec<f64> = r2_vars.iter().map(|var| solution.value(*var)).collect();
+    let cash_z1_values: Vec<f64> = z1_vars.iter().map(|var| solution.value(*var)).collect();
+    let cash_z2_values: Vec<f64> = z2_vars.iter().map(|var| solution.value(*var)).collect();
+    let cash_a1_values: Vec<f64> = a1_vars.iter().map(|var| solution.value(*var)).collect();
+    let cash_a2_values: Vec<f64> = a2_vars.iter().map(|var| solution.value(*var)).collect();
+    let cash_r1_values: Vec<f64> = r1_vars.iter().map(|var| solution.value(*var)).collect();
+    let cash_r2_values: Vec<f64> = r2_vars.iter().map(|var| solution.value(*var)).collect();
     let s_values: Vec<f64> = s_vars.iter().map(|var| solution.value(*var)).collect();
     let t_values: Vec<f64> = t_vars.iter().map(|var| solution.value(*var)).collect();
-    let obj1 = model
-        .edges
-        .iter()
-        .enumerate()
-        .filter(|(_, edge)| edge.payer_is_cash)
-        .map(|(idx, _)| solution.value(z1_vars[idx]))
-        .sum();
-    let obj2 = model
-        .edges
-        .iter()
-        .enumerate()
-        .filter(|(_, edge)| edge.payer_is_cash)
-        .map(|(idx, _)| solution.value(z2_vars[idx]))
-        .sum();
+    let obj1 = z1_vars.iter().map(|var| solution.value(*var)).sum();
+    let obj2 = z2_vars.iter().map(|var| solution.value(*var)).sum();
     let objw = model
         .edges
         .iter()
@@ -733,12 +841,12 @@ fn solve_transfer_stage<MemberId: MemberIdTrait>(
     let warm_start = WarmStartValues {
         x_values: x_values.clone(),
         y_values,
-        z1_values,
-        z2_values,
-        a1_values,
-        a2_values,
-        r1_values,
-        r2_values,
+        cash_z1_values,
+        cash_z2_values,
+        cash_a1_values,
+        cash_a2_values,
+        cash_r1_values,
+        cash_r2_values,
         s_values,
         t_values,
     };
