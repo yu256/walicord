@@ -12,6 +12,5 @@ proptest = "1.9.0"
 rstest = "0.26.1"
 
 [features]
-default = ["highs"]
 coin_cbc = ["good_lp/coin_cbc"]
 highs = ["good_lp/highs"]
