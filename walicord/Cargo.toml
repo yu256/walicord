@@ -7,7 +7,7 @@ license = "MIT"
 [dependencies]
 walicord-application = { path = "../walicord-application" }
 walicord-domain = { path = "../walicord-domain" }
-walicord-infrastructure = { path = "../walicord-infrastructure" }
+walicord-infrastructure = { path = "../walicord-infrastructure", default-features = false }
 walicord-i18n = { path = "../walicord-i18n" }
 walicord-parser = { path = "../walicord-parser" }
 walicord-presentation = { path = "../walicord-presentation" }
