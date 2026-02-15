@@ -26,8 +26,8 @@ proptest! {
                 line: idx + 1,
                 statement: Statement::Payment(Payment {
                     amount: Money::try_from(amount).expect("amount should fit in i64"),
-                    payer: MemberSetExpr::new(vec![MemberSetOp::Push(payer)]),
-                    payee: MemberSetExpr::new(vec![MemberSetOp::Push(payee)]),
+                    payer: MemberSetExpr::new([MemberSetOp::Push(payer)]),
+                    payee: MemberSetExpr::new([MemberSetOp::Push(payee)]),
                 }),
             });
         }
@@ -62,8 +62,8 @@ proptest! {
                 line: idx + 1,
                 statement: Statement::Payment(Payment {
                     amount: Money::try_from(amount).expect("amount should fit in i64"),
-                    payer: MemberSetExpr::new(vec![MemberSetOp::Push(payer)]),
-                    payee: MemberSetExpr::new(vec![MemberSetOp::Push(payee)]),
+                    payer: MemberSetExpr::new([MemberSetOp::Push(payer)]),
+                    payee: MemberSetExpr::new([MemberSetOp::Push(payee)]),
                 }),
             });
         }

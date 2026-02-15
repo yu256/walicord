@@ -1146,8 +1146,8 @@ mod tests {
             if content.starts_with("MULTI") {
                 let payment = Payment {
                     amount: Money::try_from(100).expect("amount should fit in i64"),
-                    payer: MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(1))]),
-                    payee: MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(2))]),
+                    payer: MemberSetExpr::new([MemberSetOp::Push(MemberId(1))]),
+                    payee: MemberSetExpr::new([MemberSetOp::Push(MemberId(2))]),
                 };
                 return Ok(Script::new(
                     &[],
@@ -1162,8 +1162,8 @@ mod tests {
                 "PAY" => {
                     let payment = Payment {
                         amount: Money::try_from(100).expect("amount should fit in i64"),
-                        payer: MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(1))]),
-                        payee: MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(2))]),
+                        payer: MemberSetExpr::new([MemberSetOp::Push(MemberId(1))]),
+                        payee: MemberSetExpr::new([MemberSetOp::Push(MemberId(2))]),
                     };
                     Ok(Script::new(
                         &[],
@@ -1178,7 +1178,7 @@ mod tests {
                     vec![ScriptStatementWithLine {
                         line: 1,
                         statement: ScriptStatement::Command(ProgramCommand::SettleUp {
-                            members: MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(1))]),
+                            members: MemberSetExpr::new([MemberSetOp::Push(MemberId(1))]),
                             cash_members: None,
                         }),
                     }],

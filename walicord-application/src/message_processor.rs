@@ -432,22 +432,22 @@ mod tests {
                     line: 1,
                     statement: ScriptStatement::Domain(Statement::Payment(Payment {
                         amount: Money::try_from(60).expect("amount should fit in i64"),
-                        payer: MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(1))]),
-                        payee: MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(3))]),
+                        payer: MemberSetExpr::new([MemberSetOp::Push(MemberId(1))]),
+                        payee: MemberSetExpr::new([MemberSetOp::Push(MemberId(3))]),
                     })),
                 },
                 ScriptStatementWithLine {
                     line: 2,
                     statement: ScriptStatement::Domain(Statement::Payment(Payment {
                         amount: Money::try_from(40).expect("amount should fit in i64"),
-                        payer: MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(2))]),
-                        payee: MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(3))]),
+                        payer: MemberSetExpr::new([MemberSetOp::Push(MemberId(2))]),
+                        payee: MemberSetExpr::new([MemberSetOp::Push(MemberId(3))]),
                     })),
                 },
                 ScriptStatementWithLine {
                     line: 3,
                     statement: ScriptStatement::Command(Command::SettleUp {
-                        members: MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(1))]),
+                        members: MemberSetExpr::new([MemberSetOp::Push(MemberId(1))]),
                         cash_members: None,
                     }),
                 },
@@ -594,16 +594,16 @@ mod tests {
                     line: 1,
                     statement: ScriptStatement::Domain(Statement::Payment(Payment {
                         amount: Money::from_i64(60),
-                        payer: MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(1))]),
-                        payee: MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(3))]),
+                        payer: MemberSetExpr::new([MemberSetOp::Push(MemberId(1))]),
+                        payee: MemberSetExpr::new([MemberSetOp::Push(MemberId(3))]),
                     })),
                 },
                 ScriptStatementWithLine {
                     line: 2,
                     statement: ScriptStatement::Domain(Statement::Payment(Payment {
                         amount: Money::from_i64(40),
-                        payer: MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(2))]),
-                        payee: MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(3))]),
+                        payer: MemberSetExpr::new([MemberSetOp::Push(MemberId(2))]),
+                        payee: MemberSetExpr::new([MemberSetOp::Push(MemberId(3))]),
                     })),
                 },
             ],
@@ -691,8 +691,8 @@ mod tests {
             line,
             statement: ScriptStatement::Domain(Statement::Payment(Payment {
                 amount: Money::from_i64(amount),
-                payer: MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(payer))]),
-                payee: MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(payee))]),
+                payer: MemberSetExpr::new([MemberSetOp::Push(MemberId(payer))]),
+                payee: MemberSetExpr::new([MemberSetOp::Push(MemberId(payee))]),
             })),
         }
     }
@@ -766,7 +766,7 @@ mod tests {
             ScriptStatementWithLine {
                 line: 6,
                 statement: ScriptStatement::Command(Command::MemberSetCash {
-                    members: MemberSetExpr::new(vec![MemberSetOp::PushGroup("unknown")]),
+                    members: MemberSetExpr::new([MemberSetOp::PushGroup("unknown")]),
                 }),
             },
             ScriptStatementWithLine {
@@ -914,8 +914,8 @@ mod tests {
                 line: 1,
                 statement: ScriptStatement::Domain(Statement::Payment(Payment {
                     amount: Money::from_i64(amount),
-                    payer: MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(1))]),
-                    payee: MemberSetExpr::new(vec![
+                    payer: MemberSetExpr::new([MemberSetOp::Push(MemberId(1))]),
+                    payee: MemberSetExpr::new([
                         MemberSetOp::Push(MemberId(1)),
                         MemberSetOp::Push(MemberId(2)),
                         MemberSetOp::Union,

@@ -86,7 +86,7 @@ impl ProgramParser for WalicordProgramParser {
                                             },
                                         );
                                     };
-                                    MemberSetExpr::new(vec![MemberSetOp::Push(author)])
+                                    MemberSetExpr::new([MemberSetOp::Push(author)])
                                 }
                             };
                             let payee_expr = to_member_set_expr(payee);
@@ -128,9 +128,7 @@ impl ProgramParser for WalicordProgramParser {
                                         );
                                     };
                                     Command::MemberSetCash {
-                                        members: MemberSetExpr::new(vec![MemberSetOp::Push(
-                                            author,
-                                        )]),
+                                        members: MemberSetExpr::new([MemberSetOp::Push(author)]),
                                     }
                                 }
                                 ParserCommand::SettleUp {

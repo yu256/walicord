@@ -643,17 +643,25 @@ mod tests {
     }
 
     #[rstest]
-    #[case::literal(AmountExpr::new(vec![AmountOp::Literal(dec(100))]), 100)]
+    #[case::literal(AmountExpr::new([AmountOp::Literal(dec(100))]), 100)]
     #[case::add(
-        AmountExpr::new(vec![AmountOp::Literal(dec(100)), AmountOp::Literal(dec(50)), AmountOp::Add]),
+        AmountExpr::new([
+            AmountOp::Literal(dec(100)),
+            AmountOp::Literal(dec(50)),
+            AmountOp::Add,
+        ]),
         150
     )]
     #[case::mul(
-        AmountExpr::new(vec![AmountOp::Literal(dec(20)), AmountOp::Literal(dec(5)), AmountOp::Mul]),
+        AmountExpr::new([
+            AmountOp::Literal(dec(20)),
+            AmountOp::Literal(dec(5)),
+            AmountOp::Mul,
+        ]),
         100
     )]
     #[case::mixed(
-        AmountExpr::new(vec![
+        AmountExpr::new([
             AmountOp::Literal(dec(100)),
             AmountOp::Literal(dec(200)),
             AmountOp::Literal(dec(3)),
@@ -668,7 +676,7 @@ mod tests {
     }
 
     #[rstest]
-    #[case::division_by_zero(AmountExpr::new(vec![
+    #[case::division_by_zero(AmountExpr::new([
         AmountOp::Literal(dec(10)),
         AmountOp::Literal(dec(0)),
         AmountOp::Div,
@@ -680,7 +688,11 @@ mod tests {
 
     #[rstest]
     #[case::negative_result(
-        AmountExpr::new(vec![AmountOp::Literal(dec(10)), AmountOp::Literal(dec(20)), AmountOp::Sub]),
+        AmountExpr::new([
+            AmountOp::Literal(dec(10)),
+            AmountOp::Literal(dec(20)),
+            AmountOp::Sub,
+        ]),
         -10
     )]
     fn amount_expr_allows_negative(#[case] expr: AmountExpr, #[case] expected: i64) {
@@ -811,7 +823,7 @@ mod tests {
                 .expect("group B members should be indexed"),
         );
 
-        let expr = MemberSetExpr::new(vec![
+        let expr = MemberSetExpr::new([
             MemberSetOp::PushGroup("A"),
             MemberSetOp::PushGroup("B"),
             MemberSetOp::Union,
@@ -851,8 +863,8 @@ mod tests {
             line: 1,
             statement: Statement::Payment(Payment {
                 amount: Money::try_from(100).expect("amount should fit in i64"),
-                payer: MemberSetExpr::new(vec![MemberSetOp::PushGroup("team")]),
-                payee: MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(1))]),
+                payer: MemberSetExpr::new([MemberSetOp::PushGroup("team")]),
+                payee: MemberSetExpr::new([MemberSetOp::Push(MemberId(1))]),
             }),
         },
         "team",
@@ -863,7 +875,7 @@ mod tests {
             line: 1,
             statement: Statement::Declaration(Declaration {
                 name: "group_b",
-                expression: MemberSetExpr::new(vec![MemberSetOp::PushGroup("group_a")]),
+                expression: MemberSetExpr::new([MemberSetOp::PushGroup("group_a")]),
             }),
         },
         "group_a",
@@ -891,7 +903,7 @@ mod tests {
             line: 1,
             statement: Statement::Declaration(Declaration {
                 name: "group_a",
-                expression: MemberSetExpr::new(vec![
+                expression: MemberSetExpr::new([
                     MemberSetOp::Push(MemberId(1)),
                     MemberSetOp::Push(MemberId(2)),
                     MemberSetOp::Union,
@@ -902,8 +914,8 @@ mod tests {
             line: 2,
             statement: Statement::Payment(Payment {
                 amount: Money::try_from(120).expect("amount should fit in i64"),
-                payer: MemberSetExpr::new(vec![MemberSetOp::PushGroup("group_a")]),
-                payee: MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(3))]),
+                payer: MemberSetExpr::new([MemberSetOp::PushGroup("group_a")]),
+                payee: MemberSetExpr::new([MemberSetOp::Push(MemberId(3))]),
             }),
         };
 
