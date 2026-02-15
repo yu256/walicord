@@ -770,8 +770,6 @@ fn solve_transfers_highs<MemberId: MemberIdTrait>(
     let obj3_weight = 1_i128;
 
     let mut pb = RowProblem::new();
-    let mut row_count = 0usize;
-    let mut col_count = 0usize;
     let mut x_cols = Vec::with_capacity(model.edges.len());
     let mut y_cols = Vec::with_capacity(model.edges.len());
     let mut cash_edge_to_idx = vec![None; model.edges.len()];
@@ -786,7 +784,6 @@ fn solve_transfers_highs<MemberId: MemberIdTrait>(
         let x_weight = (edge_idx as f64) * 1e-12;
         x_cols.push(pb.add_integer_column(x_weight, 0.0..=edge.upper_bound as f64));
         y_cols.push(pb.add_integer_column(y_weight as f64, 0.0..=1.0));
-        col_count += 2;
     }
 
     let mut z1_cols = Vec::with_capacity(model.cash_edge_indices.len());
@@ -814,7 +811,6 @@ fn solve_transfers_highs<MemberId: MemberIdTrait>(
         if let Some(cols) = &mut r100_cols {
             cols.push(pb.add_integer_column(0.0, 0.0..=(g2 - 1) as f64));
         }
-        col_count += if include_obj2 { 6 } else { 3 };
     }
 
     let mut s_cols = Vec::with_capacity(model.payers.len());
@@ -825,7 +821,6 @@ fn solve_transfers_highs<MemberId: MemberIdTrait>(
             *pay as f64
         };
         s_cols.push(pb.add_integer_column(0.0, 0.0..=upper));
-        col_count += 1;
     }
 
     let mut t_cols = Vec::with_capacity(model.receivers.len());
@@ -836,7 +831,6 @@ fn solve_transfers_highs<MemberId: MemberIdTrait>(
             *recv as f64
         };
         t_cols.push(pb.add_integer_column(0.0, 0.0..=upper));
-        col_count += 1;
     }
 
     for (payer_idx, (_, pay)) in model.payers.iter().enumerate() {
@@ -847,7 +841,6 @@ fn solve_transfers_highs<MemberId: MemberIdTrait>(
         factors.push((s_cols[payer_idx], 1.0));
         let rhs = *pay as f64;
         pb.add_row(rhs..=rhs, factors);
-        row_count += 1;
     }
 
     for (receiver_idx, (_, recv)) in model.receivers.iter().enumerate() {
@@ -858,7 +851,6 @@ fn solve_transfers_highs<MemberId: MemberIdTrait>(
         factors.push((t_cols[receiver_idx], 1.0));
         let rhs = *recv as f64;
         pb.add_row(rhs..=rhs, factors);
-        row_count += 1;
     }
 
     for (edge_idx, edge) in model.edges.iter().enumerate() {
@@ -866,7 +858,6 @@ fn solve_transfers_highs<MemberId: MemberIdTrait>(
         let y = y_cols[edge_idx];
         pb.add_row(..=0.0, [(x, 1.0), (y, -(edge.upper_bound as f64))]);
         pb.add_row(0.0.., [(x, 1.0), (y, -1.0)]);
-        row_count += 2;
 
         if let Some(cash_idx) = cash_edge_to_idx[edge_idx] {
             let z1 = z1_cols[cash_idx];
@@ -877,7 +868,6 @@ fn solve_transfers_highs<MemberId: MemberIdTrait>(
             pb.add_row(..=0.0, [(r1000, 1.0), (z1, -((g1 - 1) as f64))]);
             pb.add_row(0.0.., [(r1000, 1.0), (z1, -1.0)]);
             pb.add_row(..=0.0, [(z1, 1.0), (y, -1.0)]);
-            row_count += 4;
 
             if include_obj2 {
                 let z2 = z2_cols.as_ref().expect("z2 columns exist")[cash_idx];
@@ -891,7 +881,6 @@ fn solve_transfers_highs<MemberId: MemberIdTrait>(
                 pb.add_row(0.0.., [(r100, 1.0), (z2, -1.0)]);
                 pb.add_row(..=0.0, [(z2, 1.0), (z1, -1.0)]);
                 pb.add_row(..=0.0, [(z2, 1.0), (y, -1.0)]);
-                row_count += 5;
             }
         }
     }
@@ -917,7 +906,6 @@ fn solve_transfers_highs<MemberId: MemberIdTrait>(
     }
 
     let solution = solved.get_solution();
-    let _ = (col_count, row_count);
 
     if accepted_feasible_on_limit {
         let obj1 = z1_cols
