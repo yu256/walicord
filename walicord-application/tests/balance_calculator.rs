@@ -124,21 +124,25 @@ fn balances_from_result(balances: &[PersonBalance]) -> MemberBalances {
     &[(1, 100), (2, 0), (3, -100)],
     &[(1, 0), (2, 0), (3, 0)],
 )]
-fn settle_up_pre_and_post_balances(
-    processor: MessageProcessor<'_>,
+#[tokio::test(flavor = "multi_thread")]
+async fn settle_up_pre_and_post_balances(
     #[case] members: &'static [MemberId],
     #[case] content: &'static str,
     #[case] prefix_len: usize,
     #[case] expected_pre: &'static [(u64, i64)],
     #[case] expected_post: &'static [(u64, i64)],
 ) {
+    let processor = MessageProcessor::new(&TEST_PARSER, &TEST_OPTIMIZER);
     let program = parse_program_from_content(members, content);
 
-    let pre_balances = processor.calculate_balances_for_prefix(&program, prefix_len);
+    let pre_balances = processor
+        .calculate_balances_for_prefix(&program, prefix_len)
+        .await;
     assert_balances(&pre_balances, expected_pre);
 
     let result = processor
         .build_settlement_result(&program)
+        .await
         .expect("result generation failed");
     let post_balances = balances_from_result(&result.balances);
     assert_balances(&post_balances, expected_post);
@@ -195,15 +199,17 @@ fn settle_up_pre_and_post_balances(
     "all := <@1> <@2> <@3> <@4>\n<@1> paid 100 to <@2>\n<@3> paid 50 to <@4>\n!settleup (all - <@1>) ∪ <@2>",
     &[(1, 0), (2, 0), (3, 0), (4, 0)],
 )]
-fn settle_up_post_balances(
-    processor: MessageProcessor<'_>,
+#[tokio::test(flavor = "multi_thread")]
+async fn settle_up_post_balances(
     #[case] members: &'static [MemberId],
     #[case] content: &'static str,
     #[case] expected_post: &'static [(u64, i64)],
 ) {
+    let processor = MessageProcessor::new(&TEST_PARSER, &TEST_OPTIMIZER);
     let program = parse_program_from_content(members, content);
     let result = processor
         .build_settlement_result(&program)
+        .await
         .expect("result generation failed");
     let post_balances = balances_from_result(&result.balances);
     assert_balances(&post_balances, expected_post);
@@ -280,15 +286,17 @@ fn settle_up_post_balances(
     "<@1> paid 60 to <@2>\n!settleup <@1>\n<@3> paid 40 to <@2>\n!settleup <@1>",
     &[(1, 0), (2, -40), (3, 40)],
 )]
-fn payment_distribution_balances(
-    processor: MessageProcessor<'_>,
+#[tokio::test(flavor = "multi_thread")]
+async fn payment_distribution_balances(
     #[case] members: &'static [MemberId],
     #[case] content: &'static str,
     #[case] expected_post: &'static [(u64, i64)],
 ) {
+    let processor = MessageProcessor::new(&TEST_PARSER, &TEST_OPTIMIZER);
     let program = parse_program_from_content(members, content);
     let result = processor
         .build_settlement_result(&program)
+        .await
         .expect("result generation failed");
     let post_balances = balances_from_result(&result.balances);
     assert_balances(&post_balances, expected_post);

@@ -3,7 +3,8 @@ use crate::{
     services::{AtomicUnitConversionError, SettlementContext, SettlementRoundingError},
 };
 use walicord_transfer_construction::{
-    PersonBalance, SettlementError, construct_settlement_transfers,
+    HighsCommonSolveOptions, PersonBalance, SettlementError, SettlementTransferOptions,
+    construct_settlement_transfers_with_options,
 };
 
 const CASH_GRID_G1_JPY: i64 = 1000;
@@ -59,12 +60,23 @@ impl TransferConstructor {
         // 1000/100-unit grid in the current domain service.
         // TODO: derive this from SettlementContext when non-JPY settlement profiles
         // are supported end-to-end.
-        let payments = construct_settlement_transfers(
+        let options = SettlementTransferOptions::default().with_solve(
+            walicord_transfer_construction::TransferSolveOptions {
+                highs: HighsCommonSolveOptions {
+                    time_limit_seconds: Some(30.0),
+                    accept_feasible_on_limit: true,
+                    ..HighsCommonSolveOptions::default()
+                },
+                ..Default::default()
+            },
+        );
+        let payments = construct_settlement_transfers_with_options(
             calc_balances,
             settle_members,
             cash_members,
             CASH_GRID_G1_JPY,
             CASH_GRID_G2_JPY,
+            options,
         )
         .map_err(SettlementRoundingError::from)?;
 
@@ -118,6 +130,13 @@ impl From<SettlementError> for SettlementRoundingError {
                 max_edges,
             },
             SettlementError::NoSolution => SettlementRoundingError::TransferConstructionNoSolution,
+            SettlementError::InvalidWeights { .. }
+            | SettlementError::BalancesTooLargeForF64
+            | SettlementError::NonFiniteSolution
+            | SettlementError::OutOfRangeSolution
+            | SettlementError::NonBinarySolution => {
+                SettlementRoundingError::TransferConstructionNoSolution
+            }
             SettlementError::RoundingMismatch => {
                 SettlementRoundingError::TransferConstructionRoundingMismatch
             }

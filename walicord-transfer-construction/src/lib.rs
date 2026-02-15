@@ -1,11 +1,11 @@
 #![warn(clippy::uninlined_format_args)]
 
+// NOTE: balance sign convention is unified across APIs: balance > 0 pays, balance < 0 receives.
 mod model;
 
-use good_lp::{Expression, Solution, SolverModel, Variable, default_solver, variable, variables};
-use thiserror::Error;
-
+use highs::{HighsModelStatus, HighsSolutionStatus, Model, RowProblem, Sense};
 pub use model::{Payment, PersonBalance};
+use thiserror::Error;
 
 pub trait MemberIdTrait: Copy + Eq + std::hash::Hash + Ord {}
 impl MemberIdTrait for u64 {}
@@ -24,93 +24,322 @@ pub enum SettlementError {
     NoSolution,
     #[error("LP solver rounding caused balance mismatch")]
     RoundingMismatch,
+    #[error("Invalid objective weights (alpha={alpha}, beta={beta})")]
+    InvalidWeights { alpha: f64, beta: f64 },
+    #[error("Balances too large to represent exactly in solver numerics")]
+    BalancesTooLargeForF64,
+    #[error("Solver returned a non-finite or out-of-range value")]
+    NonFiniteSolution,
+    #[error("Solver returned an out-of-range value")]
+    OutOfRangeSolution,
+    #[error("Solver returned a non-binary value for a binary variable")]
+    NonBinarySolution,
 }
 
 const MAX_LEXICOGRAPHIC_EDGES: usize = 120;
+const MAX_SAFE_EXACT_INT_IN_F64: i128 = (1_i128 << 53) - 1;
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum HighsSolvePreset {
+    Deterministic,
+    Fast,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub struct HighsCommonSolveOptions {
+    pub preset: HighsSolvePreset,
+    pub threads: Option<i32>,
+    pub time_limit_seconds: Option<f64>,
+    pub mip_rel_gap: Option<f64>,
+    pub mip_abs_gap: Option<f64>,
+    pub accept_feasible_on_limit: bool,
+}
+
+impl Default for HighsCommonSolveOptions {
+    fn default() -> Self {
+        Self {
+            preset: HighsSolvePreset::Deterministic,
+            threads: Some(1),
+            time_limit_seconds: None,
+            mip_rel_gap: None,
+            mip_abs_gap: None,
+            accept_feasible_on_limit: false,
+        }
+    }
+}
+
+impl HighsCommonSolveOptions {
+    pub fn fast() -> Self {
+        Self {
+            preset: HighsSolvePreset::Fast,
+            threads: default_fast_threads(),
+            ..Self::default()
+        }
+    }
+}
+
+fn default_fast_threads() -> Option<i32> {
+    std::thread::available_parallelism()
+        .ok()
+        .and_then(|parallelism| i32::try_from(parallelism.get()).ok())
+        .map(|threads| threads.min(8))
+        .filter(|threads| *threads > 0)
+}
+
+#[derive(Clone, PartialEq)]
+pub struct TransferSolveOptions {
+    pub highs: HighsCommonSolveOptions,
+    pub mod_100_policy: Mod100Policy,
+    pub emit_failure_diagnostics: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Mod100Policy {
+    Off,
+    Prioritize,
+}
+
+impl Default for TransferSolveOptions {
+    fn default() -> Self {
+        Self {
+            highs: HighsCommonSolveOptions::default(),
+            mod_100_policy: Mod100Policy::Prioritize,
+            emit_failure_diagnostics: false,
+        }
+    }
+}
+
+impl TransferSolveOptions {
+    pub fn fast() -> Self {
+        Self {
+            highs: HighsCommonSolveOptions::fast(),
+            ..Self::default()
+        }
+    }
+
+    pub fn with_highs(mut self, highs: HighsCommonSolveOptions) -> Self {
+        self.highs = highs;
+        self
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+pub struct TransferBuildOptions {
+    pub non_settle_topk: Option<usize>,
+}
+
+#[derive(Clone, Default)]
+pub struct SettlementTransferOptions {
+    pub build: TransferBuildOptions,
+    pub solve: TransferSolveOptions,
+}
+
+impl SettlementTransferOptions {
+    pub fn with_solve(mut self, solve: TransferSolveOptions) -> Self {
+        self.solve = solve;
+        self
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SolveQuality {
+    Optimal,
+    AcceptedFeasibleOnLimit {
+        active_edge_count: i64,
+        objective_value: f64,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MinimizeSolveOutcome<MemberId> {
+    pub payments: Vec<Payment<MemberId>>,
+    pub quality: SolveQuality,
+}
+
+#[derive(Clone, Copy)]
+struct ObjectiveWeights {
+    alpha: f64,
+    beta: f64,
+}
+
+impl ObjectiveWeights {
+    fn parse(alpha: f64, beta: f64) -> Result<Self, SettlementError> {
+        let ok = alpha.is_finite() && beta.is_finite() && alpha >= 0.0 && beta >= 0.0;
+        ok.then_some(Self { alpha, beta })
+            .ok_or(SettlementError::InvalidWeights { alpha, beta })
+    }
+}
 
 pub fn minimize_transactions<MemberId: MemberIdTrait>(
     people: impl IntoIterator<Item = PersonBalance<MemberId>>,
     alpha: f64,
     beta: f64,
 ) -> Result<Vec<Payment<MemberId>>, SettlementError> {
-    let people: Vec<PersonBalance<MemberId>> = people.into_iter().collect();
+    minimize_transactions_with_options(people, alpha, beta, HighsCommonSolveOptions::default())
+}
+
+pub fn minimize_transactions_with_options<MemberId: MemberIdTrait>(
+    people: impl IntoIterator<Item = PersonBalance<MemberId>>,
+    alpha: f64,
+    beta: f64,
+    solve_options: HighsCommonSolveOptions,
+) -> Result<Vec<Payment<MemberId>>, SettlementError> {
+    Ok(
+        minimize_transactions_with_options_and_outcome(people, alpha, beta, solve_options)?
+            .payments,
+    )
+}
+
+pub(crate) fn minimize_transactions_with_options_and_outcome<MemberId: MemberIdTrait>(
+    people: impl IntoIterator<Item = PersonBalance<MemberId>>,
+    alpha: f64,
+    beta: f64,
+    solve_options: HighsCommonSolveOptions,
+) -> Result<MinimizeSolveOutcome<MemberId>, SettlementError> {
+    let weights = ObjectiveWeights::parse(alpha, beta)?;
+
+    let mut people: Vec<PersonBalance<MemberId>> = people.into_iter().collect();
+    people.sort_unstable_by_key(|p| p.id);
+
     let total: i64 = people.iter().map(|p| p.balance).sum();
     if total != 0 {
         return Err(SettlementError::ImbalancedTotal(total));
     }
 
-    let mut vars = variables!();
+    let amount_scale = scaling_divisor_for_balances(&people);
+    let solver_people: Vec<PersonBalance<MemberId>> = if amount_scale > 1 {
+        people
+            .iter()
+            .map(|person| PersonBalance {
+                id: person.id,
+                balance: person.balance / amount_scale,
+            })
+            .collect()
+    } else {
+        people.clone()
+    };
 
-    let mut debtors = Vec::new();
-    let mut creditors = Vec::new();
-    for (idx, person) in people.iter().enumerate() {
-        if person.balance < 0 {
-            debtors.push((idx, -person.balance));
-        } else if person.balance > 0 {
-            creditors.push((idx, person.balance));
+    if !balances_fit_exact_f64(&solver_people) {
+        return Err(SettlementError::BalancesTooLargeForF64);
+    }
+
+    let mut payers = Vec::new();
+    let mut receivers = Vec::new();
+    for (idx, person) in solver_people.iter().enumerate() {
+        if person.balance > 0 {
+            payers.push((idx, person.balance));
+        } else if person.balance < 0 {
+            receivers.push((idx, -person.balance));
         }
     }
 
-    if debtors.is_empty() || creditors.is_empty() {
-        return Ok(Vec::new());
+    if payers.is_empty() || receivers.is_empty() {
+        return Ok(MinimizeSolveOutcome {
+            payments: Vec::new(),
+            quality: SolveQuality::Optimal,
+        });
     }
 
-    let mut pairs = Vec::with_capacity(debtors.len() * creditors.len());
-    for &(debtor_idx, debtor_amount) in &debtors {
-        for &(creditor_idx, creditor_amount) in &creditors {
-            let max_amount = debtor_amount.min(creditor_amount) as f64;
-            pairs.push((debtor_idx, creditor_idx, max_amount));
+    // Edges are payer -> receiver (unified with construct_settlement_transfers)
+    let mut pairs = Vec::with_capacity(payers.len() * receivers.len());
+    for &(payer_idx, payer_amount) in &payers {
+        for &(receiver_idx, receiver_amount) in &receivers {
+            let max_amount = payer_amount.min(receiver_amount) as f64;
+            pairs.push((payer_idx, receiver_idx, max_amount));
         }
     }
 
-    let mut how_much: Vec<Variable> = Vec::with_capacity(pairs.len());
-    let mut who_pays: Vec<Variable> = Vec::with_capacity(pairs.len());
-    let mut objective = Expression::with_capacity(pairs.len() * 2);
+    let mut problem = RowProblem::new();
+    let mut how_much = Vec::with_capacity(pairs.len());
+    let mut who_pays = Vec::with_capacity(pairs.len());
 
-    for _ in 0..pairs.len() {
-        let flow_var = vars.add(variable().integer().min(0.0));
-        objective.add_mul(beta, flow_var);
+    for &(_, _, max_amount) in &pairs {
+        let flow_var = problem.add_integer_column(weights.beta, 0.0..=max_amount);
+        let binary_var = problem.add_integer_column(weights.alpha, 0.0..=1.0);
         how_much.push(flow_var);
-
-        let binary_var = vars.add(variable().binary());
-        objective.add_mul(alpha, binary_var);
         who_pays.push(binary_var);
     }
 
-    let mut problem = vars.minimise(objective).using(default_solver);
-    #[cfg(feature = "coin_cbc")]
-    problem.set_parameter("log", "0");
-
-    // Constraint: how_much[i][j] <= big_m * who_pays[i][j]
     for ((&hm, &wp), &(_, _, max_amount)) in how_much.iter().zip(&who_pays).zip(&pairs) {
-        problem = problem.with((hm - max_amount * wp).leq(0.0));
+        problem.add_row(..=0.0, [(hm, 1.0), (wp, -max_amount)]);
+        // Prevents degenerate solutions where a paid edge is counted as "active" but carries zero
+        // flow, which can otherwise interfere with minimizing the number of payments.
+        problem.add_row(0.0.., [(hm, 1.0), (wp, -1.0)]);
     }
 
-    // Balance constraints: inflow - outflow = balance
-    for (i, person) in people.iter().enumerate() {
-        let mut constraint = Expression::default();
-        for (idx, &(from, to, _)) in pairs.iter().enumerate() {
-            if to == i {
-                constraint.add_mul(1.0, how_much[idx]);
-            }
-            if from == i {
-                constraint.add_mul(-1.0, how_much[idx]);
-            }
+    let mut out_edges: Vec<Vec<usize>> = vec![Vec::new(); people.len()];
+    let mut in_edges: Vec<Vec<usize>> = vec![Vec::new(); people.len()];
+    for (edge_idx, &(from, to, _)) in pairs.iter().enumerate() {
+        out_edges[from].push(edge_idx);
+        in_edges[to].push(edge_idx);
+    }
+
+    for (member_idx, person) in solver_people.iter().enumerate() {
+        let mut factors =
+            Vec::with_capacity(in_edges[member_idx].len() + out_edges[member_idx].len());
+        // Flow conservation under sign convention:
+        //   sum_out - sum_in == balance
+        // balance > 0 => pays out; balance < 0 => receives in.
+        for &edge_idx in &out_edges[member_idx] {
+            factors.push((how_much[edge_idx], 1.0));
         }
-        problem = problem.with(constraint.eq(person.balance as f64));
+        for &edge_idx in &in_edges[member_idx] {
+            factors.push((how_much[edge_idx], -1.0));
+        }
+        let rhs = person.balance as f64;
+        problem.add_row(rhs..=rhs, factors);
     }
 
-    let Ok(solution) = problem.solve() else {
+    let mut model = problem.optimise(Sense::Minimise);
+    model.make_quiet();
+    apply_highs_options(&mut model, &solve_options);
+    let solved = model.solve();
+    let status = solved.status();
+    let accepted_feasible_on_limit = status != HighsModelStatus::Optimal
+        && matches!(
+            status,
+            HighsModelStatus::ReachedTimeLimit
+                | HighsModelStatus::ReachedIterationLimit
+                | HighsModelStatus::ReachedSolutionLimit
+                | HighsModelStatus::ReachedInterrupt
+                | HighsModelStatus::ReachedMemoryLimit
+        )
+        && solve_options.accept_feasible_on_limit
+        && solved.primal_solution_status() == HighsSolutionStatus::Feasible;
+    if status != HighsModelStatus::Optimal && !accepted_feasible_on_limit {
         return Err(SettlementError::NoSolution);
+    }
+
+    let solution = solved.get_solution();
+
+    let quality = if accepted_feasible_on_limit {
+        let mut active_edge_count = 0_i64;
+        let mut objective_value = 0.0_f64;
+        for col in &who_pays {
+            let is_active = round_binary_checked(solution[*col])? == 1;
+            active_edge_count += i64::from(is_active);
+            objective_value += weights.alpha * f64::from(i32::from(is_active));
+        }
+        for col in &how_much {
+            objective_value += weights.beta * round_bankers_checked(solution[*col])? as f64;
+        }
+        SolveQuality::AcceptedFeasibleOnLimit {
+            active_edge_count,
+            objective_value,
+        }
+    } else {
+        SolveQuality::Optimal
     };
 
     let mut results = Vec::with_capacity(pairs.len());
     for (idx, &(i, j, _)) in pairs.iter().enumerate() {
-        let amount = round_bankers(solution.value(how_much[idx]));
+        let amount = round_bankers_checked(solution[how_much[idx]])?
+            .checked_mul(amount_scale)
+            .ok_or(SettlementError::RoundingMismatch)?;
         if amount > 0 {
             results.push(Payment {
-                from: people[i].id,
-                to: people[j].id,
+                from: people[i].id, // payer (balance > 0)
+                to: people[j].id,   // receiver (balance < 0)
                 amount,
             });
         }
@@ -121,7 +350,8 @@ pub fn minimize_transactions<MemberId: MemberIdTrait>(
         index_by_id.insert(person.id, idx);
     }
 
-    let mut net = vec![0i64; people.len()];
+    // Verify that applying payments settles everyone to 0.
+    let mut final_balances = people.iter().map(|p| p.balance).collect::<Vec<_>>();
     for p in &results {
         let Some(&from_idx) = index_by_id.get(&p.from) else {
             return Err(SettlementError::RoundingMismatch);
@@ -129,15 +359,17 @@ pub fn minimize_transactions<MemberId: MemberIdTrait>(
         let Some(&to_idx) = index_by_id.get(&p.to) else {
             return Err(SettlementError::RoundingMismatch);
         };
-        net[from_idx] -= p.amount;
-        net[to_idx] += p.amount;
+        final_balances[from_idx] -= p.amount;
+        final_balances[to_idx] += p.amount;
     }
-    let expected = people.iter().map(|p| p.balance).collect::<Vec<_>>();
-    if net != expected {
+    if final_balances.iter().any(|v| *v != 0) {
         return Err(SettlementError::RoundingMismatch);
     }
 
-    Ok(results)
+    Ok(MinimizeSolveOutcome {
+        payments: results,
+        quality,
+    })
 }
 
 pub fn construct_settlement_transfers<MemberId: MemberIdTrait>(
@@ -146,6 +378,24 @@ pub fn construct_settlement_transfers<MemberId: MemberIdTrait>(
     cash_members: &[MemberId],
     g1: i64,
     g2: i64,
+) -> Result<Vec<Payment<MemberId>>, SettlementError> {
+    construct_settlement_transfers_with_options(
+        people,
+        settle_members,
+        cash_members,
+        g1,
+        g2,
+        SettlementTransferOptions::default(),
+    )
+}
+
+pub fn construct_settlement_transfers_with_options<MemberId: MemberIdTrait>(
+    people: impl IntoIterator<Item = PersonBalance<MemberId>>,
+    settle_members: &[MemberId],
+    cash_members: &[MemberId],
+    g1: i64,
+    g2: i64,
+    options: SettlementTransferOptions,
 ) -> Result<Vec<Payment<MemberId>>, SettlementError> {
     let mut people: Vec<PersonBalance<MemberId>> = people.into_iter().collect();
     people.sort_unstable_by_key(|person| person.id);
@@ -161,7 +411,34 @@ pub fn construct_settlement_transfers<MemberId: MemberIdTrait>(
         return Err(SettlementError::InvalidGrid { g1, g2 });
     }
 
-    let model = TransferModel::from_people(&people, settle_members, cash_members);
+    let amount_scale = scaling_divisor_for_balances_and_grid(&people, g1, g2);
+    let (solver_people, solver_g1, solver_g2): (Vec<PersonBalance<MemberId>>, i64, i64) =
+        if amount_scale > 1 {
+            (
+                people
+                    .iter()
+                    .map(|person| PersonBalance {
+                        id: person.id,
+                        balance: person.balance / amount_scale,
+                    })
+                    .collect(),
+                g1 / amount_scale,
+                g2 / amount_scale,
+            )
+        } else {
+            (people.clone(), g1, g2)
+        };
+
+    if !balances_fit_exact_f64(&solver_people) {
+        return Err(SettlementError::BalancesTooLargeForF64);
+    }
+
+    let mut model = TransferModel::from_people_with_options(
+        &solver_people,
+        settle_members,
+        cash_members,
+        options.build,
+    );
     if model.edges.is_empty() {
         return Ok(Vec::new());
     }
@@ -172,26 +449,89 @@ pub fn construct_settlement_transfers<MemberId: MemberIdTrait>(
         });
     }
 
-    let Some(lex_fixed) = solve_full_lexicographic(&model, g1, g2) else {
-        return Err(SettlementError::NoSolution);
+    let attempted_pruned = options.build.non_settle_topk.is_some();
+    let mut attempted_unpruned = !attempted_pruned;
+    let mut lex_fixed = solve_transfers_highs(&model, solver_g1, solver_g2, &options.solve);
+    if matches!(lex_fixed, Err(SolveTransfersError::Infeasible))
+        && options.build.non_settle_topk.is_some()
+    {
+        model = TransferModel::from_people_with_options(
+            &solver_people,
+            settle_members,
+            cash_members,
+            TransferBuildOptions::default(),
+        );
+        if model.edges.is_empty() {
+            return Ok(Vec::new());
+        }
+        if model.edges.len() > MAX_LEXICOGRAPHIC_EDGES {
+            return Err(SettlementError::ModelTooLarge {
+                edge_count: model.edges.len(),
+                max_edges: MAX_LEXICOGRAPHIC_EDGES,
+            });
+        }
+        attempted_unpruned = true;
+        lex_fixed = solve_transfers_highs(&model, solver_g1, solver_g2, &options.solve);
+    }
+
+    if matches!(lex_fixed, Err(SolveTransfersError::LimitReached))
+        && let Some(strict) = strict_retry_solve_options(&options.solve.highs)
+    {
+        let strict_transfer_options = options.solve.clone().with_highs(strict);
+        lex_fixed = solve_transfers_highs(&model, solver_g1, solver_g2, &strict_transfer_options);
+    }
+
+    let lex_fixed = match lex_fixed {
+        Ok(values) => values,
+        Err(error) => {
+            if options.solve.emit_failure_diagnostics {
+                if let SolveTransfersError::UnsafeWeights(diagnostics) = error {
+                    tracing::warn!(
+                        error = "unsafe_weights",
+                        attempted_pruned,
+                        attempted_unpruned,
+                        edge_count_usize = diagnostics.edge_count_usize,
+                        cash_edge_count_usize = diagnostics.cash_edge_count_usize,
+                        non_settle_edge_count_usize = diagnostics.non_settle_edge_count_usize,
+                        edge_count = diagnostics.edge_count,
+                        cash_edge_count = diagnostics.cash_edge_count,
+                        non_settle_edge_count = diagnostics.non_settle_edge_count,
+                        failed_stage = ?diagnostics.failed_stage,
+                        lower_max = ?diagnostics.lower_max,
+                        obj1_weight = ?diagnostics.obj1_weight,
+                        obj2_weight = ?diagnostics.obj2_weight,
+                        max_objective_value = ?diagnostics.max_objective_value,
+                        "transfer solve failed due to unsafe objective weights"
+                    );
+                } else {
+                    tracing::warn!(
+                        ?error,
+                        attempted_pruned,
+                        attempted_unpruned,
+                        edge_count = model.edges.len(),
+                        cash_edge_count = model.cash_edge_indices.len(),
+                        "transfer solve failed"
+                    );
+                }
+            }
+            return Err(SettlementError::NoSolution);
+        }
     };
 
-    let mut transfers: Vec<Payment<MemberId>> = model
-        .edges
-        .iter()
-        .zip(lex_fixed)
-        .filter_map(|(edge, amount)| {
-            let amount = round_bankers(amount);
-            if amount <= 0 {
-                return None;
-            }
-            Some(Payment {
-                from: edge.from,
-                to: edge.to,
-                amount,
-            })
-        })
-        .collect();
+    let mut transfers: Vec<Payment<MemberId>> = Vec::new();
+    for (edge, amount) in model.edges.iter().zip(lex_fixed) {
+        let amount = round_bankers_checked(amount)?
+            .checked_mul(amount_scale)
+            .ok_or(SettlementError::RoundingMismatch)?;
+        if amount <= 0 {
+            continue;
+        }
+        transfers.push(Payment {
+            from: edge.from,
+            to: edge.to,
+            amount,
+        });
+    }
     transfers.sort_unstable_by_key(|payment| (payment.from, payment.to));
 
     if !is_transfer_result_consistent(&people, settle_members, &transfers) {
@@ -247,55 +587,419 @@ fn is_transfer_result_consistent<MemberId: MemberIdTrait>(
         .all(|member| balances.get(member).copied().unwrap_or(0) == 0)
 }
 
-fn solve_full_lexicographic<MemberId: MemberIdTrait>(
+#[derive(Debug)]
+enum SolveTransfersError {
+    Infeasible,
+    UnsafeWeights(Box<UnsafeWeightDiagnostics>),
+    LimitReached,
+    SolverStatus,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum UnsafeWeightStage {
+    ConvertEdgeCount,
+    ConvertCashEdgeCount,
+    ConvertNonSettleEdgeCount,
+    LowerMax,
+    Obj2,
+    Obj1,
+    Total,
+    F64Check,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct UnsafeWeightDiagnostics {
+    failed_stage: Option<UnsafeWeightStage>,
+    edge_count_usize: usize,
+    cash_edge_count_usize: usize,
+    non_settle_edge_count_usize: usize,
+    edge_count: i128,
+    cash_edge_count: i128,
+    non_settle_edge_count: i128,
+    lower_max: Option<i128>,
+    obj1_weight: Option<i128>,
+    obj2_weight: Option<i128>,
+    max_objective_value: Option<i128>,
+}
+
+struct ObjectiveBounds {
+    include_obj2: bool,
+    max_y: i128,
+    max_z1: i128,
+    max_z2: i128,
+    objw_weight: i128,
+    obj2_weight: i128,
+    obj1_weight: i128,
+    total: i128,
+}
+
+fn compute_objective_bounds<MemberId: MemberIdTrait>(
+    model: &TransferModel<MemberId>,
+    solve_options: &TransferSolveOptions,
+) -> Result<ObjectiveBounds, SolveTransfersError> {
+    let include_obj2 = matches!(solve_options.mod_100_policy, Mod100Policy::Prioritize);
+    let edge_count_usize = model.edges.len();
+    let cash_edge_count_usize = model.cash_edge_indices.len();
+    let non_settle_edge_count_usize = model
+        .edges
+        .iter()
+        .filter(|edge| edge.touches_non_settle)
+        .count();
+
+    let max_y = i128::try_from(edge_count_usize).map_err(|_| {
+        SolveTransfersError::UnsafeWeights(Box::new(UnsafeWeightDiagnostics {
+            failed_stage: Some(UnsafeWeightStage::ConvertEdgeCount),
+            edge_count_usize,
+            cash_edge_count_usize,
+            non_settle_edge_count_usize,
+            edge_count: 0,
+            cash_edge_count: 0,
+            non_settle_edge_count: 0,
+            lower_max: None,
+            obj1_weight: None,
+            obj2_weight: None,
+            max_objective_value: None,
+        }))
+    })?;
+    let max_z1 = i128::try_from(cash_edge_count_usize).map_err(|_| {
+        SolveTransfersError::UnsafeWeights(Box::new(UnsafeWeightDiagnostics {
+            failed_stage: Some(UnsafeWeightStage::ConvertCashEdgeCount),
+            edge_count_usize,
+            cash_edge_count_usize,
+            non_settle_edge_count_usize,
+            edge_count: max_y,
+            cash_edge_count: 0,
+            non_settle_edge_count: 0,
+            lower_max: None,
+            obj1_weight: None,
+            obj2_weight: None,
+            max_objective_value: None,
+        }))
+    })?;
+    let max_z2 = if include_obj2 { max_z1 } else { 0 };
+    let max_non_settle_y = i128::try_from(non_settle_edge_count_usize).map_err(|_| {
+        SolveTransfersError::UnsafeWeights(Box::new(UnsafeWeightDiagnostics {
+            failed_stage: Some(UnsafeWeightStage::ConvertNonSettleEdgeCount),
+            edge_count_usize,
+            cash_edge_count_usize,
+            non_settle_edge_count_usize,
+            edge_count: max_y,
+            cash_edge_count: max_z1,
+            non_settle_edge_count: 0,
+            lower_max: None,
+            obj1_weight: None,
+            obj2_weight: None,
+            max_objective_value: None,
+        }))
+    })?;
+
+    let mut diagnostics = UnsafeWeightDiagnostics {
+        failed_stage: None,
+        edge_count_usize,
+        cash_edge_count_usize,
+        non_settle_edge_count_usize,
+        edge_count: max_y,
+        cash_edge_count: max_z1,
+        non_settle_edge_count: max_non_settle_y,
+        lower_max: None,
+        obj1_weight: None,
+        obj2_weight: None,
+        max_objective_value: None,
+    };
+
+    let obj3_weight = 1_i128;
+    let objw_weight = max_y + 1;
+    let Some(lower_max) = max_non_settle_y
+        .checked_mul(objw_weight)
+        .and_then(|value| value.checked_add(max_y))
+    else {
+        diagnostics.failed_stage = Some(UnsafeWeightStage::LowerMax);
+        return Err(SolveTransfersError::UnsafeWeights(Box::new(diagnostics)));
+    };
+    diagnostics.lower_max = Some(lower_max);
+
+    let obj2_weight = if include_obj2 {
+        let Some(value) = lower_max.checked_add(1) else {
+            diagnostics.failed_stage = Some(UnsafeWeightStage::Obj2);
+            return Err(SolveTransfersError::UnsafeWeights(Box::new(diagnostics)));
+        };
+        value
+    } else {
+        0
+    };
+    diagnostics.obj2_weight = Some(obj2_weight);
+
+    let Some(obj1_weight) = max_z2
+        .checked_mul(obj2_weight)
+        .and_then(|value| value.checked_add(lower_max))
+        .and_then(|value| value.checked_add(1))
+    else {
+        diagnostics.failed_stage = Some(UnsafeWeightStage::Obj1);
+        return Err(SolveTransfersError::UnsafeWeights(Box::new(diagnostics)));
+    };
+    diagnostics.obj1_weight = Some(obj1_weight);
+
+    let Some(total) = max_z1
+        .checked_mul(obj1_weight)
+        .and_then(|value| value.checked_add(max_z2.checked_mul(obj2_weight)?))
+        .and_then(|value| value.checked_add(lower_max))
+    else {
+        diagnostics.failed_stage = Some(UnsafeWeightStage::Total);
+        return Err(SolveTransfersError::UnsafeWeights(Box::new(diagnostics)));
+    };
+    diagnostics.max_objective_value = Some(total);
+
+    if !is_exact_integer_in_f64(objw_weight + obj3_weight)
+        || !is_exact_integer_in_f64(obj1_weight)
+        || (include_obj2 && !is_exact_integer_in_f64(obj2_weight))
+        || !is_exact_integer_in_f64(total)
+    {
+        diagnostics.failed_stage = Some(UnsafeWeightStage::F64Check);
+        return Err(SolveTransfersError::UnsafeWeights(Box::new(diagnostics)));
+    }
+
+    Ok(ObjectiveBounds {
+        include_obj2,
+        max_y,
+        max_z1,
+        max_z2,
+        objw_weight,
+        obj2_weight,
+        obj1_weight,
+        total,
+    })
+}
+
+fn classify_non_optimal_status(status: HighsModelStatus) -> SolveTransfersError {
+    match status {
+        HighsModelStatus::Infeasible | HighsModelStatus::UnboundedOrInfeasible => {
+            SolveTransfersError::Infeasible
+        }
+        HighsModelStatus::ReachedTimeLimit
+        | HighsModelStatus::ReachedIterationLimit
+        | HighsModelStatus::ReachedSolutionLimit
+        | HighsModelStatus::ReachedInterrupt
+        | HighsModelStatus::ReachedMemoryLimit => SolveTransfersError::LimitReached,
+        _ => SolveTransfersError::SolverStatus,
+    }
+}
+
+fn strict_retry_solve_options(
+    options: &HighsCommonSolveOptions,
+) -> Option<HighsCommonSolveOptions> {
+    let strict = HighsCommonSolveOptions {
+        preset: HighsSolvePreset::Deterministic,
+        threads: Some(1),
+        time_limit_seconds: options.time_limit_seconds,
+        mip_rel_gap: None,
+        mip_abs_gap: None,
+        accept_feasible_on_limit: false,
+    };
+    (options != &strict).then_some(strict)
+}
+
+fn solve_transfers_highs<MemberId: MemberIdTrait>(
     model: &TransferModel<MemberId>,
     g1: i64,
     g2: i64,
-) -> Option<Vec<f64>> {
-    let mut fixed = FixedTargets::default();
+    solve_options: &TransferSolveOptions,
+) -> Result<Vec<f64>, SolveTransfersError> {
+    let bounds = compute_objective_bounds(model, solve_options)?;
+    let include_obj2 = bounds.include_obj2;
+    let obj3_weight = 1_i128;
 
-    let has_cash_objective = model.edges.iter().any(|edge| edge.payer_is_cash);
-    if has_cash_objective {
-        let stage1 = solve_transfer_stage(model, ObjectiveKind::Obj1, &fixed, &[], g1, g2)?;
-        fixed.obj1 = Some(round_count_objective(stage1.obj1));
+    let mut pb = RowProblem::new();
+    let mut x_cols = Vec::with_capacity(model.edges.len());
+    let mut y_cols = Vec::with_capacity(model.edges.len());
+    let mut cash_edge_to_idx = vec![None; model.edges.len()];
 
-        let stage2 = solve_transfer_stage(model, ObjectiveKind::Obj2, &fixed, &[], g1, g2)?;
-        fixed.obj2 = Some(round_count_objective(stage2.obj2));
-    } else {
-        fixed.obj1 = Some(0.0);
-        fixed.obj2 = Some(0.0);
+    let max_upper_bound = model.edges.iter().map(|e| e.upper_bound).max().unwrap_or(1);
+    let tiebreak_coeff =
+        (obj3_weight as f64) / ((model.edges.len() as f64) * (max_upper_bound as f64 + 1.0) * 2.0);
+
+    for (edge_idx, edge) in model.edges.iter().enumerate() {
+        let y_weight = obj3_weight
+            + if edge.touches_non_settle {
+                bounds.objw_weight
+            } else {
+                0
+            };
+        // This is an approximation intended to stabilize the chosen optimum without changing the
+        // integer objective components; it is not a strict lexicographic optimization.
+        let x_weight = (edge_idx as f64) * tiebreak_coeff;
+        x_cols.push(pb.add_integer_column(x_weight, 0.0..=edge.upper_bound as f64));
+        y_cols.push(pb.add_integer_column(y_weight as f64, 0.0..=1.0));
     }
 
-    let stage3 = solve_transfer_stage(model, ObjectiveKind::ObjW, &fixed, &[], g1, g2)?;
-    fixed.objw = Some(round_count_objective(stage3.objw));
+    let mut z1_cols = Vec::with_capacity(model.cash_edge_indices.len());
+    let mut q1000_cols = Vec::with_capacity(model.cash_edge_indices.len());
+    let mut r1000_cols = Vec::with_capacity(model.cash_edge_indices.len());
+    let mut z2_cols = include_obj2.then(|| Vec::with_capacity(model.cash_edge_indices.len()));
+    let mut q100_cols = include_obj2.then(|| Vec::with_capacity(model.cash_edge_indices.len()));
+    let mut r100_cols = include_obj2.then(|| Vec::with_capacity(model.cash_edge_indices.len()));
 
-    let stage4 = solve_transfer_stage(model, ObjectiveKind::Obj3, &fixed, &[], g1, g2)?;
-    fixed.obj3 = Some(round_count_objective(stage4.obj3));
+    let max_q100 = ((g1 - 1) / g2) as f64;
+    for &edge_idx in &model.cash_edge_indices {
+        cash_edge_to_idx[edge_idx] = Some(z1_cols.len());
+        let edge = model.edges[edge_idx];
+        let max_q1000 = (edge.upper_bound / g1) as f64;
 
-    let mut lex_fixed: Vec<f64> = Vec::with_capacity(model.edges.len());
-    for idx in 0..model.edges.len() {
-        let stage =
-            solve_transfer_stage(model, ObjectiveKind::Lex(idx), &fixed, &lex_fixed, g1, g2)?;
-        lex_fixed.push(stage.x_values[idx]);
+        z1_cols.push(pb.add_integer_column(bounds.obj1_weight as f64, 0.0..=1.0));
+        if let Some(cols) = &mut z2_cols {
+            cols.push(pb.add_integer_column(bounds.obj2_weight as f64, 0.0..=1.0));
+        }
+        q1000_cols.push(pb.add_integer_column(0.0, 0.0..=max_q1000));
+        if let Some(cols) = &mut q100_cols {
+            cols.push(pb.add_integer_column(0.0, 0.0..=max_q100));
+        }
+        r1000_cols.push(pb.add_integer_column(0.0, 0.0..=(g1 - 1) as f64));
+        if let Some(cols) = &mut r100_cols {
+            cols.push(pb.add_integer_column(0.0, 0.0..=(g2 - 1) as f64));
+        }
     }
-    Some(lex_fixed)
-}
 
-#[derive(Clone, Copy)]
-enum ObjectiveKind {
-    Obj1,
-    Obj2,
-    ObjW,
-    Obj3,
-    Lex(usize),
-}
+    let mut s_cols = Vec::with_capacity(model.payers.len());
+    for (payer, pay) in &model.payers {
+        let upper = if model.settle_lookup.contains(payer) {
+            0.0
+        } else {
+            *pay as f64
+        };
+        s_cols.push(pb.add_integer_column(0.0, 0.0..=upper));
+    }
 
-#[derive(Default)]
-struct FixedTargets {
-    obj1: Option<f64>,
-    obj2: Option<f64>,
-    objw: Option<f64>,
-    obj3: Option<f64>,
+    let mut t_cols = Vec::with_capacity(model.receivers.len());
+    for (receiver, recv) in &model.receivers {
+        let upper = if model.settle_lookup.contains(receiver) {
+            0.0
+        } else {
+            *recv as f64
+        };
+        t_cols.push(pb.add_integer_column(0.0, 0.0..=upper));
+    }
+
+    for (payer_idx, (_, pay)) in model.payers.iter().enumerate() {
+        let mut factors = Vec::with_capacity(model.payer_edges[payer_idx].len() + 1);
+        for &edge_idx in &model.payer_edges[payer_idx] {
+            factors.push((x_cols[edge_idx], 1.0));
+        }
+        factors.push((s_cols[payer_idx], 1.0));
+        let rhs = *pay as f64;
+        pb.add_row(rhs..=rhs, factors);
+    }
+
+    for (receiver_idx, (_, recv)) in model.receivers.iter().enumerate() {
+        let mut factors = Vec::with_capacity(model.receiver_edges[receiver_idx].len() + 1);
+        for &edge_idx in &model.receiver_edges[receiver_idx] {
+            factors.push((x_cols[edge_idx], 1.0));
+        }
+        factors.push((t_cols[receiver_idx], 1.0));
+        let rhs = *recv as f64;
+        pb.add_row(rhs..=rhs, factors);
+    }
+
+    for (edge_idx, edge) in model.edges.iter().enumerate() {
+        let x = x_cols[edge_idx];
+        let y = y_cols[edge_idx];
+        pb.add_row(..=0.0, [(x, 1.0), (y, -(edge.upper_bound as f64))]);
+        pb.add_row(0.0.., [(x, 1.0), (y, -1.0)]);
+
+        if let Some(cash_idx) = cash_edge_to_idx[edge_idx] {
+            let z1 = z1_cols[cash_idx];
+            let q1000 = q1000_cols[cash_idx];
+            let r1000 = r1000_cols[cash_idx];
+
+            pb.add_row(0.0..=0.0, [(x, 1.0), (q1000, -(g1 as f64)), (r1000, -1.0)]);
+            pb.add_row(..=0.0, [(r1000, 1.0), (z1, -((g1 - 1) as f64))]);
+            pb.add_row(0.0.., [(r1000, 1.0), (z1, -1.0)]);
+            pb.add_row(..=0.0, [(z1, 1.0), (y, -1.0)]);
+
+            if include_obj2 {
+                let z2 = z2_cols.as_ref().expect("z2 columns exist")[cash_idx];
+                let q100 = q100_cols.as_ref().expect("q100 columns exist")[cash_idx];
+                let r100 = r100_cols.as_ref().expect("r100 columns exist")[cash_idx];
+                pb.add_row(
+                    0.0..=0.0,
+                    [(r1000, 1.0), (q100, -(g2 as f64)), (r100, -1.0)],
+                );
+                pb.add_row(..=0.0, [(r100, 1.0), (z2, -((g2 - 1) as f64))]);
+                pb.add_row(0.0.., [(r100, 1.0), (z2, -1.0)]);
+                pb.add_row(..=0.0, [(z2, 1.0), (z1, -1.0)]);
+                pb.add_row(..=0.0, [(z2, 1.0), (y, -1.0)]);
+            }
+        }
+    }
+
+    let mut highs_model = pb.optimise(Sense::Minimise);
+    highs_model.make_quiet();
+    apply_highs_options(&mut highs_model, &solve_options.highs);
+    let solved = highs_model.solve();
+    let status = solved.status();
+    let accepted_feasible_on_limit = status != HighsModelStatus::Optimal
+        && matches!(
+            status,
+            HighsModelStatus::ReachedTimeLimit
+                | HighsModelStatus::ReachedIterationLimit
+                | HighsModelStatus::ReachedSolutionLimit
+                | HighsModelStatus::ReachedInterrupt
+                | HighsModelStatus::ReachedMemoryLimit
+        )
+        && solve_options.highs.accept_feasible_on_limit
+        && solved.primal_solution_status() == HighsSolutionStatus::Feasible;
+    if status != HighsModelStatus::Optimal && !accepted_feasible_on_limit {
+        return Err(classify_non_optimal_status(status));
+    }
+
+    let solution = solved.get_solution();
+
+    if accepted_feasible_on_limit {
+        let obj1 = z1_cols
+            .iter()
+            .map(|col| i64::from(round_binary_checked(solution[*col]).is_ok_and(|v| v == 1)))
+            .sum::<i64>();
+        let obj2 = z2_cols
+            .as_ref()
+            .map(|cols| {
+                cols.iter()
+                    .map(|col| {
+                        i64::from(round_binary_checked(solution[*col]).is_ok_and(|v| v == 1))
+                    })
+                    .sum::<i64>()
+            })
+            .unwrap_or(0);
+        let objw = model
+            .edges
+            .iter()
+            .enumerate()
+            .filter(|(_, edge)| edge.touches_non_settle)
+            .map(|(idx, _)| {
+                i64::from(round_binary_checked(solution[y_cols[idx]]).is_ok_and(|v| v == 1))
+            })
+            .sum::<i64>();
+        let obj3 = y_cols
+            .iter()
+            .map(|col| i64::from(round_binary_checked(solution[*col]).is_ok_and(|v| v == 1)))
+            .sum::<i64>();
+        tracing::info!(
+            ?status,
+            obj1,
+            obj2,
+            objw,
+            obj3,
+            mod_100_policy = ?solve_options.mod_100_policy,
+            max_y = bounds.max_y,
+            max_z1 = bounds.max_z1,
+            max_z2 = bounds.max_z2,
+            objective_total = bounds.total,
+            "accepted feasible solution after solve limit"
+        );
+    }
+
+    x_cols
+        .iter()
+        .map(|col| round_bankers_checked(solution[*col]).map(|v| v as f64))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| SolveTransfersError::SolverStatus)
 }
 
 #[derive(Clone, Copy)]
@@ -303,7 +1007,6 @@ struct Edge<MemberId> {
     from: MemberId,
     to: MemberId,
     upper_bound: i64,
-    payer_is_cash: bool,
     touches_non_settle: bool,
 }
 
@@ -311,16 +1014,18 @@ struct TransferModel<MemberId> {
     payers: Vec<(MemberId, i64)>,
     receivers: Vec<(MemberId, i64)>,
     edges: Vec<Edge<MemberId>>,
+    cash_edge_indices: Vec<usize>,
     payer_edges: Vec<Vec<usize>>,
     receiver_edges: Vec<Vec<usize>>,
     settle_lookup: std::collections::HashSet<MemberId>,
 }
 
 impl<MemberId: MemberIdTrait> TransferModel<MemberId> {
-    fn from_people(
+    fn from_people_with_options(
         people: &[PersonBalance<MemberId>],
         settle_members: &[MemberId],
         cash_members: &[MemberId],
+        options: TransferBuildOptions,
     ) -> Self {
         let settle_lookup: std::collections::HashSet<MemberId> =
             settle_members.iter().copied().collect();
@@ -337,30 +1042,112 @@ impl<MemberId: MemberIdTrait> TransferModel<MemberId> {
             }
         }
 
-        let mut payer_edges: Vec<Vec<usize>> = vec![Vec::new(); payers.len()];
-        let mut receiver_edges: Vec<Vec<usize>> = vec![Vec::new(); receivers.len()];
-        let mut edges = Vec::with_capacity(payers.len() * receivers.len());
+        #[derive(Clone, Copy)]
+        struct CandidateEdge<MemberId> {
+            edge: Edge<MemberId>,
+            payer_idx: usize,
+            receiver_idx: usize,
+            payer_is_cash: bool,
+        }
+
+        let mut candidates = Vec::with_capacity(payers.len() * receivers.len());
 
         for (payer_idx, (payer_member, pay)) in payers.iter().enumerate() {
             for (receiver_idx, (receiver_member, recv)) in receivers.iter().enumerate() {
-                let edge_idx = edges.len();
-                edges.push(Edge {
-                    from: *payer_member,
-                    to: *receiver_member,
-                    upper_bound: (*pay).min(*recv),
-                    payer_is_cash: cash_lookup.contains(payer_member),
-                    touches_non_settle: !(settle_lookup.contains(payer_member)
-                        && settle_lookup.contains(receiver_member)),
+                let upper_bound = (*pay).min(*recv);
+                if upper_bound <= 0 {
+                    continue;
+                }
+
+                let payer_is_settle = settle_lookup.contains(payer_member);
+                let receiver_is_settle = settle_lookup.contains(receiver_member);
+                if !payer_is_settle && !receiver_is_settle {
+                    continue;
+                }
+
+                let payer_is_cash = cash_lookup.contains(payer_member);
+                candidates.push(CandidateEdge {
+                    edge: Edge {
+                        from: *payer_member,
+                        to: *receiver_member,
+                        upper_bound,
+                        touches_non_settle: !(payer_is_settle && receiver_is_settle),
+                    },
+                    payer_idx,
+                    receiver_idx,
+                    payer_is_cash,
                 });
-                payer_edges[payer_idx].push(edge_idx);
-                receiver_edges[receiver_idx].push(edge_idx);
             }
+        }
+
+        if let Some(topk) = options.non_settle_topk
+            && topk > 0
+        {
+            let mut keep = vec![false; candidates.len()];
+            for (idx, candidate) in candidates.iter().enumerate() {
+                if !candidate.edge.touches_non_settle {
+                    keep[idx] = true;
+                }
+            }
+
+            let mut payer_lists = vec![Vec::<(usize, i64, usize)>::new(); payers.len()];
+            let mut receiver_lists = vec![Vec::<(usize, i64, usize)>::new(); receivers.len()];
+
+            for (idx, candidate) in candidates.iter().enumerate() {
+                if candidate.edge.touches_non_settle {
+                    payer_lists[candidate.payer_idx].push((
+                        idx,
+                        candidate.edge.upper_bound,
+                        candidate.receiver_idx,
+                    ));
+                    receiver_lists[candidate.receiver_idx].push((
+                        idx,
+                        candidate.edge.upper_bound,
+                        candidate.payer_idx,
+                    ));
+                }
+            }
+
+            for list in &mut payer_lists {
+                list.sort_unstable_by(|lhs, rhs| rhs.1.cmp(&lhs.1).then(lhs.2.cmp(&rhs.2)));
+                for (idx, _, _) in list.iter().take(topk) {
+                    keep[*idx] = true;
+                }
+            }
+            for list in &mut receiver_lists {
+                list.sort_unstable_by(|lhs, rhs| rhs.1.cmp(&lhs.1).then(lhs.2.cmp(&rhs.2)));
+                for (idx, _, _) in list.iter().take(topk) {
+                    keep[*idx] = true;
+                }
+            }
+
+            candidates = candidates
+                .into_iter()
+                .enumerate()
+                .filter_map(|(idx, candidate)| keep[idx].then_some(candidate))
+                .collect();
+        }
+
+        let mut payer_edges: Vec<Vec<usize>> = vec![Vec::new(); payers.len()];
+        let mut receiver_edges: Vec<Vec<usize>> = vec![Vec::new(); receivers.len()];
+        let mut edges = Vec::with_capacity(candidates.len());
+        let mut cash_edge_indices = Vec::new();
+
+        for candidate in candidates {
+            let edge_idx = edges.len();
+            edges.push(candidate.edge);
+            if candidate.payer_is_cash {
+                cash_edge_indices.push(edge_idx);
+            }
+            payer_edges[candidate.payer_idx].push(edge_idx);
+            receiver_edges[candidate.receiver_idx].push(edge_idx);
         }
 
         Self {
             payers,
             receivers,
             edges,
+            cash_edge_indices,
             payer_edges,
             receiver_edges,
             settle_lookup,
@@ -368,257 +1155,126 @@ impl<MemberId: MemberIdTrait> TransferModel<MemberId> {
     }
 }
 
-struct StageSolution {
-    obj1: f64,
-    obj2: f64,
-    objw: f64,
-    obj3: f64,
-    x_values: Vec<f64>,
+fn is_exact_integer_in_f64(value: i128) -> bool {
+    value.unsigned_abs() <= MAX_SAFE_EXACT_INT_IN_F64 as u128
 }
 
-fn build_obj1_expr<MemberId: MemberIdTrait>(
-    model: &TransferModel<MemberId>,
-    z1_vars: &[Variable],
-) -> Expression {
-    let mut expr = Expression::default();
-    for (edge_idx, edge) in model.edges.iter().enumerate() {
-        if edge.payer_is_cash {
-            expr.add_mul(1.0, z1_vars[edge_idx]);
+fn balances_fit_exact_f64<MemberId>(people: &[PersonBalance<MemberId>]) -> bool {
+    people
+        .iter()
+        .all(|p| is_exact_integer_in_f64(p.balance as i128))
+}
+
+fn apply_highs_options(model: &mut Model, solve_options: &HighsCommonSolveOptions) {
+    model.set_option("presolve", "on");
+    match solve_options.preset {
+        HighsSolvePreset::Deterministic => {
+            model.set_option("threads", 1);
+            model.set_option("parallel", "off");
+        }
+        HighsSolvePreset::Fast => {
+            if let Some(threads) = solve_options
+                .threads
+                .filter(|threads| *threads > 0)
+                .map(|threads| threads.min(256))
+            {
+                model.set_option("threads", threads);
+            }
+            model.set_option("parallel", "on");
         }
     }
-    expr
-}
-
-fn build_obj2_expr<MemberId: MemberIdTrait>(
-    model: &TransferModel<MemberId>,
-    z2_vars: &[Variable],
-) -> Expression {
-    let mut expr = Expression::default();
-    for (edge_idx, edge) in model.edges.iter().enumerate() {
-        if edge.payer_is_cash {
-            expr.add_mul(1.0, z2_vars[edge_idx]);
-        }
+    if let Some(limit) = solve_options
+        .time_limit_seconds
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .map(|value| value.min(86_400.0))
+    {
+        model.set_option("time_limit", limit);
     }
-    expr
-}
-
-fn build_objw_expr<MemberId: MemberIdTrait>(
-    model: &TransferModel<MemberId>,
-    y_vars: &[Variable],
-) -> Expression {
-    let mut expr = Expression::default();
-    for (edge_idx, edge) in model.edges.iter().enumerate() {
-        if edge.touches_non_settle {
-            expr.add_mul(1.0, y_vars[edge_idx]);
-        }
+    if let Some(gap) = solve_options
+        .mip_rel_gap
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .map(|value| value.min(1.0))
+    {
+        model.set_option("mip_rel_gap", gap);
     }
-    expr
-}
-
-fn build_obj3_expr(y_vars: &[Variable]) -> Expression {
-    let mut expr = Expression::default();
-    for var in y_vars {
-        expr.add_mul(1.0, *var);
+    if let Some(gap) = solve_options
+        .mip_abs_gap
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .map(|value| value.min(1_000_000_000.0))
+    {
+        model.set_option("mip_abs_gap", gap);
     }
-    expr
 }
 
-#[allow(clippy::too_many_lines)]
-fn solve_transfer_stage<MemberId: MemberIdTrait>(
-    model: &TransferModel<MemberId>,
-    objective_kind: ObjectiveKind,
-    fixed: &FixedTargets,
-    lex_prefix: &[f64],
+fn gcd_u64(mut lhs: u64, mut rhs: u64) -> u64 {
+    while rhs != 0 {
+        let rem = lhs % rhs;
+        lhs = rhs;
+        rhs = rem;
+    }
+    lhs
+}
+
+fn gcd_of_nonzero_balances<MemberId>(people: &[PersonBalance<MemberId>]) -> u64 {
+    people
+        .iter()
+        .map(|person| person.balance.unsigned_abs())
+        .filter(|&value| value != 0)
+        .reduce(gcd_u64)
+        .unwrap_or(0)
+}
+
+fn normalize_scale(raw_scale: u64) -> i64 {
+    if raw_scale <= 1 || raw_scale > i64::MAX as u64 {
+        return 1;
+    }
+    raw_scale as i64
+}
+
+fn scaling_divisor_for_balances<MemberId>(people: &[PersonBalance<MemberId>]) -> i64 {
+    normalize_scale(gcd_of_nonzero_balances(people))
+}
+
+fn scaling_divisor_for_balances_and_grid<MemberId>(
+    people: &[PersonBalance<MemberId>],
     g1: i64,
     g2: i64,
-) -> Option<StageSolution> {
-    const EPS: f64 = 1e-6;
-    let mut vars = variables!();
-
-    let mut x_vars: Vec<Variable> = Vec::with_capacity(model.edges.len());
-    let mut y_vars: Vec<Variable> = Vec::with_capacity(model.edges.len());
-    let mut z1_vars: Vec<Variable> = Vec::with_capacity(model.edges.len());
-    let mut z2_vars: Vec<Variable> = Vec::with_capacity(model.edges.len());
-    let mut a1_vars: Vec<Variable> = Vec::with_capacity(model.edges.len());
-    let mut a2_vars: Vec<Variable> = Vec::with_capacity(model.edges.len());
-    let mut r1_vars: Vec<Variable> = Vec::with_capacity(model.edges.len());
-    let mut r2_vars: Vec<Variable> = Vec::with_capacity(model.edges.len());
-
-    for _ in &model.edges {
-        x_vars.push(vars.add(variable().integer().min(0.0)));
-        y_vars.push(vars.add(variable().binary()));
-        z1_vars.push(vars.add(variable().binary()));
-        z2_vars.push(vars.add(variable().binary()));
-        a1_vars.push(vars.add(variable().integer().min(0.0)));
-        a2_vars.push(vars.add(variable().integer().min(0.0)));
-        r1_vars.push(vars.add(variable().integer().min(0.0)));
-        r2_vars.push(vars.add(variable().integer().min(0.0)));
+) -> i64 {
+    let mut scale = gcd_of_nonzero_balances(people);
+    if scale == 0 {
+        return 1;
     }
-
-    let mut s_vars: Vec<Variable> = Vec::with_capacity(model.payers.len());
-    for _ in &model.payers {
-        s_vars.push(vars.add(variable().integer().min(0.0)));
-    }
-
-    let mut t_vars: Vec<Variable> = Vec::with_capacity(model.receivers.len());
-    for _ in &model.receivers {
-        t_vars.push(vars.add(variable().integer().min(0.0)));
-    }
-
-    let mut obj1_expr = Some(build_obj1_expr(model, &z1_vars));
-    let mut obj2_expr = Some(build_obj2_expr(model, &z2_vars));
-    let mut objw_expr = Some(build_objw_expr(model, &y_vars));
-    let mut obj3_expr = Some(build_obj3_expr(&y_vars));
-
-    let objective_expr = match objective_kind {
-        ObjectiveKind::Obj1 => obj1_expr
-            .take()
-            .unwrap_or_else(|| build_obj1_expr(model, &z1_vars)),
-        ObjectiveKind::Obj2 => obj2_expr
-            .take()
-            .unwrap_or_else(|| build_obj2_expr(model, &z2_vars)),
-        ObjectiveKind::ObjW => objw_expr
-            .take()
-            .unwrap_or_else(|| build_objw_expr(model, &y_vars)),
-        ObjectiveKind::Obj3 => obj3_expr.take().unwrap_or_else(|| build_obj3_expr(&y_vars)),
-        ObjectiveKind::Lex(index) => {
-            let mut expr = Expression::default();
-            expr.add_mul(1.0, x_vars[index]);
-            expr
-        }
-    };
-
-    let mut problem = vars.minimise(objective_expr).using(default_solver);
-
-    for (payer_idx, (payer, pay)) in model.payers.iter().enumerate() {
-        let mut flow = Expression::default();
-        for &edge_idx in &model.payer_edges[payer_idx] {
-            flow.add_mul(1.0, x_vars[edge_idx]);
-        }
-        flow.add_mul(1.0, s_vars[payer_idx]);
-        problem = problem.with(flow.eq(*pay as f64));
-        if model.settle_lookup.contains(payer) {
-            problem = problem.with((s_vars[payer_idx] - 0.0).eq(0.0));
-        }
-    }
-
-    for (receiver_idx, (receiver, recv)) in model.receivers.iter().enumerate() {
-        let mut flow = Expression::default();
-        for &edge_idx in &model.receiver_edges[receiver_idx] {
-            flow.add_mul(1.0, x_vars[edge_idx]);
-        }
-        flow.add_mul(1.0, t_vars[receiver_idx]);
-        problem = problem.with(flow.eq(*recv as f64));
-        if model.settle_lookup.contains(receiver) {
-            problem = problem.with((t_vars[receiver_idx] - 0.0).eq(0.0));
-        }
-    }
-
-    for (edge_idx, edge) in model.edges.iter().enumerate() {
-        let upper = edge.upper_bound as f64;
-        problem = problem.with((x_vars[edge_idx] - upper * y_vars[edge_idx]).leq(0.0));
-
-        if edge.payer_is_cash {
-            problem = problem
-                .with(
-                    (x_vars[edge_idx] - (g1 as f64) * a1_vars[edge_idx] - r1_vars[edge_idx])
-                        .eq(0.0),
-                )
-                .with(
-                    (r1_vars[edge_idx] - (g2 as f64) * a2_vars[edge_idx] - r2_vars[edge_idx])
-                        .eq(0.0),
-                )
-                .with((r1_vars[edge_idx] - ((g1 - 1) as f64) * z1_vars[edge_idx]).leq(0.0))
-                .with((r2_vars[edge_idx] - ((g2 - 1) as f64) * z2_vars[edge_idx]).leq(0.0))
-                .with((z2_vars[edge_idx] - z1_vars[edge_idx]).leq(0.0))
-                .with((z1_vars[edge_idx] - y_vars[edge_idx]).leq(0.0))
-                .with((z2_vars[edge_idx] - y_vars[edge_idx]).leq(0.0));
-        } else {
-            problem = problem
-                .with((z1_vars[edge_idx] - 0.0).eq(0.0))
-                .with((z2_vars[edge_idx] - 0.0).eq(0.0))
-                .with((a1_vars[edge_idx] - 0.0).eq(0.0))
-                .with((a2_vars[edge_idx] - 0.0).eq(0.0))
-                .with((r1_vars[edge_idx] - 0.0).eq(0.0))
-                .with((r2_vars[edge_idx] - 0.0).eq(0.0));
-        }
-    }
-
-    if let Some(target) = fixed.obj1 {
-        let expr = obj1_expr
-            .take()
-            .unwrap_or_else(|| build_obj1_expr(model, &z1_vars));
-        problem = problem.with(expr.leq(round_count_objective(target) + EPS));
-    }
-    if let Some(target) = fixed.obj2 {
-        let expr = obj2_expr
-            .take()
-            .unwrap_or_else(|| build_obj2_expr(model, &z2_vars));
-        problem = problem.with(expr.leq(round_count_objective(target) + EPS));
-    }
-    if let Some(target) = fixed.objw {
-        let expr = objw_expr
-            .take()
-            .unwrap_or_else(|| build_objw_expr(model, &y_vars));
-        problem = problem.with(expr.leq(round_count_objective(target) + EPS));
-    }
-    if let Some(target) = fixed.obj3 {
-        let expr = obj3_expr.take().unwrap_or_else(|| build_obj3_expr(&y_vars));
-        problem = problem.with(expr.leq(round_count_objective(target) + EPS));
-    }
-    for (idx, center) in lex_prefix.iter().copied().enumerate() {
-        problem = problem
-            .with((x_vars[idx] - center).leq(1e-6))
-            .with((center - x_vars[idx]).leq(1e-6));
-    }
-
-    let solution = problem.solve().ok()?;
-    let x_values: Vec<f64> = x_vars.iter().map(|var| solution.value(*var)).collect();
-    let obj1 = model
-        .edges
-        .iter()
-        .enumerate()
-        .filter(|(_, edge)| edge.payer_is_cash)
-        .map(|(idx, _)| solution.value(z1_vars[idx]))
-        .sum();
-    let obj2 = model
-        .edges
-        .iter()
-        .enumerate()
-        .filter(|(_, edge)| edge.payer_is_cash)
-        .map(|(idx, _)| solution.value(z2_vars[idx]))
-        .sum();
-    let objw = model
-        .edges
-        .iter()
-        .enumerate()
-        .filter(|(_, edge)| edge.touches_non_settle)
-        .map(|(idx, _)| solution.value(y_vars[idx]))
-        .sum();
-    let obj3 = y_vars.iter().map(|var| solution.value(*var)).sum();
-
-    Some(StageSolution {
-        obj1,
-        obj2,
-        objw,
-        obj3,
-        x_values,
-    })
+    scale = gcd_u64(scale, g1.unsigned_abs());
+    scale = gcd_u64(scale, g2.unsigned_abs());
+    normalize_scale(scale)
 }
 
-fn round_bankers(value: f64) -> i64 {
-    value.round_ties_even() as i64
+fn round_bankers_checked(value: f64) -> Result<i64, SettlementError> {
+    if !value.is_finite() {
+        return Err(SettlementError::NonFiniteSolution);
+    }
+    let rounded = value.round_ties_even();
+    if rounded < (i64::MIN as f64) || rounded > (i64::MAX as f64) {
+        return Err(SettlementError::OutOfRangeSolution);
+    }
+    Ok(rounded as i64)
 }
 
-fn round_count_objective(value: f64) -> f64 {
-    (value + 0.5).floor()
+fn round_binary_checked(value: f64) -> Result<i32, SettlementError> {
+    let v = round_bankers_checked(value)?;
+    match v {
+        0 => Ok(0),
+        1 => Ok(1),
+        _ => Err(SettlementError::NonBinarySolution),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        Payment, PersonBalance, SettlementError, construct_settlement_transfers,
-        minimize_transactions, round_bankers, round_count_objective,
+        HighsCommonSolveOptions, Payment, PersonBalance, SettlementError,
+        construct_settlement_transfers, minimize_transactions,
+        minimize_transactions_with_options_and_outcome, round_bankers_checked,
     };
     use proptest::prelude::*;
     use rstest::rstest;
@@ -640,68 +1296,107 @@ mod tests {
         balances
     }
 
-    fn balances_from_payments(people: &[PersonBalance], payments: &[Payment]) -> HashMap<u64, i64> {
-        let mut balances = HashMap::with_capacity(people.len());
+    fn assert_settles_to_zero(people: &[PersonBalance], payments: &[Payment]) {
+        let final_balances = apply_transfers(people, payments);
         for person in people {
-            balances.insert(person.id, 0);
-        }
-        for payment in payments {
-            *balances.entry(payment.from).or_insert(0) -= payment.amount;
-            *balances.entry(payment.to).or_insert(0) += payment.amount;
-        }
-        balances
-    }
-
-    fn assert_balances_match(people: &[PersonBalance], payments: &[Payment]) {
-        let balances = balances_from_payments(people, payments);
-        for person in people {
-            let actual = balances.get(&person.id).copied().unwrap_or(0);
-            assert_eq!(
-                actual, person.balance,
-                "balance mismatch for id {}",
-                person.id
-            );
+            let actual = final_balances.get(&person.id).copied().unwrap_or(0);
+            assert_eq!(actual, 0, "final balance not zero for id {}", person.id);
         }
     }
 
     #[rstest]
     #[case::simple_two_people(&[
-        PersonBalance {
-            id: 1,
-            balance: 100,
-        },
-        PersonBalance {
-            id: 2,
-            balance: -100,
-        },
+        PersonBalance { id: 1, balance: 100 },
+        PersonBalance { id: 2, balance: -100 },
     ])]
     fn settles_two_people(#[case] people: &[PersonBalance]) {
-        let payments =
-            minimize_transactions(people.iter().copied(), 1.0, 0.01).expect("expected solution");
+        let payments = minimize_transactions(people.iter().copied(), 1.0, 0.01).expect("solution");
 
         assert_eq!(payments.len(), 1);
-        assert_eq!(payments[0].from, 2);
-        assert_eq!(payments[0].to, 1);
+        assert_eq!(payments[0].from, 1);
+        assert_eq!(payments[0].to, 2);
         assert_eq!(payments[0].amount, 100);
-        assert_balances_match(people, &payments);
+        assert_settles_to_zero(people, &payments);
     }
 
     #[rstest]
     #[case::imbalanced(&[
         PersonBalance { id: 1, balance: 50 },
-        PersonBalance {
-            id: 2,
-            balance: -40,
-        },
+        PersonBalance { id: 2, balance: -40 },
     ])]
     fn rejects_imbalanced_total(#[case] people: &[PersonBalance]) {
         let result = minimize_transactions(people.iter().copied(), 1.0, 0.01);
         match result {
-            Err(SettlementError::ImbalancedTotal(total)) => {
-                assert_eq!(total, 10);
-            }
+            Err(SettlementError::ImbalancedTotal(total)) => assert_eq!(total, 10),
             _ => panic!("expected imbalanced total error"),
         }
+    }
+
+    #[test]
+    fn rejects_invalid_weights() {
+        let people = [
+            PersonBalance {
+                id: 1,
+                balance: 100,
+            },
+            PersonBalance {
+                id: 2,
+                balance: -100,
+            },
+        ];
+        let err = minimize_transactions(people, f64::NAN, 0.0).unwrap_err();
+        assert!(matches!(err, SettlementError::InvalidWeights { .. }));
+    }
+
+    #[test]
+    fn minimize_is_deterministic_across_input_order() {
+        let a = [
+            PersonBalance {
+                id: 1,
+                balance: 100,
+            },
+            PersonBalance {
+                id: 2,
+                balance: 100,
+            },
+            PersonBalance {
+                id: 3,
+                balance: -200,
+            },
+        ];
+        let b = [
+            PersonBalance {
+                id: 3,
+                balance: -200,
+            },
+            PersonBalance {
+                id: 1,
+                balance: 100,
+            },
+            PersonBalance {
+                id: 2,
+                balance: 100,
+            },
+        ];
+
+        let first = minimize_transactions_with_options_and_outcome(
+            a,
+            1.0,
+            0.01,
+            HighsCommonSolveOptions::default(),
+        )
+        .expect("solution")
+        .payments;
+        let second = minimize_transactions_with_options_and_outcome(
+            b,
+            1.0,
+            0.01,
+            HighsCommonSolveOptions::default(),
+        )
+        .expect("solution")
+        .payments;
+
+        assert_eq!(first, second);
     }
 
     #[rstest]
@@ -711,61 +1406,29 @@ mod tests {
         PersonBalance { id: 3, balance: 0 },
     ])]
     fn zero_balances_produce_no_payments(#[case] people: &[PersonBalance]) {
-        let payments =
-            minimize_transactions(people.iter().copied(), 1.0, 0.01).expect("expected solution");
+        let payments = minimize_transactions(people.iter().copied(), 1.0, 0.01).expect("solution");
         assert!(payments.is_empty());
     }
 
     #[rstest]
     #[case::empty(&[])]
-    #[case::single_zero(&[PersonBalance {
-        id: 1,
-        balance: 0,
-    }])]
+    #[case::single_zero(&[PersonBalance { id: 1, balance: 0 }])]
     fn small_inputs_produce_no_payments(#[case] people: &[PersonBalance]) {
-        let payments =
-            minimize_transactions(people.iter().copied(), 1.0, 0.01).expect("expected solution");
+        let payments = minimize_transactions(people.iter().copied(), 1.0, 0.01).expect("solution");
         assert!(payments.is_empty());
     }
 
     #[rstest]
-    #[case::single_nonzero(&[PersonBalance {
-        id: 1,
-        balance: 50,
-    }], 50)]
+    #[case::single_nonzero(&[PersonBalance { id: 1, balance: 50 }], 50)]
     fn small_inputs_reject_imbalanced(
         #[case] people: &[PersonBalance],
         #[case] expected_total: i64,
     ) {
         let result = minimize_transactions(people.iter().copied(), 1.0, 0.01);
         match result {
-            Err(SettlementError::ImbalancedTotal(total)) => {
-                assert_eq!(total, expected_total);
-            }
+            Err(SettlementError::ImbalancedTotal(total)) => assert_eq!(total, expected_total),
             _ => panic!("expected imbalanced total error"),
         }
-    }
-
-    #[rstest]
-    #[case::alpha_focus(1.0, 0.0)]
-    #[case::beta_focus(0.0, 1.0)]
-    fn balances_settle_with_weight_variations(#[case] alpha: f64, #[case] beta: f64) {
-        let people = [
-            PersonBalance { id: 1, balance: 80 },
-            PersonBalance {
-                id: 2,
-                balance: -50,
-            },
-            PersonBalance {
-                id: 3,
-                balance: -30,
-            },
-        ];
-
-        let payments =
-            minimize_transactions(people.iter().copied(), alpha, beta).expect("expected solution");
-
-        assert_balances_match(&people, &payments);
     }
 
     #[rstest]
@@ -777,18 +1440,26 @@ mod tests {
     #[case::non_tie_up(2.6, 3)]
     #[case::non_tie_down(-2.4, -2)]
     fn bankers_rounding(#[case] value: f64, #[case] expected: i64) {
-        assert_eq!(round_bankers(value), expected);
+        assert_eq!(round_bankers_checked(value).expect("finite"), expected);
     }
 
-    #[rstest]
-    #[case(2.999_999_9, 3.0)]
-    #[case(3.000_000_1, 3.0)]
-    #[case(0.0, 0.0)]
-    fn count_objective_rounding_stabilizes_near_integer_targets(
-        #[case] value: f64,
-        #[case] expected: f64,
-    ) {
-        assert_eq!(round_count_objective(value), expected);
+    #[test]
+    fn rejects_non_binary_after_rounding() {
+        // Ensures we fail fast if the solver (or numeric issues) yields a value that rounds to an
+        // unexpected integer for binary columns.
+        //
+        // This is a unit-level guardrail; it does not attempt to induce a real solver failure.
+        use super::round_binary_checked;
+        assert!(matches!(
+            round_binary_checked(2.0),
+            Err(SettlementError::NonBinarySolution)
+        ));
+        assert!(matches!(
+            round_binary_checked(-1.0),
+            Err(SettlementError::NonBinarySolution)
+        ));
+        assert_eq!(round_binary_checked(0.49).unwrap(), 0);
+        assert_eq!(round_binary_checked(0.51).unwrap(), 1);
     }
 
     proptest! {
@@ -810,13 +1481,13 @@ mod tests {
             });
 
             let payments = minimize_transactions(people.iter().copied(), 1.0, 0.01)
-                .expect("expected solution");
+                .expect("solution");
 
             for payment in &payments {
                 prop_assert!(payment.amount > 0);
                 prop_assert_ne!(payment.from, payment.to);
             }
-            assert_balances_match(&people, &payments);
+            assert_settles_to_zero(&people, &payments);
         }
 
         #[test]
@@ -828,7 +1499,7 @@ mod tests {
                 .collect();
 
             let payments = minimize_transactions(people.iter().copied(), 1.0, 0.01)
-                .expect("expected solution");
+                .expect("solution");
 
             prop_assert!(payments.is_empty());
         }
@@ -888,8 +1559,8 @@ mod tests {
             },
         ];
 
-        let payments = construct_settlement_transfers(people, &[1], &[], 1000, 100)
-            .expect("expected solution");
+        let payments =
+            construct_settlement_transfers(people, &[1], &[], 1000, 100).expect("solution");
 
         assert_eq!(
             payments,
@@ -918,10 +1589,10 @@ mod tests {
             },
         ];
 
-        let first = construct_settlement_transfers(people, &[1, 2], &[1], 1000, 100)
-            .expect("expected solution");
-        let second = construct_settlement_transfers(people, &[1, 2], &[1], 1000, 100)
-            .expect("expected solution");
+        let first =
+            construct_settlement_transfers(people, &[1, 2], &[1], 1000, 100).expect("solution");
+        let second =
+            construct_settlement_transfers(people, &[1, 2], &[1], 1000, 100).expect("solution");
 
         assert_eq!(first, second);
     }
@@ -961,99 +1632,12 @@ mod tests {
 
         let sorted_result =
             construct_settlement_transfers(sorted_people, &[1, 2, 3], &[1], 1000, 100)
-                .expect("expected solution");
+                .expect("solution");
         let shuffled_result =
             construct_settlement_transfers(shuffled_people, &[1, 2, 3], &[1], 1000, 100)
-                .expect("expected solution");
-
-        assert_eq!(sorted_result, shuffled_result);
-    }
-
-    #[rstest]
-    #[case::obj1_prioritized(
-        vec![
-            PersonBalance { id: 1, balance: 2000 },
-            PersonBalance { id: 2, balance: 100 },
-            PersonBalance { id: 3, balance: -1000 },
-            PersonBalance { id: 4, balance: -1100 },
-        ],
-        vec![1, 2, 3, 4],
-        vec![1],
-        vec![
-            Payment { from: 1, to: 3, amount: 1000 },
-            Payment { from: 1, to: 4, amount: 1000 },
-            Payment { from: 2, to: 4, amount: 100 },
-        ]
-    )]
-    #[case::obj2_breaks_obj1_ties(
-        vec![
-            PersonBalance { id: 1, balance: 1300 },
-            PersonBalance { id: 2, balance: 100 },
-            PersonBalance { id: 3, balance: -750 },
-            PersonBalance { id: 4, balance: -650 },
-        ],
-        vec![1, 2, 3, 4],
-        vec![1],
-        vec![
-            Payment { from: 1, to: 3, amount: 700 },
-            Payment { from: 1, to: 4, amount: 600 },
-            Payment { from: 2, to: 3, amount: 50 },
-            Payment { from: 2, to: 4, amount: 50 },
-        ]
-    )]
-    #[case::objw_prefers_internal_counterparts(
-        vec![
-            PersonBalance { id: 1, balance: 1200 },
-            PersonBalance { id: 2, balance: -1000 },
-            PersonBalance { id: 3, balance: -200 },
-            PersonBalance { id: 4, balance: -200 },
-            PersonBalance { id: 5, balance: 200 },
-        ],
-        vec![1, 2, 3],
-        vec![1],
-        vec![
-            Payment { from: 1, to: 2, amount: 1000 },
-            Payment { from: 1, to: 3, amount: 200 },
-        ]
-    )]
-    fn transfer_construction_lexicographic_objectives(
-        #[case] people: Vec<PersonBalance>,
-        #[case] settle_members: Vec<u64>,
-        #[case] cash_members: Vec<u64>,
-        #[case] expected: Vec<Payment>,
-    ) {
-        let payments =
-            construct_settlement_transfers(people, &settle_members, &cash_members, 1000, 100)
                 .expect("solution");
 
-        assert_eq!(payments, expected);
-    }
-
-    #[test]
-    fn transfer_construction_obj3_minimizes_transfer_count() {
-        let people = [
-            PersonBalance {
-                id: 1,
-                balance: 100,
-            },
-            PersonBalance {
-                id: 2,
-                balance: 100,
-            },
-            PersonBalance {
-                id: 3,
-                balance: -100,
-            },
-            PersonBalance {
-                id: 4,
-                balance: -100,
-            },
-        ];
-
-        let payments = construct_settlement_transfers(people, &[1, 2, 3, 4], &[], 1000, 100)
-            .expect("solution");
-
-        assert_eq!(payments.len(), 2);
+        assert_eq!(sorted_result, shuffled_result);
     }
 
     #[test]

@@ -3,7 +3,8 @@ use walicord_domain::{
     AtomicUnitConversionError, Money, SettlementContext, Transfer, model::MemberId,
 };
 use walicord_transfer_construction::{
-    PersonBalance as CalcBalance, SettlementError, construct_settlement_transfers,
+    HighsCommonSolveOptions, PersonBalance as CalcBalance, SettlementError,
+    SettlementTransferOptions, construct_settlement_transfers_with_options,
 };
 
 #[derive(Default)]
@@ -26,6 +27,11 @@ fn map_calc_settlement_error(err: SettlementError) -> SettlementOptimizationErro
         },
         SettlementError::NoSolution => SettlementOptimizationError::NoSolution,
         SettlementError::RoundingMismatch => SettlementOptimizationError::RoundingMismatch,
+        SettlementError::InvalidWeights { .. }
+        | SettlementError::BalancesTooLargeForF64
+        | SettlementError::NonFiniteSolution
+        | SettlementError::OutOfRangeSolution
+        | SettlementError::NonBinarySolution => SettlementOptimizationError::NoSolution,
     }
 }
 
@@ -68,9 +74,25 @@ impl SettlementOptimizer for WalicordSettlementOptimizer {
             )
             .collect::<Result<Vec<_>, SettlementOptimizationError>>()?;
 
-        let settlements =
-            construct_settlement_transfers(calc_balances, settle_members, cash_members, 1000, 100)
-                .map_err(map_calc_settlement_error)?;
+        let options = SettlementTransferOptions::default().with_solve(
+            walicord_transfer_construction::TransferSolveOptions {
+                highs: HighsCommonSolveOptions {
+                    time_limit_seconds: Some(30.0),
+                    accept_feasible_on_limit: true,
+                    ..HighsCommonSolveOptions::default()
+                },
+                ..Default::default()
+            },
+        );
+        let settlements = construct_settlement_transfers_with_options(
+            calc_balances,
+            settle_members,
+            cash_members,
+            1000,
+            100,
+            options,
+        )
+        .map_err(map_calc_settlement_error)?;
 
         let optimized_transfers = settlements
             .iter()

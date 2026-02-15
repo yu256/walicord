@@ -32,7 +32,7 @@ jobs:
           tool: nextest
 
       - name: Run clippy
-        run: cargo clippy --features highs,ja -- -D warnings
+        run: cargo clippy -- -D warnings
 
       - name: Run tests
-        run: cargo nextest run --features highs,ja
+        run: cargo nextest run

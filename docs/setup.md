@@ -30,16 +30,15 @@ Rustの開発環境がある場合の手順です。
 3. **設定**: `.env`ファイルを作成し、必要な設定を行います。
 4. **実行**:
 
-   **線形計画ソルバーの選択**
-
-   ソルバーと言語をfeatureフラグで指定します：
+   Walicord は HiGHS ソルバーを標準で使用します。言語を feature フラグで指定して実行します：
 
    ```sh
-   # HiGHSソルバー（推奨）
-   cargo run --release --features highs,ja
+   # 日本語（デフォルト）
+   cargo run --release --features ja
 
-   # COIN-OR CBCソルバー
-   cargo run --release --features coin_cbc,ja
+   # 英語
+   cargo run --release --no-default-features --features en
+
    ```
 
 ## Discordボットの作成

@@ -60,7 +60,7 @@ jobs:
           cache-dev: false
 
       - name: Build release
-        run: cargo build --release --target ${{ matrix.target }} --features highs,ja
+        run: cargo build --release --target ${{ matrix.target }}
 
       - name: Create archive (Windows)
         if: ${{ matrix.os == 'windows-latest' }}
