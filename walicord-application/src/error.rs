@@ -14,7 +14,7 @@ pub enum ProgramParseError<'a> {
     UndefinedGroup { name: Cow<'a, str>, line: usize },
     UndefinedMember { id: u64, line: usize },
     SyntaxError { line: usize, detail: String },
-    MissingContextForImplicitPayment { line: usize },
+    MissingContextForImplicitAuthor { line: usize },
     InvalidAmountExpression { line: usize, detail: String },
 }
 
@@ -75,7 +75,7 @@ impl SettlementOptimizationError {
 impl ProgramParseError<'_> {
     pub fn kind(&self) -> FailureKind {
         match self {
-            ProgramParseError::MissingContextForImplicitPayment { .. } => {
+            ProgramParseError::MissingContextForImplicitAuthor { .. } => {
                 FailureKind::Misconfiguration
             }
             ProgramParseError::FailedToEvaluateGroup { .. }
@@ -142,7 +142,7 @@ mod tests {
 
     #[rstest]
     #[case::missing_context(
-        ProgramParseError::MissingContextForImplicitPayment { line: 1 },
+        ProgramParseError::MissingContextForImplicitAuthor { line: 1 },
         FailureKind::Misconfiguration
     )]
     #[case::syntax_error(

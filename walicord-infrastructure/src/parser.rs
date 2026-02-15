@@ -81,7 +81,7 @@ impl ProgramParser for WalicordProgramParser {
                                 PayerSpec::Implicit => {
                                     let Some(author) = author_id else {
                                         return Err(
-                                            ProgramParseError::MissingContextForImplicitPayment {
+                                            ProgramParseError::MissingContextForImplicitAuthor {
                                                 line,
                                             },
                                         );
@@ -114,20 +114,20 @@ impl ProgramParser for WalicordProgramParser {
                             let command = match parser_command {
                                 ParserCommand::Variables => Command::Variables,
                                 ParserCommand::Review => Command::Review,
-                                ParserCommand::MemberSetCash { members } => {
-                                    Command::MemberSetCash {
+                                ParserCommand::MemberAddCash { members } => {
+                                    Command::MemberAddCash {
                                         members: to_member_set_expr(members),
                                     }
                                 }
                                 ParserCommand::CashSelf => {
                                     let Some(author) = author_id else {
                                         return Err(
-                                            ProgramParseError::MissingContextForImplicitPayment {
+                                            ProgramParseError::MissingContextForImplicitAuthor {
                                                 line,
                                             },
                                         );
                                     };
-                                    Command::MemberSetCash {
+                                    Command::MemberAddCash {
                                         members: MemberSetExpr::new([MemberSetOp::Push(author)]),
                                     }
                                 }
@@ -212,7 +212,7 @@ mod tests {
         let members: [MemberId; 0] = [];
         let result = parser.parse(&members, input, None);
         match result {
-            Err(ProgramParseError::MissingContextForImplicitPayment { line }) => {
+            Err(ProgramParseError::MissingContextForImplicitAuthor { line }) => {
                 assert_eq!(line, 1);
             }
             _ => panic!("expected implicit payer without author error"),
@@ -255,7 +255,7 @@ mod tests {
             .expect("parse should succeed");
 
         let statement = &script.statements()[0].statement;
-        let ScriptStatement::Command(Command::MemberSetCash { members }) = statement else {
+        let ScriptStatement::Command(Command::MemberAddCash { members }) = statement else {
             panic!("expected member cash command");
         };
 
@@ -272,7 +272,7 @@ mod tests {
             .expect("parse should succeed");
 
         let statement = &script.statements()[0].statement;
-        let ScriptStatement::Command(Command::MemberSetCash { members }) = statement else {
+        let ScriptStatement::Command(Command::MemberAddCash { members }) = statement else {
             panic!("expected member cash command");
         };
 

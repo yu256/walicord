@@ -590,7 +590,7 @@ impl<'a> Handler<'a> {
                                 }
                             }
                         }
-                        ProgramCommand::MemberSetCash { .. } => {}
+                        ProgramCommand::MemberAddCash { .. } => {}
                     }
                 }
 
@@ -652,7 +652,7 @@ impl<'a> Handler<'a> {
                 .await;
                 false
             }
-            ProcessingOutcome::MissingContextForImplicitPayment { line } => {
+            ProcessingOutcome::MissingContextForImplicitAuthor { line } => {
                 self.react(ctx, msg, '❎').await;
                 self.reply(
                     ctx,

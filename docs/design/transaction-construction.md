@@ -143,8 +143,8 @@ This is preferred over splits that increase non-`G1`/non-`G2` cash transfers or 
 Walicord exposes cash preference in two script-level forms.
 
 - Script-local persisted flag (effective while scanning the current script in order):
-- `!member set <set_expr> cash`
-- `!cash` (self)
+  - `!member set <set_expr> cash`
+  - `!cash` (self)
 - Per-command option:
   - `!settleup <set_expr> [--cash <set_expr>]`
 

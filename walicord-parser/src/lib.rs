@@ -129,7 +129,7 @@ pub enum Command<'a> {
     Variables,
     Review,
     CashSelf,
-    MemberSetCash {
+    MemberAddCash {
         members: SetExpr<'a>,
     },
     SettleUp {
@@ -472,7 +472,7 @@ fn command(input: &str) -> IResult<&str, Command<'_>> {
             sp,
             tag_no_case("cash"),
         )
-            .map(|(_, _, _, _, members, _, _)| Command::MemberSetCash { members }),
+            .map(|(_, _, _, _, members, _, _)| Command::MemberAddCash { members }),
         (
             alt((tag_no_case("!settleup"), tag_no_case("!確定"))),
             sp,
@@ -678,7 +678,7 @@ mod tests {
         members.push(SetOp::Push(11));
         members.push(SetOp::Union);
 
-        assert_eq!(stmt, Statement::Command(Command::MemberSetCash { members }));
+        assert_eq!(stmt, Statement::Command(Command::MemberAddCash { members }));
     }
 
     #[test]
@@ -833,7 +833,7 @@ mod tests {
     )]
     #[case::inline_comment_member_cash(
         "!member set <@10> /*メモ*/ cash",
-        Statement::Command(Command::MemberSetCash {
+        Statement::Command(Command::MemberAddCash {
             members: {
             let mut expr = SetExpr::new();
             expr.push(SetOp::Push(10));
