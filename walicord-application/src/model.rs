@@ -9,7 +9,6 @@ pub enum Command<'a> {
     Review,
     MemberSetCash {
         members: MemberSetExpr<'a>,
-        enabled: bool,
     },
     SettleUp {
         members: MemberSetExpr<'a>,

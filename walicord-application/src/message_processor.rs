@@ -253,17 +253,11 @@ impl<'a> MessageProcessor<'a> {
                     }
                     match command {
                         Command::Variables | Command::Review => {}
-                        Command::MemberSetCash { members, enabled } => {
+                        Command::MemberSetCash { members } => {
                             let Some(target_members) = accumulator.evaluate_members(members) else {
                                 continue;
                             };
-                            for member in target_members.iter() {
-                                if *enabled {
-                                    script_local_cash_members.insert(member);
-                                } else {
-                                    script_local_cash_members.remove(&member);
-                                }
-                            }
+                            script_local_cash_members.extend(target_members.iter());
                         }
                         Command::SettleUp {
                             members,
@@ -640,7 +634,6 @@ mod tests {
                     line: 5,
                     statement: ScriptStatement::Command(Command::MemberSetCash {
                         members: union_members(&[1]),
-                        enabled: true,
                     }),
                 },
                 ScriptStatementWithLine {
@@ -673,7 +666,6 @@ mod tests {
                 line: 5,
                 statement: ScriptStatement::Command(Command::MemberSetCash {
                     members: union_members(&[1]),
-                    enabled: true,
                 }),
             },
             ScriptStatementWithLine {
@@ -733,7 +725,6 @@ mod tests {
                 line: 5,
                 statement: ScriptStatement::Command(Command::MemberSetCash {
                     members: union_members(&[1]),
-                    enabled: true,
                 }),
             },
             ScriptStatementWithLine {
@@ -762,50 +753,6 @@ mod tests {
         Script::new(&[], command_statements)
     }
 
-    fn script_with_member_cash_on_off() -> Script<'static> {
-        let members = union_members(&[1, 2, 3, 4]);
-        let mut on_off_statements = base_cash_sensitivity_payments();
-        on_off_statements.extend([
-            ScriptStatementWithLine {
-                line: 5,
-                statement: ScriptStatement::Command(Command::MemberSetCash {
-                    members: union_members(&[1]),
-                    enabled: true,
-                }),
-            },
-            ScriptStatementWithLine {
-                line: 6,
-                statement: ScriptStatement::Command(Command::MemberSetCash {
-                    members: union_members(&[1]),
-                    enabled: false,
-                }),
-            },
-            ScriptStatementWithLine {
-                line: 7,
-                statement: ScriptStatement::Command(Command::SettleUp {
-                    members,
-                    cash_members: None,
-                }),
-            },
-        ]);
-
-        Script::new(&[], on_off_statements)
-    }
-
-    fn script_baseline_no_cash() -> Script<'static> {
-        let members = union_members(&[1, 2, 3, 4]);
-        let mut baseline_statements = base_cash_sensitivity_payments();
-        baseline_statements.push(ScriptStatementWithLine {
-            line: 5,
-            statement: ScriptStatement::Command(Command::SettleUp {
-                members,
-                cash_members: None,
-            }),
-        });
-
-        Script::new(&[], baseline_statements)
-    }
-
     fn script_with_invalid_member_cash_expr() -> Script<'static> {
         let members = union_members(&[1, 2, 3, 4]);
         let mut with_invalid_cash = base_cash_sensitivity_payments();
@@ -814,14 +761,12 @@ mod tests {
                 line: 5,
                 statement: ScriptStatement::Command(Command::MemberSetCash {
                     members: union_members(&[1]),
-                    enabled: true,
                 }),
             },
             ScriptStatementWithLine {
                 line: 6,
                 statement: ScriptStatement::Command(Command::MemberSetCash {
                     members: MemberSetExpr::new(vec![MemberSetOp::PushGroup("unknown")]),
-                    enabled: false,
                 }),
             },
             ScriptStatementWithLine {
@@ -844,7 +789,6 @@ mod tests {
                 line: 5,
                 statement: ScriptStatement::Command(Command::MemberSetCash {
                     members: union_members(&[1]),
-                    enabled: true,
                 }),
             },
             ScriptStatementWithLine {
@@ -886,7 +830,6 @@ mod tests {
 
     #[rstest]
     #[case::persisted_and_command_cash(script_with_persisted_cash(), script_with_command_cash())]
-    #[case::cash_off_matches_baseline(script_with_member_cash_on_off(), script_baseline_no_cash())]
     #[case::invalid_cash_expr_keeps_previous_state(
         script_with_invalid_member_cash_expr(),
         script_with_member_cash_on()
@@ -911,7 +854,6 @@ mod tests {
                 line: 5,
                 statement: ScriptStatement::Command(Command::MemberSetCash {
                     members: union_members(&[1]),
-                    enabled: true,
                 }),
             },
             ScriptStatementWithLine {

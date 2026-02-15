@@ -114,10 +114,23 @@ impl ProgramParser for WalicordProgramParser {
                             let command = match parser_command {
                                 ParserCommand::Variables => Command::Variables,
                                 ParserCommand::Review => Command::Review,
-                                ParserCommand::MemberSetCash { members, enabled } => {
+                                ParserCommand::MemberSetCash { members } => {
                                     Command::MemberSetCash {
                                         members: to_member_set_expr(members),
-                                        enabled,
+                                    }
+                                }
+                                ParserCommand::CashSelf => {
+                                    let Some(author) = author_id else {
+                                        return Err(
+                                            ProgramParseError::MissingContextForImplicitPayment {
+                                                line,
+                                            },
+                                        );
+                                    };
+                                    Command::MemberSetCash {
+                                        members: MemberSetExpr::new(vec![MemberSetOp::Push(
+                                            author,
+                                        )]),
                                     }
                                 }
                                 ParserCommand::SettleUp {
@@ -240,17 +253,32 @@ mod tests {
         let parser = WalicordProgramParser;
         let members: [MemberId; 0] = [];
         let script = parser
-            .parse(&members, "!member set <@1> <@2> cash off", None)
+            .parse(&members, "!member set <@1> <@2> cash", None)
             .expect("parse should succeed");
 
         let statement = &script.statements()[0].statement;
-        let ScriptStatement::Command(Command::MemberSetCash { members, enabled }) = statement
-        else {
+        let ScriptStatement::Command(Command::MemberSetCash { members }) = statement else {
             panic!("expected member cash command");
         };
 
         let ids: Vec<_> = members.referenced_ids().collect();
         assert_eq!(ids, vec![MemberId(1), MemberId(2)]);
-        assert!(!enabled);
+    }
+
+    #[test]
+    fn parse_cash_self_command_maps_to_member_cash() {
+        let parser = WalicordProgramParser;
+        let members: [MemberId; 0] = [];
+        let script = parser
+            .parse(&members, "!cash", Some(MemberId(7)))
+            .expect("parse should succeed");
+
+        let statement = &script.statements()[0].statement;
+        let ScriptStatement::Command(Command::MemberSetCash { members }) = statement else {
+            panic!("expected member cash command");
+        };
+
+        let ids: Vec<_> = members.referenced_ids().collect();
+        assert_eq!(ids, vec![MemberId(7)]);
     }
 }

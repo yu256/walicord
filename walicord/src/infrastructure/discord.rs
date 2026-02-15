@@ -25,8 +25,9 @@ pub enum ChannelError {
 pub struct DiscordChannelService;
 
 fn should_ignore_history_message(message: &Message) -> bool {
-    let command_without_state_effect =
-        is_command_message(&message.content) && !is_command_prefix(&message.content, "!member");
+    let command_without_state_effect = is_command_message(&message.content)
+        && !is_command_prefix(&message.content, "!member")
+        && !is_command_prefix(&message.content, "!cash");
     message.author.bot
         || message
             .reactions
@@ -160,7 +161,8 @@ mod tests {
     }
 
     #[rstest]
-    #[case::member_cash_command_kept("!member set <@1> cash on", false)]
+    #[case::member_cash_command_kept("!member set <@1> cash", false)]
+    #[case::cash_command_kept("!cash", false)]
     #[case::settleup_command_ignored("!settleup <@1>", true)]
     fn history_filter_keeps_stateful_member_commands(
         #[case] content: &str,

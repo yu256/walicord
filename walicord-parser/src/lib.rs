@@ -128,9 +128,9 @@ impl<'a> Payment<'a> {
 pub enum Command<'a> {
     Variables,
     Review,
+    CashSelf,
     MemberSetCash {
         members: SetExpr<'a>,
-        enabled: bool,
     },
     SettleUp {
         members: SetExpr<'a>,
@@ -462,6 +462,7 @@ fn command(input: &str) -> IResult<&str, Command<'_>> {
         tag_no_case("!variables").map(|_| Command::Variables),
         tag_no_case("!review").map(|_| Command::Review),
         tag("!清算確認").map(|_| Command::Review),
+        tag_no_case("!cash").map(|_| Command::CashSelf),
         (
             tag_no_case("!member"),
             sp,
@@ -470,15 +471,8 @@ fn command(input: &str) -> IResult<&str, Command<'_>> {
             set_expr,
             sp,
             tag_no_case("cash"),
-            sp,
-            alt((tag_no_case("on"), tag_no_case("off"))),
         )
-            .map(
-                |(_, _, _, _, members, _, _, _, state)| Command::MemberSetCash {
-                    members,
-                    enabled: state.eq_ignore_ascii_case("on"),
-                },
-            ),
+            .map(|(_, _, _, _, members, _, _)| Command::MemberSetCash { members }),
         (
             alt((tag_no_case("!settleup"), tag_no_case("!確定"))),
             sp,
@@ -674,25 +668,29 @@ mod tests {
         );
     }
 
-    #[rstest]
-    #[case::cash_on("!member set <@10> ∪ <@11> cash on", true)]
-    #[case::cash_off("!member set <@10> ∪ <@11> cash off", false)]
-    fn test_parse_member_cash_command(#[case] input: &str, #[case] enabled: bool) {
-        let (_, stmt) = statement(input).expect("member cash command should parse");
+    #[test]
+    fn test_parse_member_cash_command() {
+        let (_, stmt) =
+            statement("!member set <@10> ∪ <@11> cash").expect("member cash command should parse");
 
         let mut members = SetExpr::new();
         members.push(SetOp::Push(10));
         members.push(SetOp::Push(11));
         members.push(SetOp::Union);
 
-        assert_eq!(
-            stmt,
-            Statement::Command(Command::MemberSetCash { members, enabled })
-        );
+        assert_eq!(stmt, Statement::Command(Command::MemberSetCash { members }));
+    }
+
+    #[test]
+    fn test_parse_cash_self_command() {
+        let (_, stmt) = statement("!cash").expect("cash command should parse");
+        assert_eq!(stmt, Statement::Command(Command::CashSelf));
     }
 
     #[rstest]
     #[case::member_cash_invalid_state("!member set <@1> cash maybe")]
+    #[case::member_cash_legacy_on("!member set <@1> cash on")]
+    #[case::member_cash_legacy_off("!member set <@1> cash off")]
     #[case::settleup_cash_missing_expr("!settleup <@1> --cash")]
     fn test_reject_invalid_command_syntax(#[case] input: &str) {
         let result = parse_program(input);
@@ -834,14 +832,13 @@ mod tests {
         })
     )]
     #[case::inline_comment_member_cash(
-        "!member set <@10> /*メモ*/ cash on",
+        "!member set <@10> /*メモ*/ cash",
         Statement::Command(Command::MemberSetCash {
             members: {
             let mut expr = SetExpr::new();
             expr.push(SetOp::Push(10));
             expr
             },
-            enabled: true,
         })
     )]
     #[case::inline_comment_adjacent(
