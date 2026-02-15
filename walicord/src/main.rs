@@ -402,26 +402,34 @@ impl<'a> Handler<'a> {
         let mut member_directory: Option<HashMap<MemberId, String>> = None;
         let author_id = MemberId(msg.author.id.get());
 
-        let messages_guard = self.message_cache.get(&msg.channel_id);
-
-        let next_line_offset = match &messages_guard {
-            Some(messages) => next_line_offset(messages.iter().map(|(_, m)| m)),
-            None => 0,
+        let (cached_contents, next_line_offset) = {
+            let guard = self.message_cache.get(&msg.channel_id);
+            match &guard {
+                Some(messages) => {
+                    let offset = next_line_offset(messages.iter().map(|(_, m)| m));
+                    let contents: Vec<(String, Option<MemberId>)> = messages
+                        .iter()
+                        .map(|(_, m)| (m.content.clone(), Some(MemberId(m.author.id.get()))))
+                        .collect();
+                    (contents, offset)
+                }
+                None => (Vec::new(), 0),
+            }
         };
 
-        let parse_outcome = match &messages_guard {
-            Some(messages) => {
-                let message_iter = messages
-                    .iter()
-                    .map(|(_, m)| (m.content.as_str(), Some(MemberId(m.author.id.get()))))
-                    .chain(std::iter::once((msg.content.as_str(), Some(author_id))));
-                self.processor
-                    .parse_program_sequence(&member_ids, message_iter)
-            }
-            None => self.processor.parse_program_sequence(
+        let parse_outcome = if cached_contents.is_empty() {
+            self.processor.parse_program_sequence(
                 &member_ids,
                 std::iter::once((msg.content.as_str(), Some(author_id))),
-            ),
+            )
+        } else {
+            self.processor.parse_program_sequence(
+                &member_ids,
+                cached_contents
+                    .iter()
+                    .map(|(content, author)| (content.as_str(), *author))
+                    .chain(std::iter::once((msg.content.as_str(), Some(author_id)))),
+            )
         };
 
         match parse_outcome {
