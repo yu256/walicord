@@ -3,7 +3,7 @@
 mod infrastructure;
 mod member_roster_provider;
 
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 use indexmap::IndexMap;
 use infrastructure::{
     discord::{ChannelError, DiscordChannelService, to_member_info},
@@ -90,7 +90,7 @@ fn format_settlement_error(err: SettlementOptimizationError) -> String {
 }
 
 struct Handler<'a> {
-    enabled_channels: DashMap<ChannelId, GuildId>,
+    enabled_channels: DashSet<ChannelId>,
     message_cache: DashMap<ChannelId, IndexMap<MessageId, Message>>,
     channel_service: DiscordChannelService,
     roster_provider: MemberRosterProvider,
@@ -128,7 +128,7 @@ impl<'a> Handler<'a> {
         processor: MessageProcessor<'a>,
     ) -> Self {
         Self {
-            enabled_channels: DashMap::new(),
+            enabled_channels: DashSet::new(),
             message_cache: DashMap::new(),
             channel_service,
             roster_provider,
@@ -137,24 +137,19 @@ impl<'a> Handler<'a> {
     }
 
     fn is_enabled_channel(&self, channel_id: ChannelId) -> bool {
-        self.enabled_channels.contains_key(&channel_id)
+        self.enabled_channels.contains(&channel_id)
     }
 
     fn topic_has_flag(topic: Option<&str>) -> bool {
         topic.is_some_and(|topic| topic.contains(CHANNEL_TOPIC_FLAG))
     }
 
-    fn apply_channel_toggle(
-        &self,
-        channel_id: ChannelId,
-        guild_id: GuildId,
-        enabled: bool,
-    ) -> ChannelToggle {
+    fn apply_channel_toggle(&self, channel_id: ChannelId, enabled: bool) -> ChannelToggle {
         if enabled {
-            if self.enabled_channels.insert(channel_id, guild_id).is_some() {
-                ChannelToggle::NoChange
-            } else {
+            if self.enabled_channels.insert(channel_id) {
                 ChannelToggle::Enabled
+            } else {
+                ChannelToggle::NoChange
             }
         } else if self.enabled_channels.remove(&channel_id).is_some() {
             self.message_cache.remove(&channel_id);
@@ -164,9 +159,9 @@ impl<'a> Handler<'a> {
         }
     }
 
-    async fn enable_channel(&self, ctx: &Context, channel_id: ChannelId, guild_id: GuildId) {
+    async fn enable_channel(&self, ctx: &Context, channel_id: ChannelId) {
         if !matches!(
-            self.apply_channel_toggle(channel_id, guild_id, true),
+            self.apply_channel_toggle(channel_id, true),
             ChannelToggle::Enabled
         ) {
             return;
@@ -205,9 +200,9 @@ impl<'a> Handler<'a> {
         }
     }
 
-    fn disable_channel(&self, channel_id: ChannelId, guild_id: GuildId) {
+    fn disable_channel(&self, channel_id: ChannelId) {
         if matches!(
-            self.apply_channel_toggle(channel_id, guild_id, false),
+            self.apply_channel_toggle(channel_id, false),
             ChannelToggle::Disabled
         ) {
             tracing::info!("Disabled channel {}", channel_id);
@@ -222,7 +217,7 @@ impl<'a> Handler<'a> {
                 Ok(channels) => {
                     for channel in channels.values() {
                         if Self::topic_has_flag(channel.topic.as_deref()) {
-                            self.enable_channel(ctx, channel.id, guild_id).await;
+                            self.enable_channel(ctx, channel.id).await;
                         }
                     }
                 }
@@ -944,11 +939,10 @@ impl EventHandler for Handler<'_> {
     }
 
     async fn channel_update(&self, ctx: Context, _old: Option<GuildChannel>, new: GuildChannel) {
-        let guild_id = new.guild_id;
         if Self::topic_has_flag(new.topic.as_deref()) {
-            self.enable_channel(&ctx, new.id, guild_id).await;
+            self.enable_channel(&ctx, new.id).await;
         } else {
-            self.disable_channel(new.id, guild_id);
+            self.disable_channel(new.id);
         }
     }
 
@@ -1316,15 +1310,14 @@ mod tests {
         let roster_provider = MemberRosterProvider::new(DiscordChannelService);
         let handler = Handler::new(DiscordChannelService, roster_provider, processor);
         let channel_id = ChannelId::new(1);
-        let guild_id = GuildId::new(10);
 
         assert_eq!(
-            handler.apply_channel_toggle(channel_id, guild_id, true),
+            handler.apply_channel_toggle(channel_id, true),
             ChannelToggle::Enabled
         );
         assert!(handler.is_enabled_channel(channel_id));
         assert_eq!(
-            handler.apply_channel_toggle(channel_id, guild_id, true),
+            handler.apply_channel_toggle(channel_id, true),
             ChannelToggle::NoChange
         );
 
@@ -1333,7 +1326,7 @@ mod tests {
         handler.message_cache.insert(channel_id, cache);
 
         assert_eq!(
-            handler.apply_channel_toggle(channel_id, guild_id, false),
+            handler.apply_channel_toggle(channel_id, false),
             ChannelToggle::Disabled
         );
         assert!(!handler.is_enabled_channel(channel_id));
@@ -1346,12 +1339,10 @@ mod tests {
         let roster_provider = MemberRosterProvider::new(DiscordChannelService);
         let handler = Handler::new(DiscordChannelService, roster_provider, processor);
         let channel_a = ChannelId::new(1);
-        let guild_a = GuildId::new(10);
         let channel_b = ChannelId::new(2);
-        let guild_b = GuildId::new(11);
 
-        handler.apply_channel_toggle(channel_a, guild_a, true);
-        handler.apply_channel_toggle(channel_b, guild_b, true);
+        handler.apply_channel_toggle(channel_a, true);
+        handler.apply_channel_toggle(channel_b, true);
 
         let mut cache_a = IndexMap::new();
         cache_a.insert(MessageId::new(10), make_message(10, 1, 1, "PAY"));
@@ -1361,7 +1352,7 @@ mod tests {
         cache_b.insert(MessageId::new(11), make_message(11, 2, 2, "PAY"));
         handler.message_cache.insert(channel_b, cache_b);
 
-        handler.apply_channel_toggle(channel_a, guild_a, false);
+        handler.apply_channel_toggle(channel_a, false);
 
         assert!(!handler.is_enabled_channel(channel_a));
         assert!(handler.is_enabled_channel(channel_b));
