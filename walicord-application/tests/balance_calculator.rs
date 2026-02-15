@@ -70,8 +70,8 @@ fn parse_program_from_content<'a>(members: &'a [MemberId], content: &'a str) -> 
             ProgramParseError::SyntaxError { line, detail } => {
                 panic!("parse failed at line {line}: {detail}")
             }
-            ProgramParseError::MissingContextForImplicitPayment { line } => {
-                panic!("parse failed: implicit payer without author at line {line}")
+            ProgramParseError::MissingContextForImplicitAuthor { line } => {
+                panic!("parse failed: implicit author without context at line {line}")
             }
             ProgramParseError::InvalidAmountExpression { line, detail } => {
                 panic!("parse failed: invalid amount expression at line {line}: {detail}")

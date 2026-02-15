@@ -31,7 +31,7 @@ pub enum ProcessingOutcome<'a> {
     UndefinedGroup { name: Cow<'a, str>, line: usize },
     UndefinedMember { id: u64, line: usize },
     SyntaxError { line: usize, detail: String },
-    MissingContextForImplicitPayment { line: usize },
+    MissingContextForImplicitAuthor { line: usize },
     InvalidAmountExpression { line: usize, detail: String },
 }
 
@@ -253,17 +253,11 @@ impl<'a> MessageProcessor<'a> {
                     }
                     match command {
                         Command::Variables | Command::Review => {}
-                        Command::MemberSetCash { members, enabled } => {
+                        Command::MemberAddCash { members } => {
                             let Some(target_members) = accumulator.evaluate_members(members) else {
                                 continue;
                             };
-                            for member in target_members.iter() {
-                                if *enabled {
-                                    script_local_cash_members.insert(member);
-                                } else {
-                                    script_local_cash_members.remove(&member);
-                                }
-                            }
+                            script_local_cash_members.extend(target_members.iter());
                         }
                         Command::SettleUp {
                             members,
@@ -390,8 +384,8 @@ impl<'a> MessageProcessor<'a> {
                 line: line + offset,
                 detail,
             },
-            ProgramParseError::MissingContextForImplicitPayment { line } => {
-                ProcessingOutcome::MissingContextForImplicitPayment {
+            ProgramParseError::MissingContextForImplicitAuthor { line } => {
+                ProcessingOutcome::MissingContextForImplicitAuthor {
                     line: line + offset,
                 }
             }
@@ -438,22 +432,22 @@ mod tests {
                     line: 1,
                     statement: ScriptStatement::Domain(Statement::Payment(Payment {
                         amount: Money::try_from(60).expect("amount should fit in i64"),
-                        payer: MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(1))]),
-                        payee: MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(3))]),
+                        payer: MemberSetExpr::new([MemberSetOp::Push(MemberId(1))]),
+                        payee: MemberSetExpr::new([MemberSetOp::Push(MemberId(3))]),
                     })),
                 },
                 ScriptStatementWithLine {
                     line: 2,
                     statement: ScriptStatement::Domain(Statement::Payment(Payment {
                         amount: Money::try_from(40).expect("amount should fit in i64"),
-                        payer: MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(2))]),
-                        payee: MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(3))]),
+                        payer: MemberSetExpr::new([MemberSetOp::Push(MemberId(2))]),
+                        payee: MemberSetExpr::new([MemberSetOp::Push(MemberId(3))]),
                     })),
                 },
                 ScriptStatementWithLine {
                     line: 3,
                     statement: ScriptStatement::Command(Command::SettleUp {
-                        members: MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(1))]),
+                        members: MemberSetExpr::new([MemberSetOp::Push(MemberId(1))]),
                         cash_members: None,
                     }),
                 },
@@ -534,7 +528,7 @@ mod tests {
                 });
             }
             if content.contains("IMPLICIT") {
-                return Err(ProgramParseError::MissingContextForImplicitPayment { line: 1 });
+                return Err(ProgramParseError::MissingContextForImplicitAuthor { line: 1 });
             }
 
             Ok(Script::new(
@@ -600,16 +594,16 @@ mod tests {
                     line: 1,
                     statement: ScriptStatement::Domain(Statement::Payment(Payment {
                         amount: Money::from_i64(60),
-                        payer: MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(1))]),
-                        payee: MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(3))]),
+                        payer: MemberSetExpr::new([MemberSetOp::Push(MemberId(1))]),
+                        payee: MemberSetExpr::new([MemberSetOp::Push(MemberId(3))]),
                     })),
                 },
                 ScriptStatementWithLine {
                     line: 2,
                     statement: ScriptStatement::Domain(Statement::Payment(Payment {
                         amount: Money::from_i64(40),
-                        payer: MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(2))]),
-                        payee: MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(3))]),
+                        payer: MemberSetExpr::new([MemberSetOp::Push(MemberId(2))]),
+                        payee: MemberSetExpr::new([MemberSetOp::Push(MemberId(3))]),
                     })),
                 },
             ],
@@ -638,9 +632,8 @@ mod tests {
                 payment_stmt(4, 2, 4, 50),
                 ScriptStatementWithLine {
                     line: 5,
-                    statement: ScriptStatement::Command(Command::MemberSetCash {
+                    statement: ScriptStatement::Command(Command::MemberAddCash {
                         members: union_members(&[1]),
-                        enabled: true,
                     }),
                 },
                 ScriptStatementWithLine {
@@ -671,9 +664,8 @@ mod tests {
         statements.extend([
             ScriptStatementWithLine {
                 line: 5,
-                statement: ScriptStatement::Command(Command::MemberSetCash {
+                statement: ScriptStatement::Command(Command::MemberAddCash {
                     members: union_members(&[1]),
-                    enabled: true,
                 }),
             },
             ScriptStatementWithLine {
@@ -699,8 +691,8 @@ mod tests {
             line,
             statement: ScriptStatement::Domain(Statement::Payment(Payment {
                 amount: Money::from_i64(amount),
-                payer: MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(payer))]),
-                payee: MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(payee))]),
+                payer: MemberSetExpr::new([MemberSetOp::Push(MemberId(payer))]),
+                payee: MemberSetExpr::new([MemberSetOp::Push(MemberId(payee))]),
             })),
         }
     }
@@ -731,9 +723,8 @@ mod tests {
         persisted_statements.extend([
             ScriptStatementWithLine {
                 line: 5,
-                statement: ScriptStatement::Command(Command::MemberSetCash {
+                statement: ScriptStatement::Command(Command::MemberAddCash {
                     members: union_members(&[1]),
-                    enabled: true,
                 }),
             },
             ScriptStatementWithLine {
@@ -762,66 +753,20 @@ mod tests {
         Script::new(&[], command_statements)
     }
 
-    fn script_with_member_cash_on_off() -> Script<'static> {
-        let members = union_members(&[1, 2, 3, 4]);
-        let mut on_off_statements = base_cash_sensitivity_payments();
-        on_off_statements.extend([
-            ScriptStatementWithLine {
-                line: 5,
-                statement: ScriptStatement::Command(Command::MemberSetCash {
-                    members: union_members(&[1]),
-                    enabled: true,
-                }),
-            },
-            ScriptStatementWithLine {
-                line: 6,
-                statement: ScriptStatement::Command(Command::MemberSetCash {
-                    members: union_members(&[1]),
-                    enabled: false,
-                }),
-            },
-            ScriptStatementWithLine {
-                line: 7,
-                statement: ScriptStatement::Command(Command::SettleUp {
-                    members,
-                    cash_members: None,
-                }),
-            },
-        ]);
-
-        Script::new(&[], on_off_statements)
-    }
-
-    fn script_baseline_no_cash() -> Script<'static> {
-        let members = union_members(&[1, 2, 3, 4]);
-        let mut baseline_statements = base_cash_sensitivity_payments();
-        baseline_statements.push(ScriptStatementWithLine {
-            line: 5,
-            statement: ScriptStatement::Command(Command::SettleUp {
-                members,
-                cash_members: None,
-            }),
-        });
-
-        Script::new(&[], baseline_statements)
-    }
-
     fn script_with_invalid_member_cash_expr() -> Script<'static> {
         let members = union_members(&[1, 2, 3, 4]);
         let mut with_invalid_cash = base_cash_sensitivity_payments();
         with_invalid_cash.extend([
             ScriptStatementWithLine {
                 line: 5,
-                statement: ScriptStatement::Command(Command::MemberSetCash {
+                statement: ScriptStatement::Command(Command::MemberAddCash {
                     members: union_members(&[1]),
-                    enabled: true,
                 }),
             },
             ScriptStatementWithLine {
                 line: 6,
-                statement: ScriptStatement::Command(Command::MemberSetCash {
-                    members: MemberSetExpr::new(vec![MemberSetOp::PushGroup("unknown")]),
-                    enabled: false,
+                statement: ScriptStatement::Command(Command::MemberAddCash {
+                    members: MemberSetExpr::new([MemberSetOp::PushGroup("unknown")]),
                 }),
             },
             ScriptStatementWithLine {
@@ -842,9 +787,8 @@ mod tests {
         baseline.extend([
             ScriptStatementWithLine {
                 line: 5,
-                statement: ScriptStatement::Command(Command::MemberSetCash {
+                statement: ScriptStatement::Command(Command::MemberAddCash {
                     members: union_members(&[1]),
-                    enabled: true,
                 }),
             },
             ScriptStatementWithLine {
@@ -886,7 +830,6 @@ mod tests {
 
     #[rstest]
     #[case::persisted_and_command_cash(script_with_persisted_cash(), script_with_command_cash())]
-    #[case::cash_off_matches_baseline(script_with_member_cash_on_off(), script_baseline_no_cash())]
     #[case::invalid_cash_expr_keeps_previous_state(
         script_with_invalid_member_cash_expr(),
         script_with_member_cash_on()
@@ -909,9 +852,8 @@ mod tests {
         statements.extend([
             ScriptStatementWithLine {
                 line: 5,
-                statement: ScriptStatement::Command(Command::MemberSetCash {
+                statement: ScriptStatement::Command(Command::MemberAddCash {
                     members: union_members(&[1]),
-                    enabled: true,
                 }),
             },
             ScriptStatementWithLine {
@@ -972,8 +914,8 @@ mod tests {
                 line: 1,
                 statement: ScriptStatement::Domain(Statement::Payment(Payment {
                     amount: Money::from_i64(amount),
-                    payer: MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(1))]),
-                    payee: MemberSetExpr::new(vec![
+                    payer: MemberSetExpr::new([MemberSetOp::Push(MemberId(1))]),
+                    payee: MemberSetExpr::new([
                         MemberSetOp::Push(MemberId(1)),
                         MemberSetOp::Push(MemberId(2)),
                         MemberSetOp::Union,
@@ -1106,7 +1048,7 @@ mod tests {
             vec![(first, Some(MemberId(1))), ("IMPLICIT", Some(MemberId(2)))],
         );
 
-        let ProcessingOutcome::MissingContextForImplicitPayment { line } = outcome else {
+        let ProcessingOutcome::MissingContextForImplicitAuthor { line } = outcome else {
             panic!("unexpected parse outcome");
         };
 

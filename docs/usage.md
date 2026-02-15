@@ -106,10 +106,12 @@ Walicordの基本的な使い方と高度な機能について説明します。
 
 現金でのやり取りを優先したいメンバーを指定できます。
 
-- `!member set <set_expr> cash on` / `!member set <set_expr> cash off`
+- `!member set <set_expr> cash`
+- `!cash` (本人のみ)
 - `!settleup <set_expr> --cash <set_expr>`
 
 cash指定は送金構築のみに影響します。`!review` でも有効です。
+解除は該当するメッセージを削除してください。
 
 ### コメント
 

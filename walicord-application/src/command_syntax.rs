@@ -5,6 +5,7 @@ pub const COMMAND_PREFIXES: &[&str] = &[
     "!settleup",
     "!確定",
     "!member",
+    "!cash",
 ];
 
 pub fn is_command_prefix(content: &str, cmd: &str) -> bool {
@@ -45,7 +46,8 @@ mod tests {
     #[case("!清算確認", true)]
     #[case("!清算確認中", false)]
     #[case("!settleup <@1>", true)]
-    #[case("!member set <@1> cash on", true)]
+    #[case("!member set <@1> cash", true)]
+    #[case("!cash", true)]
     #[case("!variablesXYZ", false)]
     fn test_is_command_message(#[case] input: &str, #[case] expected: bool) {
         assert_eq!(is_command_message(input), expected);

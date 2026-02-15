@@ -86,7 +86,7 @@ mod tests {
     #[test]
     fn evaluate_members_uses_default_members_for_members_keyword() {
         let resolver = MemberSetResolver::new_with_members([MemberId(2), MemberId(1)]);
-        let expr = MemberSetExpr::new(vec![MemberSetOp::PushGroup("MEMBERS")]);
+        let expr = MemberSetExpr::new([MemberSetOp::PushGroup("MEMBERS")]);
 
         let members = resolver
             .evaluate_members(&expr)
@@ -99,7 +99,7 @@ mod tests {
     fn evaluate_members_sorts_group_members() {
         let mut resolver = MemberSetResolver::new();
         resolver.register_group_members("team", [MemberId(3), MemberId(1), MemberId(2)]);
-        let expr = MemberSetExpr::new(vec![MemberSetOp::PushGroup("team")]);
+        let expr = MemberSetExpr::new([MemberSetOp::PushGroup("team")]);
 
         let members = resolver
             .evaluate_members(&expr)
@@ -152,7 +152,7 @@ mod tests {
     #[test]
     fn evaluate_members_returns_none_for_unknown_group() {
         let resolver = MemberSetResolver::new();
-        let expr = MemberSetExpr::new(vec![MemberSetOp::PushGroup("missing")]);
+        let expr = MemberSetExpr::new([MemberSetOp::PushGroup("missing")]);
 
         assert!(resolver.evaluate_members(&expr).is_none());
     }

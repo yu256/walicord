@@ -317,8 +317,8 @@ mod tests {
         let mut accumulator = BalanceAccumulator::new_with_members(&[MemberId(1), MemberId(2)]);
         accumulator.apply(&Statement::Payment(Payment {
             amount: Money::from_i64(100),
-            payer: MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(1))]),
-            payee: MemberSetExpr::new(vec![MemberSetOp::Push(MemberId(2))]),
+            payer: MemberSetExpr::new([MemberSetOp::Push(MemberId(1))]),
+            payee: MemberSetExpr::new([MemberSetOp::Push(MemberId(2))]),
         }));
         let balances = accumulator.into_balances();
 
