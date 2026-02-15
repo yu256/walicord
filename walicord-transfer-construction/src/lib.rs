@@ -1,5 +1,6 @@
 #![warn(clippy::uninlined_format_args)]
 
+// NOTE: balance sign convention is unified across APIs: balance > 0 pays, balance < 0 receives.
 mod model;
 
 use highs::{HighsModelStatus, HighsSolutionStatus, Model, RowProblem, Sense};
@@ -218,28 +219,29 @@ pub(crate) fn minimize_transactions_with_options_and_outcome<MemberId: MemberIdT
         return Err(SettlementError::BalancesTooLargeForF64);
     }
 
-    let mut debtors = Vec::new();
-    let mut creditors = Vec::new();
+    let mut payers = Vec::new();
+    let mut receivers = Vec::new();
     for (idx, person) in solver_people.iter().enumerate() {
-        if person.balance < 0 {
-            debtors.push((idx, -person.balance));
-        } else if person.balance > 0 {
-            creditors.push((idx, person.balance));
+        if person.balance > 0 {
+            payers.push((idx, person.balance));
+        } else if person.balance < 0 {
+            receivers.push((idx, -person.balance));
         }
     }
 
-    if debtors.is_empty() || creditors.is_empty() {
+    if payers.is_empty() || receivers.is_empty() {
         return Ok(MinimizeSolveOutcome {
             payments: Vec::new(),
             quality: SolveQuality::Optimal,
         });
     }
 
-    let mut pairs = Vec::with_capacity(debtors.len() * creditors.len());
-    for &(debtor_idx, debtor_amount) in &debtors {
-        for &(creditor_idx, creditor_amount) in &creditors {
-            let max_amount = debtor_amount.min(creditor_amount) as f64;
-            pairs.push((debtor_idx, creditor_idx, max_amount));
+    // Edges are payer -> receiver (unified with construct_settlement_transfers)
+    let mut pairs = Vec::with_capacity(payers.len() * receivers.len());
+    for &(payer_idx, payer_amount) in &payers {
+        for &(receiver_idx, receiver_amount) in &receivers {
+            let max_amount = payer_amount.min(receiver_amount) as f64;
+            pairs.push((payer_idx, receiver_idx, max_amount));
         }
     }
 
@@ -269,13 +271,17 @@ pub(crate) fn minimize_transactions_with_options_and_outcome<MemberId: MemberIdT
     for (member_idx, person) in solver_people.iter().enumerate() {
         let mut factors =
             Vec::with_capacity(in_edges[member_idx].len() + out_edges[member_idx].len());
-        for &edge_idx in &in_edges[member_idx] {
+        // Flow conservation under sign convention:
+        //   sum_out - sum_in == balance
+        // balance > 0 => pays out; balance < 0 => receives in.
+        for &edge_idx in &out_edges[member_idx] {
             factors.push((how_much[edge_idx], 1.0));
         }
-        for &edge_idx in &out_edges[member_idx] {
+        for &edge_idx in &in_edges[member_idx] {
             factors.push((how_much[edge_idx], -1.0));
         }
-        problem.add_row(person.balance as f64..=person.balance as f64, factors);
+        let rhs = person.balance as f64;
+        problem.add_row(rhs..=rhs, factors);
     }
 
     let mut model = problem.optimise(Sense::Minimise);
@@ -326,8 +332,8 @@ pub(crate) fn minimize_transactions_with_options_and_outcome<MemberId: MemberIdT
             .ok_or(SettlementError::RoundingMismatch)?;
         if amount > 0 {
             results.push(Payment {
-                from: people[i].id,
-                to: people[j].id,
+                from: people[i].id, // payer (balance > 0)
+                to: people[j].id,   // receiver (balance < 0)
                 amount,
             });
         }
@@ -338,7 +344,8 @@ pub(crate) fn minimize_transactions_with_options_and_outcome<MemberId: MemberIdT
         index_by_id.insert(person.id, idx);
     }
 
-    let mut net = vec![0i64; people.len()];
+    // Verify that applying payments settles everyone to 0.
+    let mut final_balances = people.iter().map(|p| p.balance).collect::<Vec<_>>();
     for p in &results {
         let Some(&from_idx) = index_by_id.get(&p.from) else {
             return Err(SettlementError::RoundingMismatch);
@@ -346,11 +353,10 @@ pub(crate) fn minimize_transactions_with_options_and_outcome<MemberId: MemberIdT
         let Some(&to_idx) = index_by_id.get(&p.to) else {
             return Err(SettlementError::RoundingMismatch);
         };
-        net[from_idx] -= p.amount;
-        net[to_idx] += p.amount;
+        final_balances[from_idx] -= p.amount;
+        final_balances[to_idx] += p.amount;
     }
-    let expected = people.iter().map(|p| p.balance).collect::<Vec<_>>();
-    if net != expected {
+    if final_balances.iter().any(|v| *v != 0) {
         return Err(SettlementError::RoundingMismatch);
     }
 
@@ -1247,11 +1253,6 @@ fn round_bankers_checked(value: f64) -> Result<i64, SettlementError> {
 }
 
 #[cfg(test)]
-fn round_count_objective(value: f64) -> f64 {
-    (value + 0.5).floor()
-}
-
-#[cfg(test)]
 mod tests {
     use super::{
         HighsCommonSolveOptions, Payment, PersonBalance, SettlementError,
@@ -1278,27 +1279,11 @@ mod tests {
         balances
     }
 
-    fn balances_from_payments(people: &[PersonBalance], payments: &[Payment]) -> HashMap<u64, i64> {
-        let mut balances = HashMap::with_capacity(people.len());
+    fn assert_settles_to_zero(people: &[PersonBalance], payments: &[Payment]) {
+        let final_balances = apply_transfers(people, payments);
         for person in people {
-            balances.insert(person.id, 0);
-        }
-        for payment in payments {
-            *balances.entry(payment.from).or_insert(0) -= payment.amount;
-            *balances.entry(payment.to).or_insert(0) += payment.amount;
-        }
-        balances
-    }
-
-    fn assert_balances_match(people: &[PersonBalance], payments: &[Payment]) {
-        let balances = balances_from_payments(people, payments);
-        for person in people {
-            let actual = balances.get(&person.id).copied().unwrap_or(0);
-            assert_eq!(
-                actual, person.balance,
-                "balance mismatch for id {}",
-                person.id
-            );
+            let actual = final_balances.get(&person.id).copied().unwrap_or(0);
+            assert_eq!(actual, 0, "final balance not zero for id {}", person.id);
         }
     }
 
@@ -1311,10 +1296,10 @@ mod tests {
         let payments = minimize_transactions(people.iter().copied(), 1.0, 0.01).expect("solution");
 
         assert_eq!(payments.len(), 1);
-        assert_eq!(payments[0].from, 2);
-        assert_eq!(payments[0].to, 1);
+        assert_eq!(payments[0].from, 1);
+        assert_eq!(payments[0].to, 2);
         assert_eq!(payments[0].amount, 100);
-        assert_balances_match(people, &payments);
+        assert_settles_to_zero(people, &payments);
     }
 
     #[rstest]
@@ -1466,7 +1451,7 @@ mod tests {
                 prop_assert!(payment.amount > 0);
                 prop_assert_ne!(payment.from, payment.to);
             }
-            assert_balances_match(&people, &payments);
+            assert_settles_to_zero(&people, &payments);
         }
 
         #[test]
