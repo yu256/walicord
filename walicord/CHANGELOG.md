@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.1](https://github.com/yu256/walicord/compare/walicord-v0.5.0...walicord-v0.5.1) (2026-02-15)
+
+
+### Bug Fixes
+
+* settleup solver latency ([#50](https://github.com/yu256/walicord/issues/50)) ([fe0f567](https://github.com/yu256/walicord/commit/fe0f5678e8dee1dbb4964882c6ba0c820a31a3f0))
+
 ## [0.5.0](https://github.com/yu256/walicord/compare/walicord-v0.4.0...walicord-v0.5.0) (2026-02-14)
 
 
