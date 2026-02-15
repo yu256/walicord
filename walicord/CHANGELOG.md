@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.0.0](https://github.com/yu256/walicord/compare/walicord-v0.5.1...walicord-v1.0.0) (2026-02-15)
+
+
+### ⚠ BREAKING CHANGES
+
+* add self cash toggle and drop on/off syntax
+
+### Features
+
+* add self cash toggle and drop on/off syntax ([ac4b906](https://github.com/yu256/walicord/commit/ac4b90699009a7ada0ae00fa390ec9433e7120df))
+
 ## [0.5.1](https://github.com/yu256/walicord/compare/walicord-v0.5.0...walicord-v0.5.1) (2026-02-15)
 
 
