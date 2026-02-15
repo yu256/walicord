@@ -22,13 +22,13 @@ impl SettlementPresenter {
     ) -> SettlementView {
         use crate::svg_table::combine_svgs_vertically;
 
-        let balance_table_svg = Self::build_balance_table_svg(
-            &result.balances,
-            member_directory,
-            result.quantization_scale,
-        );
-
         if let Some(settle_up) = &result.settle_up {
+            let balance_table_svg = Self::build_settle_up_balance_table_svg(
+                &result.balances,
+                &settle_up.settle_members,
+                member_directory,
+                result.quantization_scale,
+            );
             let has_any_transfers =
                 !settle_up.immediate_transfers.is_empty() || !result.optimized_transfers.is_empty();
 
@@ -38,36 +38,9 @@ impl SettlementPresenter {
                 };
             }
 
-            let settle_member_lookup: HashSet<_> =
-                settle_up.settle_members.iter().copied().collect();
-
-            let mut pay_from_settle: Vec<Transfer> = Vec::new();
-            let mut receive_for_settle: Vec<Transfer> = Vec::new();
-            let mut other_settlements: Vec<Transfer> = Vec::new();
-
-            for transfer in settle_up
-                .immediate_transfers
-                .iter()
-                .copied()
-                .chain(result.optimized_transfers.iter().copied())
-            {
-                if settle_member_lookup.contains(&transfer.from) {
-                    pay_from_settle.push(transfer);
-                } else if settle_member_lookup.contains(&transfer.to) {
-                    receive_for_settle.push(transfer);
-                } else {
-                    other_settlements.push(transfer);
-                }
-            }
-
-            sort_transfers(&mut pay_from_settle);
-            sort_transfers(&mut receive_for_settle);
-            sort_transfers(&mut other_settlements);
-
             let transfer_table_svg = Self::build_settle_up_transfer_svg(
-                &pay_from_settle,
-                &receive_for_settle,
-                &other_settlements,
+                &settle_up.immediate_transfers,
+                &result.optimized_transfers,
                 member_directory,
                 result.quantization_scale,
             );
@@ -77,6 +50,12 @@ impl SettlementPresenter {
 
             return SettlementView { combined_svg };
         }
+
+        let balance_table_svg = Self::build_balance_table_svg(
+            &result.balances,
+            member_directory,
+            result.quantization_scale,
+        );
 
         if result.optimized_transfers.is_empty() {
             SettlementView {
@@ -148,9 +127,8 @@ impl SettlementPresenter {
     }
 
     pub fn build_settle_up_transfer_svg(
-        pay_from_settle: &[Transfer],
-        receive_for_settle: &[Transfer],
-        other_settlements: &[Transfer],
+        confirmed_transfers: &[Transfer],
+        planned_transfers: &[Transfer],
         member_directory: &dyn MemberDirectory,
         quantization_scale: u32,
     ) -> String {
@@ -162,15 +140,20 @@ impl SettlementPresenter {
                 Alignment::Right,
             ])
             .headers(&[
-                Cow::Borrowed(i18n::CATEGORY),
+                Cow::Borrowed(i18n::STATUS),
                 Cow::Borrowed(i18n::FROM),
                 Cow::Borrowed(i18n::TO),
                 Cow::Borrowed(i18n::AMOUNT),
             ]);
 
-        for transfer in pay_from_settle {
+        let mut confirmed = confirmed_transfers.to_vec();
+        let mut planned = planned_transfers.to_vec();
+        sort_transfers(&mut confirmed);
+        sort_transfers(&mut planned);
+
+        for transfer in confirmed {
             builder = builder.row([
-                Cow::Borrowed(i18n::SETTLEMENT_PAYMENT),
+                Cow::Borrowed(i18n::SETTLED_TRANSFER),
                 format_member_label(transfer.from, member_directory),
                 format_member_label(transfer.to, member_directory),
                 Cow::Owned(
@@ -179,9 +162,9 @@ impl SettlementPresenter {
             ]);
         }
 
-        for transfer in receive_for_settle {
+        for transfer in planned {
             builder = builder.row([
-                Cow::Borrowed(i18n::PAYMENT_TO_SETTLOR),
+                Cow::Borrowed(i18n::PLANNED_TRANSFER),
                 format_member_label(transfer.from, member_directory),
                 format_member_label(transfer.to, member_directory),
                 Cow::Owned(
@@ -190,14 +173,42 @@ impl SettlementPresenter {
             ]);
         }
 
-        for transfer in other_settlements {
+        builder.build()
+    }
+
+    pub fn build_settle_up_balance_table_svg(
+        person_balances: &[PersonBalance],
+        settle_members: &[MemberId],
+        member_directory: &dyn MemberDirectory,
+        quantization_scale: u32,
+    ) -> String {
+        let settle_member_lookup: HashSet<_> = settle_members.iter().copied().collect();
+        let mut builder = SvgTableBuilder::new()
+            .alignments(&[Alignment::Left, Alignment::Right, Alignment::Left])
+            .headers(&[
+                Cow::Borrowed(i18n::MEMBER),
+                Cow::Borrowed(i18n::BALANCE),
+                Cow::Borrowed(i18n::STATUS),
+            ]);
+
+        for person in person_balances {
+            let sign = if person.balance.signum() >= 0 {
+                "+"
+            } else {
+                ""
+            };
+            let status = if settle_member_lookup.contains(&person.id) {
+                i18n::SETTLED_MEMBER
+            } else {
+                i18n::UNSETTLED_MEMBER
+            };
             builder = builder.row([
-                Cow::Borrowed(i18n::PENDING),
-                format_member_label(transfer.from, member_directory),
-                format_member_label(transfer.to, member_directory),
-                Cow::Owned(
-                    format_money_for_display(transfer.amount, quantization_scale).to_string(),
-                ),
+                format_member_label(person.id, member_directory),
+                Cow::Owned(format!(
+                    "{sign}{}",
+                    format_money_for_display(person.balance, quantization_scale)
+                )),
+                Cow::Borrowed(status),
             ]);
         }
 
@@ -259,7 +270,7 @@ mod tests {
     use super::*;
     use rstest::rstest;
     use std::collections::HashMap;
-    use walicord_application::PersonBalance;
+    use walicord_application::{PersonBalance, SettleUpContext};
     use walicord_domain::{Money, Transfer, model::MemberId};
 
     fn sample_result() -> SettlementResult {
@@ -331,5 +342,42 @@ mod tests {
 
         let view = SettlementPresenter::render(&result);
         assert!(view.combined_svg.contains("+2"));
+    }
+
+    #[test]
+    fn settle_up_view_shows_status_and_transfer_labels() {
+        let result = SettlementResult {
+            balances: vec![
+                PersonBalance {
+                    id: MemberId(1),
+                    balance: Money::from_i64(100),
+                },
+                PersonBalance {
+                    id: MemberId(2),
+                    balance: Money::from_i64(-100),
+                },
+            ],
+            optimized_transfers: vec![Transfer {
+                from: MemberId(2),
+                to: MemberId(1),
+                amount: Money::from_i64(50),
+            }],
+            settle_up: Some(SettleUpContext {
+                settle_members: vec![MemberId(1)],
+                immediate_transfers: vec![Transfer {
+                    from: MemberId(1),
+                    to: MemberId(2),
+                    amount: Money::from_i64(100),
+                }],
+            }),
+            quantization_scale: 0,
+        };
+
+        let view = SettlementPresenter::render(&result);
+        assert!(view.combined_svg.contains(i18n::STATUS));
+        assert!(view.combined_svg.contains(i18n::SETTLED_MEMBER));
+        assert!(view.combined_svg.contains(i18n::UNSETTLED_MEMBER));
+        assert!(view.combined_svg.contains(i18n::SETTLED_TRANSFER));
+        assert!(view.combined_svg.contains(i18n::PLANNED_TRANSFER));
     }
 }
