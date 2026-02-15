@@ -1272,7 +1272,7 @@ fn round_binary_checked(value: f64) -> Result<i32, SettlementError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        HighsCommonSolveOptions, Payment, PersonBalance, SettlementError,
+        HighsCommonSolveOptions, MemberIdTrait, Payment, PersonBalance, SettlementError,
         construct_settlement_transfers, minimize_transactions,
         minimize_transactions_with_options_and_outcome, round_bankers_checked,
     };
@@ -1280,8 +1280,21 @@ mod tests {
     use rstest::rstest;
     use std::collections::HashMap;
 
-    fn apply_transfers(people: &[PersonBalance], payments: &[Payment]) -> HashMap<u64, i64> {
-        let mut balances: HashMap<u64, i64> = people
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Ord, PartialOrd)]
+    enum TestMember {
+        Alice,
+        Bob,
+        Carol,
+        Dave,
+    }
+
+    impl MemberIdTrait for TestMember {}
+
+    fn apply_transfers<MemberId: MemberIdTrait>(
+        people: &[PersonBalance<MemberId>],
+        payments: &[Payment<MemberId>],
+    ) -> HashMap<MemberId, i64> {
+        let mut balances: HashMap<MemberId, i64> = people
             .iter()
             .map(|person| (person.id, person.balance))
             .collect();
@@ -1296,35 +1309,50 @@ mod tests {
         balances
     }
 
-    fn assert_settles_to_zero(people: &[PersonBalance], payments: &[Payment]) {
+    fn assert_settles_to_zero<MemberId: MemberIdTrait + std::fmt::Debug>(
+        people: &[PersonBalance<MemberId>],
+        payments: &[Payment<MemberId>],
+    ) {
         let final_balances = apply_transfers(people, payments);
         for person in people {
             let actual = final_balances.get(&person.id).copied().unwrap_or(0);
-            assert_eq!(actual, 0, "final balance not zero for id {}", person.id);
+            assert_eq!(actual, 0, "final balance not zero for id {:?}", person.id);
         }
     }
 
     #[rstest]
     #[case::simple_two_people(&[
-        PersonBalance { id: 1, balance: 100 },
-        PersonBalance { id: 2, balance: -100 },
+        PersonBalance {
+            id: TestMember::Alice,
+            balance: 100,
+        },
+        PersonBalance {
+            id: TestMember::Bob,
+            balance: -100,
+        },
     ])]
-    fn settles_two_people(#[case] people: &[PersonBalance]) {
+    fn settles_two_people(#[case] people: &[PersonBalance<TestMember>]) {
         let payments = minimize_transactions(people.iter().copied(), 1.0, 0.01).expect("solution");
 
         assert_eq!(payments.len(), 1);
-        assert_eq!(payments[0].from, 1);
-        assert_eq!(payments[0].to, 2);
+        assert_eq!(payments[0].from, TestMember::Alice);
+        assert_eq!(payments[0].to, TestMember::Bob);
         assert_eq!(payments[0].amount, 100);
         assert_settles_to_zero(people, &payments);
     }
 
     #[rstest]
     #[case::imbalanced(&[
-        PersonBalance { id: 1, balance: 50 },
-        PersonBalance { id: 2, balance: -40 },
+        PersonBalance {
+            id: TestMember::Alice,
+            balance: 50,
+        },
+        PersonBalance {
+            id: TestMember::Bob,
+            balance: -40,
+        },
     ])]
-    fn rejects_imbalanced_total(#[case] people: &[PersonBalance]) {
+    fn rejects_imbalanced_total(#[case] people: &[PersonBalance<TestMember>]) {
         let result = minimize_transactions(people.iter().copied(), 1.0, 0.01);
         match result {
             Err(SettlementError::ImbalancedTotal(total)) => assert_eq!(total, 10),
@@ -1336,11 +1364,11 @@ mod tests {
     fn rejects_invalid_weights() {
         let people = [
             PersonBalance {
-                id: 1,
+                id: TestMember::Alice,
                 balance: 100,
             },
             PersonBalance {
-                id: 2,
+                id: TestMember::Bob,
                 balance: -100,
             },
         ];
@@ -1352,29 +1380,29 @@ mod tests {
     fn minimize_is_deterministic_across_input_order() {
         let a = [
             PersonBalance {
-                id: 1,
+                id: TestMember::Alice,
                 balance: 100,
             },
             PersonBalance {
-                id: 2,
+                id: TestMember::Bob,
                 balance: 100,
             },
             PersonBalance {
-                id: 3,
+                id: TestMember::Carol,
                 balance: -200,
             },
         ];
         let b = [
             PersonBalance {
-                id: 3,
+                id: TestMember::Carol,
                 balance: -200,
             },
             PersonBalance {
-                id: 1,
+                id: TestMember::Alice,
                 balance: 100,
             },
             PersonBalance {
-                id: 2,
+                id: TestMember::Bob,
                 balance: 100,
             },
         ];
@@ -1401,27 +1429,45 @@ mod tests {
 
     #[rstest]
     #[case::all_zero(&[
-        PersonBalance { id: 1, balance: 0 },
-        PersonBalance { id: 2, balance: 0 },
-        PersonBalance { id: 3, balance: 0 },
+        PersonBalance {
+            id: TestMember::Alice,
+            balance: 0,
+        },
+        PersonBalance {
+            id: TestMember::Bob,
+            balance: 0,
+        },
+        PersonBalance {
+            id: TestMember::Carol,
+            balance: 0,
+        },
     ])]
-    fn zero_balances_produce_no_payments(#[case] people: &[PersonBalance]) {
+    fn zero_balances_produce_no_payments(#[case] people: &[PersonBalance<TestMember>]) {
         let payments = minimize_transactions(people.iter().copied(), 1.0, 0.01).expect("solution");
         assert!(payments.is_empty());
     }
 
     #[rstest]
     #[case::empty(&[])]
-    #[case::single_zero(&[PersonBalance { id: 1, balance: 0 }])]
-    fn small_inputs_produce_no_payments(#[case] people: &[PersonBalance]) {
+    #[case::single_zero(&[PersonBalance {
+        id: TestMember::Alice,
+        balance: 0,
+    }])]
+    fn small_inputs_produce_no_payments(#[case] people: &[PersonBalance<TestMember>]) {
         let payments = minimize_transactions(people.iter().copied(), 1.0, 0.01).expect("solution");
         assert!(payments.is_empty());
     }
 
     #[rstest]
-    #[case::single_nonzero(&[PersonBalance { id: 1, balance: 50 }], 50)]
+    #[case::single_nonzero(
+        &[PersonBalance {
+            id: TestMember::Alice,
+            balance: 50,
+        }],
+        50
+    )]
     fn small_inputs_reject_imbalanced(
-        #[case] people: &[PersonBalance],
+        #[case] people: &[PersonBalance<TestMember>],
         #[case] expected_total: i64,
     ) {
         let result = minimize_transactions(people.iter().copied(), 1.0, 0.01);
@@ -1548,25 +1594,28 @@ mod tests {
     #[test]
     fn transfer_construction_settles_target_subset_only() {
         let people = [
-            PersonBalance { id: 1, balance: 60 },
             PersonBalance {
-                id: 2,
+                id: TestMember::Alice,
+                balance: 60,
+            },
+            PersonBalance {
+                id: TestMember::Bob,
                 balance: 100,
             },
             PersonBalance {
-                id: 3,
+                id: TestMember::Carol,
                 balance: -160,
             },
         ];
 
-        let payments =
-            construct_settlement_transfers(people, &[1], &[], 1000, 100).expect("solution");
+        let payments = construct_settlement_transfers(people, &[TestMember::Alice], &[], 1000, 100)
+            .expect("solution");
 
         assert_eq!(
             payments,
             vec![Payment {
-                from: 1,
-                to: 3,
+                from: TestMember::Alice,
+                to: TestMember::Carol,
                 amount: 60,
             }]
         );
@@ -1576,23 +1625,35 @@ mod tests {
     fn transfer_construction_is_deterministic() {
         let people = [
             PersonBalance {
-                id: 1,
+                id: TestMember::Alice,
                 balance: 100,
             },
             PersonBalance {
-                id: 2,
+                id: TestMember::Bob,
                 balance: 100,
             },
             PersonBalance {
-                id: 3,
+                id: TestMember::Carol,
                 balance: -200,
             },
         ];
 
-        let first =
-            construct_settlement_transfers(people, &[1, 2], &[1], 1000, 100).expect("solution");
-        let second =
-            construct_settlement_transfers(people, &[1, 2], &[1], 1000, 100).expect("solution");
+        let first = construct_settlement_transfers(
+            people,
+            &[TestMember::Alice, TestMember::Bob],
+            &[TestMember::Alice],
+            1000,
+            100,
+        )
+        .expect("solution");
+        let second = construct_settlement_transfers(
+            people,
+            &[TestMember::Alice, TestMember::Bob],
+            &[TestMember::Alice],
+            1000,
+            100,
+        )
+        .expect("solution");
 
         assert_eq!(first, second);
     }
@@ -1601,41 +1662,57 @@ mod tests {
     fn transfer_construction_is_deterministic_across_input_order() {
         let sorted_people = [
             PersonBalance {
-                id: 1,
+                id: TestMember::Alice,
                 balance: 1200,
             },
             PersonBalance {
-                id: 2,
+                id: TestMember::Bob,
                 balance: -1000,
             },
             PersonBalance {
-                id: 3,
+                id: TestMember::Carol,
                 balance: -200,
             },
-            PersonBalance { id: 4, balance: 0 },
+            PersonBalance {
+                id: TestMember::Dave,
+                balance: 0,
+            },
         ];
         let shuffled_people = [
             PersonBalance {
-                id: 3,
+                id: TestMember::Carol,
                 balance: -200,
             },
-            PersonBalance { id: 4, balance: 0 },
             PersonBalance {
-                id: 1,
+                id: TestMember::Dave,
+                balance: 0,
+            },
+            PersonBalance {
+                id: TestMember::Alice,
                 balance: 1200,
             },
             PersonBalance {
-                id: 2,
+                id: TestMember::Bob,
                 balance: -1000,
             },
         ];
 
-        let sorted_result =
-            construct_settlement_transfers(sorted_people, &[1, 2, 3], &[1], 1000, 100)
-                .expect("solution");
-        let shuffled_result =
-            construct_settlement_transfers(shuffled_people, &[1, 2, 3], &[1], 1000, 100)
-                .expect("solution");
+        let sorted_result = construct_settlement_transfers(
+            sorted_people,
+            &[TestMember::Alice, TestMember::Bob, TestMember::Carol],
+            &[TestMember::Alice],
+            1000,
+            100,
+        )
+        .expect("solution");
+        let shuffled_result = construct_settlement_transfers(
+            shuffled_people,
+            &[TestMember::Alice, TestMember::Bob, TestMember::Carol],
+            &[TestMember::Alice],
+            1000,
+            100,
+        )
+        .expect("solution");
 
         assert_eq!(sorted_result, shuffled_result);
     }
