@@ -776,14 +776,15 @@ fn solve_transfers_highs<MemberId: MemberIdTrait>(
     let mut y_cols = Vec::with_capacity(model.edges.len());
     let mut cash_edge_to_idx = vec![None; model.edges.len()];
 
-    for edge in &model.edges {
+    for (edge_idx, edge) in model.edges.iter().enumerate() {
         let y_weight = obj3_weight
             + if edge.touches_non_settle {
                 bounds.objw_weight
             } else {
                 0
             };
-        x_cols.push(pb.add_integer_column(0.0, 0.0..=edge.upper_bound as f64));
+        let x_weight = (edge_idx as f64) * 1e-12;
+        x_cols.push(pb.add_integer_column(x_weight, 0.0..=edge.upper_bound as f64));
         y_cols.push(pb.add_integer_column(y_weight as f64, 0.0..=1.0));
         col_count += 2;
     }
