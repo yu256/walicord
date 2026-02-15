@@ -130,6 +130,11 @@ impl From<SettlementError> for SettlementRoundingError {
                 max_edges,
             },
             SettlementError::NoSolution => SettlementRoundingError::TransferConstructionNoSolution,
+            SettlementError::InvalidWeights { .. }
+            | SettlementError::BalancesTooLargeForF64
+            | SettlementError::NonFiniteSolution => {
+                SettlementRoundingError::TransferConstructionNoSolution
+            }
             SettlementError::RoundingMismatch => {
                 SettlementRoundingError::TransferConstructionRoundingMismatch
             }
