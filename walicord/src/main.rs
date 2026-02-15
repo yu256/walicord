@@ -14,7 +14,7 @@ use serenity::{
     all::MessageId,
     async_trait,
     model::{
-        channel::{Message, Reaction, ReactionType},
+        channel::{GuildChannel, Message, Reaction, ReactionType},
         event::{GuildMemberUpdateEvent, MessageUpdateEvent},
         gateway::Ready,
         guild::Member,
@@ -32,17 +32,7 @@ use walicord_domain::model::MemberId;
 use walicord_infrastructure::{WalicordProgramParser, WalicordSettlementOptimizer};
 use walicord_presentation::{SettlementPresenter, SettlementView, VariablesPresenter};
 
-fn load_target_channel_ids() -> Vec<ChannelId> {
-    let var = env::var("TARGET_CHANNEL_IDS");
-    var.iter()
-        .flat_map(|ids_str| {
-            ids_str
-                .split(',')
-                .filter_map(|id_str| id_str.trim().parse::<u64>().ok())
-                .map(ChannelId::new)
-        })
-        .collect()
-}
+const CHANNEL_TOPIC_FLAG: &str = "#walicord";
 
 fn format_settlement_error(err: SettlementOptimizationError) -> String {
     match err {
@@ -100,7 +90,7 @@ fn format_settlement_error(err: SettlementOptimizationError) -> String {
 }
 
 struct Handler<'a> {
-    target_channel: Option<ChannelId>,
+    enabled_channels: DashMap<ChannelId, GuildId>,
     message_cache: DashMap<ChannelId, IndexMap<MessageId, Message>>,
     channel_service: DiscordChannelService,
     roster_provider: MemberRosterProvider,
@@ -119,6 +109,13 @@ enum MessageUpdateResolution {
     Fetch,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ChannelToggle {
+    Enabled,
+    Disabled,
+    NoChange,
+}
+
 struct CacheRebuildPlan {
     cache: IndexMap<MessageId, Message>,
     reactions: Vec<(Message, ReactionState)>,
@@ -126,13 +123,12 @@ struct CacheRebuildPlan {
 
 impl<'a> Handler<'a> {
     fn new(
-        target_channel: Option<ChannelId>,
         channel_service: DiscordChannelService,
         roster_provider: MemberRosterProvider,
         processor: MessageProcessor<'a>,
     ) -> Self {
         Self {
-            target_channel,
+            enabled_channels: DashMap::new(),
             message_cache: DashMap::new(),
             channel_service,
             roster_provider,
@@ -140,10 +136,101 @@ impl<'a> Handler<'a> {
         }
     }
 
-    fn is_target_channel(&self, channel_id: ChannelId) -> bool {
-        self.target_channel
-            .as_ref()
-            .is_some_and(|target| *target == channel_id)
+    fn is_enabled_channel(&self, channel_id: ChannelId) -> bool {
+        self.enabled_channels.contains_key(&channel_id)
+    }
+
+    fn topic_has_flag(topic: Option<&str>) -> bool {
+        topic.is_some_and(|topic| topic.contains(CHANNEL_TOPIC_FLAG))
+    }
+
+    fn apply_channel_toggle(
+        &self,
+        channel_id: ChannelId,
+        guild_id: GuildId,
+        enabled: bool,
+    ) -> ChannelToggle {
+        if enabled {
+            if self.enabled_channels.insert(channel_id, guild_id).is_some() {
+                ChannelToggle::NoChange
+            } else {
+                ChannelToggle::Enabled
+            }
+        } else if self.enabled_channels.remove(&channel_id).is_some() {
+            self.message_cache.remove(&channel_id);
+            ChannelToggle::Disabled
+        } else {
+            ChannelToggle::NoChange
+        }
+    }
+
+    async fn enable_channel(&self, ctx: &Context, channel_id: ChannelId, guild_id: GuildId) {
+        if !matches!(
+            self.apply_channel_toggle(channel_id, guild_id, true),
+            ChannelToggle::Enabled
+        ) {
+            return;
+        }
+
+        tracing::info!("Enabling channel {}", channel_id);
+        match self
+            .channel_service
+            .fetch_all_messages(ctx, channel_id)
+            .await
+        {
+            Ok(messages) => {
+                if self.is_enabled_channel(channel_id) {
+                    if messages.is_empty() {
+                        self.message_cache.remove(&channel_id);
+                    } else {
+                        self.message_cache.insert(channel_id, messages);
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to fetch initial messages for {}: {:?}",
+                    channel_id,
+                    e
+                );
+            }
+        }
+
+        if let Err(e) = self.roster_provider.warm_up(ctx, channel_id).await {
+            tracing::warn!(
+                "Failed to build member cache for channel {}: {:?}",
+                channel_id,
+                e
+            );
+        }
+    }
+
+    fn disable_channel(&self, channel_id: ChannelId, guild_id: GuildId) {
+        if matches!(
+            self.apply_channel_toggle(channel_id, guild_id, false),
+            ChannelToggle::Disabled
+        ) {
+            tracing::info!("Disabled channel {}", channel_id);
+        }
+    }
+
+    async fn initialize_enabled_channels(&self, ctx: &Context, ready: &Ready) {
+        tracing::info!("Scanning guild channels for {} flag", CHANNEL_TOPIC_FLAG);
+        for guild in &ready.guilds {
+            let guild_id = guild.id;
+            match guild_id.channels(&ctx.http).await {
+                Ok(channels) => {
+                    for channel in channels.values() {
+                        if Self::topic_has_flag(channel.topic.as_deref()) {
+                            self.enable_channel(ctx, channel.id, guild_id).await;
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to fetch channels for guild {}: {:?}", guild_id, e);
+                }
+            }
+        }
     }
 
     fn member_ids(result: &SettlementResult) -> impl Iterator<Item = MemberId> + '_ {
@@ -839,7 +926,7 @@ impl EventHandler for Handler<'_> {
             return;
         }
 
-        if !self.is_target_channel(msg.channel_id) {
+        if !self.is_enabled_channel(msg.channel_id) {
             return;
         }
 
@@ -853,37 +940,15 @@ impl EventHandler for Handler<'_> {
 
     async fn ready(&self, ctx: Context, ready: Ready) {
         tracing::info!("Connected as {}", ready.user.name);
+        self.initialize_enabled_channels(&ctx, &ready).await;
+    }
 
-        let Some(channel_id) = self.target_channel else {
-            tracing::warn!("Warning: TARGET_CHANNEL_ID is not set");
-            return;
-        };
-
-        tracing::info!("Target channel ID: {}", channel_id);
-        tracing::info!("Building message cache...");
-
-        match self
-            .channel_service
-            .fetch_all_messages(&ctx, channel_id)
-            .await
-        {
-            Ok(messages) => {
-                self.message_cache.insert(channel_id, messages);
-                tracing::info!("Message cache built successfully.");
-            }
-            Err(e) => {
-                tracing::error!("Failed to fetch initial messages: {:?}", e);
-            }
-        }
-
-        if let Err(e) = self.roster_provider.warm_up(&ctx, channel_id).await {
-            tracing::warn!(
-                "Failed to build member cache for channel {}: {:?}",
-                channel_id,
-                e
-            );
+    async fn channel_update(&self, ctx: Context, _old: Option<GuildChannel>, new: GuildChannel) {
+        let guild_id = new.guild_id;
+        if Self::topic_has_flag(new.topic.as_deref()) {
+            self.enable_channel(&ctx, new.id, guild_id).await;
         } else {
-            tracing::info!("Member cache built successfully.");
+            self.disable_channel(new.id, guild_id);
         }
     }
 
@@ -927,7 +992,7 @@ impl EventHandler for Handler<'_> {
         deleted_message_id: MessageId,
         _guild_id: Option<GuildId>,
     ) {
-        if !self.is_target_channel(channel_id) {
+        if !self.is_enabled_channel(channel_id) {
             return;
         }
 
@@ -951,7 +1016,7 @@ impl EventHandler for Handler<'_> {
         deleted_message_ids: Vec<MessageId>,
         _guild_id: Option<GuildId>,
     ) {
-        if !self.is_target_channel(channel_id) {
+        if !self.is_enabled_channel(channel_id) {
             return;
         }
 
@@ -977,7 +1042,7 @@ impl EventHandler for Handler<'_> {
         new: Option<Message>,
         event: MessageUpdateEvent,
     ) {
-        if !self.is_target_channel(event.channel_id) {
+        if !self.is_enabled_channel(event.channel_id) {
             return;
         }
 
@@ -1014,7 +1079,7 @@ impl EventHandler for Handler<'_> {
     }
 
     async fn reaction_add(&self, ctx: Context, add_reaction: Reaction) {
-        if !self.is_target_channel(add_reaction.channel_id) {
+        if !self.is_enabled_channel(add_reaction.channel_id) {
             return;
         }
 
@@ -1045,7 +1110,7 @@ impl EventHandler for Handler<'_> {
     }
 
     async fn reaction_remove(&self, ctx: Context, removed_reaction: Reaction) {
-        if !self.is_target_channel(removed_reaction.channel_id) {
+        if !self.is_enabled_channel(removed_reaction.channel_id) {
             return;
         }
 
@@ -1088,38 +1153,17 @@ async fn main() {
         | GatewayIntents::GUILD_MEMBERS
         | GatewayIntents::GUILD_MESSAGE_REACTIONS;
 
-    let target_channel = load_target_channel_ids();
     let processor = MessageProcessor::new(&WalicordProgramParser, &WalicordSettlementOptimizer);
+    let roster_provider = MemberRosterProvider::new(DiscordChannelService);
+    let handler = Handler::new(DiscordChannelService, roster_provider, processor);
 
-    let handles: Vec<tokio::task::JoinHandle<()>> = target_channel
-        .into_iter()
-        .map(|channel_id| {
-            let roster_provider = MemberRosterProvider::new(DiscordChannelService);
-            let handler = Handler::new(
-                Some(channel_id),
-                DiscordChannelService,
-                roster_provider,
-                processor,
-            );
+    let mut client = Client::builder(&token, intents)
+        .event_handler(handler)
+        .await
+        .expect("Failed to create client");
 
-            tokio::spawn({
-                let client_builder = Client::builder(&token, intents);
-                async move {
-                    let mut client = client_builder
-                        .event_handler(handler)
-                        .await
-                        .expect("Failed to create client");
-
-                    if let Err(why) = client.start().await {
-                        tracing::error!("Client error: {:?}", why);
-                    }
-                }
-            })
-        })
-        .collect();
-
-    for handle in handles {
-        let _ = handle.await;
+    if let Err(why) = client.start().await {
+        tracing::error!("Client error: {:?}", why);
     }
 }
 
@@ -1256,6 +1300,73 @@ mod tests {
             value["content"] = json!(content);
         }
         serde_json::from_value(value).expect("MessageUpdateEvent should deserialize")
+    }
+
+    #[rstest]
+    #[case::flag_present(Some("topic #walicord enabled"), true)]
+    #[case::flag_missing(Some("topic walicord"), false)]
+    #[case::empty(None, false)]
+    fn topic_has_flag_cases(#[case] topic: Option<&str>, #[case] expected: bool) {
+        assert_eq!(Handler::topic_has_flag(topic), expected);
+    }
+
+    #[test]
+    fn apply_channel_toggle_enables_and_disables_with_cache_purge() {
+        let processor = MessageProcessor::new(&StubParser, &NoopOptimizer);
+        let roster_provider = MemberRosterProvider::new(DiscordChannelService);
+        let handler = Handler::new(DiscordChannelService, roster_provider, processor);
+        let channel_id = ChannelId::new(1);
+        let guild_id = GuildId::new(10);
+
+        assert_eq!(
+            handler.apply_channel_toggle(channel_id, guild_id, true),
+            ChannelToggle::Enabled
+        );
+        assert!(handler.is_enabled_channel(channel_id));
+        assert_eq!(
+            handler.apply_channel_toggle(channel_id, guild_id, true),
+            ChannelToggle::NoChange
+        );
+
+        let mut cache = IndexMap::new();
+        cache.insert(MessageId::new(10), make_message(10, 1, 1, "PAY"));
+        handler.message_cache.insert(channel_id, cache);
+
+        assert_eq!(
+            handler.apply_channel_toggle(channel_id, guild_id, false),
+            ChannelToggle::Disabled
+        );
+        assert!(!handler.is_enabled_channel(channel_id));
+        assert!(handler.message_cache.get(&channel_id).is_none());
+    }
+
+    #[test]
+    fn apply_channel_toggle_preserves_other_channels() {
+        let processor = MessageProcessor::new(&StubParser, &NoopOptimizer);
+        let roster_provider = MemberRosterProvider::new(DiscordChannelService);
+        let handler = Handler::new(DiscordChannelService, roster_provider, processor);
+        let channel_a = ChannelId::new(1);
+        let guild_a = GuildId::new(10);
+        let channel_b = ChannelId::new(2);
+        let guild_b = GuildId::new(11);
+
+        handler.apply_channel_toggle(channel_a, guild_a, true);
+        handler.apply_channel_toggle(channel_b, guild_b, true);
+
+        let mut cache_a = IndexMap::new();
+        cache_a.insert(MessageId::new(10), make_message(10, 1, 1, "PAY"));
+        handler.message_cache.insert(channel_a, cache_a);
+
+        let mut cache_b = IndexMap::new();
+        cache_b.insert(MessageId::new(11), make_message(11, 2, 2, "PAY"));
+        handler.message_cache.insert(channel_b, cache_b);
+
+        handler.apply_channel_toggle(channel_a, guild_a, false);
+
+        assert!(!handler.is_enabled_channel(channel_a));
+        assert!(handler.is_enabled_channel(channel_b));
+        assert!(handler.message_cache.get(&channel_a).is_none());
+        assert!(handler.message_cache.get(&channel_b).is_some());
     }
 
     #[rstest]
