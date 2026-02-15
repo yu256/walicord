@@ -30,7 +30,7 @@ Walicord therefore defines an explicit objective order instead of relying on imp
 
 - `b[m]: Money` — quantized final balance per member.
 - `settle_members: Set<MemberId>` — members explicitly requested to settle now.
-- `cash_members: Set<MemberId>` — members whose payer-side transfers should avoid loose change.
+- `cash_members: Set<MemberId>` — members whose transfers should avoid loose change (payer or payee side).
 
 Input contract for this layer:
 
@@ -91,22 +91,23 @@ Transaction construction may return the following operational errors:
 Walicord uses exact lexicographic optimization (not greedy matching).
 
 Current runtime profile uses fixed JPY-style cash grids: `G1=1000`, `G2=100`.
-Cash-friendliness is evaluated only for payers in `cash_members`.
+Cash-friendliness is evaluated for transfers that touch `cash_members` on either side.
 
 Future extension note: when non-JPY settlement profiles are introduced end-to-end,
 `G1/G2` should be derived from settlement context instead of fixed constants.
 
 The solver minimizes, in this strict order:
 
-1. **OBJ1**: number of cash-payer transfers not divisible by `G1`.
-2. **OBJ2**: among OBJ1-optimal solutions, number of cash-payer transfers not divisible by `G2`.
+1. **OBJ1**: number of cash-member transfers not divisible by `G1`.
+2. **OBJ2**: among OBJ1-optimal solutions, number of cash-member transfers not divisible by `G2`.
 3. **OBJW**: among OBJ1/OBJ2-optimal solutions, number of transfers involving non-`settle_members` counterparts.
 4. **OBJ3**: among OBJ1/OBJ2/OBJW-optimal solutions, total transfer count.
-5. **Tie-break**: deterministic lexicographic minimization of edge amounts in fixed `(from asc, to asc)` order.
+5. **OBJ4**: among OBJ1/OBJ2/OBJW/OBJ3-optimal solutions, minimize the maximum transfer amount.
+6. **Tie-break**: deterministic lexicographic minimization of edge amounts in fixed `(from asc, to asc)` order.
 
 ## Why this approach
 
-- **Cash intent is explicit**: users can mark cash-oriented payers, and the solver optimizes their payer-side divisibility first.
+- **Cash intent is explicit**: users can mark cash-oriented members, and the solver optimizes divisibility for transfers that touch them first.
 - **Settle intent is preserved**: after cash objectives, `OBJW` prefers plans that avoid pulling in non-`settle_members` counterparts when possible.
 - **Determinism for trust and UX**: the same input always yields the same transfer list and ordering, which is important for chat-based workflows and audits.
 - **Exactness over heuristics**: lexicographic optimization provides globally optimal outcomes under the declared objective order.

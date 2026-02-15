@@ -814,8 +814,22 @@ fn solve_transfers_highs<MemberId: MemberIdTrait>(
     let mut cash_edge_to_idx = vec![None; model.edges.len()];
 
     let max_upper_bound = model.edges.iter().map(|e| e.upper_bound).max().unwrap_or(1);
-    let tiebreak_coeff =
-        (obj3_weight as f64) / ((model.edges.len() as f64) * (max_upper_bound as f64 + 1.0) * 2.0);
+    let max_amount_weight = if model.edges.is_empty() {
+        0.0
+    } else {
+        (obj3_weight as f64) / (max_upper_bound as f64 + 1.0)
+    };
+    let tiebreak_coeff = if model.edges.is_empty() {
+        0.0
+    } else {
+        max_amount_weight / ((model.edges.len() as f64) * (max_upper_bound as f64 + 1.0) * 2.0)
+    };
+
+    let max_amount_col = if model.edges.is_empty() {
+        None
+    } else {
+        Some(pb.add_integer_column(max_amount_weight, 0.0..=max_upper_bound as f64))
+    };
 
     for (edge_idx, edge) in model.edges.iter().enumerate() {
         let y_weight = obj3_weight
@@ -903,6 +917,9 @@ fn solve_transfers_highs<MemberId: MemberIdTrait>(
         let y = y_cols[edge_idx];
         pb.add_row(..=0.0, [(x, 1.0), (y, -(edge.upper_bound as f64))]);
         pb.add_row(0.0.., [(x, 1.0), (y, -1.0)]);
+        if let Some(max_col) = max_amount_col {
+            pb.add_row(..=0.0, [(x, 1.0), (max_col, -1.0)]);
+        }
 
         if let Some(cash_idx) = cash_edge_to_idx[edge_idx] {
             let z1 = z1_cols[cash_idx];
@@ -1047,7 +1064,7 @@ impl<MemberId: MemberIdTrait> TransferModel<MemberId> {
             edge: Edge<MemberId>,
             payer_idx: usize,
             receiver_idx: usize,
-            payer_is_cash: bool,
+            touches_cash: bool,
         }
 
         let mut candidates = Vec::with_capacity(payers.len() * receivers.len());
@@ -1066,6 +1083,7 @@ impl<MemberId: MemberIdTrait> TransferModel<MemberId> {
                 }
 
                 let payer_is_cash = cash_lookup.contains(payer_member);
+                let receiver_is_cash = cash_lookup.contains(receiver_member);
                 candidates.push(CandidateEdge {
                     edge: Edge {
                         from: *payer_member,
@@ -1075,7 +1093,7 @@ impl<MemberId: MemberIdTrait> TransferModel<MemberId> {
                     },
                     payer_idx,
                     receiver_idx,
-                    payer_is_cash,
+                    touches_cash: payer_is_cash || receiver_is_cash,
                 });
             }
         }
@@ -1136,7 +1154,7 @@ impl<MemberId: MemberIdTrait> TransferModel<MemberId> {
         for candidate in candidates {
             let edge_idx = edges.len();
             edges.push(candidate.edge);
-            if candidate.payer_is_cash {
+            if candidate.touches_cash {
                 cash_edge_indices.push(edge_idx);
             }
             payer_edges[candidate.payer_idx].push(edge_idx);
@@ -1273,7 +1291,7 @@ fn round_binary_checked(value: f64) -> Result<i32, SettlementError> {
 mod tests {
     use super::{
         HighsCommonSolveOptions, MemberIdTrait, Payment, PersonBalance, SettlementError,
-        construct_settlement_transfers, minimize_transactions,
+        TransferBuildOptions, TransferModel, construct_settlement_transfers, minimize_transactions,
         minimize_transactions_with_options_and_outcome, round_bankers_checked,
     };
     use proptest::prelude::*;
@@ -1715,6 +1733,30 @@ mod tests {
         .expect("solution");
 
         assert_eq!(sorted_result, shuffled_result);
+    }
+
+    #[test]
+    fn cash_edges_include_cash_payee() {
+        let people = [
+            PersonBalance {
+                id: TestMember::Alice,
+                balance: 100,
+            },
+            PersonBalance {
+                id: TestMember::Bob,
+                balance: -100,
+            },
+        ];
+
+        let model = TransferModel::from_people_with_options(
+            &people,
+            &[TestMember::Alice, TestMember::Bob],
+            &[TestMember::Bob],
+            TransferBuildOptions::default(),
+        );
+
+        assert_eq!(model.edges.len(), 1);
+        assert_eq!(model.cash_edge_indices, vec![0]);
     }
 
     #[test]
