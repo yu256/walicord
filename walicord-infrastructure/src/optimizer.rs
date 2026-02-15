@@ -29,7 +29,9 @@ fn map_calc_settlement_error(err: SettlementError) -> SettlementOptimizationErro
         SettlementError::RoundingMismatch => SettlementOptimizationError::RoundingMismatch,
         SettlementError::InvalidWeights { .. }
         | SettlementError::BalancesTooLargeForF64
-        | SettlementError::NonFiniteSolution => SettlementOptimizationError::NoSolution,
+        | SettlementError::NonFiniteSolution
+        | SettlementError::OutOfRangeSolution
+        | SettlementError::NonBinarySolution => SettlementOptimizationError::NoSolution,
     }
 }
 

@@ -132,7 +132,9 @@ impl From<SettlementError> for SettlementRoundingError {
             SettlementError::NoSolution => SettlementRoundingError::TransferConstructionNoSolution,
             SettlementError::InvalidWeights { .. }
             | SettlementError::BalancesTooLargeForF64
-            | SettlementError::NonFiniteSolution => {
+            | SettlementError::NonFiniteSolution
+            | SettlementError::OutOfRangeSolution
+            | SettlementError::NonBinarySolution => {
                 SettlementRoundingError::TransferConstructionNoSolution
             }
             SettlementError::RoundingMismatch => {

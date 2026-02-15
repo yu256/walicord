@@ -30,6 +30,10 @@ pub enum SettlementError {
     BalancesTooLargeForF64,
     #[error("Solver returned a non-finite or out-of-range value")]
     NonFiniteSolution,
+    #[error("Solver returned an out-of-range value")]
+    OutOfRangeSolution,
+    #[error("Solver returned a non-binary value for a binary variable")]
+    NonBinarySolution,
 }
 
 const MAX_LEXICOGRAPHIC_EDGES: usize = 120;
@@ -258,6 +262,8 @@ pub(crate) fn minimize_transactions_with_options_and_outcome<MemberId: MemberIdT
 
     for ((&hm, &wp), &(_, _, max_amount)) in how_much.iter().zip(&who_pays).zip(&pairs) {
         problem.add_row(..=0.0, [(hm, 1.0), (wp, -max_amount)]);
+        // Prevents degenerate solutions where a paid edge is counted as "active" but carries zero
+        // flow, which can otherwise interfere with minimizing the number of payments.
         problem.add_row(0.0.., [(hm, 1.0), (wp, -1.0)]);
     }
 
@@ -310,7 +316,7 @@ pub(crate) fn minimize_transactions_with_options_and_outcome<MemberId: MemberIdT
         let mut active_edge_count = 0_i64;
         let mut objective_value = 0.0_f64;
         for col in &who_pays {
-            let is_active = round_bankers_checked(solution[*col])? > 0;
+            let is_active = round_binary_checked(solution[*col])? == 1;
             active_edge_count += i64::from(is_active);
             objective_value += weights.alpha * f64::from(i32::from(is_active));
         }
@@ -818,6 +824,8 @@ fn solve_transfers_highs<MemberId: MemberIdTrait>(
             } else {
                 0
             };
+        // This is an approximation intended to stabilize the chosen optimum without changing the
+        // integer objective components; it is not a strict lexicographic optimization.
         let x_weight = (edge_idx as f64) * tiebreak_coeff;
         x_cols.push(pb.add_integer_column(x_weight, 0.0..=edge.upper_bound as f64));
         y_cols.push(pb.add_integer_column(y_weight as f64, 0.0..=1.0));
@@ -947,14 +955,14 @@ fn solve_transfers_highs<MemberId: MemberIdTrait>(
     if accepted_feasible_on_limit {
         let obj1 = z1_cols
             .iter()
-            .map(|col| i64::from(round_bankers_checked(solution[*col]).is_ok_and(|v| v > 0)))
+            .map(|col| i64::from(round_binary_checked(solution[*col]).is_ok_and(|v| v == 1)))
             .sum::<i64>();
         let obj2 = z2_cols
             .as_ref()
             .map(|cols| {
                 cols.iter()
                     .map(|col| {
-                        i64::from(round_bankers_checked(solution[*col]).is_ok_and(|v| v > 0))
+                        i64::from(round_binary_checked(solution[*col]).is_ok_and(|v| v == 1))
                     })
                     .sum::<i64>()
             })
@@ -965,12 +973,12 @@ fn solve_transfers_highs<MemberId: MemberIdTrait>(
             .enumerate()
             .filter(|(_, edge)| edge.touches_non_settle)
             .map(|(idx, _)| {
-                i64::from(round_bankers_checked(solution[y_cols[idx]]).is_ok_and(|v| v > 0))
+                i64::from(round_binary_checked(solution[y_cols[idx]]).is_ok_and(|v| v == 1))
             })
             .sum::<i64>();
         let obj3 = y_cols
             .iter()
-            .map(|col| i64::from(round_bankers_checked(solution[*col]).is_ok_and(|v| v > 0)))
+            .map(|col| i64::from(round_binary_checked(solution[*col]).is_ok_and(|v| v == 1)))
             .sum::<i64>();
         tracing::info!(
             ?status,
@@ -1247,9 +1255,18 @@ fn round_bankers_checked(value: f64) -> Result<i64, SettlementError> {
     }
     let rounded = value.round_ties_even();
     if rounded < (i64::MIN as f64) || rounded > (i64::MAX as f64) {
-        return Err(SettlementError::NonFiniteSolution);
+        return Err(SettlementError::OutOfRangeSolution);
     }
     Ok(rounded as i64)
+}
+
+fn round_binary_checked(value: f64) -> Result<i32, SettlementError> {
+    let v = round_bankers_checked(value)?;
+    match v {
+        0 => Ok(0),
+        1 => Ok(1),
+        _ => Err(SettlementError::NonBinarySolution),
+    }
 }
 
 #[cfg(test)]
@@ -1424,6 +1441,25 @@ mod tests {
     #[case::non_tie_down(-2.4, -2)]
     fn bankers_rounding(#[case] value: f64, #[case] expected: i64) {
         assert_eq!(round_bankers_checked(value).expect("finite"), expected);
+    }
+
+    #[test]
+    fn rejects_non_binary_after_rounding() {
+        // Ensures we fail fast if the solver (or numeric issues) yields a value that rounds to an
+        // unexpected integer for binary columns.
+        //
+        // This is a unit-level guardrail; it does not attempt to induce a real solver failure.
+        use super::round_binary_checked;
+        assert!(matches!(
+            round_binary_checked(2.0),
+            Err(SettlementError::NonBinarySolution)
+        ));
+        assert!(matches!(
+            round_binary_checked(-1.0),
+            Err(SettlementError::NonBinarySolution)
+        ));
+        assert_eq!(round_binary_checked(0.49).unwrap(), 0);
+        assert_eq!(round_binary_checked(0.51).unwrap(), 1);
     }
 
     proptest! {
