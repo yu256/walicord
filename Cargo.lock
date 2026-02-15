@@ -2863,6 +2863,7 @@ dependencies = [
  "proptest",
  "rstest",
  "rust_decimal",
+ "tokio",
  "walicord-domain",
  "walicord-infrastructure",
 ]

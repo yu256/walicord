@@ -140,24 +140,24 @@ impl<'a> MessageProcessor<'a> {
             .balances
     }
 
-    pub fn build_settlement_result(
+    pub async fn build_settlement_result(
         &self,
         program: &Script<'_>,
     ) -> Result<SettlementResult, SettlementOptimizationError> {
         let apply_result = self.apply_statements(program, None, true)?;
-        self.build_settlement_result_from_apply(apply_result)
+        self.build_settlement_result_from_apply(apply_result).await
     }
 
-    pub fn build_settlement_result_for_prefix(
+    pub async fn build_settlement_result_for_prefix(
         &self,
         program: &Script<'_>,
         prefix_len: usize,
     ) -> Result<SettlementResult, SettlementOptimizationError> {
         let apply_result = self.apply_statements(program, Some(prefix_len), true)?;
-        self.build_settlement_result_from_apply(apply_result)
+        self.build_settlement_result_from_apply(apply_result).await
     }
 
-    fn build_settlement_result_from_apply(
+    async fn build_settlement_result_from_apply(
         &self,
         apply_result: ApplyResult,
     ) -> Result<SettlementResult, SettlementOptimizationError> {
@@ -175,18 +175,31 @@ impl<'a> MessageProcessor<'a> {
             scale: apply_result.quantization_scale,
             ..Self::settlement_context()
         };
+
+        let optimizer = self.optimizer;
+        let person_balances_clone = person_balances.clone();
+
         let optimized_transfers = match apply_result.settle_up.as_ref() {
-            Some(settle_up) => self.optimizer.optimize(
-                &person_balances,
-                &settle_up.settle_members,
-                &apply_result.settle_up_cash_members,
-                context,
-            )?,
+            Some(settle_up) => {
+                let settle_members = settle_up.settle_members.clone();
+                let cash_members = apply_result.settle_up_cash_members.clone();
+                tokio::task::block_in_place(move || {
+                    optimizer.optimize(
+                        &person_balances_clone,
+                        &settle_members,
+                        &cash_members,
+                        context,
+                    )
+                })?
+            }
             None => {
-                let all_members: Vec<MemberId> =
-                    person_balances.iter().map(|balance| balance.id).collect();
-                self.optimizer
-                    .optimize(&person_balances, &all_members, &[], context)?
+                let all_members: Vec<MemberId> = person_balances_clone
+                    .iter()
+                    .map(|balance| balance.id)
+                    .collect();
+                tokio::task::block_in_place(move || {
+                    optimizer.optimize(&person_balances_clone, &all_members, &[], context)
+                })?
             }
         };
 
@@ -518,7 +531,8 @@ mod tests {
     }
 
     #[rstest]
-    fn settle_up_response_groups_transfers(processor: MessageProcessor<'_>) {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn settle_up_response_groups_transfers(processor: MessageProcessor<'_>) {
         let members: [MemberId; 0] = [];
         let program = match processor.parse_program(&members, "unused", None) {
             ProcessingOutcome::Success(program) => program,
@@ -528,14 +542,15 @@ mod tests {
         let last_index = program.statements().len().saturating_sub(1);
         let result = processor
             .build_settlement_result_for_prefix(&program, last_index)
+            .await
             .expect("result generation failed");
 
         let settle_up = result.settle_up.expect("expected settle up context");
         assert!(!settle_up.immediate_transfers.is_empty());
     }
 
-    #[test]
-    fn build_settlement_result_passes_settle_members_to_optimizer() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn build_settlement_result_passes_settle_members_to_optimizer() {
         let parser = StubParser;
         let optimizer = AssertSettleMembersOptimizer {
             expected: vec![MemberId(1)],
@@ -550,11 +565,12 @@ mod tests {
 
         let _ = processor
             .build_settlement_result(&program)
+            .await
             .expect("result generation failed");
     }
 
-    #[test]
-    fn build_settlement_result_without_settleup_passes_all_members_to_optimizer() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn build_settlement_result_without_settleup_passes_all_members_to_optimizer() {
         let optimizer = AssertSettleMembersOptimizer {
             expected: vec![MemberId(1), MemberId(2), MemberId(3)],
         };
@@ -584,11 +600,12 @@ mod tests {
 
         let _ = processor
             .build_settlement_result(&script)
+            .await
             .expect("result generation failed");
     }
 
-    #[test]
-    fn build_settlement_result_passes_effective_cash_members_to_optimizer() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn build_settlement_result_passes_effective_cash_members_to_optimizer() {
         let optimizer = AssertSettleAndCashMembersOptimizer {
             expected_settle: vec![MemberId(1), MemberId(2), MemberId(3), MemberId(4)],
             expected_cash: vec![MemberId(1), MemberId(2)],
@@ -621,6 +638,7 @@ mod tests {
 
         let _ = processor
             .build_settlement_result(&script)
+            .await
             .expect("result generation failed");
     }
 
@@ -794,16 +812,18 @@ mod tests {
         Script::new(&[], baseline)
     }
 
-    fn assert_settle_transfers_equal(
+    async fn assert_settle_transfers_equal(
         processor: &MessageProcessor<'_>,
         left: &Script<'_>,
         right: &Script<'_>,
     ) {
         let left_result = processor
             .build_settlement_result(left)
+            .await
             .expect("left settle should succeed");
         let right_result = processor
             .build_settlement_result(right)
+            .await
             .expect("right settle should succeed");
 
         let left_transfers = left_result
@@ -824,16 +844,17 @@ mod tests {
         script_with_invalid_member_cash_expr(),
         script_with_member_cash_on()
     )]
-    fn cash_configuration_equivalence(
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cash_configuration_equivalence(
         #[case] left: Script<'static>,
         #[case] right: Script<'static>,
     ) {
         let processor = MessageProcessor::new(&StubParser, &NoopOptimizer);
-        assert_settle_transfers_equal(&processor, &left, &right);
+        assert_settle_transfers_equal(&processor, &left, &right).await;
     }
 
-    #[test]
-    fn script_local_cash_persists_across_multiple_settleup_commands() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn script_local_cash_persists_across_multiple_settleup_commands() {
         let processor = MessageProcessor::new(&StubParser, &NoopOptimizer);
         let members = union_members(&[1, 2, 3, 4]);
 
@@ -870,9 +891,11 @@ mod tests {
 
         let first = processor
             .build_settlement_result_for_prefix(&script, 5)
+            .await
             .expect("first settle should succeed");
         let second = processor
             .build_settlement_result_for_prefix(&script, 10)
+            .await
             .expect("second settle should succeed");
 
         let first_transfers = first

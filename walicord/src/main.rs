@@ -470,6 +470,7 @@ impl<'a> Handler<'a> {
                             match self
                                 .processor
                                 .build_settlement_result_for_prefix(&program, stmt_index)
+                                .await
                             {
                                 Ok(response) => {
                                     let member_ids: Vec<MemberId> =
@@ -528,6 +529,7 @@ impl<'a> Handler<'a> {
                             match self
                                 .processor
                                 .build_settlement_result_for_prefix(&program, stmt_index)
+                                .await
                             {
                                 Ok(response) => {
                                     let member_ids = Self::member_ids(&response);
