@@ -751,7 +751,7 @@ fn strict_retry_solve_options(
     let strict = HighsCommonSolveOptions {
         preset: HighsSolvePreset::Deterministic,
         threads: Some(1),
-        time_limit_seconds: None,
+        time_limit_seconds: options.time_limit_seconds,
         mip_rel_gap: None,
         mip_abs_gap: None,
         accept_feasible_on_limit: false,
