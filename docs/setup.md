@@ -37,7 +37,7 @@ Rustの開発環境がある場合の手順です。
    cargo run --release --features ja
 
    # 英語
-   cargo run --release --features en
+   cargo run --release --no-default-features --features en
 
    ```
 
