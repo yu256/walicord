@@ -120,15 +120,16 @@ impl<'a> MessageProcessor<'a> {
         ProcessingOutcome::Success(Script::new(member_ids, statements))
     }
 
-    pub fn calculate_balances(&self, program: &Script<'_>) -> MemberBalances {
+    pub async fn calculate_balances(&self, program: &Script<'_>) -> MemberBalances {
         // apply_settle=false skips settle-up quantization/optimization paths, so rounding-related
         // failures are not expected in this code path.
         self.apply_statements(program, None, false)
+            .await
             .expect("apply_statements should not fail without settlement")
             .balances
     }
 
-    pub fn calculate_balances_for_prefix(
+    pub async fn calculate_balances_for_prefix(
         &self,
         program: &Script<'_>,
         prefix_len: usize,
@@ -136,6 +137,7 @@ impl<'a> MessageProcessor<'a> {
         // apply_settle=false skips settle-up quantization/optimization paths, so rounding-related
         // failures are not expected in this code path.
         self.apply_statements(program, Some(prefix_len), false)
+            .await
             .expect("apply_statements should not fail without settlement")
             .balances
     }
@@ -144,7 +146,7 @@ impl<'a> MessageProcessor<'a> {
         &self,
         program: &Script<'_>,
     ) -> Result<SettlementResult, SettlementOptimizationError> {
-        let apply_result = self.apply_statements(program, None, true)?;
+        let apply_result = self.apply_statements(program, None, true).await?;
         self.build_settlement_result_from_apply(apply_result).await
     }
 
@@ -153,7 +155,9 @@ impl<'a> MessageProcessor<'a> {
         program: &Script<'_>,
         prefix_len: usize,
     ) -> Result<SettlementResult, SettlementOptimizationError> {
-        let apply_result = self.apply_statements(program, Some(prefix_len), true)?;
+        let apply_result = self
+            .apply_statements(program, Some(prefix_len), true)
+            .await?;
         self.build_settlement_result_from_apply(apply_result).await
     }
 
@@ -211,7 +215,7 @@ impl<'a> MessageProcessor<'a> {
         })
     }
 
-    fn apply_statements(
+    async fn apply_statements(
         &self,
         program: &Script<'_>,
         prefix_len: Option<usize>,
@@ -295,12 +299,18 @@ impl<'a> MessageProcessor<'a> {
                             effective_cash_members.sort_unstable();
                             effective_cash_members.dedup();
 
-                            let result = SettleUpPolicy::settle(
-                                accumulator.balances(),
-                                settle_members.members(),
-                                effective_cash_members.iter().copied(),
-                                Self::settlement_context(),
-                            )
+                            let balances = accumulator.balances().clone();
+                            let settle_members_vec: Vec<_> = settle_members.members().to_vec();
+                            let effective_cash_vec = effective_cash_members.clone();
+                            let context = Self::settlement_context();
+                            let result = tokio::task::block_in_place(move || {
+                                SettleUpPolicy::settle(
+                                    &balances,
+                                    &settle_members_vec,
+                                    effective_cash_vec.iter().copied(),
+                                    context,
+                                )
+                            })
                             .map_err(SettlementOptimizationError::from)?;
                             accumulator.set_balances(result.new_balances);
                             last_settle_cash_members.extend(effective_cash_members);
@@ -911,7 +921,8 @@ mod tests {
 
     #[rstest]
     #[case::jpy_thirds(100, 67, -34, -33)]
-    fn apply_statements_quantizes_balances_when_settlement_enabled(
+    #[tokio::test(flavor = "multi_thread")]
+    async fn apply_statements_quantizes_balances_when_settlement_enabled(
         #[case] amount: i64,
         #[case] expected_member_1: i64,
         #[case] expected_member_2: i64,
@@ -938,6 +949,7 @@ mod tests {
 
         let apply = processor
             .apply_statements(&script, None, true)
+            .await
             .expect("apply should succeed");
 
         assert_eq!(

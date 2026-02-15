@@ -135,7 +135,9 @@ async fn settle_up_pre_and_post_balances(
     let processor = MessageProcessor::new(&TEST_PARSER, &TEST_OPTIMIZER);
     let program = parse_program_from_content(members, content);
 
-    let pre_balances = processor.calculate_balances_for_prefix(&program, prefix_len);
+    let pre_balances = processor
+        .calculate_balances_for_prefix(&program, prefix_len)
+        .await;
     assert_balances(&pre_balances, expected_pre);
 
     let result = processor
