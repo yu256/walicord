@@ -43,6 +43,7 @@ struct ApplyResult {
     balances: MemberBalances,
     settle_up: Option<SettleUpContext>,
     settle_up_cash_members: Vec<MemberId>,
+    review_cash_members: Vec<MemberId>,
     quantization_scale: u32,
 }
 
@@ -201,8 +202,9 @@ impl<'a> MessageProcessor<'a> {
                     .iter()
                     .map(|balance| balance.id)
                     .collect();
+                let cash_members = apply_result.review_cash_members.clone();
                 tokio::task::block_in_place(move || {
-                    optimizer.optimize(&person_balances_clone, &all_members, &[], context)
+                    optimizer.optimize(&person_balances_clone, &all_members, &cash_members, context)
                 })?
             }
         };
@@ -338,10 +340,15 @@ impl<'a> MessageProcessor<'a> {
             balances
         };
 
+        let mut review_cash_members: Vec<MemberId> =
+            script_local_cash_members.iter().copied().collect();
+        review_cash_members.sort_unstable();
+
         Ok(ApplyResult {
             balances,
             settle_up,
             settle_up_cash_members: last_settle_cash_members,
+            review_cash_members,
             quantization_scale: context.scale,
         })
     }
@@ -650,6 +657,36 @@ mod tests {
             .build_settlement_result(&script)
             .await
             .expect("result generation failed");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn build_settlement_result_for_review_passes_cash_members_to_optimizer() {
+        let optimizer = AssertSettleAndCashMembersOptimizer {
+            expected_settle: vec![MemberId(1), MemberId(2), MemberId(3), MemberId(4)],
+            expected_cash: vec![MemberId(1)],
+        };
+        let processor = MessageProcessor::new(&StubParser, &optimizer);
+
+        let mut statements = base_cash_sensitivity_payments();
+        statements.extend([
+            ScriptStatementWithLine {
+                line: 5,
+                statement: ScriptStatement::Command(Command::MemberSetCash {
+                    members: union_members(&[1]),
+                    enabled: true,
+                }),
+            },
+            ScriptStatementWithLine {
+                line: 6,
+                statement: ScriptStatement::Command(Command::Review),
+            },
+        ]);
+        let script = Script::new(&[], statements);
+
+        let _ = processor
+            .build_settlement_result_for_prefix(&script, 5)
+            .await
+            .expect("review generation failed");
     }
 
     fn payment_stmt(
