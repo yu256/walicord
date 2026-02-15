@@ -102,6 +102,15 @@ Walicordの基本的な使い方と高度な機能について説明します。
 - **差集合 (-)**: `MEMBERS - @欠席者` （全員から欠席者を除く）
 - **積集合 (∩)**: `チームA ∩ チームB` （両方に所属する人）
 
+### 現金配慮（cash）
+
+現金でのやり取りを優先したいメンバーを指定できます。
+
+- `!member set <set_expr> cash on` / `!member set <set_expr> cash off`
+- `!settleup <set_expr> --cash <set_expr>`
+
+cash指定は送金構築のみに影響します。`!review` でも有効です。
+
 ### コメント
 
 記録にメモを残せます。

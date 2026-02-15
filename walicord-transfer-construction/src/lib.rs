@@ -814,12 +814,16 @@ fn solve_transfers_highs<MemberId: MemberIdTrait>(
     let mut cash_edge_to_idx = vec![None; model.edges.len()];
 
     let max_upper_bound = model.edges.iter().map(|e| e.upper_bound).max().unwrap_or(1);
+    let max_amount_weight = if model.edges.is_empty() {
+        0.0
+    } else {
+        (obj3_weight as f64) / (max_upper_bound as f64 + 1.0)
+    };
     let tiebreak_coeff = if model.edges.is_empty() {
         0.0
     } else {
-        (obj3_weight as f64) / ((model.edges.len() as f64) * (max_upper_bound as f64 + 1.0) * 2.0)
+        max_amount_weight / ((model.edges.len() as f64) * (max_upper_bound as f64 + 1.0) * 2.0)
     };
-    let max_amount_weight = tiebreak_coeff / (max_upper_bound as f64 + 1.0);
 
     let max_amount_col = if model.edges.is_empty() {
         None
