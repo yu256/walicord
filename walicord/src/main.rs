@@ -207,15 +207,23 @@ impl<'a> Handler<'a> {
         ) {
             tracing::info!("Disabled channel {}", channel_id);
         }
+        // Note: MemberRosterProvider maintains a guild-wide member cache, not per-channel,
+        // so no channel-specific purge is needed here.
     }
 
     async fn initialize_enabled_channels(&self, ctx: &Context, ready: &Ready) {
+        use serenity::model::channel::ChannelType;
+
         tracing::info!("Scanning guild channels for {} flag", CHANNEL_TOPIC_FLAG);
         for guild in &ready.guilds {
             let guild_id = guild.id;
             match guild_id.channels(&ctx.http).await {
                 Ok(channels) => {
                     for channel in channels.values() {
+                        // Only scan text-based channels (not voice, category, etc.)
+                        if channel.kind != ChannelType::Text {
+                            continue;
+                        }
                         if Self::topic_has_flag(channel.topic.as_deref()) {
                             self.enable_channel(ctx, channel.id).await;
                         }
@@ -938,10 +946,16 @@ impl EventHandler for Handler<'_> {
         self.initialize_enabled_channels(&ctx, &ready).await;
     }
 
-    async fn channel_update(&self, ctx: Context, _old: Option<GuildChannel>, new: GuildChannel) {
-        if Self::topic_has_flag(new.topic.as_deref()) {
+    async fn channel_update(&self, ctx: Context, old: Option<GuildChannel>, new: GuildChannel) {
+        let new_has_flag = Self::topic_has_flag(new.topic.as_deref());
+        let old_has_flag = old
+            .as_ref()
+            .is_some_and(|o| Self::topic_has_flag(o.topic.as_deref()));
+
+        // Process only when the flag presence actually changes
+        if new_has_flag && !old_has_flag {
             self.enable_channel(&ctx, new.id).await;
-        } else {
+        } else if !new_has_flag && old_has_flag {
             self.disable_channel(new.id);
         }
     }
