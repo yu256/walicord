@@ -37,26 +37,15 @@ const CHANNEL_TOPIC_FLAG: &str = "#walicord";
 fn format_settlement_error(err: SettlementOptimizationError) -> String {
     match err {
         SettlementOptimizationError::ImbalancedTotal(total) => {
-            format!(
-                "{} (total: {total})",
-                walicord_i18n::SETTLEMENT_CALCULATION_FAILED
-            )
+            walicord_i18n::settlement_imbalanced_total(total).to_string()
         }
         SettlementOptimizationError::InvalidGrid { g1, g2 } => {
-            format!(
-                "{} (invalid grid: g1={g1}, g2={g2})",
-                walicord_i18n::SETTLEMENT_CALCULATION_FAILED
-            )
+            walicord_i18n::settlement_invalid_grid(g1, g2).to_string()
         }
         SettlementOptimizationError::ModelTooLarge {
             edge_count,
             max_edges,
-        } => {
-            format!(
-                "{} (model too large: edges={edge_count}, max={max_edges})",
-                walicord_i18n::SETTLEMENT_CALCULATION_FAILED
-            )
-        }
+        } => walicord_i18n::settlement_model_too_large(edge_count, max_edges).to_string(),
         SettlementOptimizationError::NoSolution => {
             walicord_i18n::SETTLEMENT_CALCULATION_FAILED.to_string()
         }
@@ -1540,20 +1529,14 @@ mod tests {
     )]
     #[case::invalid_grid(
         SettlementOptimizationError::InvalidGrid { g1: 1000, g2: 300 },
-        format!(
-            "{} (invalid grid: g1=1000, g2=300)",
-            walicord_i18n::SETTLEMENT_CALCULATION_FAILED
-        )
+        walicord_i18n::settlement_invalid_grid(1000, 300).to_string()
     )]
     #[case::model_too_large(
         SettlementOptimizationError::ModelTooLarge {
             edge_count: 121,
             max_edges: 120,
         },
-        format!(
-            "{} (model too large: edges=121, max=120)",
-            walicord_i18n::SETTLEMENT_CALCULATION_FAILED
-        )
+        walicord_i18n::settlement_model_too_large(121, 120).to_string()
     )]
     fn format_settlement_error_uses_quantization_message(
         #[case] error: SettlementOptimizationError,
