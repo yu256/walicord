@@ -1,5 +1,16 @@
 # Changelog
 
+## [2.0.0](https://github.com/yu256/walicord/compare/walicord-v1.0.0...walicord-v2.0.0) (2026-02-16)
+
+
+### ⚠ BREAKING CHANGES
+
+* dynamic channel selection via topic flag ([#60](https://github.com/yu256/walicord/issues/60))
+
+### Features
+
+* dynamic channel selection via topic flag ([#60](https://github.com/yu256/walicord/issues/60)) ([f59f0ae](https://github.com/yu256/walicord/commit/f59f0aec9234b6617519db07fae7766ddd346833))
+
 ## [1.0.0](https://github.com/yu256/walicord/compare/walicord-v0.5.1...walicord-v1.0.0) (2026-02-15)
 
 
