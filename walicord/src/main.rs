@@ -201,10 +201,7 @@ impl<'a> Handler<'a> {
     }
 
     fn disable_channel(&self, channel_id: ChannelId) {
-        if matches!(
-            self.apply_channel_toggle(channel_id, false),
-            ChannelToggle::Disabled
-        ) {
+        if let ChannelToggle::Disabled = self.apply_channel_toggle(channel_id, false) {
             tracing::info!("Disabled channel {}", channel_id);
         }
         // Note: MemberRosterProvider maintains a guild-wide member cache, not per-channel,
@@ -541,7 +538,7 @@ impl<'a> Handler<'a> {
                                 has_effect_statement = true;
                             }
                             ScriptStatement::Command(command) => {
-                                if matches!(command, ProgramCommand::SettleUp { .. }) {
+                                if let ProgramCommand::SettleUp { .. } = command {
                                     has_effect_statement = true;
                                 }
                                 commands.push((stmt_index, command.clone()));
@@ -856,7 +853,7 @@ fn plan_cache_rebuild(
                                 has_effect_statement = true;
                             }
                             ScriptStatement::Command(command) => {
-                                if matches!(command, ProgramCommand::SettleUp { .. }) {
+                                if let ProgramCommand::SettleUp { .. } = command {
                                     has_effect_statement = true;
                                 }
                             }

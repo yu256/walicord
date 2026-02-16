@@ -452,7 +452,7 @@ pub fn construct_settlement_transfers_with_options<MemberId: MemberIdTrait>(
     let attempted_pruned = options.build.non_settle_topk.is_some();
     let mut attempted_unpruned = !attempted_pruned;
     let mut lex_fixed = solve_transfers_highs(&model, solver_g1, solver_g2, &options.solve);
-    if matches!(lex_fixed, Err(SolveTransfersError::Infeasible))
+    if let Err(SolveTransfersError::Infeasible) = lex_fixed
         && options.build.non_settle_topk.is_some()
     {
         model = TransferModel::from_people_with_options(
@@ -474,7 +474,7 @@ pub fn construct_settlement_transfers_with_options<MemberId: MemberIdTrait>(
         lex_fixed = solve_transfers_highs(&model, solver_g1, solver_g2, &options.solve);
     }
 
-    if matches!(lex_fixed, Err(SolveTransfersError::LimitReached))
+    if let Err(SolveTransfersError::LimitReached) = lex_fixed
         && let Some(strict) = strict_retry_solve_options(&options.solve.highs)
     {
         let strict_transfer_options = options.solve.clone().with_highs(strict);

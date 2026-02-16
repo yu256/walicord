@@ -26,10 +26,8 @@ impl VariablesPresenter {
         let statements = program.statements();
         let prefix_len = prefix_len.min(statements.len());
         let statements_slice = if prefix_len < statements.len()
-            && matches!(
-                statements[prefix_len].statement,
-                ScriptStatement::Command(_)
-            ) {
+            && let ScriptStatement::Command(_) = statements[prefix_len].statement
+        {
             &statements[..=prefix_len]
         } else {
             &statements[..prefix_len]
