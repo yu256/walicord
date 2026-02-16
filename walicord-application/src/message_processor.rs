@@ -354,10 +354,7 @@ impl<'a> MessageProcessor<'a> {
     ) -> usize {
         let prefix_len = prefix_len.min(statements.len());
         if prefix_len < statements.len()
-            && matches!(
-                statements[prefix_len].statement,
-                ScriptStatement::Command(_)
-            )
+            && let ScriptStatement::Command(_) = statements[prefix_len].statement
         {
             return prefix_len + 1;
         }

@@ -1,3 +1,5 @@
+#![warn(clippy::uninlined_format_args)]
+
 #[cfg(all(feature = "ja", feature = "en"))]
 compile_error!("Cannot enable both 'ja' and 'en' features at the same time");
 
@@ -88,48 +90,48 @@ pub mod strings {
 pub use strings::*;
 
 #[cfg(feature = "ja")]
-pub fn failed_to_evaluate_group(name: impl std::fmt::Display) -> String {
-    format!("グループ '{}' の評価に失敗しました", name)
+pub fn failed_to_evaluate_group(name: impl std::fmt::Display) -> impl std::fmt::Display {
+    std::fmt::from_fn(move |f| write!(f, "グループ '{name}' の評価に失敗しました"))
 }
 
 #[cfg(feature = "ja")]
-pub fn undefined_group(name: impl std::fmt::Display) -> String {
-    format!("未定義のグループ '{}' です", name)
+pub fn undefined_group(name: impl std::fmt::Display) -> impl std::fmt::Display {
+    std::fmt::from_fn(move |f| write!(f, "未定義のグループ '{name}' です"))
 }
 
 #[cfg(feature = "ja")]
-pub fn undefined_member(id: u64) -> String {
-    format!("未定義のメンバー <@{id}> です")
+pub fn undefined_member(id: u64) -> impl std::fmt::Display {
+    std::fmt::from_fn(move |f| write!(f, "未定義のメンバー <@{id}> です"))
 }
 
 #[cfg(feature = "en")]
-pub fn failed_to_evaluate_group(name: impl std::fmt::Display) -> String {
-    format!("Failed to evaluate group '{}'", name)
+pub fn failed_to_evaluate_group(name: impl std::fmt::Display) -> impl std::fmt::Display {
+    std::fmt::from_fn(move |f| write!(f, "Failed to evaluate group '{}'", name))
 }
 
 #[cfg(feature = "en")]
-pub fn undefined_group(name: impl std::fmt::Display) -> String {
-    format!("Undefined group '{}'", name)
+pub fn undefined_group(name: impl std::fmt::Display) -> impl std::fmt::Display {
+    std::fmt::from_fn(move |f| write!(f, "Undefined group '{}'", name))
 }
 
 #[cfg(feature = "en")]
-pub fn undefined_member(id: u64) -> String {
-    format!("Undefined member <@{id}>")
+pub fn undefined_member(id: u64) -> impl std::fmt::Display {
+    std::fmt::from_fn(move |f| write!(f, "Undefined member <@{id}>"))
 }
 
 #[cfg(not(any(feature = "ja", feature = "en")))]
-pub fn failed_to_evaluate_group(name: impl std::fmt::Display) -> String {
-    format!("Failed to evaluate group '{}'", name)
+pub fn failed_to_evaluate_group(name: impl std::fmt::Display) -> impl std::fmt::Display {
+    std::fmt::from_fn(move |f| write!(f, "Failed to evaluate group '{}'", name))
 }
 
 #[cfg(not(any(feature = "ja", feature = "en")))]
-pub fn undefined_group(name: impl std::fmt::Display) -> String {
-    format!("Undefined group '{}'", name)
+pub fn undefined_group(name: impl std::fmt::Display) -> impl std::fmt::Display {
+    std::fmt::from_fn(move |f| write!(f, "Undefined group '{}'", name))
 }
 
 #[cfg(not(any(feature = "ja", feature = "en")))]
-pub fn undefined_member(id: u64) -> String {
-    format!("Undefined member <@{id}>")
+pub fn undefined_member(id: u64) -> impl std::fmt::Display {
+    std::fmt::from_fn(move |f| write!(f, "Undefined member <@{id}>"))
 }
 
 pub struct SyntaxErrorMessage {
@@ -146,15 +148,6 @@ pub struct AmountExpressionErrorMessage {
     detail: String,
 }
 
-pub struct SettlementQuantizationImbalancedMessage<Dec> {
-    total: Dec,
-}
-
-pub struct SettlementQuantizationUnsupportedScaleMessage {
-    scale: u32,
-    max_supported: u32,
-}
-
 pub fn syntax_error(line: usize, detail: String) -> SyntaxErrorMessage {
     SyntaxErrorMessage { line, detail }
 }
@@ -165,22 +158,6 @@ pub fn implicit_payer_missing(line: usize) -> ImplicitPayerMissingMessage {
 
 pub fn invalid_amount_expression(line: usize, detail: String) -> AmountExpressionErrorMessage {
     AmountExpressionErrorMessage { line, detail }
-}
-
-pub fn settlement_quantization_imbalanced<Dec: std::fmt::Display>(
-    total: Dec,
-) -> SettlementQuantizationImbalancedMessage<Dec> {
-    SettlementQuantizationImbalancedMessage { total }
-}
-
-pub fn settlement_quantization_unsupported_scale(
-    scale: u32,
-    max_supported: u32,
-) -> SettlementQuantizationUnsupportedScaleMessage {
-    SettlementQuantizationUnsupportedScaleMessage {
-        scale,
-        max_supported,
-    }
 }
 
 #[cfg(feature = "ja")]
@@ -205,24 +182,6 @@ impl std::fmt::Display for ImplicitPayerMissingMessage {
 impl std::fmt::Display for AmountExpressionErrorMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "金額の式が不正です (行 {}): {}", self.line, self.detail)
-    }
-}
-
-#[cfg(feature = "ja")]
-impl<Dec: std::fmt::Display> std::fmt::Display for SettlementQuantizationImbalancedMessage<Dec> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "清算の丸めに失敗しました (合計: {})", self.total)
-    }
-}
-
-#[cfg(feature = "ja")]
-impl std::fmt::Display for SettlementQuantizationUnsupportedScaleMessage {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "清算の丸めに失敗しました (scale={}, max={})",
-            self.scale, self.max_supported
-        )
     }
 }
 
@@ -255,24 +214,6 @@ impl std::fmt::Display for ImplicitPayerMissingMessage {
     }
 }
 
-#[cfg(feature = "en")]
-impl<Dec: std::fmt::Display> std::fmt::Display for SettlementQuantizationImbalancedMessage<Dec> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Settlement quantization failed (total: {})", self.total)
-    }
-}
-
-#[cfg(feature = "en")]
-impl std::fmt::Display for SettlementQuantizationUnsupportedScaleMessage {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "Settlement quantization failed (scale={}, max={})",
-            self.scale, self.max_supported
-        )
-    }
-}
-
 #[cfg(not(any(feature = "ja", feature = "en")))]
 impl std::fmt::Display for SyntaxErrorMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -292,19 +233,87 @@ impl std::fmt::Display for ImplicitPayerMissingMessage {
 }
 
 #[cfg(not(any(feature = "ja", feature = "en")))]
-impl<Dec: std::fmt::Display> std::fmt::Display for SettlementQuantizationImbalancedMessage<Dec> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Settlement quantization failed (total: {})", self.total)
-    }
-}
-
-#[cfg(not(any(feature = "ja", feature = "en")))]
-impl std::fmt::Display for SettlementQuantizationUnsupportedScaleMessage {
+impl std::fmt::Display for AmountExpressionErrorMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "Settlement quantization failed (scale={}, max={})",
-            self.scale, self.max_supported
+            "Invalid amount expression at line {}: {}",
+            self.line, self.detail
         )
     }
+}
+
+pub fn settlement_quantization_imbalanced(total: impl std::fmt::Display) -> impl std::fmt::Display {
+    #[cfg(feature = "ja")]
+    return std::fmt::from_fn(move |f| write!(f, "清算の丸めに失敗しました (合計: {total})"));
+    #[cfg(not(feature = "ja"))]
+    return std::fmt::from_fn(move |f| {
+        write!(f, "Settlement quantization failed (total: {})", total)
+    });
+}
+
+pub fn settlement_quantization_unsupported_scale(
+    scale: u32,
+    max_supported: u32,
+) -> impl std::fmt::Display {
+    #[cfg(feature = "ja")]
+    return std::fmt::from_fn(move |f| {
+        write!(
+            f,
+            "清算の丸めに失敗しました (scale={scale}, max={max_supported})"
+        )
+    });
+    #[cfg(not(feature = "ja"))]
+    return std::fmt::from_fn(move |f| {
+        write!(
+            f,
+            "Settlement quantization failed (scale={}, max={})",
+            scale, max_supported
+        )
+    });
+}
+
+pub fn settlement_imbalanced_total(total: impl std::fmt::Display) -> impl std::fmt::Display {
+    #[cfg(feature = "ja")]
+    return std::fmt::from_fn(move |f| write!(f, "清算の計算に失敗しました (total: {total})"));
+    #[cfg(not(feature = "ja"))]
+    return std::fmt::from_fn(move |f| {
+        write!(f, "Settlement calculation failed (total: {})", total)
+    });
+}
+
+pub fn settlement_invalid_grid(g1: i64, g2: i64) -> impl std::fmt::Display {
+    #[cfg(feature = "ja")]
+    return std::fmt::from_fn(move |f| {
+        write!(
+            f,
+            "清算の計算に失敗しました (invalid grid: g1={g1}, g2={g2})"
+        )
+    });
+    #[cfg(not(feature = "ja"))]
+    return std::fmt::from_fn(move |f| {
+        write!(
+            f,
+            "Settlement calculation failed (invalid grid: g1={}, g2={})",
+            g1, g2
+        )
+    });
+}
+
+pub fn settlement_model_too_large(edge_count: usize, max_edges: usize) -> impl std::fmt::Display {
+    #[cfg(feature = "ja")]
+    return std::fmt::from_fn(move |f| {
+        write!(
+            f,
+            "清算の計算に失敗しました (model too large: edges={edge_count}, max={max_edges})"
+        )
+    });
+    #[cfg(not(feature = "ja"))]
+    return std::fmt::from_fn(move |f| {
+        write!(
+            f,
+            "Settlement calculation failed (model too large: edges={}, max={})",
+            edge_count, max_edges
+        )
+    });
 }
