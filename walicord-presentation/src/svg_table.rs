@@ -283,7 +283,9 @@ fn extract_svg_content(svg: &str) -> Option<Cow<'_, str>> {
     let content = &svg[start..end];
 
     let content = if let Some(style_start) = content.find("<style>")
-        && let Some(style_end) = content.find(STYLE_TAG_CLOSE)
+        && let Some(style_end) = content[style_start + "<style>".len()..]
+            .find(STYLE_TAG_CLOSE)
+            .map(|idx| idx + style_start + "<style>".len())
     {
         let before_style = &content[..style_start];
         let after_style = &content[style_end + STYLE_TAG_CLOSE.len()..];
