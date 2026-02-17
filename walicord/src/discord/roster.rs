@@ -1,4 +1,4 @@
-use crate::infrastructure::discord::{ChannelError, DiscordChannelService};
+use crate::discord::service::{ChannelError, DiscordChannelService};
 use dashmap::{DashMap, DashSet};
 use serenity::{
     model::id::{ChannelId, GuildId},
@@ -7,6 +7,8 @@ use serenity::{
 use std::collections::HashMap;
 use walicord_domain::model::{MemberId, MemberInfo};
 
+/// Provides member roster information for channels
+#[derive(Clone)]
 pub struct MemberRosterProvider {
     channel_service: DiscordChannelService,
     members: DashMap<GuildId, HashMap<MemberId, MemberInfo>>,
@@ -138,6 +140,57 @@ impl MemberRosterProvider {
     }
 }
 
+impl super::ports::RosterProvider for MemberRosterProvider {
+    async fn roster_for_channel(
+        &self,
+        ctx: &Context,
+        channel_id: ChannelId,
+    ) -> Result<Vec<MemberId>, super::ports::ServiceError> {
+        self.roster_for_channel(ctx, channel_id)
+            .await
+            .map_err(|e| match e {
+                ChannelError::Request(msg) => super::ports::ServiceError::Request(msg),
+                ChannelError::NotGuildChannel => super::ports::ServiceError::NotGuildChannel,
+                ChannelError::GuildNotCached => super::ports::ServiceError::GuildNotCached,
+            })
+    }
+
+    async fn warm_up(
+        &self,
+        ctx: &Context,
+        channel_id: ChannelId,
+    ) -> Result<(), super::ports::ServiceError> {
+        self.warm_up(ctx, channel_id).await.map_err(|e| match e {
+            ChannelError::Request(msg) => super::ports::ServiceError::Request(msg),
+            ChannelError::NotGuildChannel => super::ports::ServiceError::NotGuildChannel,
+            ChannelError::GuildNotCached => super::ports::ServiceError::GuildNotCached,
+        })
+    }
+
+    fn apply_member_add(&self, guild_id: GuildId, member: MemberInfo) {
+        self.apply_member_add(guild_id, member);
+    }
+
+    fn apply_member_update(&self, guild_id: GuildId, member: MemberInfo) {
+        self.apply_member_update(guild_id, member);
+    }
+
+    fn apply_member_remove(&self, guild_id: GuildId, member_id: MemberId) {
+        self.apply_member_remove(guild_id, member_id);
+    }
+
+    fn display_names_for_guild<I>(
+        &self,
+        guild_id: GuildId,
+        member_ids: I,
+    ) -> HashMap<MemberId, String>
+    where
+        I: IntoIterator<Item = MemberId>,
+    {
+        self.display_names_for_guild(guild_id, member_ids)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -196,7 +249,7 @@ mod tests {
         }
     }
 
-    #[rstest]
+    #[test]
     fn display_names_for_guild_returns_empty_when_not_loaded() {
         let guild_id = GuildId::new(1);
         let provider = MemberRosterProvider::new(DiscordChannelService);
@@ -240,7 +293,7 @@ mod tests {
         );
     }
 
-    #[rstest]
+    #[test]
     fn apply_member_add_ignores_new_guild() {
         let guild_id = GuildId::new(1);
         let provider = MemberRosterProvider::new(DiscordChannelService);

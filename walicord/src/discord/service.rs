@@ -22,6 +22,7 @@ pub enum ChannelError {
     GuildNotCached,
 }
 
+#[derive(Clone, Copy)]
 pub struct DiscordChannelService;
 
 fn should_ignore_history_message(message: &Message) -> bool {
@@ -105,6 +106,18 @@ impl DiscordChannelService {
 
         all_messages.reverse();
         Ok(all_messages)
+    }
+}
+
+impl super::ports::ChannelService for DiscordChannelService {
+    async fn fetch_all_messages(
+        &self,
+        ctx: &Context,
+        channel_id: ChannelId,
+    ) -> Result<IndexMap<MessageId, Message>, super::ports::ServiceError> {
+        self.fetch_all_messages(ctx, channel_id)
+            .await
+            .map_err(|e| super::ports::ServiceError::Request(e.to_string()))
     }
 }
 
