@@ -115,7 +115,7 @@ impl super::ports::ChannelService for DiscordChannelService {
         ctx: &Context,
         channel_id: ChannelId,
     ) -> Result<IndexMap<MessageId, Message>, super::ports::ServiceError> {
-        self.fetch_all_messages(ctx, channel_id)
+        DiscordChannelService::fetch_all_messages(self, ctx, channel_id)
             .await
             .map_err(|e| super::ports::ServiceError::Request(e.to_string()))
     }

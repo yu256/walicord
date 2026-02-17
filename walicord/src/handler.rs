@@ -199,11 +199,27 @@ where
             }
         };
 
+        let member_ids = match self
+            .roster_provider
+            .roster_for_channel(ctx, msg.channel_id)
+            .await
+        {
+            Ok(member_ids) => member_ids,
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to fetch channel member IDs for {}: {:?}",
+                    msg.channel_id,
+                    e
+                );
+                Vec::new()
+            }
+        };
+
         let result = process_program_message(
             ctx,
             msg,
             &self.processor,
-            &self.roster_provider,
+            &member_ids,
             &cached_contents,
             next_line_offset,
         )
@@ -214,64 +230,40 @@ where
         }
 
         // Execute commands
-        if result.has_effect_statement {
-            // Re-parse and execute commands
-            let member_ids: Vec<walicord_domain::model::MemberId> = self
-                .roster_provider
-                .roster_for_channel(ctx, msg.channel_id)
-                .await
-                .unwrap_or_default();
-            let author_id = MemberId(msg.author.id.get());
-            let parse_outcome = if cached_contents.is_empty() {
-                self.processor.parse_program_sequence(
-                    &member_ids,
-                    std::iter::once((msg.content.as_str(), Some(author_id))),
-                )
-            } else {
-                self.processor.parse_program_sequence(
-                    &member_ids,
-                    cached_contents
-                        .iter()
-                        .map(|(content, author)| (content.as_str(), *author))
-                        .chain(std::iter::once((msg.content.as_str(), Some(author_id)))),
-                )
-            };
+        if result.has_effect_statement
+            && let Some(program) = result.program.as_ref()
+        {
+            let settlement_service = SettlementService::new(&self.processor, &self.roster_provider);
+            let mut member_directory: Option<HashMap<MemberId, String>> = None;
 
-            if let walicord_application::ProcessingOutcome::Success(program) = parse_outcome {
-                let settlement_service =
-                    SettlementService::new(&self.processor, &self.roster_provider);
-                let mut member_directory: Option<HashMap<MemberId, String>> = None;
-
-                for (stmt_index, stmt) in program.statements().iter().enumerate() {
-                    if stmt.line <= next_line_offset {
-                        continue;
-                    }
-                    if let walicord_application::ScriptStatement::Command(command) = &stmt.statement
-                    {
-                        match command {
-                            ProgramCommand::Variables => {
-                                let reply = VariablesPresenter::render_for_prefix_with_members(
-                                    &program,
+            for (stmt_index, stmt) in program.statements().iter().enumerate() {
+                if stmt.line <= next_line_offset {
+                    continue;
+                }
+                if let walicord_application::ScriptStatement::Command(command) = &stmt.statement {
+                    match command {
+                        ProgramCommand::Variables => {
+                            let reply = VariablesPresenter::render_for_prefix_with_members(
+                                program,
+                                stmt_index,
+                                &member_ids,
+                            );
+                            let _ = msg.reply(&ctx.http, reply).await;
+                        }
+                        ProgramCommand::Review | ProgramCommand::SettleUp { .. } => {
+                            settlement_service
+                                .handle_settlement_command(
+                                    ctx,
+                                    msg,
                                     stmt_index,
+                                    program,
                                     &member_ids,
-                                );
-                                let _ = msg.reply(&ctx.http, reply).await;
-                            }
-                            ProgramCommand::Review | ProgramCommand::SettleUp { .. } => {
-                                settlement_service
-                                    .handle_settlement_command(
-                                        ctx,
-                                        msg,
-                                        stmt_index,
-                                        &program,
-                                        &member_ids,
-                                        &mut member_directory,
-                                    )
-                                    .await;
-                            }
-                            ProgramCommand::MemberAddCash { .. } => {
-                                // No immediate action needed
-                            }
+                                    &mut member_directory,
+                                )
+                                .await;
+                        }
+                        ProgramCommand::MemberAddCash { .. } => {
+                            // No immediate action needed
                         }
                     }
                 }

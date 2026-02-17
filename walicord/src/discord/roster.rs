@@ -146,7 +146,7 @@ impl super::ports::RosterProvider for MemberRosterProvider {
         ctx: &Context,
         channel_id: ChannelId,
     ) -> Result<Vec<MemberId>, super::ports::ServiceError> {
-        self.roster_for_channel(ctx, channel_id)
+        MemberRosterProvider::roster_for_channel(self, ctx, channel_id)
             .await
             .map_err(|e| match e {
                 ChannelError::Request(msg) => super::ports::ServiceError::Request(msg),
@@ -160,23 +160,25 @@ impl super::ports::RosterProvider for MemberRosterProvider {
         ctx: &Context,
         channel_id: ChannelId,
     ) -> Result<(), super::ports::ServiceError> {
-        self.warm_up(ctx, channel_id).await.map_err(|e| match e {
-            ChannelError::Request(msg) => super::ports::ServiceError::Request(msg),
-            ChannelError::NotGuildChannel => super::ports::ServiceError::NotGuildChannel,
-            ChannelError::GuildNotCached => super::ports::ServiceError::GuildNotCached,
-        })
+        MemberRosterProvider::warm_up(self, ctx, channel_id)
+            .await
+            .map_err(|e| match e {
+                ChannelError::Request(msg) => super::ports::ServiceError::Request(msg),
+                ChannelError::NotGuildChannel => super::ports::ServiceError::NotGuildChannel,
+                ChannelError::GuildNotCached => super::ports::ServiceError::GuildNotCached,
+            })
     }
 
     fn apply_member_add(&self, guild_id: GuildId, member: MemberInfo) {
-        self.apply_member_add(guild_id, member);
+        MemberRosterProvider::apply_member_add(self, guild_id, member);
     }
 
     fn apply_member_update(&self, guild_id: GuildId, member: MemberInfo) {
-        self.apply_member_update(guild_id, member);
+        MemberRosterProvider::apply_member_update(self, guild_id, member);
     }
 
     fn apply_member_remove(&self, guild_id: GuildId, member_id: MemberId) {
-        self.apply_member_remove(guild_id, member_id);
+        MemberRosterProvider::apply_member_remove(self, guild_id, member_id);
     }
 
     fn display_names_for_guild<I>(
@@ -187,7 +189,7 @@ impl super::ports::RosterProvider for MemberRosterProvider {
     where
         I: IntoIterator<Item = MemberId>,
     {
-        self.display_names_for_guild(guild_id, member_ids)
+        MemberRosterProvider::display_names_for_guild(self, guild_id, member_ids)
     }
 }
 

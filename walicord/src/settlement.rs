@@ -232,9 +232,10 @@ where
 }
 
 /// Result of processing a program message
-pub struct ProcessResult {
+pub struct ProcessResult<'a> {
     pub should_store: bool,
     pub has_effect_statement: bool,
+    pub program: Option<walicord_application::Script<'a>>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -271,7 +272,7 @@ fn evaluate_program<'b>(
     content: &'b str,
     author_id: MemberId,
     next_line_offset: usize,
-) -> Result<ProcessResult, ProgramParseFailure<'b>> {
+) -> Result<ProcessResult<'b>, ProgramParseFailure<'b>> {
     let parse_outcome = if cached_contents.is_empty() {
         processor.parse_program_sequence(member_ids, std::iter::once((content, Some(author_id))))
     } else {
@@ -310,6 +311,7 @@ fn evaluate_program<'b>(
             Ok(ProcessResult {
                 should_store,
                 has_effect_statement,
+                program: Some(program),
             })
         }
         ProcessingOutcome::FailedToEvaluateGroup { name, line } => {
@@ -372,36 +374,22 @@ fn format_parse_failure(
 }
 
 /// Process a program message and return processing result
-pub async fn process_program_message<RP>(
+pub async fn process_program_message<'a, 'b>(
     ctx: &Context,
-    msg: &Message,
-    processor: &MessageProcessor<'_>,
-    roster_provider: &RP,
-    cached_contents: &[(String, Option<MemberId>)],
+    msg: &'b Message,
+    processor: &MessageProcessor<'a>,
+    member_ids: &'b [MemberId],
+    cached_contents: &'b [(String, Option<MemberId>)],
     next_line_offset: usize,
-) -> ProcessResult
+) -> ProcessResult<'b>
 where
-    RP: RosterProvider,
+    'a: 'b,
 {
-    let member_ids = match roster_provider
-        .roster_for_channel(ctx, msg.channel_id)
-        .await
-    {
-        Ok(member_ids) => member_ids,
-        Err(e) => {
-            tracing::warn!(
-                "Failed to fetch channel member IDs for {}: {:?}",
-                msg.channel_id,
-                e
-            );
-            Vec::new()
-        }
-    };
     let author_id = MemberId(msg.author.id.get());
 
     match evaluate_program(
         processor,
-        &member_ids,
+        member_ids,
         cached_contents,
         msg.content.as_str(),
         author_id,
@@ -415,6 +403,7 @@ where
             ProcessResult {
                 should_store: false,
                 has_effect_statement: false,
+                program: None,
             }
         }
     }
@@ -464,6 +453,7 @@ mod tests {
 
         assert_eq!(result.should_store, expected_store);
         assert_eq!(result.has_effect_statement, expected_effect);
+        assert!(result.program.is_some());
     }
 
     #[rstest]
@@ -485,6 +475,7 @@ mod tests {
 
         assert!(!result.should_store);
         assert!(!result.has_effect_statement);
+        assert!(result.program.is_some());
     }
 
     #[rstest]

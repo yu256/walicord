@@ -4,7 +4,6 @@ use serenity::{
     model::{channel::Message, id::ChannelId},
     prelude::*,
 };
-use std::future::Future;
 use walicord_domain::model::{MemberId, MemberInfo};
 
 /// Error type for Discord service operations
