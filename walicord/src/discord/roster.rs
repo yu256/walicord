@@ -148,11 +148,7 @@ impl super::ports::RosterProvider for MemberRosterProvider {
     ) -> Result<Vec<MemberId>, super::ports::ServiceError> {
         MemberRosterProvider::roster_for_channel(self, ctx, channel_id)
             .await
-            .map_err(|e| match e {
-                ChannelError::Request(msg) => super::ports::ServiceError::Request(msg),
-                ChannelError::NotGuildChannel => super::ports::ServiceError::NotGuildChannel,
-                ChannelError::GuildNotCached => super::ports::ServiceError::GuildNotCached,
-            })
+            .map_err(super::ports::ServiceError::from)
     }
 
     async fn warm_up(
@@ -162,11 +158,7 @@ impl super::ports::RosterProvider for MemberRosterProvider {
     ) -> Result<(), super::ports::ServiceError> {
         MemberRosterProvider::warm_up(self, ctx, channel_id)
             .await
-            .map_err(|e| match e {
-                ChannelError::Request(msg) => super::ports::ServiceError::Request(msg),
-                ChannelError::NotGuildChannel => super::ports::ServiceError::NotGuildChannel,
-                ChannelError::GuildNotCached => super::ports::ServiceError::GuildNotCached,
-            })
+            .map_err(super::ports::ServiceError::from)
     }
 
     fn apply_member_add(&self, guild_id: GuildId, member: MemberInfo) {

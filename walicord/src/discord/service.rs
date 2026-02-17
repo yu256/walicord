@@ -1,3 +1,4 @@
+use super::ports::ServiceError;
 use indexmap::IndexMap;
 use serenity::{
     all::MessageId,
@@ -20,6 +21,16 @@ pub enum ChannelError {
     NotGuildChannel,
     #[error("Guild is not available in cache")]
     GuildNotCached,
+}
+
+impl From<ChannelError> for ServiceError {
+    fn from(err: ChannelError) -> Self {
+        match err {
+            ChannelError::Request(msg) => ServiceError::Request(msg),
+            ChannelError::NotGuildChannel => ServiceError::NotGuildChannel,
+            ChannelError::GuildNotCached => ServiceError::GuildNotCached,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -117,7 +128,7 @@ impl super::ports::ChannelService for DiscordChannelService {
     ) -> Result<IndexMap<MessageId, Message>, super::ports::ServiceError> {
         DiscordChannelService::fetch_all_messages(self, ctx, channel_id)
             .await
-            .map_err(|e| super::ports::ServiceError::Request(e.to_string()))
+            .map_err(ServiceError::from)
     }
 }
 
