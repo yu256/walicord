@@ -286,7 +286,7 @@ fn plan_cache_rebuild(
     member_ids: &[MemberId],
     mut messages: Vec<Message>,
 ) -> CacheRebuildPlan {
-    messages.sort_by_key(|m| m.id.get());
+    messages.sort_by_key(|m| m.id);
 
     let mut cache: IndexMap<MessageId, Message> = IndexMap::new();
     let mut reactions = Vec::new();
@@ -619,5 +619,83 @@ where
         {
             messages.insert(message.id, message);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rstest::rstest;
+    use serenity::model::{channel::Message, id::UserId};
+    use walicord_infrastructure::{WalicordProgramParser, WalicordSettlementOptimizer};
+
+    fn make_message(id: u64, content: &str) -> Message {
+        let mut message = Message::default();
+        message.id = MessageId::new(id);
+        message.channel_id = ChannelId::new(1);
+        message.content = content.to_string();
+        message.author = serenity::model::user::User::default();
+        message.author.id = UserId::new(1);
+        message
+    }
+
+    fn make_processor() -> MessageProcessor<'static> {
+        MessageProcessor::new(&WalicordProgramParser, &WalicordSettlementOptimizer)
+    }
+
+    #[test]
+    fn plan_cache_rebuild_orders_messages_and_sets_reactions() {
+        let processor = make_processor();
+        let member_ids = [MemberId(1), MemberId(2)];
+        let messages = vec![
+            make_message(3, "<@1> paid x to <@2>"),
+            make_message(1, "<@1> paid 100 to <@2>"),
+            make_message(2, "!variables"),
+        ];
+
+        let plan = plan_cache_rebuild(&processor, &member_ids, messages);
+
+        let reaction_order: Vec<(u64, ReactionState)> = plan
+            .reactions
+            .iter()
+            .map(|(msg, state)| (msg.id.get(), *state))
+            .collect();
+        assert_eq!(
+            reaction_order,
+            [
+                (1, ReactionState::Valid),
+                (2, ReactionState::Clear),
+                (3, ReactionState::Invalid),
+            ]
+        );
+
+        let cached_ids: Vec<u64> = plan.cache.keys().map(|id| id.get()).collect();
+        assert_eq!(cached_ids, [1, 2]);
+    }
+
+    #[rstest]
+    #[case::multiline_domain_then_settleup(
+        "<@1> paid 100 to <@2>\n<@1> paid 50 to <@2>",
+        "!settleup <@1>"
+    )]
+    fn plan_cache_rebuild_respects_line_offsets(#[case] first: &str, #[case] second: &str) {
+        let processor = make_processor();
+        let member_ids = [MemberId(1), MemberId(2)];
+        let messages = vec![make_message(1, first), make_message(2, second)];
+
+        let plan = plan_cache_rebuild(&processor, &member_ids, messages);
+
+        let reaction_order: Vec<(u64, ReactionState)> = plan
+            .reactions
+            .iter()
+            .map(|(msg, state)| (msg.id.get(), *state))
+            .collect();
+        assert_eq!(
+            reaction_order,
+            [(1, ReactionState::Valid), (2, ReactionState::Valid)]
+        );
+
+        let cached_ids: Vec<u64> = plan.cache.keys().map(|id| id.get()).collect();
+        assert_eq!(cached_ids, [1, 2]);
     }
 }
