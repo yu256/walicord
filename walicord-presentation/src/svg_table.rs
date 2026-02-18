@@ -276,19 +276,22 @@ fn extract_svg_dimension(svg: &str, attr: &str) -> Option<u32> {
 }
 
 fn extract_svg_content(svg: &str) -> Option<Cow<'_, str>> {
+    const STYLE_TAG_OPEN: &str = "<style>";
+    const STYLE_TAG_OPEN_LEN: usize = STYLE_TAG_OPEN.len();
     const STYLE_TAG_CLOSE: &str = "</style>";
+    const STYLE_TAG_CLOSE_LEN: usize = STYLE_TAG_CLOSE.len();
 
     let start = svg.find('>')? + 1;
     let end = svg.rfind("</svg>")?;
     let content = &svg[start..end];
 
-    let content = if let Some(style_start) = content.find("<style>")
-        && let Some(style_end) = content[style_start + "<style>".len()..]
+    let content = if let Some(style_start) = content.find(STYLE_TAG_OPEN)
+        && let Some(style_end) = content[style_start + STYLE_TAG_OPEN_LEN..]
             .find(STYLE_TAG_CLOSE)
-            .map(|idx| idx + style_start + "<style>".len())
+            .map(|idx| idx + style_start + STYLE_TAG_OPEN_LEN)
     {
         let before_style = &content[..style_start];
-        let after_style = &content[style_end + STYLE_TAG_CLOSE.len()..];
+        let after_style = &content[style_end + STYLE_TAG_CLOSE_LEN..];
         Cow::Owned(format!("{before_style}{after_style}"))
     } else {
         Cow::Borrowed(content)
