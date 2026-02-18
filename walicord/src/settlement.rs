@@ -1,16 +1,13 @@
-use crate::{
-    discord::{
-        ports::{RosterProvider, ServiceError},
-        svg_renderer::svg_to_png,
-    },
-    reaction::{ReactionService, ReactionState},
+use crate::discord::{
+    ports::{RosterProvider, ServiceError},
+    svg_renderer::svg_to_png,
 };
 use serenity::{
     all::CreateAttachment, builder::CreateMessage, model::channel::Message, prelude::*,
 };
 use std::collections::HashMap;
 use walicord_application::{
-    Command as ProgramCommand, FailureKind, MessageProcessor, ProcessingOutcome, ScriptStatement,
+    Command as ProgramCommand, FailureKind, MessageProcessor, ProgramParseError, ScriptStatement,
     SettlementOptimizationError, SettlementResult,
 };
 use walicord_domain::model::MemberId;
@@ -238,41 +235,14 @@ pub struct ProcessResult<'a> {
     pub program: Option<walicord_application::Script<'a>>,
 }
 
-#[derive(Debug, PartialEq, Eq)]
-enum ProgramParseFailure<'a> {
-    FailedToEvaluateGroup {
-        name: std::borrow::Cow<'a, str>,
-        line: usize,
-    },
-    UndefinedGroup {
-        name: std::borrow::Cow<'a, str>,
-        line: usize,
-    },
-    UndefinedMember {
-        id: u64,
-        line: usize,
-    },
-    SyntaxError {
-        line: usize,
-        detail: String,
-    },
-    MissingContextForImplicitAuthor {
-        line: usize,
-    },
-    InvalidAmountExpression {
-        line: usize,
-        detail: String,
-    },
-}
-
-fn evaluate_program<'b>(
+pub fn evaluate_program<'b>(
     processor: &MessageProcessor<'b>,
     member_ids: &'b [MemberId],
     cached_contents: &'b [(String, Option<MemberId>)],
     content: &'b str,
     author_id: MemberId,
     next_line_offset: usize,
-) -> Result<ProcessResult<'b>, ProgramParseFailure<'b>> {
+) -> Result<ProcessResult<'b>, ProgramParseError<'b>> {
     let parse_outcome = if cached_contents.is_empty() {
         processor.parse_program_sequence(member_ids, std::iter::once((content, Some(author_id))))
     } else {
@@ -285,128 +255,34 @@ fn evaluate_program<'b>(
         )
     };
 
+    let program = parse_outcome.into_result()?;
+
     let mut has_effect_statement = false;
     let mut should_store = false;
 
-    match parse_outcome {
-        ProcessingOutcome::Success(program) => {
-            let statements = program.statements();
-            for (_, stmt) in statements
-                .iter()
-                .enumerate()
-                .filter(|(_, stmt)| stmt.line > next_line_offset)
-            {
-                should_store = true;
-                match &stmt.statement {
-                    ScriptStatement::Domain(_) => {
-                        has_effect_statement = true;
-                    }
-                    ScriptStatement::Command(command) => {
-                        if let ProgramCommand::SettleUp { .. } = command {
-                            has_effect_statement = true;
-                        }
-                    }
+    let statements = program.statements();
+    for (_, stmt) in statements
+        .iter()
+        .enumerate()
+        .filter(|(_, stmt)| stmt.line > next_line_offset)
+    {
+        should_store = true;
+        match &stmt.statement {
+            ScriptStatement::Domain(_) => {
+                has_effect_statement = true;
+            }
+            ScriptStatement::Command(command) => {
+                if let ProgramCommand::SettleUp { .. } = command {
+                    has_effect_statement = true;
                 }
             }
-            Ok(ProcessResult {
-                should_store,
-                has_effect_statement,
-                program: Some(program),
-            })
-        }
-        ProcessingOutcome::FailedToEvaluateGroup { name, line } => {
-            Err(ProgramParseFailure::FailedToEvaluateGroup { name, line })
-        }
-        ProcessingOutcome::UndefinedGroup { name, line } => {
-            Err(ProgramParseFailure::UndefinedGroup { name, line })
-        }
-        ProcessingOutcome::UndefinedMember { id, line } => {
-            Err(ProgramParseFailure::UndefinedMember { id, line })
-        }
-        ProcessingOutcome::SyntaxError { line, detail } => {
-            Err(ProgramParseFailure::SyntaxError { line, detail })
-        }
-        ProcessingOutcome::MissingContextForImplicitAuthor { line } => {
-            Err(ProgramParseFailure::MissingContextForImplicitAuthor { line })
-        }
-        ProcessingOutcome::InvalidAmountExpression { line, detail } => {
-            Err(ProgramParseFailure::InvalidAmountExpression { line, detail })
         }
     }
-}
-
-fn format_parse_failure(
-    failure: ProgramParseFailure<'_>,
-    mention: impl std::fmt::Display,
-) -> String {
-    match failure {
-        ProgramParseFailure::FailedToEvaluateGroup { name, line } => {
-            format!(
-                "{mention} {} (line {line})",
-                walicord_i18n::failed_to_evaluate_group(name)
-            )
-        }
-        ProgramParseFailure::UndefinedGroup { name, line } => {
-            format!(
-                "{mention} {} (line {line})",
-                walicord_i18n::undefined_group(name)
-            )
-        }
-        ProgramParseFailure::UndefinedMember { id, line } => {
-            format!(
-                "{mention} {} (line {line})",
-                walicord_i18n::undefined_member(id)
-            )
-        }
-        ProgramParseFailure::SyntaxError { line, detail } => {
-            format!("{mention} {}", walicord_i18n::syntax_error(line, detail))
-        }
-        ProgramParseFailure::MissingContextForImplicitAuthor { line } => {
-            format!("{mention} {}", walicord_i18n::implicit_payer_missing(line))
-        }
-        ProgramParseFailure::InvalidAmountExpression { line, detail } => {
-            format!(
-                "{mention} {}",
-                walicord_i18n::invalid_amount_expression(line, detail)
-            )
-        }
-    }
-}
-
-/// Process a program message and return processing result
-pub async fn process_program_message<'a, 'b>(
-    ctx: &Context,
-    msg: &'b Message,
-    processor: &MessageProcessor<'a>,
-    member_ids: &'b [MemberId],
-    cached_contents: &'b [(String, Option<MemberId>)],
-    next_line_offset: usize,
-) -> ProcessResult<'b>
-where
-    'a: 'b,
-{
-    let author_id = MemberId(msg.author.id.get());
-
-    match evaluate_program(
-        processor,
-        member_ids,
-        cached_contents,
-        msg.content.as_str(),
-        author_id,
-        next_line_offset,
-    ) {
-        Ok(result) => result,
-        Err(failure) => {
-            ReactionService::update_state(ctx, msg, ReactionState::Invalid).await;
-            let content = format_parse_failure(failure, msg.author.mention());
-            let _ = msg.reply(&ctx.http, content).await;
-            ProcessResult {
-                should_store: false,
-                has_effect_statement: false,
-                program: None,
-            }
-        }
-    }
+    Ok(ProcessResult {
+        should_store,
+        has_effect_statement,
+        program: Some(program),
+    })
 }
 
 #[cfg(test)]

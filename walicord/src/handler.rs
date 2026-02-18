@@ -3,7 +3,7 @@ use crate::{
     discord::ports::{ChannelService, RosterProvider},
     message_cache::{MessageCache, next_line_offset},
     reaction::{ReactionService, ReactionState},
-    settlement::{SettlementService, process_program_message},
+    settlement::{SettlementService, evaluate_program},
 };
 use indexmap::IndexMap;
 use serenity::{
@@ -22,7 +22,7 @@ use serenity::{
 use std::collections::HashMap;
 use walicord_application::{Command as ProgramCommand, MessageProcessor, ScriptStatement};
 use walicord_domain::model::MemberId;
-use walicord_presentation::VariablesPresenter;
+use walicord_presentation::{VariablesPresenter, format_program_parse_error};
 
 /// Discord bot event handler with generic service dependencies
 pub struct BotHandler<'a, CS, RP>
@@ -215,21 +215,28 @@ where
             }
         };
 
-        let result = process_program_message(
-            ctx,
-            msg,
+        let author_id = MemberId(msg.author.id.get());
+        let result = match evaluate_program(
             &self.processor,
             &member_ids,
             &cached_contents,
+            msg.content.as_str(),
+            author_id,
             next_line_offset,
-        )
-        .await;
+        ) {
+            Ok(result) => result,
+            Err(failure) => {
+                ReactionService::update_state(ctx, msg, ReactionState::Invalid).await;
+                let content = format_program_parse_error(failure, msg.author.mention());
+                let _ = msg.reply(&ctx.http, content).await;
+                return false;
+            }
+        };
 
         if result.has_effect_statement {
             ReactionService::react(ctx, msg, '✅').await;
         }
 
-        // Execute commands
         if result.has_effect_statement
             && let Some(program) = result.program.as_ref()
         {
@@ -262,9 +269,7 @@ where
                                 )
                                 .await;
                         }
-                        ProgramCommand::MemberAddCash { .. } => {
-                            // No immediate action needed
-                        }
+                        ProgramCommand::MemberAddCash { .. } => {}
                     }
                 }
             }
