@@ -178,7 +178,7 @@ where
 
         if plan.cache.is_empty() {
             self.message_cache.remove(&channel_id);
-        } else {
+        } else if self.channel_manager.is_enabled(channel_id) {
             self.message_cache.insert(channel_id, plan.cache);
         }
     }
@@ -584,6 +584,7 @@ where
             .channel_id
             .message(&ctx.http, add_reaction.message_id)
             .await
+            && self.channel_manager.is_enabled(add_reaction.channel_id)
             && let Some(mut messages) = self.message_cache.get_mut(add_reaction.channel_id)
         {
             messages.insert(message.id, message);
@@ -615,6 +616,7 @@ where
             .channel_id
             .message(&ctx.http, removed_reaction.message_id)
             .await
+            && self.channel_manager.is_enabled(removed_reaction.channel_id)
             && let Some(mut messages) = self.message_cache.get_mut(removed_reaction.channel_id)
         {
             messages.insert(message.id, message);
