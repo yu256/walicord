@@ -1,30 +1,24 @@
-use crate::message_cache::MessageCache;
 use dashmap::DashSet;
 use serenity::model::id::ChannelId;
 
 const CHANNEL_TOPIC_FLAG: &str = "#walicord";
 
-/// Result of toggling a channel's enabled state
+/// Domain event emitted when channel state changes
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ChannelToggle {
-    Enabled,
-    Disabled,
-    NoChange,
+pub enum ChannelEvent {
+    Enabled(ChannelId),
+    Disabled(ChannelId),
 }
 
-/// Manages enabled/disabled state of channels
-#[derive(Clone)]
+/// Aggregate root managing enabled/disabled state of channels
+#[derive(Clone, Default)]
 pub struct ChannelManager {
     enabled_channels: DashSet<ChannelId>,
-    message_cache: MessageCache,
 }
 
 impl ChannelManager {
-    pub fn new(message_cache: MessageCache) -> Self {
-        Self {
-            enabled_channels: DashSet::new(),
-            message_cache,
-        }
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Check if a channel is enabled
@@ -37,45 +31,30 @@ impl ChannelManager {
         topic.is_some_and(|topic| topic.contains(CHANNEL_TOPIC_FLAG))
     }
 
-    /// Enable a channel and return the toggle result
-    pub fn enable(&self, channel_id: ChannelId) -> ChannelToggle {
+    /// Enable a channel and return the domain event if state changed
+    pub fn enable(&self, channel_id: ChannelId) -> Option<ChannelEvent> {
         if self.enabled_channels.insert(channel_id) {
-            ChannelToggle::Enabled
+            Some(ChannelEvent::Enabled(channel_id))
         } else {
-            ChannelToggle::NoChange
+            None
         }
     }
 
-    /// Disable a channel, clear its cache, and return the toggle result
-    pub fn disable(&self, channel_id: ChannelId) -> ChannelToggle {
-        if self.enabled_channels.remove(&channel_id).is_some() {
-            self.message_cache.remove(&channel_id);
-            ChannelToggle::Disabled
-        } else {
-            ChannelToggle::NoChange
-        }
+    /// Disable a channel and return the domain event if state changed
+    /// Note: Cache cleanup is the caller's responsibility (separate aggregate)
+    pub fn disable(&self, channel_id: ChannelId) -> Option<ChannelEvent> {
+        self.enabled_channels
+            .remove(&channel_id)
+            .map(|_| ChannelEvent::Disabled(channel_id))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use indexmap::IndexMap;
-    use serenity::{
-        all::MessageId,
-        model::{channel::Message, id::UserId},
-    };
+    use rstest::rstest;
 
-    fn make_message(id: u64, content: &str) -> Message {
-        let mut message = Message::default();
-        message.id = MessageId::new(id);
-        message.content = content.to_string();
-        message.author = serenity::model::user::User::default();
-        message.author.id = UserId::new(1);
-        message
-    }
-
-    #[rstest::rstest]
+    #[rstest]
     #[case::flag_present(Some("topic #walicord enabled"), true)]
     #[case::flag_missing(Some("topic walicord"), false)]
     #[case::empty(None, false)]
@@ -83,47 +62,72 @@ mod tests {
         assert_eq!(ChannelManager::topic_has_flag(topic), expected);
     }
 
+    #[rstest]
+    #[case::first_enable_emits_event(
+        ChannelId::new(1),
+        true,
+        Some(ChannelEvent::Enabled(ChannelId::new(1)))
+    )]
+    #[case::second_enable_returns_none(ChannelId::new(1), false, None)]
+    fn enable_returns_event_only_on_state_change(
+        #[case] channel_id: ChannelId,
+        #[case] is_first: bool,
+        #[case] expected: Option<ChannelEvent>,
+    ) {
+        let manager = ChannelManager::new();
+        if !is_first {
+            manager.enable(channel_id);
+        }
+        assert_eq!(manager.enable(channel_id), expected);
+    }
+
+    #[rstest]
+    #[case::disable_enabled_emits_event(true, Some(ChannelEvent::Disabled(ChannelId::new(1))))]
+    #[case::disable_not_enabled_returns_none(false, None)]
+    fn disable_returns_event_only_when_was_enabled(
+        #[case] was_enabled: bool,
+        #[case] expected: Option<ChannelEvent>,
+    ) {
+        let manager = ChannelManager::new();
+        let channel_id = ChannelId::new(1);
+        if was_enabled {
+            manager.enable(channel_id);
+        }
+        assert_eq!(manager.disable(channel_id), expected);
+    }
+
     #[test]
-    fn enable_and_disable_channel() {
-        let cache = MessageCache::new();
-        let manager = ChannelManager::new(cache);
+    fn enable_then_disable_produces_correct_state_sequence() {
+        let manager = ChannelManager::new();
         let channel_id = ChannelId::new(1);
 
-        assert_eq!(manager.enable(channel_id), ChannelToggle::Enabled);
-        assert!(manager.is_enabled(channel_id));
-        assert_eq!(manager.enable(channel_id), ChannelToggle::NoChange);
-
-        assert_eq!(manager.disable(channel_id), ChannelToggle::Disabled);
         assert!(!manager.is_enabled(channel_id));
-        assert_eq!(manager.disable(channel_id), ChannelToggle::NoChange);
+
+        let enable_event = manager.enable(channel_id);
+        assert_eq!(enable_event, Some(ChannelEvent::Enabled(channel_id)));
+        assert!(manager.is_enabled(channel_id));
+
+        let disable_event = manager.disable(channel_id);
+        assert_eq!(disable_event, Some(ChannelEvent::Disabled(channel_id)));
+        assert!(!manager.is_enabled(channel_id));
+
+        let disable_again = manager.disable(channel_id);
+        assert_eq!(disable_again, None);
     }
 
-    #[test]
-    fn disable_clears_cache() {
-        let cache = MessageCache::new();
-        let manager = ChannelManager::new(cache.clone());
+    #[rstest]
+    fn preserves_other_channels_when_disabling(
+        #[values(ChannelId::new(1), ChannelId::new(2))] target_channel: ChannelId,
+        #[values(ChannelId::new(3), ChannelId::new(4))] other_channel: ChannelId,
+    ) {
+        let manager = ChannelManager::new();
 
-        let mut messages = IndexMap::new();
-        messages.insert(MessageId::new(10), make_message(10, "content"));
-        cache.insert(ChannelId::new(1), messages);
-        manager.enable(ChannelId::new(1));
+        manager.enable(target_channel);
+        manager.enable(other_channel);
 
-        assert!(cache.get(ChannelId::new(1)).is_some());
-        manager.disable(ChannelId::new(1));
-        assert!(cache.get(ChannelId::new(1)).is_none());
-    }
+        manager.disable(target_channel);
 
-    #[test]
-    fn preserves_other_channels_when_disabling() {
-        let cache = MessageCache::new();
-        let manager = ChannelManager::new(cache);
-
-        manager.enable(ChannelId::new(1));
-        manager.enable(ChannelId::new(2));
-
-        manager.disable(ChannelId::new(1));
-
-        assert!(!manager.is_enabled(ChannelId::new(1)));
-        assert!(manager.is_enabled(ChannelId::new(2)));
+        assert!(!manager.is_enabled(target_channel));
+        assert!(manager.is_enabled(other_channel));
     }
 }

@@ -38,9 +38,8 @@ impl AppBuilder {
         let channel_service = DiscordChannelService;
         let roster_provider = MemberRosterProvider::new(channel_service);
         let message_cache = MessageCache::new();
-        let channel_manager = ChannelManager::new(message_cache.clone());
+        let channel_manager = ChannelManager::new();
 
-        // Create the handler with concrete types
         let handler: BotHandler<'_, DiscordChannelService, MemberRosterProvider> = BotHandler::new(
             message_cache,
             channel_service,

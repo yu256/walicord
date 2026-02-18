@@ -1,12 +1,66 @@
 //! Mock implementations for testing
 
-use crate::discord::ports::{RosterProvider, ServiceError};
+use crate::discord::ports::{ChannelService, RosterProvider, ServiceError};
+use indexmap::IndexMap;
 use serenity::{
-    model::id::{ChannelId, GuildId},
+    all::MessageId,
+    model::{
+        channel::Message,
+        id::{ChannelId, GuildId},
+    },
     prelude::*,
 };
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    future::{Ready, ready},
+};
 use walicord_domain::model::{MemberId, MemberInfo};
+
+/// Mock ChannelService for testing
+#[derive(Clone)]
+pub struct MockChannelService {
+    messages: HashMap<ChannelId, IndexMap<MessageId, Message>>,
+}
+
+impl MockChannelService {
+    pub fn new() -> Self {
+        Self {
+            messages: HashMap::new(),
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn with_messages(
+        mut self,
+        channel_id: ChannelId,
+        messages: IndexMap<MessageId, Message>,
+    ) -> Self {
+        self.messages.insert(channel_id, messages);
+        self
+    }
+}
+
+impl Default for MockChannelService {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ChannelService for MockChannelService {
+    #[allow(refining_impl_trait)]
+    fn fetch_all_messages(
+        &self,
+        _ctx: &Context,
+        channel_id: ChannelId,
+    ) -> Ready<Result<IndexMap<MessageId, Message>, ServiceError>> {
+        ready(
+            self.messages
+                .get(&channel_id)
+                .cloned()
+                .ok_or(ServiceError::Request("Channel not found".into())),
+        )
+    }
+}
 
 /// Mock RosterProvider for testing
 #[derive(Clone)]

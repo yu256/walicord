@@ -1,5 +1,5 @@
 use crate::{
-    channel::{ChannelManager, ChannelToggle},
+    channel::{ChannelEvent, ChannelManager},
     discord::ports::{ChannelService, RosterProvider},
     message_cache::{MessageCache, next_line_offset},
     reaction::{ReactionService, ReactionState},
@@ -59,49 +59,49 @@ where
     }
 
     async fn enable_channel(&self, ctx: &Context, channel_id: ChannelId) {
-        if !matches!(
-            self.channel_manager.enable(channel_id),
-            ChannelToggle::Enabled
-        ) {
+        let Some(ChannelEvent::Enabled(enabled_id)) = self.channel_manager.enable(channel_id)
+        else {
             return;
-        }
+        };
 
-        tracing::info!("Enabling channel {}", channel_id);
+        tracing::info!("Enabling channel {}", enabled_id);
         match self
             .channel_service
-            .fetch_all_messages(ctx, channel_id)
+            .fetch_all_messages(ctx, enabled_id)
             .await
         {
             Ok(messages) => {
-                if self.channel_manager.is_enabled(channel_id) {
+                if self.channel_manager.is_enabled(enabled_id) {
                     if messages.is_empty() {
-                        self.message_cache.remove(&channel_id);
+                        self.message_cache.remove(&enabled_id);
                     } else {
-                        self.message_cache.insert(channel_id, messages);
+                        self.message_cache.insert(enabled_id, messages);
                     }
                 }
             }
             Err(e) => {
                 tracing::warn!(
                     "Failed to fetch initial messages for {}: {:?}",
-                    channel_id,
+                    enabled_id,
                     e
                 );
             }
         }
 
-        if let Err(e) = self.roster_provider.warm_up(ctx, channel_id).await {
+        if let Err(e) = self.roster_provider.warm_up(ctx, enabled_id).await {
             tracing::warn!(
                 "Failed to build member cache for channel {}: {:?}",
-                channel_id,
+                enabled_id,
                 e
             );
         }
     }
 
     fn disable_channel(&self, channel_id: ChannelId) {
-        if let ChannelToggle::Disabled = self.channel_manager.disable(channel_id) {
-            tracing::info!("Disabled channel {}", channel_id);
+        if let Some(ChannelEvent::Disabled(disabled_id)) = self.channel_manager.disable(channel_id)
+        {
+            self.message_cache.remove(&disabled_id);
+            tracing::info!("Disabled channel {}", disabled_id);
         }
     }
 
@@ -625,7 +625,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rstest::rstest;
+    use crate::test_utils::{MockChannelService, MockRosterProvider};
+    use indexmap::IndexMap;
+    use rstest::{fixture, rstest};
     use serenity::model::{channel::Message, id::UserId};
     use walicord_infrastructure::{WalicordProgramParser, WalicordSettlementOptimizer};
 
@@ -643,9 +645,104 @@ mod tests {
         MessageProcessor::new(&WalicordProgramParser, &WalicordSettlementOptimizer)
     }
 
-    #[test]
-    fn plan_cache_rebuild_orders_messages_and_sets_reactions() {
+    #[fixture]
+    fn handler() -> BotHandler<'static, MockChannelService, MockRosterProvider> {
+        let message_cache = MessageCache::new();
+        let channel_service = MockChannelService::new();
+        let roster_provider = MockRosterProvider::new();
         let processor = make_processor();
+        let channel_manager = ChannelManager::new();
+        BotHandler::new(
+            message_cache,
+            channel_service,
+            roster_provider,
+            processor,
+            channel_manager,
+        )
+    }
+
+    #[fixture]
+    fn processor() -> MessageProcessor<'static> {
+        make_processor()
+    }
+
+    #[rstest]
+    fn disable_channel_clears_cache_when_channel_was_enabled(
+        handler: BotHandler<'static, MockChannelService, MockRosterProvider>,
+    ) {
+        let channel_id = ChannelId::new(1);
+
+        handler.channel_manager.enable(channel_id);
+        let mut messages = IndexMap::new();
+        messages.insert(MessageId::new(10), make_message(10, "test content"));
+        handler.message_cache.insert(channel_id, messages);
+
+        assert!(handler.channel_manager.is_enabled(channel_id));
+        assert!(handler.message_cache.get(channel_id).is_some());
+
+        handler.disable_channel(channel_id);
+
+        assert!(!handler.channel_manager.is_enabled(channel_id));
+        assert!(handler.message_cache.get(channel_id).is_none());
+    }
+
+    #[rstest]
+    #[case::first_disable_clears_cache(true, false)]
+    #[case::second_disable_is_noop(false, false)]
+    fn disable_channel_is_idempotent_for_cache(
+        #[case] should_have_cache: bool,
+        #[case] expected_cache_present: bool,
+    ) {
+        let handler = handler();
+        let channel_id = ChannelId::new(1);
+
+        handler.channel_manager.enable(channel_id);
+        let mut messages = IndexMap::new();
+        messages.insert(MessageId::new(10), make_message(10, "test"));
+        handler.message_cache.insert(channel_id, messages);
+
+        handler.disable_channel(channel_id);
+
+        if !should_have_cache {
+            handler.disable_channel(channel_id);
+        }
+
+        assert_eq!(
+            handler.message_cache.get(channel_id).is_some(),
+            expected_cache_present
+        );
+    }
+
+    #[rstest]
+    fn disable_channel_preserves_other_channel_cache(
+        handler: BotHandler<'static, MockChannelService, MockRosterProvider>,
+    ) {
+        let channel_a = ChannelId::new(1);
+        let channel_b = ChannelId::new(2);
+
+        handler.channel_manager.enable(channel_a);
+        handler.channel_manager.enable(channel_b);
+
+        let mut messages_a = IndexMap::new();
+        messages_a.insert(MessageId::new(10), make_message(10, "a"));
+        handler.message_cache.insert(channel_a, messages_a);
+
+        let mut messages_b = IndexMap::new();
+        messages_b.insert(MessageId::new(20), make_message(20, "b"));
+        handler.message_cache.insert(channel_b, messages_b);
+
+        handler.disable_channel(channel_a);
+
+        assert!(!handler.channel_manager.is_enabled(channel_a));
+        assert!(handler.channel_manager.is_enabled(channel_b));
+        assert!(handler.message_cache.get(channel_a).is_none());
+        assert!(handler.message_cache.get(channel_b).is_some());
+    }
+
+    #[rstest]
+    fn plan_cache_rebuild_orders_messages_by_id_and_sets_reactions(
+        processor: MessageProcessor<'static>,
+    ) {
         let member_ids = [MemberId(1), MemberId(2)];
         let messages = vec![
             make_message(3, "<@1> paid x to <@2>"),
@@ -676,10 +773,17 @@ mod tests {
     #[rstest]
     #[case::multiline_domain_then_settleup(
         "<@1> paid 100 to <@2>\n<@1> paid 50 to <@2>",
-        "!settleup <@1>"
+        "!settleup <@1>",
+        [(1, ReactionState::Valid), (2, ReactionState::Valid)],
+        [1, 2]
     )]
-    fn plan_cache_rebuild_respects_line_offsets(#[case] first: &str, #[case] second: &str) {
-        let processor = make_processor();
+    fn plan_cache_rebuild_respects_line_offsets(
+        processor: MessageProcessor<'static>,
+        #[case] first: &str,
+        #[case] second: &str,
+        #[case] expected_reactions: [(u64, ReactionState); 2],
+        #[case] expected_cached: [u64; 2],
+    ) {
         let member_ids = [MemberId(1), MemberId(2)];
         let messages = vec![make_message(1, first), make_message(2, second)];
 
@@ -690,12 +794,9 @@ mod tests {
             .iter()
             .map(|(msg, state)| (msg.id.get(), *state))
             .collect();
-        assert_eq!(
-            reaction_order,
-            [(1, ReactionState::Valid), (2, ReactionState::Valid)]
-        );
+        assert_eq!(reaction_order, expected_reactions);
 
         let cached_ids: Vec<u64> = plan.cache.keys().map(|id| id.get()).collect();
-        assert_eq!(cached_ids, [1, 2]);
+        assert_eq!(cached_ids, expected_cached);
     }
 }
