@@ -19,20 +19,6 @@ impl MessageCache {
         }
     }
 
-    pub fn get(
-        &self,
-        channel_id: ChannelId,
-    ) -> Option<dashmap::mapref::one::Ref<'_, ChannelId, IndexMap<MessageId, Message>>> {
-        self.inner.get(&channel_id)
-    }
-
-    pub fn get_mut(
-        &self,
-        channel_id: ChannelId,
-    ) -> Option<dashmap::mapref::one::RefMut<'_, ChannelId, IndexMap<MessageId, Message>>> {
-        self.inner.get_mut(&channel_id)
-    }
-
     pub fn insert(&self, channel_id: ChannelId, messages: IndexMap<MessageId, Message>) {
         self.inner.insert(channel_id, messages);
     }
@@ -46,6 +32,12 @@ impl MessageCache {
         channel_id: ChannelId,
     ) -> dashmap::mapref::entry::Entry<'_, ChannelId, IndexMap<MessageId, Message>> {
         self.inner.entry(channel_id)
+    }
+
+    /// Check if a channel exists in the cache
+    #[cfg(test)]
+    pub fn contains(&self, channel_id: ChannelId) -> bool {
+        self.inner.contains_key(&channel_id)
     }
 
     /// Remove a specific message from a channel's cache
@@ -78,6 +70,28 @@ impl MessageCache {
         } else {
             false
         }
+    }
+
+    /// Execute a closure with read access to a channel's messages
+    /// This ensures the lock is held only for the duration of the closure
+    pub fn with_messages<F, R>(&self, channel_id: ChannelId, f: F) -> Option<R>
+    where
+        F: FnOnce(&IndexMap<MessageId, Message>) -> R,
+    {
+        self.inner
+            .get(&channel_id)
+            .map(|ref_val| f(ref_val.value()))
+    }
+
+    /// Execute a closure with mutable access to a channel's messages
+    /// This ensures the lock is held only for the duration of the closure
+    pub fn with_messages_mut<F, R>(&self, channel_id: ChannelId, f: F) -> Option<R>
+    where
+        F: FnOnce(&mut IndexMap<MessageId, Message>) -> R,
+    {
+        self.inner
+            .get_mut(&channel_id)
+            .map(|mut ref_val| f(ref_val.value_mut()))
     }
 }
 
@@ -297,20 +311,46 @@ mod tests {
         #[case] second: &str,
         #[case] expected_offset: usize,
     ) {
-        let cache = MessageCache::new();
-        let mut messages = IndexMap::new();
+        let mut messages: IndexMap<MessageId, Message> = IndexMap::new();
         messages.insert(MessageId::new(1), make_message(1, 1, 1, first));
-        cache.insert(ChannelId::new(1), messages);
 
-        let guard = cache.get(ChannelId::new(1)).unwrap();
         let second_message = make_message(2, 1, 1, second);
         let offset = next_line_offset(
-            guard
+            messages
                 .iter()
                 .map(|(_, m)| m)
                 .chain(std::iter::once(&second_message)),
         );
 
         assert_eq!(offset, expected_offset);
+    }
+
+    #[rstest::rstest]
+    #[case::existing_channel_returns_some(ChannelId::new(1), Some(1))]
+    #[case::missing_channel_returns_none(ChannelId::new(99), None)]
+    fn with_messages_returns_result_or_none(
+        #[case] channel_id: ChannelId,
+        #[case] expected: Option<usize>,
+    ) {
+        let cache = MessageCache::new();
+        let mut messages = IndexMap::new();
+        messages.insert(MessageId::new(10), make_message(10, 1, 1, "test"));
+        cache.insert(ChannelId::new(1), messages);
+
+        let result = cache.with_messages(channel_id, |msgs| msgs.len());
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn with_messages_does_not_expose_lock_guard() {
+        let cache = MessageCache::new();
+        let mut messages = IndexMap::new();
+        messages.insert(MessageId::new(10), make_message(10, 1, 1, "test"));
+        cache.insert(ChannelId::new(1), messages);
+
+        let result = cache.with_messages(ChannelId::new(1), |msgs| {
+            msgs.get(&MessageId::new(10)).map(|m| m.content.clone())
+        });
+        assert_eq!(result, Some(Some("test".to_string())));
     }
 }

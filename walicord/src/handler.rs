@@ -136,10 +136,12 @@ where
         channel_id: ChannelId,
         updated_message: Option<Message>,
     ) {
-        let mut messages: Vec<Message> = match self.message_cache.get(channel_id) {
-            Some(messages) => messages.iter().map(|(_, m)| m.clone()).collect(),
-            None => Vec::new(),
-        };
+        let mut messages: Vec<Message> = self
+            .message_cache
+            .with_messages(channel_id, |msgs| {
+                msgs.iter().map(|(_, m)| m.clone()).collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
 
         if let Some(updated_message) = updated_message {
             if let Some(pos) = messages.iter().position(|m| m.id == updated_message.id) {
@@ -184,20 +186,17 @@ where
     }
 
     async fn process_program_message(&self, ctx: &Context, msg: &Message) -> bool {
-        let (cached_contents, next_line_offset) = {
-            let guard = self.message_cache.get(msg.channel_id);
-            match &guard {
-                Some(messages) => {
-                    let offset = next_line_offset(messages.iter().map(|(_, m)| m));
-                    let contents: Vec<(String, Option<MemberId>)> = messages
-                        .iter()
-                        .map(|(_, m)| (m.content.clone(), Some(MemberId(m.author.id.get()))))
-                        .collect();
-                    (contents, offset)
-                }
-                None => (Vec::new(), 0),
-            }
-        };
+        let (cached_contents, next_line_offset) = self
+            .message_cache
+            .with_messages(msg.channel_id, |messages| {
+                let offset = next_line_offset(messages.iter().map(|(_, m)| m));
+                let contents: Vec<(String, Option<MemberId>)> = messages
+                    .iter()
+                    .map(|(_, m)| (m.content.clone(), Some(MemberId(m.author.id.get()))))
+                    .collect();
+                (contents, offset)
+            })
+            .unwrap_or_default();
 
         let member_ids = match self
             .roster_provider
@@ -534,8 +533,10 @@ where
 
         let cached_message = self
             .message_cache
-            .get(event.channel_id)
-            .and_then(|messages| messages.get(&event.id).cloned());
+            .with_messages(event.channel_id, |messages| {
+                messages.get(&event.id).cloned()
+            })
+            .flatten();
 
         let updated_message =
             match resolve_message_update(&event, new, old_if_available, cached_message) {
@@ -571,18 +572,24 @@ where
 
         let current_user_id = ctx.cache.current_user().id;
         let is_me = add_reaction.user_id == Some(current_user_id);
-        if let Some(mut messages) = self.message_cache.get_mut(add_reaction.channel_id)
-            && let Some(message) = messages.get_mut(&add_reaction.message_id)
-        {
-            let updated = crate::message_cache::update_cached_reaction_add(
-                message,
-                &add_reaction.emoji,
-                is_me,
-                add_reaction.burst,
-            );
-            if updated {
-                return;
-            }
+        let updated = self
+            .message_cache
+            .with_messages_mut(add_reaction.channel_id, |messages| {
+                messages
+                    .get_mut(&add_reaction.message_id)
+                    .map(|message| {
+                        crate::message_cache::update_cached_reaction_add(
+                            message,
+                            &add_reaction.emoji,
+                            is_me,
+                            add_reaction.burst,
+                        )
+                    })
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false);
+        if updated {
+            return;
         }
 
         if let Ok(message) = add_reaction
@@ -590,9 +597,11 @@ where
             .message(&ctx.http, add_reaction.message_id)
             .await
             && self.channel_manager.is_enabled(add_reaction.channel_id)
-            && let Some(mut messages) = self.message_cache.get_mut(add_reaction.channel_id)
         {
-            messages.insert(message.id, message);
+            self.message_cache
+                .with_messages_mut(add_reaction.channel_id, |messages| {
+                    messages.insert(message.id, message);
+                });
         }
     }
 
@@ -603,18 +612,24 @@ where
 
         let current_user_id = ctx.cache.current_user().id;
         let is_me = removed_reaction.user_id == Some(current_user_id);
-        if let Some(mut messages) = self.message_cache.get_mut(removed_reaction.channel_id)
-            && let Some(message) = messages.get_mut(&removed_reaction.message_id)
-        {
-            let updated = crate::message_cache::update_cached_reaction_remove(
-                message,
-                &removed_reaction.emoji,
-                is_me,
-                removed_reaction.burst,
-            );
-            if updated {
-                return;
-            }
+        let updated = self
+            .message_cache
+            .with_messages_mut(removed_reaction.channel_id, |messages| {
+                messages
+                    .get_mut(&removed_reaction.message_id)
+                    .map(|message| {
+                        crate::message_cache::update_cached_reaction_remove(
+                            message,
+                            &removed_reaction.emoji,
+                            is_me,
+                            removed_reaction.burst,
+                        )
+                    })
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false);
+        if updated {
+            return;
         }
 
         if let Ok(message) = removed_reaction
@@ -622,9 +637,11 @@ where
             .message(&ctx.http, removed_reaction.message_id)
             .await
             && self.channel_manager.is_enabled(removed_reaction.channel_id)
-            && let Some(mut messages) = self.message_cache.get_mut(removed_reaction.channel_id)
         {
-            messages.insert(message.id, message);
+            self.message_cache
+                .with_messages_mut(removed_reaction.channel_id, |messages| {
+                    messages.insert(message.id, message);
+                });
         }
     }
 }
@@ -685,12 +702,12 @@ mod tests {
         handler.message_cache.insert(channel_id, messages);
 
         assert!(handler.channel_manager.is_enabled(channel_id));
-        assert!(handler.message_cache.get(channel_id).is_some());
+        assert!(handler.message_cache.contains(channel_id));
 
         handler.disable_channel(channel_id);
 
         assert!(!handler.channel_manager.is_enabled(channel_id));
-        assert!(handler.message_cache.get(channel_id).is_none());
+        assert!(!handler.message_cache.contains(channel_id));
     }
 
     #[rstest]
@@ -715,7 +732,7 @@ mod tests {
         }
 
         assert_eq!(
-            handler.message_cache.get(channel_id).is_some(),
+            handler.message_cache.contains(channel_id),
             expected_cache_present
         );
     }
@@ -742,8 +759,8 @@ mod tests {
 
         assert!(!handler.channel_manager.is_enabled(channel_a));
         assert!(handler.channel_manager.is_enabled(channel_b));
-        assert!(handler.message_cache.get(channel_a).is_none());
-        assert!(handler.message_cache.get(channel_b).is_some());
+        assert!(!handler.message_cache.contains(channel_a));
+        assert!(handler.message_cache.contains(channel_b));
     }
 
     #[rstest]
