@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 fxhash = "0.2.1"
+arcstr = "1.2.0"
 rust_decimal = "1.36.0"
 sha2 = "0.10.9"
 smallvec = "1.15.1"

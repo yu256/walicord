@@ -2891,6 +2891,7 @@ dependencies = [
 name = "walicord-domain"
 version = "0.1.0"
 dependencies = [
+ "arcstr",
  "fxhash",
  "proptest",
  "rstest",

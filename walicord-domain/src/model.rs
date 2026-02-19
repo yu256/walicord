@@ -1,3 +1,4 @@
+use arcstr::ArcStr;
 use fxhash::{FxHashMap, FxHashSet};
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 use smallvec::SmallVec;
@@ -615,7 +616,7 @@ pub struct MemberInfo {
     pub id: MemberId,
     pub display_name: SmolStr,
     pub username: SmolStr,
-    pub avatar_url: Option<SmolStr>,
+    pub avatar_url: Option<ArcStr>,
 }
 
 impl MemberInfo {

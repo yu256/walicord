@@ -1,4 +1,5 @@
 use super::ports::ServiceError;
+use arcstr::ArcStr;
 use indexmap::IndexMap;
 use serenity::{
     all::MessageId,
@@ -63,7 +64,7 @@ pub fn to_member_info(member: &Member) -> MemberInfo {
         avatar_url: member
             .user
             .avatar_url()
-            .map(|url| SmolStr::from(url.as_str())),
+            .map(|url| ArcStr::from(url.as_str())),
     }
 }
 
