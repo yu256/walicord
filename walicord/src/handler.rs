@@ -5,6 +5,7 @@ use crate::{
     reaction::{BotReaction, BotReactionState, MessageValidity, ReactionService},
     settlement::{SettlementService, evaluate_program},
 };
+use arcstr::ArcStr;
 use indexmap::IndexMap;
 use serenity::{
     all::MessageId,
@@ -19,7 +20,7 @@ use serenity::{
     },
     prelude::*,
 };
-use std::{collections::HashMap, sync::Arc};
+use std::collections::HashMap;
 use walicord_application::{Command as ProgramCommand, MessageProcessor, ScriptStatement};
 use walicord_domain::model::MemberId;
 use walicord_presentation::{VariablesPresenter, format_program_parse_error};
@@ -306,10 +307,10 @@ where
             .message_cache
             .with_messages(tracked_id, |messages| {
                 let offset = next_line_offset(messages.iter().map(|(_, m)| m));
-                let contents: Vec<(Arc<str>, Option<MemberId>)> = messages
+                let contents: Vec<(ArcStr, Option<MemberId>)> = messages
                     .iter()
                     .filter(|(_, m)| !m.is_bot && !m.is_marked_invalid())
-                    .map(|(_, m)| (Arc::clone(&m.content), Some(MemberId(m.author_id.get()))))
+                    .map(|(_, m)| (m.content.clone(), Some(MemberId(m.author_id.get()))))
                     .collect();
                 (contents, offset)
             })
@@ -778,7 +779,7 @@ mod tests {
     fn make_cached_message(id: u64, content: &str) -> CachedMessage {
         CachedMessage {
             id: MessageId::new(id),
-            content: std::sync::Arc::from(content),
+            content: ArcStr::from(content),
             author_id: UserId::new(1),
             is_bot: false,
             reaction_state: BotReactionState::None,

@@ -1,6 +1,7 @@
 use fxhash::{FxHashMap, FxHashSet};
 use rust_decimal::{Decimal, prelude::ToPrimitive};
 use smallvec::SmallVec;
+use smol_str::SmolStr;
 use std::{
     borrow::Cow,
     collections::BTreeMap,
@@ -9,7 +10,6 @@ use std::{
         Add, AddAssign, BitAnd, BitAndAssign, BitOr, BitOrAssign, BitXor, BitXorAssign, Neg, Not,
         Shl, Sub, SubAssign,
     },
-    sync::Arc,
 };
 
 use crate::services::MemberSetResolver;
@@ -613,9 +613,9 @@ impl MemberSet {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemberInfo {
     pub id: MemberId,
-    pub display_name: Arc<str>,
-    pub username: Arc<str>,
-    pub avatar_url: Option<Arc<str>>,
+    pub display_name: SmolStr,
+    pub username: SmolStr,
+    pub avatar_url: Option<SmolStr>,
 }
 
 impl MemberInfo {
@@ -770,24 +770,26 @@ mod tests {
     fn member_info_effective_name_returns_display_name(#[case] display_name: &str) {
         let info = MemberInfo {
             id: MemberId(1),
-            display_name: Arc::from(display_name),
-            username: Arc::from("username"),
+            display_name: SmolStr::from(display_name),
+            username: SmolStr::from("username"),
             avatar_url: None,
         };
         assert_eq!(info.effective_name(), display_name);
     }
 
     #[rstest]
-    fn member_info_clone_shares_arc() {
+    fn member_info_clone_preserves_fields() {
         let info1 = MemberInfo {
             id: MemberId(1),
-            display_name: Arc::from("Test"),
-            username: Arc::from("test"),
+            display_name: SmolStr::from("Test"),
+            username: SmolStr::from("test"),
             avatar_url: None,
         };
         let info2 = info1.clone();
 
-        assert_eq!(info1.display_name.as_ptr(), info2.display_name.as_ptr());
+        assert_eq!(info1.display_name, info2.display_name);
+        assert_eq!(info1.username, info2.username);
+        assert_eq!(info1.avatar_url, info2.avatar_url);
     }
 
     #[rstest]

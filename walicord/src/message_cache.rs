@@ -1,3 +1,4 @@
+use arcstr::ArcStr;
 use dashmap::DashMap;
 use indexmap::IndexMap;
 use serenity::{
@@ -10,13 +11,15 @@ use serenity::{
 };
 use std::sync::Arc;
 
-use crate::channel::TrackedChannelId;
-use crate::reaction::{BotReaction, BotReactionState};
+use crate::{
+    channel::TrackedChannelId,
+    reaction::{BotReaction, BotReactionState},
+};
 
 #[derive(Clone, Debug)]
 pub struct CachedMessage {
     pub id: MessageId,
-    pub content: Arc<str>,
+    pub content: ArcStr,
     pub author_id: UserId,
     pub is_bot: bool,
     pub reaction_state: BotReactionState,
@@ -59,7 +62,7 @@ impl CachedMessage {
         let reaction_state = bot_reaction_state_from_message(&msg);
         Self {
             id: msg.id,
-            content: Arc::from(msg.content.into_boxed_str()),
+            content: ArcStr::from(msg.content),
             author_id: msg.author.id,
             is_bot: msg.author.bot,
             reaction_state,
@@ -74,7 +77,7 @@ impl CachedMessage {
     /// - `from_message` on full fetch (reconciliation)
     pub fn apply_event(&mut self, event: &MessageUpdateEvent) {
         if let Some(ref content) = event.content {
-            self.content = Arc::from(content.as_str());
+            self.content = ArcStr::from(content.as_str());
         }
     }
 }
@@ -103,7 +106,11 @@ impl MessageCache {
     /// Insert messages for a tracked channel.
     ///
     /// The TrackedChannelId parameter ensures this is only called for tracked channels.
-    pub fn insert(&self, channel_id: TrackedChannelId, messages: IndexMap<MessageId, CachedMessage>) {
+    pub fn insert(
+        &self,
+        channel_id: TrackedChannelId,
+        messages: IndexMap<MessageId, CachedMessage>,
+    ) {
         self.inner.insert(channel_id.get(), messages);
     }
 
@@ -226,7 +233,7 @@ mod tests {
     fn make_cached_message(id: u64, author_id: u64, content: &str) -> CachedMessage {
         CachedMessage {
             id: MessageId::new(id),
-            content: Arc::from(content),
+            content: ArcStr::from(content),
             author_id: UserId::new(author_id),
             is_bot: false,
             reaction_state: BotReactionState::None,

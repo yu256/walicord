@@ -189,14 +189,14 @@ impl super::ports::RosterProvider for MemberRosterProvider {
 mod tests {
     use super::*;
     use rstest::rstest;
-    use std::sync::Arc;
+    use smol_str::SmolStr;
 
     fn create_test_member_info(user_id: u64, name: &str, nick: Option<&str>) -> MemberInfo {
         let display_name = nick.unwrap_or(name);
         MemberInfo {
             id: MemberId(user_id),
-            display_name: Arc::from(display_name),
-            username: Arc::from(name),
+            display_name: SmolStr::from(display_name),
+            username: SmolStr::from(name),
             avatar_url: None,
         }
     }

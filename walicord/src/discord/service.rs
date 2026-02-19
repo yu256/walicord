@@ -9,7 +9,7 @@ use serenity::{
     },
     prelude::*,
 };
-use std::sync::Arc;
+use smol_str::SmolStr;
 use walicord_application::{is_command_message, is_command_prefix};
 use walicord_domain::model::{MemberId, MemberInfo};
 
@@ -58,9 +58,12 @@ pub fn to_member_info(member: &Member) -> MemberInfo {
 
     MemberInfo {
         id: MemberId(member.user.id.get()),
-        display_name: Arc::from(display_name),
-        username: Arc::from(member.user.name.as_str()),
-        avatar_url: member.user.avatar_url().map(|url| Arc::from(url.as_str())),
+        display_name: SmolStr::from(display_name),
+        username: SmolStr::from(member.user.name.as_str()),
+        avatar_url: member
+            .user
+            .avatar_url()
+            .map(|url| SmolStr::from(url.as_str())),
     }
 }
 
@@ -166,7 +169,7 @@ mod tests {
 
         assert_eq!(info.id, MemberId(1));
         assert_eq!(info.effective_name(), expected);
-        assert_eq!(info.username.as_ref(), "username");
+        assert_eq!(info.username.as_str(), "username");
     }
 
     #[rstest]
@@ -181,7 +184,7 @@ mod tests {
         let member = create_test_member(1, "username", global_name, nick);
         let info = to_member_info(&member);
 
-        assert_eq!(info.display_name.as_ref(), expected);
+        assert_eq!(info.display_name.as_str(), expected);
     }
 
     #[rstest]

@@ -10,11 +10,14 @@ use serenity::{
     },
     prelude::*,
 };
+use smol_str::SmolStr;
 use std::{
     collections::HashMap,
     future::{Ready, ready},
-    sync::Arc,
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 use walicord_domain::model::{MemberId, MemberInfo};
 
@@ -49,7 +52,7 @@ impl MockChannelService {
     /// - Cache exists (empty or not) → fetch_count == 0
     /// - Cache miss + tracked → fetch_count == 1
     /// - Cache miss + not tracked → fetch_count == 0
-    /// Requires: Serenity Context construction in tests (currently difficult)
+    ///   Requires: Serenity Context construction in tests (currently difficult)
     #[allow(dead_code)]
     pub fn fetch_count(&self) -> usize {
         self.fetch_count.load(Ordering::SeqCst)
@@ -161,8 +164,8 @@ impl RosterProvider for MockRosterProvider {
 pub fn member_info(id: u64, name: &str) -> MemberInfo {
     MemberInfo {
         id: MemberId(id),
-        display_name: std::sync::Arc::from(name),
-        username: std::sync::Arc::from(name),
+        display_name: SmolStr::from(name),
+        username: SmolStr::from(name),
         avatar_url: None,
     }
 }

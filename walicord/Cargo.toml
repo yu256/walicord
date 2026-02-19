@@ -23,6 +23,8 @@ resvg = "0.45"
 tiny-skia = "0.11"
 futures = "0.3.31"
 smallvec = "1.15.1"
+arcstr = "1.2.0"
+smol_str = "0.3.5"
 
 [dev-dependencies]
 rstest = "0.26.1"
