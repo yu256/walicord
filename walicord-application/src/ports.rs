@@ -29,8 +29,8 @@ pub trait MemberDirectory: Send + Sync {
     fn display_name(&self, member_id: MemberId) -> Option<&str>;
 }
 
-impl MemberDirectory for HashMap<MemberId, String> {
+impl MemberDirectory for HashMap<MemberId, smol_str::SmolStr> {
     fn display_name(&self, member_id: MemberId) -> Option<&str> {
-        self.get(&member_id).map(String::as_str)
+        self.get(&member_id).map(smol_str::SmolStr::as_str)
     }
 }

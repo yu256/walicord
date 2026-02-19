@@ -2882,6 +2882,7 @@ dependencies = [
  "proptest",
  "rstest",
  "rust_decimal",
+ "smol_str",
  "tokio",
  "walicord-domain",
  "walicord-infrastructure",

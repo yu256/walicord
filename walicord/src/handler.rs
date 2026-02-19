@@ -341,7 +341,7 @@ where
             && let Some(program) = result.program.as_ref()
         {
             let settlement_service = SettlementService::new(&self.processor, &self.roster_provider);
-            let mut member_directory: Option<HashMap<MemberId, String>> = None;
+            let mut member_directory: Option<HashMap<MemberId, smol_str::SmolStr>> = None;
 
             for (stmt_index, stmt) in program.statements().iter().enumerate() {
                 if stmt.line <= next_line_offset {

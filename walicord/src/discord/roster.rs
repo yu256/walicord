@@ -122,7 +122,7 @@ impl MemberRosterProvider {
         &self,
         guild_id: GuildId,
         member_ids: I,
-    ) -> HashMap<MemberId, String>
+    ) -> HashMap<MemberId, smol_str::SmolStr>
     where
         I: IntoIterator<Item = MemberId>,
     {
@@ -133,7 +133,7 @@ impl MemberRosterProvider {
         let mut result = HashMap::new();
         for member_id in member_ids {
             if let Some(member) = members.get(&member_id) {
-                result.insert(member_id, member.effective_name().to_string());
+                result.insert(member_id, member.effective_name().into());
             }
         }
         result
@@ -177,7 +177,7 @@ impl super::ports::RosterProvider for MemberRosterProvider {
         &self,
         guild_id: GuildId,
         member_ids: I,
-    ) -> HashMap<MemberId, String>
+    ) -> HashMap<MemberId, smol_str::SmolStr>
     where
         I: IntoIterator<Item = MemberId>,
     {
@@ -239,7 +239,7 @@ mod tests {
 
         assert_eq!(result.len(), expected.len());
         for (id, name) in expected {
-            assert_eq!(result.get(&MemberId(*id)), Some(&name.to_string()));
+            assert_eq!(result.get(&MemberId(*id)), Some(&SmolStr::from(*name)));
         }
     }
 
@@ -283,7 +283,7 @@ mod tests {
         let result = provider.display_names_for_guild(guild_id, vec![MemberId(expected_id)]);
         assert_eq!(
             result.get(&MemberId(expected_id)),
-            Some(&expected.to_string())
+            Some(&SmolStr::from(expected))
         );
     }
 

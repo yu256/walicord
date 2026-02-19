@@ -144,7 +144,7 @@ impl RosterProvider for MockRosterProvider {
         &self,
         guild_id: GuildId,
         member_ids: I,
-    ) -> HashMap<MemberId, String>
+    ) -> HashMap<MemberId, smol_str::SmolStr>
     where
         I: IntoIterator<Item = MemberId>,
     {
@@ -152,7 +152,7 @@ impl RosterProvider for MockRosterProvider {
         if let Some(guild_members) = self.members.get(&guild_id) {
             for member_id in member_ids {
                 if let Some(member) = guild_members.get(&member_id) {
-                    result.insert(member_id, member.effective_name().to_string());
+                    result.insert(member_id, member.effective_name().into());
                 }
             }
         }
@@ -181,6 +181,6 @@ mod tests {
 
         let result = provider.display_names_for_guild(guild_id, vec![MemberId(1)]);
 
-        assert_eq!(result.get(&MemberId(1)), Some(&"Alice".to_string()));
+        assert_eq!(result.get(&MemberId(1)), Some(&SmolStr::from("Alice")));
     }
 }

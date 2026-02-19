@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 fxhash = "0.2.1"
+smol_str = "0.3.5"
 tokio = { version = "1.48.0", features = ["rt-multi-thread"] }
 walicord-domain = { path = "../walicord-domain" }
 
@@ -13,3 +14,4 @@ proptest = "1.10.0"
 rstest = "0.26.1"
 rust_decimal = "1.36.0"
 walicord-infrastructure = { path = "../walicord-infrastructure" }
+tokio = { version = "1.48.0", features = ["macros"] }

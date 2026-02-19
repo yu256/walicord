@@ -102,8 +102,8 @@ where
         ctx: &Context,
         channel_id: serenity::model::id::ChannelId,
         member_ids: I,
-        member_directory: &'b mut Option<HashMap<MemberId, String>>,
-    ) -> Result<&'b HashMap<MemberId, String>, ServiceError>
+        member_directory: &'b mut Option<HashMap<MemberId, smol_str::SmolStr>>,
+    ) -> Result<&'b HashMap<MemberId, smol_str::SmolStr>, ServiceError>
     where
         I: IntoIterator<Item = MemberId>,
     {
@@ -172,7 +172,7 @@ where
         stmt_index: usize,
         program: &walicord_application::Script<'_>,
         _member_ids: &[MemberId],
-        member_directory: &mut Option<HashMap<MemberId, String>>,
+        member_directory: &mut Option<HashMap<MemberId, smol_str::SmolStr>>,
     ) {
         match self
             .processor
