@@ -5,7 +5,7 @@ use crate::discord::{
 use serenity::{
     all::CreateAttachment, builder::CreateMessage, model::channel::Message, prelude::*,
 };
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 use walicord_application::{
     Command as ProgramCommand, FailureKind, MessageProcessor, ProgramParseError, ScriptStatement,
     SettlementOptimizationError, SettlementResult,
@@ -238,7 +238,7 @@ pub struct ProcessResult<'a> {
 pub fn evaluate_program<'b>(
     processor: &MessageProcessor<'b>,
     member_ids: &'b [MemberId],
-    cached_contents: &'b [(String, Option<MemberId>)],
+    cached_contents: &'b [(Arc<str>, Option<MemberId>)],
     content: &'b str,
     author_id: MemberId,
     next_line_offset: usize,
@@ -250,7 +250,7 @@ pub fn evaluate_program<'b>(
             member_ids,
             cached_contents
                 .iter()
-                .map(|(cached, author)| (cached.as_str(), *author))
+                .map(|(cached, author)| (cached.as_ref(), *author))
                 .chain(std::iter::once((content, Some(author_id)))),
         )
     };

@@ -2842,6 +2842,7 @@ dependencies = [
  "rstest",
  "serde_json",
  "serenity",
+ "smallvec",
  "thiserror 2.0.17",
  "tiny-skia",
  "tokio",

@@ -1,8 +1,8 @@
 use crate::{
-    channel::{ChannelEvent, ChannelManager},
+    channel::{ChannelEvent, ChannelManager, TrackedChannelId},
     discord::ports::{ChannelService, RosterProvider},
-    message_cache::{MessageCache, next_line_offset},
-    reaction::{ReactionService, ReactionState},
+    message_cache::{CachedMessage, MessageCache, next_line_offset},
+    reaction::{BotReaction, BotReactionState, MessageValidity, ReactionService},
     settlement::{SettlementService, evaluate_program},
 };
 use indexmap::IndexMap;
@@ -19,10 +19,23 @@ use serenity::{
     },
     prelude::*,
 };
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 use walicord_application::{Command as ProgramCommand, MessageProcessor, ScriptStatement};
 use walicord_domain::model::MemberId;
 use walicord_presentation::{VariablesPresenter, format_program_parse_error};
+
+/// Result of attempting to load channel cache.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CacheLoadResult {
+    /// Cache loaded successfully with at least one message.
+    LoadedNonEmpty,
+    /// Cache loaded successfully but channel is empty.
+    LoadedEmpty,
+    /// Channel is not tracked, no cache operation performed.
+    NotTracked,
+    /// Fetch failed, cache not loaded.
+    Failed,
+}
 
 /// Discord bot event handler with generic service dependencies
 pub struct BotHandler<'a, CS, RP>
@@ -58,50 +71,53 @@ where
         }
     }
 
-    async fn enable_channel(&self, ctx: &Context, channel_id: ChannelId) {
-        let Some(ChannelEvent::Enabled(enabled_id)) = self.channel_manager.enable(channel_id)
-        else {
+    async fn track_channel(&self, ctx: &Context, channel_id: ChannelId) {
+        let Some(ChannelEvent::Tracked(tracked_id)) = self.channel_manager.track(channel_id) else {
             return;
         };
 
-        tracing::info!("Enabling channel {}", enabled_id);
+        let channel_id = tracked_id.get();
+        tracing::info!("Tracking channel {}", channel_id);
         match self
             .channel_service
-            .fetch_all_messages(ctx, enabled_id)
+            .fetch_all_messages(ctx, channel_id)
             .await
         {
             Ok(messages) => {
-                if self.channel_manager.is_enabled(enabled_id) {
-                    if messages.is_empty() {
-                        self.message_cache.remove(&enabled_id);
-                    } else {
-                        self.message_cache.insert(enabled_id, messages);
-                    }
+                if self.channel_manager.mark_fetch_succeeded(channel_id) {
+                    let cached: IndexMap<MessageId, CachedMessage> = messages
+                        .into_iter()
+                        .map(|(id, msg)| (id, CachedMessage::from_message(msg)))
+                        .collect();
+                    self.message_cache.insert(tracked_id, cached);
                 }
             }
             Err(e) => {
-                tracing::warn!(
-                    "Failed to fetch initial messages for {}: {:?}",
-                    enabled_id,
-                    e
-                );
+                if self.channel_manager.mark_fetch_failed(channel_id) {
+                    tracing::warn!(
+                        "Failed to fetch initial messages for {}: {:?}",
+                        channel_id,
+                        e
+                    );
+                }
             }
         }
 
-        if let Err(e) = self.roster_provider.warm_up(ctx, enabled_id).await {
+        if let Err(e) = self.roster_provider.warm_up(ctx, channel_id).await {
             tracing::warn!(
                 "Failed to build member cache for channel {}: {:?}",
-                enabled_id,
+                channel_id,
                 e
             );
         }
     }
 
-    fn disable_channel(&self, channel_id: ChannelId) {
-        if let Some(ChannelEvent::Disabled(disabled_id)) = self.channel_manager.disable(channel_id)
+    fn untrack_channel(&self, channel_id: ChannelId) {
+        if let Some(ChannelEvent::Untracked(untracked_id)) =
+            self.channel_manager.untrack(channel_id)
         {
-            self.message_cache.remove(&disabled_id);
-            tracing::info!("Disabled channel {}", disabled_id);
+            self.message_cache.remove(untracked_id);
+            tracing::info!("Untracked channel {untracked_id}");
         }
     }
 
@@ -119,7 +135,7 @@ where
                             continue;
                         }
                         if ChannelManager::topic_has_flag(channel.topic.as_deref()) {
-                            self.enable_channel(ctx, channel.id).await;
+                            self.track_channel(ctx, channel.id).await;
                         }
                     }
                 }
@@ -130,29 +146,104 @@ where
         }
     }
 
+    pub(crate) async fn ensure_cache_loaded(
+        &self,
+        ctx: &Context,
+        channel_id: ChannelId,
+    ) -> CacheLoadResult {
+        let Some(tracked_id) = self.channel_manager.get_tracked(channel_id) else {
+            return CacheLoadResult::NotTracked;
+        };
+
+        if let Some(is_empty) = self
+            .message_cache
+            .with_messages(tracked_id, |msgs| msgs.is_empty())
+        {
+            return if is_empty {
+                CacheLoadResult::LoadedEmpty
+            } else {
+                CacheLoadResult::LoadedNonEmpty
+            };
+        }
+
+        match self
+            .channel_service
+            .fetch_all_messages(ctx, channel_id)
+            .await
+        {
+            Ok(messages) => {
+                let Some(tracked_id) = self.channel_manager.get_tracked(channel_id) else {
+                    return CacheLoadResult::NotTracked;
+                };
+                let _ = self.channel_manager.mark_fetch_succeeded(channel_id);
+                let cached_messages: IndexMap<MessageId, CachedMessage> = messages
+                    .into_iter()
+                    .map(|(id, msg)| (id, CachedMessage::from_message(msg)))
+                    .collect();
+                let is_empty = cached_messages.is_empty();
+                self.message_cache.insert(tracked_id, cached_messages);
+                if is_empty {
+                    CacheLoadResult::LoadedEmpty
+                } else {
+                    CacheLoadResult::LoadedNonEmpty
+                }
+            }
+            Err(e) => {
+                if self.channel_manager.mark_fetch_failed(channel_id) {
+                    tracing::warn!("Fetch failed for {}: {:?}", channel_id, e);
+                }
+                CacheLoadResult::Failed
+            }
+        }
+    }
+
+    /// Rebuild cache and update reactions for a channel.
+    ///
+    /// Requires at least one message to evaluate (either from cache or updated_cached).
+    /// - LoadedEmpty continues execution (cache exists but empty, updated_cached may exist)
+    /// - If no messages after merging cache + updated_cached, returns early without evaluation
+    /// - Cache entry is preserved even when empty (distinguishes "loaded empty" from "not loaded")
+    ///
+    /// # Performance Note
+    /// Currently fetches all channel messages on cache miss, even when updated_cached is present.
+    /// Future optimization: skip full fetch when updated_cached exists and accept empty context
+    /// (trades accuracy of line offsets for reduced API load).
     async fn rebuild_channel_cache(
         &self,
         ctx: &Context,
         channel_id: ChannelId,
-        updated_message: Option<Message>,
+        updated_cached: Option<CachedMessage>,
     ) {
-        let mut messages: Vec<Message> = self
-            .message_cache
-            .with_messages(channel_id, |msgs| {
-                msgs.iter().map(|(_, m)| m.clone()).collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
+        let load_result = self.ensure_cache_loaded(ctx, channel_id).await;
 
-        if let Some(updated_message) = updated_message {
-            if let Some(pos) = messages.iter().position(|m| m.id == updated_message.id) {
-                messages[pos] = updated_message;
+        match load_result {
+            CacheLoadResult::NotTracked | CacheLoadResult::Failed => return,
+            CacheLoadResult::LoadedEmpty | CacheLoadResult::LoadedNonEmpty => {}
+        }
+
+        let Some(tracked_id) = self.channel_manager.get_tracked(channel_id) else {
+            return;
+        };
+
+        let cached: Option<Vec<CachedMessage>> =
+            self.message_cache.with_messages(tracked_id, |msgs| {
+                msgs.iter().map(|(_, m)| m.clone()).collect()
+            });
+
+        let mut messages = cached.unwrap_or_default();
+
+        if let Some(updated_msg) = updated_cached {
+            if let Some(pos) = messages.iter().position(|m| m.id == updated_msg.id) {
+                messages[pos] = updated_msg;
             } else {
-                messages.push(updated_message);
+                messages.push(updated_msg);
             }
         }
 
         if messages.is_empty() {
-            self.message_cache.remove(&channel_id);
+            if let Some(tracked_id) = self.channel_manager.get_tracked(channel_id) {
+                self.message_cache.insert(tracked_id, IndexMap::new());
+            }
             return;
         }
 
@@ -161,7 +252,7 @@ where
             .roster_for_channel(ctx, channel_id)
             .await
         {
-            Ok(member_ids) => member_ids,
+            Ok(ids) => ids,
             Err(e) => {
                 tracing::warn!(
                     "Failed to fetch channel member IDs for {}: {:?}",
@@ -172,32 +263,28 @@ where
             }
         };
 
-        let plan = plan_cache_rebuild(&self.processor, &member_ids, messages);
+        let plan = plan_cache_rebuild(&self.processor, &member_ids, &messages);
 
-        for (message, desired_reaction) in plan.reactions {
-            ReactionService::update_state(ctx, &message, desired_reaction).await;
+        if let Some(tracked_id) = self.channel_manager.get_tracked(channel_id) {
+            self.message_cache.insert(tracked_id, plan.cache);
         }
 
-        if plan.cache.is_empty() {
-            self.message_cache.remove(&channel_id);
-        } else if self.channel_manager.is_enabled(channel_id) {
-            self.message_cache.insert(channel_id, plan.cache);
+        for (message_id, current, desired) in plan.reactions {
+            ReactionService::update_state_diff(ctx, channel_id, message_id, current, desired).await;
         }
     }
 
-    async fn process_program_message(&self, ctx: &Context, msg: &Message) -> bool {
-        let (cached_contents, next_line_offset) = self
-            .message_cache
-            .with_messages(msg.channel_id, |messages| {
-                let offset = next_line_offset(messages.iter().map(|(_, m)| m));
-                let contents: Vec<(String, Option<MemberId>)> = messages
-                    .iter()
-                    .map(|(_, m)| (m.content.clone(), Some(MemberId(m.author.id.get()))))
-                    .collect();
-                (contents, offset)
-            })
-            .unwrap_or_default();
-
+    /// Process a single message for program evaluation.
+    ///
+    /// Evaluates the message in context of cached prior messages. If cache is absent,
+    /// evaluates with empty context (valid for first message in channel or after cache miss).
+    /// The message is then stored in cache if it contains effect statements.
+    async fn process_program_message(
+        &self,
+        ctx: &Context,
+        msg: &Message,
+        tracked_id: TrackedChannelId,
+    ) -> bool {
         let member_ids = match self
             .roster_provider
             .roster_for_channel(ctx, msg.channel_id)
@@ -215,6 +302,19 @@ where
         };
 
         let author_id = MemberId(msg.author.id.get());
+        let (cached_contents, next_line_offset) = self
+            .message_cache
+            .with_messages(tracked_id, |messages| {
+                let offset = next_line_offset(messages.iter().map(|(_, m)| m));
+                let contents: Vec<(Arc<str>, Option<MemberId>)> = messages
+                    .iter()
+                    .filter(|(_, m)| !m.is_bot && !m.is_marked_invalid())
+                    .map(|(_, m)| (Arc::clone(&m.content), Some(MemberId(m.author_id.get()))))
+                    .collect();
+                (contents, offset)
+            })
+            .unwrap_or_default();
+
         let result = match evaluate_program(
             &self.processor,
             &member_ids,
@@ -225,7 +325,7 @@ where
         ) {
             Ok(result) => result,
             Err(failure) => {
-                ReactionService::update_state(ctx, msg, ReactionState::Invalid).await;
+                ReactionService::update_state(ctx, msg, MessageValidity::Invalid).await;
                 let content = format_program_parse_error(failure, msg.author.mention());
                 let _ = msg.reply(&ctx.http, content).await;
                 return false;
@@ -280,45 +380,52 @@ where
 
 /// Plan for rebuilding channel cache
 struct CacheRebuildPlan {
-    cache: IndexMap<MessageId, Message>,
-    reactions: Vec<(Message, ReactionState)>,
+    cache: IndexMap<MessageId, CachedMessage>,
+    /// Reaction updates for ALL processed messages:
+    /// - Invalid: add ❎ (parse error feedback)
+    /// - Valid: add ✅
+    /// - NotProgram: clear reactions
+    ///
+    /// Non-cached messages may receive redundant API calls on each rebuild,
+    /// acceptable trade-off since they don't pollute the cache.
+    reactions: Vec<(MessageId, BotReactionState, MessageValidity)>,
 }
 
-/// Plan cache rebuild based on message processing
 fn plan_cache_rebuild(
     processor: &MessageProcessor,
     member_ids: &[MemberId],
-    mut messages: Vec<Message>,
+    messages: &[CachedMessage],
 ) -> CacheRebuildPlan {
-    messages.sort_by_key(|m| m.id);
+    let mut sorted_indices: Vec<usize> = (0..messages.len()).collect();
+    sorted_indices.sort_by_key(|&i| messages[i].id);
 
-    let mut cache: IndexMap<MessageId, Message> = IndexMap::new();
+    let mut cache: IndexMap<MessageId, CachedMessage> = IndexMap::new();
     let mut reactions = Vec::new();
-    let mut inputs: Vec<(String, Option<MemberId>)> = Vec::new();
+    let mut inputs: Vec<(&str, Option<MemberId>)> = Vec::new();
     let mut line_count = 0usize;
     let mut ends_with_newline = false;
     let mut has_any = false;
 
-    for message in messages {
-        if message.author.bot {
+    for &idx in &sorted_indices {
+        let message = &messages[idx];
+        if message.is_bot || message.is_marked_invalid() {
             continue;
         }
 
-        let message_content = message.content.clone();
-        let author_id = MemberId(message.author.id.get());
+        let author_id = MemberId(message.author_id.get());
         let line_offset = if has_any {
             line_count + if ends_with_newline { 1 } else { 0 }
         } else {
             0
         };
 
-        let (desired_reaction, should_store) = {
+        let (desired_validity, should_store) = {
             let outcome = processor.parse_program_sequence(
                 member_ids,
                 inputs
                     .iter()
-                    .map(|(content, author_id)| (content.as_str(), *author_id))
-                    .chain(std::iter::once((message_content.as_str(), Some(author_id)))),
+                    .copied()
+                    .chain(std::iter::once((message.content.as_ref(), Some(author_id)))),
             );
 
             match outcome {
@@ -346,29 +453,34 @@ fn plan_cache_rebuild(
 
                     let should_store = has_any_statement;
                     let desired = if has_any_statement && has_effect_statement {
-                        ReactionState::Valid
+                        MessageValidity::Valid
                     } else {
-                        ReactionState::Clear
+                        MessageValidity::NotProgram
                     };
                     (desired, should_store)
                 }
-                _ => (ReactionState::Invalid, false),
+                _ => (MessageValidity::Invalid, false),
             }
         };
 
-        reactions.push((message.clone(), desired_reaction));
-
         if should_store {
-            cache.insert(message.id, message);
-            inputs.push((message_content.clone(), Some(author_id)));
+            let mut cached = message.clone();
+            cached.reaction_state = BotReaction::state_from_validity(desired_validity);
+            cache.insert(message.id, cached);
             if has_any {
-                line_count += line_count_with_prior_newline(&message_content, ends_with_newline);
+                line_count += line_count_with_prior_newline(&message.content, ends_with_newline);
             } else {
-                line_count = message_content.lines().count();
+                line_count = message.content.lines().count();
             }
-            ends_with_newline = message_content.is_empty() || message_content.ends_with('\n');
+            ends_with_newline = message.content.is_empty() || message.content.ends_with('\n');
             has_any = true;
+            inputs.push((message.content.as_ref(), Some(author_id)));
         }
+        // Always update reactions for all processed messages:
+        // - Valid: add ✅
+        // - Invalid: add ❎ (parse error feedback to user)
+        // - NotProgram: clear reactions (cleanup)
+        reactions.push((message.id, message.reaction_state, desired_validity));
     }
 
     CacheRebuildPlan { cache, reactions }
@@ -377,34 +489,6 @@ fn plan_cache_rebuild(
 /// Calculate line count with prior newline consideration
 fn line_count_with_prior_newline(content: &str, prior_ended_with_newline: bool) -> usize {
     content.lines().count() + if prior_ended_with_newline { 1 } else { 0 }
-}
-
-/// Resolution for message update events
-enum MessageUpdateResolution {
-    Message(Box<Message>),
-    Fetch,
-}
-
-/// Resolve message update from various sources
-fn resolve_message_update(
-    event: &MessageUpdateEvent,
-    new: Option<Message>,
-    old: Option<Message>,
-    cached: Option<Message>,
-) -> MessageUpdateResolution {
-    if let Some(message) = new {
-        return MessageUpdateResolution::Message(Box::new(message));
-    }
-    if let Some(mut message) = old {
-        event.apply_to_message(&mut message);
-        return MessageUpdateResolution::Message(Box::new(message));
-    }
-    if let Some(mut message) = cached {
-        event.apply_to_message(&mut message);
-        return MessageUpdateResolution::Message(Box::new(message));
-    }
-
-    MessageUpdateResolution::Fetch
 }
 
 #[async_trait]
@@ -426,15 +510,13 @@ where
             return;
         }
 
-        if !self.channel_manager.is_enabled(msg.channel_id) {
+        let Some(tracked_id) = self.channel_manager.get_tracked(msg.channel_id) else {
             return;
-        }
+        };
 
-        if self.process_program_message(&ctx, &msg).await {
+        if self.process_program_message(&ctx, &msg, tracked_id).await {
             self.message_cache
-                .entry(msg.channel_id)
-                .or_default()
-                .insert(msg.id, msg);
+                .upsert_message(tracked_id, CachedMessage::from_message(msg));
         }
     }
 
@@ -451,9 +533,9 @@ where
 
         // Process only when the flag presence actually changes
         if new_has_flag && !old_has_flag {
-            self.enable_channel(&ctx, new.id).await;
+            self.track_channel(&ctx, new.id).await;
         } else if !new_has_flag && old_has_flag {
-            self.disable_channel(new.id);
+            self.untrack_channel(new.id);
         }
     }
 
@@ -497,12 +579,12 @@ where
         deleted_message_id: MessageId,
         _guild_id: Option<GuildId>,
     ) {
-        if !self.channel_manager.is_enabled(channel_id) {
+        let Some(tracked_id) = self.channel_manager.get_tracked(channel_id) else {
             return;
-        }
+        };
 
         self.message_cache
-            .remove_message(channel_id, deleted_message_id);
+            .remove_message(tracked_id, deleted_message_id);
     }
 
     async fn message_delete_bulk(
@@ -512,12 +594,12 @@ where
         deleted_message_ids: Vec<MessageId>,
         _guild_id: Option<GuildId>,
     ) {
-        if !self.channel_manager.is_enabled(channel_id) {
+        let Some(tracked_id) = self.channel_manager.get_tracked(channel_id) else {
             return;
-        }
+        };
 
         self.message_cache
-            .remove_messages(channel_id, &deleted_message_ids);
+            .remove_messages(tracked_id, &deleted_message_ids);
     }
 
     async fn message_update(
@@ -527,68 +609,89 @@ where
         new: Option<Message>,
         event: MessageUpdateEvent,
     ) {
-        if !self.channel_manager.is_enabled(event.channel_id) {
+        let Some(tracked_id) = self.channel_manager.get_tracked(event.channel_id) else {
             return;
-        }
+        };
 
-        let cached_message = self
-            .message_cache
-            .with_messages(event.channel_id, |messages| {
-                messages.get(&event.id).cloned()
-            })
-            .flatten();
+        let updated_cached = if let Some(message) = new {
+            if message.author.bot {
+                return;
+            }
+            Some(CachedMessage::from_message(message))
+        } else if let Some(mut old) = old_if_available {
+            if old.author.bot {
+                return;
+            }
+            event.apply_to_message(&mut old);
+            Some(CachedMessage::from_message(old))
+        } else {
+            let cached_updated = self
+                .message_cache
+                .with_messages(tracked_id, |msgs| {
+                    msgs.get(&event.id).map(|cached| {
+                        let mut updated = cached.clone();
+                        updated.apply_event(&event);
+                        updated
+                    })
+                })
+                .flatten();
 
-        let updated_message =
-            match resolve_message_update(&event, new, old_if_available, cached_message) {
-                MessageUpdateResolution::Message(message) => *message,
-                MessageUpdateResolution::Fetch => {
-                    match event.channel_id.message(&ctx.http, event.id).await {
-                        Ok(message) => message,
-                        Err(e) => {
-                            tracing::warn!(
-                                "Failed to fetch updated message {} in {}: {:?}",
-                                event.id,
-                                event.channel_id,
-                                e
-                            );
+            if let Some(cached) = cached_updated {
+                if cached.is_bot {
+                    return;
+                }
+                Some(cached)
+            } else {
+                match event.channel_id.message(&ctx.http, event.id).await {
+                    Ok(message) => {
+                        if message.author.bot {
                             return;
                         }
+                        Some(CachedMessage::from_message(message))
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to fetch updated message {} in {}: {:?}",
+                            event.id,
+                            event.channel_id,
+                            e
+                        );
+                        return;
                     }
                 }
-            };
+            }
+        };
 
-        if updated_message.author.bot {
-            return;
-        }
-
-        self.rebuild_channel_cache(&ctx, event.channel_id, Some(updated_message))
+        self.rebuild_channel_cache(&ctx, event.channel_id, updated_cached)
             .await;
     }
 
     async fn reaction_add(&self, ctx: Context, add_reaction: Reaction) {
-        if !self.channel_manager.is_enabled(add_reaction.channel_id) {
+        let Some(tracked_id) = self.channel_manager.get_tracked(add_reaction.channel_id) else {
+            return;
+        };
+
+        let is_own_reaction = add_reaction.user_id == Some(ctx.cache.current_user().id);
+        if !is_own_reaction {
             return;
         }
 
-        let current_user_id = ctx.cache.current_user().id;
-        let is_me = add_reaction.user_id == Some(current_user_id);
-        let updated = self
+        let new_state = match &add_reaction.emoji {
+            ReactionType::Unicode(s) if s == BotReaction::CHECK => Some(BotReactionState::HasCheck),
+            ReactionType::Unicode(s) if s == BotReaction::CROSS => Some(BotReactionState::HasCross),
+            _ => None,
+        };
+
+        let Some(new_state) = new_state else {
+            return;
+        };
+
+        if self
             .message_cache
-            .with_messages_mut(add_reaction.channel_id, |messages| {
-                messages
-                    .get_mut(&add_reaction.message_id)
-                    .map(|message| {
-                        crate::message_cache::update_cached_reaction_add(
-                            message,
-                            &add_reaction.emoji,
-                            is_me,
-                            add_reaction.burst,
-                        )
-                    })
-                    .unwrap_or(false)
-            })
-            .unwrap_or(false);
-        if updated {
+            .update_reaction_state(tracked_id, add_reaction.message_id, new_state)
+        {
+            self.rebuild_channel_cache(&ctx, add_reaction.channel_id, None)
+                .await;
             return;
         }
 
@@ -596,39 +699,54 @@ where
             .channel_id
             .message(&ctx.http, add_reaction.message_id)
             .await
-            && self.channel_manager.is_enabled(add_reaction.channel_id)
+            && self.channel_manager.is_tracked(add_reaction.channel_id)
         {
-            self.message_cache
-                .with_messages_mut(add_reaction.channel_id, |messages| {
-                    messages.insert(message.id, message);
-                });
+            let cached = CachedMessage::from_message(message);
+            self.rebuild_channel_cache(&ctx, add_reaction.channel_id, Some(cached))
+                .await;
         }
     }
 
     async fn reaction_remove(&self, ctx: Context, removed_reaction: Reaction) {
-        if !self.channel_manager.is_enabled(removed_reaction.channel_id) {
+        let Some(tracked_id) = self
+            .channel_manager
+            .get_tracked(removed_reaction.channel_id)
+        else {
+            return;
+        };
+
+        let is_own_reaction = removed_reaction.user_id == Some(ctx.cache.current_user().id);
+        if !is_own_reaction {
             return;
         }
 
-        let current_user_id = ctx.cache.current_user().id;
-        let is_me = removed_reaction.user_id == Some(current_user_id);
-        let updated = self
-            .message_cache
-            .with_messages_mut(removed_reaction.channel_id, |messages| {
-                messages
-                    .get_mut(&removed_reaction.message_id)
-                    .map(|message| {
-                        crate::message_cache::update_cached_reaction_remove(
-                            message,
-                            &removed_reaction.emoji,
-                            is_me,
-                            removed_reaction.burst,
-                        )
-                    })
-                    .unwrap_or(false)
+        let removed_check =
+            matches!(&removed_reaction.emoji, ReactionType::Unicode(s) if s == BotReaction::CHECK);
+        let removed_cross =
+            matches!(&removed_reaction.emoji, ReactionType::Unicode(s) if s == BotReaction::CROSS);
+
+        if !removed_check && !removed_cross {
+            return;
+        }
+
+        let should_clear = self.message_cache.with_messages(tracked_id, |msgs| {
+            msgs.get(&removed_reaction.message_id).map(|msg| {
+                (removed_check && msg.reaction_state == BotReactionState::HasCheck)
+                    || (removed_cross && msg.reaction_state == BotReactionState::HasCross)
             })
-            .unwrap_or(false);
-        if updated {
+        });
+
+        let should_clear = should_clear.flatten().unwrap_or(false);
+
+        if should_clear
+            && self.message_cache.update_reaction_state(
+                tracked_id,
+                removed_reaction.message_id,
+                BotReactionState::None,
+            )
+        {
+            self.rebuild_channel_cache(&ctx, removed_reaction.channel_id, None)
+                .await;
             return;
         }
 
@@ -636,12 +754,11 @@ where
             .channel_id
             .message(&ctx.http, removed_reaction.message_id)
             .await
-            && self.channel_manager.is_enabled(removed_reaction.channel_id)
+            && self.channel_manager.is_tracked(removed_reaction.channel_id)
         {
-            self.message_cache
-                .with_messages_mut(removed_reaction.channel_id, |messages| {
-                    messages.insert(message.id, message);
-                });
+            let cached = CachedMessage::from_message(message);
+            self.rebuild_channel_cache(&ctx, removed_reaction.channel_id, Some(cached))
+                .await;
         }
     }
 }
@@ -649,20 +766,23 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::{MockChannelService, MockRosterProvider};
+    use crate::{
+        message_cache::CachedMessage,
+        test_utils::{MockChannelService, MockRosterProvider},
+    };
     use indexmap::IndexMap;
     use rstest::{fixture, rstest};
-    use serenity::model::{channel::Message, id::UserId};
+    use serenity::model::id::UserId;
     use walicord_infrastructure::{WalicordProgramParser, WalicordSettlementOptimizer};
 
-    fn make_message(id: u64, content: &str) -> Message {
-        let mut message = Message::default();
-        message.id = MessageId::new(id);
-        message.channel_id = ChannelId::new(1);
-        message.content = content.to_string();
-        message.author = serenity::model::user::User::default();
-        message.author.id = UserId::new(1);
-        message
+    fn make_cached_message(id: u64, content: &str) -> CachedMessage {
+        CachedMessage {
+            id: MessageId::new(id),
+            content: std::sync::Arc::from(content),
+            author_id: UserId::new(1),
+            is_bot: false,
+            reaction_state: BotReactionState::None,
+        }
     }
 
     fn make_processor() -> MessageProcessor<'static> {
@@ -691,44 +811,50 @@ mod tests {
     }
 
     #[rstest]
-    fn disable_channel_clears_cache_when_channel_was_enabled(
+    fn untrack_channel_clears_cache_when_channel_was_tracked(
         handler: BotHandler<'static, MockChannelService, MockRosterProvider>,
     ) {
         let channel_id = ChannelId::new(1);
 
-        handler.channel_manager.enable(channel_id);
+        let Some(ChannelEvent::Tracked(tracked_id)) = handler.channel_manager.track(channel_id)
+        else {
+            panic!("track should succeed");
+        };
         let mut messages = IndexMap::new();
-        messages.insert(MessageId::new(10), make_message(10, "test content"));
-        handler.message_cache.insert(channel_id, messages);
+        messages.insert(MessageId::new(10), make_cached_message(10, "test content"));
+        handler.message_cache.insert(tracked_id, messages);
 
-        assert!(handler.channel_manager.is_enabled(channel_id));
+        assert!(handler.channel_manager.is_tracked(channel_id));
         assert!(handler.message_cache.contains(channel_id));
 
-        handler.disable_channel(channel_id);
+        handler.untrack_channel(channel_id);
 
-        assert!(!handler.channel_manager.is_enabled(channel_id));
+        assert!(!handler.channel_manager.is_tracked(channel_id));
         assert!(!handler.message_cache.contains(channel_id));
     }
 
     #[rstest]
-    #[case::first_disable_clears_cache(true, false)]
-    #[case::second_disable_is_noop(false, false)]
-    fn disable_channel_is_idempotent_for_cache(
+    #[case::first_untrack_clears_cache(true, false)]
+    #[case::second_untrack_is_noop(false, false)]
+    fn untrack_channel_is_idempotent_for_cache(
         #[case] should_have_cache: bool,
         #[case] expected_cache_present: bool,
     ) {
         let handler = handler();
         let channel_id = ChannelId::new(1);
 
-        handler.channel_manager.enable(channel_id);
+        let Some(ChannelEvent::Tracked(tracked_id)) = handler.channel_manager.track(channel_id)
+        else {
+            panic!("track should succeed");
+        };
         let mut messages = IndexMap::new();
-        messages.insert(MessageId::new(10), make_message(10, "test"));
-        handler.message_cache.insert(channel_id, messages);
+        messages.insert(MessageId::new(10), make_cached_message(10, "test"));
+        handler.message_cache.insert(tracked_id, messages);
 
-        handler.disable_channel(channel_id);
+        handler.untrack_channel(channel_id);
 
         if !should_have_cache {
-            handler.disable_channel(channel_id);
+            handler.untrack_channel(channel_id);
         }
 
         assert_eq!(
@@ -738,27 +864,33 @@ mod tests {
     }
 
     #[rstest]
-    fn disable_channel_preserves_other_channel_cache(
+    fn untrack_channel_preserves_other_channel_cache(
         handler: BotHandler<'static, MockChannelService, MockRosterProvider>,
     ) {
         let channel_a = ChannelId::new(1);
         let channel_b = ChannelId::new(2);
 
-        handler.channel_manager.enable(channel_a);
-        handler.channel_manager.enable(channel_b);
+        let Some(ChannelEvent::Tracked(tracked_a)) = handler.channel_manager.track(channel_a)
+        else {
+            panic!("track should succeed");
+        };
+        let Some(ChannelEvent::Tracked(tracked_b)) = handler.channel_manager.track(channel_b)
+        else {
+            panic!("track should succeed");
+        };
 
         let mut messages_a = IndexMap::new();
-        messages_a.insert(MessageId::new(10), make_message(10, "a"));
-        handler.message_cache.insert(channel_a, messages_a);
+        messages_a.insert(MessageId::new(10), make_cached_message(10, "a"));
+        handler.message_cache.insert(tracked_a, messages_a);
 
         let mut messages_b = IndexMap::new();
-        messages_b.insert(MessageId::new(20), make_message(20, "b"));
-        handler.message_cache.insert(channel_b, messages_b);
+        messages_b.insert(MessageId::new(20), make_cached_message(20, "b"));
+        handler.message_cache.insert(tracked_b, messages_b);
 
-        handler.disable_channel(channel_a);
+        handler.untrack_channel(channel_a);
 
-        assert!(!handler.channel_manager.is_enabled(channel_a));
-        assert!(handler.channel_manager.is_enabled(channel_b));
+        assert!(!handler.channel_manager.is_tracked(channel_a));
+        assert!(handler.channel_manager.is_tracked(channel_b));
         assert!(!handler.message_cache.contains(channel_a));
         assert!(handler.message_cache.contains(channel_b));
     }
@@ -769,24 +901,24 @@ mod tests {
     ) {
         let member_ids = [MemberId(1), MemberId(2)];
         let messages = vec![
-            make_message(3, "<@1> paid x to <@2>"),
-            make_message(1, "<@1> paid 100 to <@2>"),
-            make_message(2, "!variables"),
+            make_cached_message(3, "<@1> paid x to <@2>"),
+            make_cached_message(1, "<@1> paid 100 to <@2>"),
+            make_cached_message(2, "!variables"),
         ];
 
-        let plan = plan_cache_rebuild(&processor, &member_ids, messages);
+        let plan = plan_cache_rebuild(&processor, &member_ids, &messages);
 
-        let reaction_order: Vec<(u64, ReactionState)> = plan
+        let reaction_order: Vec<(u64, MessageValidity)> = plan
             .reactions
             .iter()
-            .map(|(msg, state)| (msg.id.get(), *state))
+            .map(|(msg_id, _current, desired)| (msg_id.get(), *desired))
             .collect();
         assert_eq!(
             reaction_order,
             [
-                (1, ReactionState::Valid),
-                (2, ReactionState::Clear),
-                (3, ReactionState::Invalid),
+                (1, MessageValidity::Valid),
+                (2, MessageValidity::NotProgram),
+                (3, MessageValidity::Invalid),
             ]
         );
 
@@ -798,29 +930,90 @@ mod tests {
     #[case::multiline_domain_then_settleup(
         "<@1> paid 100 to <@2>\n<@1> paid 50 to <@2>",
         "!settleup <@1>",
-        [(1, ReactionState::Valid), (2, ReactionState::Valid)],
+        [(1, MessageValidity::Valid), (2, MessageValidity::Valid)],
         [1, 2]
     )]
     fn plan_cache_rebuild_respects_line_offsets(
         processor: MessageProcessor<'static>,
         #[case] first: &str,
         #[case] second: &str,
-        #[case] expected_reactions: [(u64, ReactionState); 2],
+        #[case] expected_reactions: [(u64, MessageValidity); 2],
         #[case] expected_cached: [u64; 2],
     ) {
         let member_ids = [MemberId(1), MemberId(2)];
-        let messages = vec![make_message(1, first), make_message(2, second)];
+        let messages = vec![
+            make_cached_message(1, first),
+            make_cached_message(2, second),
+        ];
 
-        let plan = plan_cache_rebuild(&processor, &member_ids, messages);
+        let plan = plan_cache_rebuild(&processor, &member_ids, &messages);
 
-        let reaction_order: Vec<(u64, ReactionState)> = plan
+        let reaction_order: Vec<(u64, MessageValidity)> = plan
             .reactions
             .iter()
-            .map(|(msg, state)| (msg.id.get(), *state))
+            .map(|(msg_id, _current, desired)| (msg_id.get(), *desired))
             .collect();
         assert_eq!(reaction_order, expected_reactions);
 
         let cached_ids: Vec<u64> = plan.cache.keys().map(|id| id.get()).collect();
         assert_eq!(cached_ids, expected_cached);
+    }
+
+    #[test]
+    fn remove_message_keeps_channel_when_empty() {
+        let cache = MessageCache::new();
+        let channel_id = ChannelId::new(1);
+        let manager = ChannelManager::new();
+        let Some(ChannelEvent::Tracked(tracked_id)) = manager.track(channel_id) else {
+            panic!("track should succeed");
+        };
+        let mut messages = IndexMap::new();
+        messages.insert(MessageId::new(10), make_cached_message(10, "test"));
+        cache.insert(tracked_id, messages);
+
+        cache.remove_message(tracked_id, MessageId::new(10));
+
+        let is_empty = cache.with_messages(tracked_id, |msgs| msgs.is_empty());
+        assert_eq!(is_empty, Some(true));
+    }
+
+    #[rstest]
+    fn plan_cache_rebuild_skips_marked_invalid_messages(processor: MessageProcessor<'static>) {
+        let member_ids = [MemberId(1), MemberId(2)];
+
+        let mut invalid_message = make_cached_message(1, "<@1> paid 100 to <@2>");
+        invalid_message.reaction_state = BotReactionState::HasCross;
+
+        let valid_message = make_cached_message(2, "!variables");
+
+        let messages = vec![invalid_message, valid_message];
+
+        let plan = plan_cache_rebuild(&processor, &member_ids, &messages);
+
+        let cached_ids: Vec<u64> = plan.cache.keys().map(|id| id.get()).collect();
+        assert_eq!(cached_ids, [2]);
+
+        let reaction_ids: Vec<u64> = plan.reactions.iter().map(|(id, _, _)| id.get()).collect();
+        assert_eq!(reaction_ids, [2]);
+    }
+
+    #[rstest]
+    fn plan_cache_rebuild_returns_empty_when_all_messages_invalid(
+        processor: MessageProcessor<'static>,
+    ) {
+        let member_ids = [MemberId(1), MemberId(2)];
+
+        let mut invalid1 = make_cached_message(1, "<@1> paid 100 to <@2>");
+        invalid1.reaction_state = BotReactionState::HasCross;
+
+        let mut invalid2 = make_cached_message(2, "!variables");
+        invalid2.reaction_state = BotReactionState::HasCross;
+
+        let messages = vec![invalid1, invalid2];
+
+        let plan = plan_cache_rebuild(&processor, &member_ids, &messages);
+
+        assert!(plan.cache.is_empty());
+        assert!(plan.reactions.is_empty());
     }
 }

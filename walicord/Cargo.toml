@@ -22,6 +22,7 @@ thiserror = "2.0.17"
 resvg = "0.45"
 tiny-skia = "0.11"
 futures = "0.3.31"
+smallvec = "1.15.1"
 
 [dev-dependencies]
 rstest = "0.26.1"

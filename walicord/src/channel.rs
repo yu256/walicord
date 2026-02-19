@@ -1,19 +1,47 @@
-use dashmap::DashSet;
+use dashmap::DashMap;
 use serenity::model::id::ChannelId;
 
 const CHANNEL_TOPIC_FLAG: &str = "#walicord";
 
-/// Domain event emitted when channel state changes
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ChannelEvent {
-    Enabled(ChannelId),
-    Disabled(ChannelId),
+/// A ChannelId that has been verified as tracked.
+///
+/// This newtype ensures that MessageCache operations only occur on tracked channels,
+/// enforcing the invariant at the type level rather than relying on caller discipline.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct TrackedChannelId(ChannelId);
+
+impl TrackedChannelId {
+    pub fn get(self) -> ChannelId {
+        self.0
+    }
+
+    #[cfg(test)]
+    pub fn new_for_test(id: ChannelId) -> Self {
+        Self(id)
+    }
 }
 
-/// Aggregate root managing enabled/disabled state of channels
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChannelEvent {
+    Tracked(TrackedChannelId),
+    Untracked(ChannelId),
+}
+
+/// Status of the last fetch attempt for a tracked channel.
+///
+/// This is purely observational/diagnostic and does NOT control fetch behavior.
+/// A Failed status does not prevent future fetch attempts on cache miss.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FetchStatus {
+    #[default]
+    Unknown,
+    Ok,
+    Failed,
+}
+
 #[derive(Clone, Default)]
 pub struct ChannelManager {
-    enabled_channels: DashSet<ChannelId>,
+    channels: DashMap<ChannelId, FetchStatus>,
 }
 
 impl ChannelManager {
@@ -21,31 +49,65 @@ impl ChannelManager {
         Self::default()
     }
 
-    /// Check if a channel is enabled
-    pub fn is_enabled(&self, channel_id: ChannelId) -> bool {
-        self.enabled_channels.contains(&channel_id)
+    pub fn is_tracked(&self, channel_id: ChannelId) -> bool {
+        self.channels.contains_key(&channel_id)
     }
 
-    /// Check if channel topic contains the walicord flag
+    /// Returns TrackedChannelId if the channel is tracked, None otherwise.
+    /// Use this to obtain a type-level proof of tracking for MessageCache operations.
+    pub fn get_tracked(&self, channel_id: ChannelId) -> Option<TrackedChannelId> {
+        self.channels
+            .get(&channel_id)
+            .map(|_| TrackedChannelId(channel_id))
+    }
+
+    #[cfg(test)]
+    pub fn has_fetch_failed(&self, channel_id: ChannelId) -> bool {
+        self.channels
+            .get(&channel_id)
+            .map(|s| *s == FetchStatus::Failed)
+            .unwrap_or(false)
+    }
+
     pub fn topic_has_flag(topic: Option<&str>) -> bool {
         topic.is_some_and(|topic| topic.contains(CHANNEL_TOPIC_FLAG))
     }
 
-    /// Enable a channel and return the domain event if state changed
-    pub fn enable(&self, channel_id: ChannelId) -> Option<ChannelEvent> {
-        if self.enabled_channels.insert(channel_id) {
-            Some(ChannelEvent::Enabled(channel_id))
-        } else {
-            None
+    pub fn track(&self, channel_id: ChannelId) -> Option<ChannelEvent> {
+        use dashmap::mapref::entry::Entry;
+        match self.channels.entry(channel_id) {
+            Entry::Vacant(e) => {
+                e.insert(FetchStatus::Unknown);
+                Some(ChannelEvent::Tracked(TrackedChannelId(channel_id)))
+            }
+            Entry::Occupied(_) => None,
         }
     }
 
-    /// Disable a channel and return the domain event if state changed
-    /// Note: Cache cleanup is the caller's responsibility (separate aggregate)
-    pub fn disable(&self, channel_id: ChannelId) -> Option<ChannelEvent> {
-        self.enabled_channels
+    #[must_use = "returns false if channel is not tracked, caller should decide whether to handle this"]
+    pub fn mark_fetch_failed(&self, channel_id: ChannelId) -> bool {
+        if let Some(mut status) = self.channels.get_mut(&channel_id) {
+            *status = FetchStatus::Failed;
+            true
+        } else {
+            false
+        }
+    }
+
+    #[must_use = "returns false if channel is not tracked, caller should decide whether to handle this"]
+    pub fn mark_fetch_succeeded(&self, channel_id: ChannelId) -> bool {
+        if let Some(mut status) = self.channels.get_mut(&channel_id) {
+            *status = FetchStatus::Ok;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn untrack(&self, channel_id: ChannelId) -> Option<ChannelEvent> {
+        self.channels
             .remove(&channel_id)
-            .map(|_| ChannelEvent::Disabled(channel_id))
+            .map(|_| ChannelEvent::Untracked(channel_id))
     }
 }
 
@@ -63,71 +125,129 @@ mod tests {
     }
 
     #[rstest]
-    #[case::first_enable_emits_event(
-        ChannelId::new(1),
-        true,
-        Some(ChannelEvent::Enabled(ChannelId::new(1)))
-    )]
-    #[case::second_enable_returns_none(ChannelId::new(1), false, None)]
-    fn enable_returns_event_only_on_state_change(
+    #[case::first_track_emits_event(ChannelId::new(1), true, true)]
+    #[case::second_track_returns_none(ChannelId::new(1), false, false)]
+    fn track_returns_event_only_on_state_change(
         #[case] channel_id: ChannelId,
         #[case] is_first: bool,
-        #[case] expected: Option<ChannelEvent>,
+        #[case] expected_emits_event: bool,
     ) {
         let manager = ChannelManager::new();
         if !is_first {
-            manager.enable(channel_id);
+            manager.track(channel_id);
         }
-        assert_eq!(manager.enable(channel_id), expected);
+        let result = manager.track(channel_id);
+        assert_eq!(result.is_some(), expected_emits_event);
+        if let Some(ChannelEvent::Tracked(tracked_id)) = result {
+            assert_eq!(tracked_id.get(), channel_id);
+        }
     }
 
     #[rstest]
-    #[case::disable_enabled_emits_event(true, Some(ChannelEvent::Disabled(ChannelId::new(1))))]
-    #[case::disable_not_enabled_returns_none(false, None)]
-    fn disable_returns_event_only_when_was_enabled(
-        #[case] was_enabled: bool,
-        #[case] expected: Option<ChannelEvent>,
+    #[case::untrack_tracked_emits_event(true, true)]
+    #[case::untrack_not_tracked_returns_none(false, false)]
+    fn untrack_returns_event_only_when_was_tracked(
+        #[case] was_tracked: bool,
+        #[case] expected_emits_event: bool,
     ) {
         let manager = ChannelManager::new();
         let channel_id = ChannelId::new(1);
-        if was_enabled {
-            manager.enable(channel_id);
+        if was_tracked {
+            manager.track(channel_id);
         }
-        assert_eq!(manager.disable(channel_id), expected);
+        let result = manager.untrack(channel_id);
+        assert_eq!(result.is_some(), expected_emits_event);
+        if let Some(ChannelEvent::Untracked(untracked_id)) = result {
+            assert_eq!(untracked_id, channel_id);
+        }
     }
 
     #[test]
-    fn enable_then_disable_produces_correct_state_sequence() {
+    fn track_then_untrack_produces_correct_state_sequence() {
         let manager = ChannelManager::new();
         let channel_id = ChannelId::new(1);
 
-        assert!(!manager.is_enabled(channel_id));
+        assert!(!manager.is_tracked(channel_id));
 
-        let enable_event = manager.enable(channel_id);
-        assert_eq!(enable_event, Some(ChannelEvent::Enabled(channel_id)));
-        assert!(manager.is_enabled(channel_id));
+        let track_event = manager.track(channel_id);
+        assert!(matches!(track_event, Some(ChannelEvent::Tracked(_))));
+        assert!(manager.is_tracked(channel_id));
 
-        let disable_event = manager.disable(channel_id);
-        assert_eq!(disable_event, Some(ChannelEvent::Disabled(channel_id)));
-        assert!(!manager.is_enabled(channel_id));
+        let untrack_event = manager.untrack(channel_id);
+        assert!(matches!(untrack_event, Some(ChannelEvent::Untracked(_))));
+        assert!(!manager.is_tracked(channel_id));
 
-        let disable_again = manager.disable(channel_id);
-        assert_eq!(disable_again, None);
+        let untrack_again = manager.untrack(channel_id);
+        assert_eq!(untrack_again, None);
     }
 
     #[rstest]
-    fn preserves_other_channels_when_disabling(
+    fn preserves_other_channels_when_untracking(
         #[values(ChannelId::new(1), ChannelId::new(2))] target_channel: ChannelId,
         #[values(ChannelId::new(3), ChannelId::new(4))] other_channel: ChannelId,
     ) {
         let manager = ChannelManager::new();
 
-        manager.enable(target_channel);
-        manager.enable(other_channel);
+        manager.track(target_channel);
+        manager.track(other_channel);
 
-        manager.disable(target_channel);
+        manager.untrack(target_channel);
 
-        assert!(!manager.is_enabled(target_channel));
-        assert!(manager.is_enabled(other_channel));
+        assert!(!manager.is_tracked(target_channel));
+        assert!(manager.is_tracked(other_channel));
+    }
+
+    #[test]
+    fn untrack_removes_channel_state() {
+        let manager = ChannelManager::new();
+        let channel_id = ChannelId::new(1);
+        manager.track(channel_id);
+        assert!(manager.mark_fetch_failed(channel_id));
+
+        assert!(manager.untrack(channel_id).is_some());
+        assert!(!manager.is_tracked(channel_id));
+        assert!(!manager.has_fetch_failed(channel_id));
+    }
+
+    #[test]
+    fn has_fetch_failed_reflects_fetch_status() {
+        let manager = ChannelManager::new();
+        let channel_id = ChannelId::new(1);
+
+        assert!(!manager.has_fetch_failed(channel_id));
+
+        manager.track(channel_id);
+        assert!(!manager.has_fetch_failed(channel_id));
+
+        assert!(manager.mark_fetch_failed(channel_id));
+        assert!(manager.has_fetch_failed(channel_id));
+
+        assert!(manager.mark_fetch_succeeded(channel_id));
+        assert!(!manager.has_fetch_failed(channel_id));
+    }
+
+    #[test]
+    fn mark_fetch_returns_false_when_not_tracked() {
+        let manager = ChannelManager::new();
+        let channel_id = ChannelId::new(1);
+
+        assert!(!manager.mark_fetch_failed(channel_id));
+        assert!(!manager.has_fetch_failed(channel_id));
+
+        assert!(!manager.mark_fetch_succeeded(channel_id));
+        assert!(!manager.has_fetch_failed(channel_id));
+    }
+
+    #[test]
+    fn mark_fetch_returns_true_when_tracked() {
+        let manager = ChannelManager::new();
+        let channel_id = ChannelId::new(1);
+        manager.track(channel_id);
+
+        assert!(manager.mark_fetch_failed(channel_id));
+        assert!(manager.has_fetch_failed(channel_id));
+
+        assert!(manager.mark_fetch_succeeded(channel_id));
+        assert!(!manager.has_fetch_failed(channel_id));
     }
 }

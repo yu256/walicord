@@ -2,14 +2,95 @@ use dashmap::DashMap;
 use indexmap::IndexMap;
 use serenity::{
     all::MessageId,
-    model::channel::{Message, ReactionType},
+    model::{
+        channel::{Message, ReactionType},
+        event::MessageUpdateEvent,
+        id::{ChannelId, UserId},
+    },
 };
 use std::sync::Arc;
 
-/// Cache for messages in enabled channels
+use crate::channel::TrackedChannelId;
+use crate::reaction::{BotReaction, BotReactionState};
+
+#[derive(Clone, Debug)]
+pub struct CachedMessage {
+    pub id: MessageId,
+    pub content: Arc<str>,
+    pub author_id: UserId,
+    pub is_bot: bool,
+    pub reaction_state: BotReactionState,
+}
+
+impl CachedMessage {
+    /// Returns true if bot has marked this message as invalid (has ❎ reaction).
+    /// Invalidated messages are excluded from program evaluation.
+    pub fn is_marked_invalid(&self) -> bool {
+        self.reaction_state == BotReactionState::HasCross
+    }
+}
+
+/// Extract bot's reaction state from a full Message object.
+///
+/// This serves as the reconciliation point for cache divergence caused by:
+/// - Missed reaction events (gateway reconnect, partial intents)
+/// - External reaction changes (manual deletion, moderation)
+///
+/// Called during `ensure_cache_loaded` to rebuild cache from Discord's authoritative state.
+fn bot_reaction_state_from_message(msg: &Message) -> BotReactionState {
+    let has_cross = msg.reactions.iter().any(
+        |r| matches!(&r.reaction_type, ReactionType::Unicode(s) if s == BotReaction::CROSS && r.me),
+    );
+    let has_check = msg.reactions.iter().any(
+        |r| matches!(&r.reaction_type, ReactionType::Unicode(s) if s == BotReaction::CHECK && r.me),
+    );
+
+    if has_cross {
+        BotReactionState::HasCross
+    } else if has_check {
+        BotReactionState::HasCheck
+    } else {
+        BotReactionState::None
+    }
+}
+
+impl CachedMessage {
+    pub fn from_message(msg: Message) -> Self {
+        let reaction_state = bot_reaction_state_from_message(&msg);
+        Self {
+            id: msg.id,
+            content: Arc::from(msg.content.into_boxed_str()),
+            author_id: msg.author.id,
+            is_bot: msg.author.bot,
+            reaction_state,
+        }
+    }
+
+    /// Apply content changes from MessageUpdateEvent.
+    ///
+    /// Note: Reactions are NOT updated here. Discord does not guarantee that
+    /// event.reactions is a complete snapshot. Reaction state is maintained via:
+    /// - `reaction_add`/`reaction_remove` events (primary source)
+    /// - `from_message` on full fetch (reconciliation)
+    pub fn apply_event(&mut self, event: &MessageUpdateEvent) {
+        if let Some(ref content) = event.content {
+            self.content = Arc::from(content.as_str());
+        }
+    }
+}
+
+/// In-memory cache for channel messages.
+///
+/// # Invariant
+/// This cache is a pure storage layer. The caller (BotHandler) is responsible for:
+/// - Only caching messages from tracked channels
+/// - Ensuring cache consistency with channel tracking state
+///
+/// Empty channels are represented as `IndexMap::new()` rather than being removed,
+/// to distinguish "loaded but empty" from "not loaded".
 #[derive(Clone)]
 pub struct MessageCache {
-    inner: Arc<DashMap<ChannelId, IndexMap<MessageId, Message>>>,
+    inner: Arc<DashMap<ChannelId, IndexMap<MessageId, CachedMessage>>>,
 }
 
 impl MessageCache {
@@ -19,79 +100,82 @@ impl MessageCache {
         }
     }
 
-    pub fn insert(&self, channel_id: ChannelId, messages: IndexMap<MessageId, Message>) {
-        self.inner.insert(channel_id, messages);
+    /// Insert messages for a tracked channel.
+    ///
+    /// The TrackedChannelId parameter ensures this is only called for tracked channels.
+    pub fn insert(&self, channel_id: TrackedChannelId, messages: IndexMap<MessageId, CachedMessage>) {
+        self.inner.insert(channel_id.get(), messages);
     }
 
-    pub fn remove(&self, channel_id: &ChannelId) -> Option<IndexMap<MessageId, Message>> {
-        self.inner.remove(channel_id).map(|(_, v)| v)
+    /// Remove all messages for a channel being untracked.
+    ///
+    /// The caller is responsible for only invoking this after the channel was tracked.
+    pub fn remove(&self, channel_id: ChannelId) -> Option<IndexMap<MessageId, CachedMessage>> {
+        self.inner.remove(&channel_id).map(|(_, v)| v)
     }
 
-    pub fn entry(
-        &self,
-        channel_id: ChannelId,
-    ) -> dashmap::mapref::entry::Entry<'_, ChannelId, IndexMap<MessageId, Message>> {
-        self.inner.entry(channel_id)
-    }
-
-    /// Check if a channel exists in the cache
     #[cfg(test)]
     pub fn contains(&self, channel_id: ChannelId) -> bool {
         self.inner.contains_key(&channel_id)
     }
 
-    /// Remove a specific message from a channel's cache
-    pub fn remove_message(&self, channel_id: ChannelId, message_id: MessageId) -> bool {
-        if let Some(mut messages) = self.inner.get_mut(&channel_id) {
+    pub fn remove_message(&self, channel_id: TrackedChannelId, message_id: MessageId) -> bool {
+        if let Some(mut messages) = self.inner.get_mut(&channel_id.get()) {
             messages.shift_remove(&message_id);
-            let should_remove_channel = messages.is_empty();
-            drop(messages);
-            if should_remove_channel {
-                self.inner.remove(&channel_id);
-            }
             true
         } else {
             false
         }
     }
 
-    /// Remove multiple messages from a channel's cache
-    pub fn remove_messages(&self, channel_id: ChannelId, message_ids: &[MessageId]) -> bool {
-        if let Some(mut messages) = self.inner.get_mut(&channel_id) {
+    pub fn remove_messages(&self, channel_id: TrackedChannelId, message_ids: &[MessageId]) -> bool {
+        if let Some(mut messages) = self.inner.get_mut(&channel_id.get()) {
             for message_id in message_ids {
                 messages.shift_remove(message_id);
             }
-            let should_remove_channel = messages.is_empty();
-            drop(messages);
-            if should_remove_channel {
-                self.inner.remove(&channel_id);
-            }
             true
         } else {
             false
         }
     }
 
-    /// Execute a closure with read access to a channel's messages
-    /// This ensures the lock is held only for the duration of the closure
-    pub fn with_messages<F, R>(&self, channel_id: ChannelId, f: F) -> Option<R>
+    pub fn with_messages<F, R>(&self, channel_id: TrackedChannelId, f: F) -> Option<R>
     where
-        F: FnOnce(&IndexMap<MessageId, Message>) -> R,
+        F: FnOnce(&IndexMap<MessageId, CachedMessage>) -> R,
     {
         self.inner
-            .get(&channel_id)
+            .get(&channel_id.get())
             .map(|ref_val| f(ref_val.value()))
     }
 
-    /// Execute a closure with mutable access to a channel's messages
-    /// This ensures the lock is held only for the duration of the closure
-    pub fn with_messages_mut<F, R>(&self, channel_id: ChannelId, f: F) -> Option<R>
-    where
-        F: FnOnce(&mut IndexMap<MessageId, Message>) -> R,
-    {
+    /// Insert or update a message in the cache for a tracked channel.
+    ///
+    /// The TrackedChannelId parameter ensures this is only called for tracked channels.
+    /// Creates a new channel entry if it doesn't exist.
+    pub(crate) fn upsert_message(&self, channel_id: TrackedChannelId, message: CachedMessage) {
         self.inner
-            .get_mut(&channel_id)
-            .map(|mut ref_val| f(ref_val.value_mut()))
+            .entry(channel_id.get())
+            .or_insert_with(IndexMap::new)
+            .insert(message.id, message);
+    }
+
+    /// Update reaction state for a message in a tracked channel.
+    ///
+    /// The TrackedChannelId parameter ensures this is only called for tracked channels.
+    pub fn update_reaction_state(
+        &self,
+        channel_id: TrackedChannelId,
+        message_id: MessageId,
+        reaction_state: BotReactionState,
+    ) -> bool {
+        if let Some(mut messages) = self.inner.get_mut(&channel_id.get())
+            && let Some(msg) = messages.get_mut(&message_id)
+        {
+            msg.reaction_state = reaction_state;
+            true
+        } else {
+            false
+        }
     }
 }
 
@@ -101,93 +185,23 @@ impl Default for MessageCache {
     }
 }
 
-use serenity::model::id::ChannelId;
-
-/// Update cached reactions when a reaction is added
-pub fn update_cached_reaction_add(
-    message: &mut Message,
-    emoji: &ReactionType,
-    is_me: bool,
-    is_burst: bool,
-) -> bool {
-    let Some(entry) = message
-        .reactions
-        .iter_mut()
-        .find(|reaction| reaction.reaction_type == *emoji)
-    else {
-        return false;
-    };
-
-    entry.count = entry.count.saturating_add(1);
-    if is_burst {
-        entry.count_details.burst = entry.count_details.burst.saturating_add(1);
-        if is_me {
-            entry.me_burst = true;
-        }
-    } else {
-        entry.count_details.normal = entry.count_details.normal.saturating_add(1);
-    }
-    if is_me {
-        entry.me = true;
-    }
-
-    true
-}
-
-/// Update cached reactions when a reaction is removed
-pub fn update_cached_reaction_remove(
-    message: &mut Message,
-    emoji: &ReactionType,
-    is_me: bool,
-    is_burst: bool,
-) -> bool {
-    let Some(position) = message
-        .reactions
-        .iter()
-        .position(|reaction| reaction.reaction_type == *emoji)
-    else {
-        return false;
-    };
-
-    let entry = &mut message.reactions[position];
-    if entry.count > 0 {
-        entry.count -= 1;
-    }
-    if is_burst {
-        entry.count_details.burst = entry.count_details.burst.saturating_sub(1);
-        if is_me {
-            entry.me_burst = false;
-        }
-    } else {
-        entry.count_details.normal = entry.count_details.normal.saturating_sub(1);
-    }
-    if is_me {
-        entry.me = false;
-    }
-
-    if entry.count == 0 {
-        message.reactions.remove(position);
-    }
-
-    true
-}
-
-/// Calculate line count increment for message concatenation
 fn line_count_increment(content: &str, prior_ended_with_newline: bool) -> usize {
     content.lines().count() + if prior_ended_with_newline { 1 } else { 0 }
 }
 
-/// Calculate next line offset for a sequence of messages
 pub fn next_line_offset<'a, I>(messages: I) -> usize
 where
-    I: IntoIterator<Item = &'a Message>,
+    I: IntoIterator<Item = &'a CachedMessage>,
 {
     let mut line_count = 0usize;
     let mut ends_with_newline = false;
     let mut has_any = false;
 
     for message in messages {
-        let content = message.content.as_str();
+        if message.is_bot || message.is_marked_invalid() {
+            continue;
+        }
+        let content = message.content.as_ref();
         if has_any {
             line_count += line_count_increment(content, ends_with_newline);
         } else {
@@ -207,7 +221,17 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serenity::model::id::UserId;
+    use crate::channel::TrackedChannelId;
+
+    fn make_cached_message(id: u64, author_id: u64, content: &str) -> CachedMessage {
+        CachedMessage {
+            id: MessageId::new(id),
+            content: Arc::from(content),
+            author_id: UserId::new(author_id),
+            is_bot: false,
+            reaction_state: BotReactionState::None,
+        }
+    }
 
     fn make_message(id: u64, channel_id: u64, author_id: u64, content: &str) -> Message {
         let mut message = Message::default();
@@ -219,90 +243,6 @@ mod tests {
         message
     }
 
-    fn make_reaction(
-        emoji: &str,
-        count: u64,
-        normal: u64,
-        burst: u64,
-        me: bool,
-        me_burst: bool,
-    ) -> serenity::model::channel::MessageReaction {
-        use serde_json::json;
-        serde_json::from_value(json!({
-            "count": count,
-            "count_details": { "normal": normal, "burst": burst },
-            "me": me,
-            "me_burst": me_burst,
-            "emoji": { "id": null, "name": emoji },
-            "burst_colors": []
-        }))
-        .expect("MessageReaction should deserialize")
-    }
-
-    #[rstest::rstest]
-    #[case::existing_entry(
-        vec![make_reaction("✅", 1, 1, 0, false, false)],
-        true,
-        vec![(2, true, 2)],
-    )]
-    #[case::missing_entry(vec![], false, vec![])]
-    fn update_cached_reaction_add_cases(
-        #[case] initial: Vec<serenity::model::channel::MessageReaction>,
-        #[case] expected_updated: bool,
-        #[case] expected_snapshot: Vec<(u64, bool, u64)>,
-    ) {
-        let mut message = Message::default();
-        message.reactions = initial;
-
-        let updated = update_cached_reaction_add(
-            &mut message,
-            &ReactionType::Unicode("✅".to_string()),
-            true,
-            false,
-        );
-
-        let snapshot: Vec<(u64, bool, u64)> = message
-            .reactions
-            .iter()
-            .map(|reaction| (reaction.count, reaction.me, reaction.count_details.normal))
-            .collect();
-
-        assert_eq!(updated, expected_updated);
-        assert_eq!(snapshot, expected_snapshot);
-    }
-
-    #[rstest::rstest]
-    #[case::delete_when_count_reaches_zero(
-        vec![make_reaction("✅", 1, 1, 0, true, false)],
-        true,
-        vec![],
-    )]
-    #[case::missing_entry(vec![], false, vec![])]
-    fn update_cached_reaction_remove_cases(
-        #[case] initial: Vec<serenity::model::channel::MessageReaction>,
-        #[case] expected_updated: bool,
-        #[case] expected_snapshot: Vec<(u64, bool, u64)>,
-    ) {
-        let mut message = Message::default();
-        message.reactions = initial;
-
-        let updated = update_cached_reaction_remove(
-            &mut message,
-            &ReactionType::Unicode("✅".to_string()),
-            true,
-            false,
-        );
-
-        let snapshot: Vec<(u64, bool, u64)> = message
-            .reactions
-            .iter()
-            .map(|reaction| (reaction.count, reaction.me, reaction.count_details.normal))
-            .collect();
-
-        assert_eq!(updated, expected_updated);
-        assert_eq!(snapshot, expected_snapshot);
-    }
-
     #[rstest::rstest]
     #[case("a\nb", "c", 3)]
     #[case("a\nb\n", "c", 4)]
@@ -311,10 +251,10 @@ mod tests {
         #[case] second: &str,
         #[case] expected_offset: usize,
     ) {
-        let mut messages: IndexMap<MessageId, Message> = IndexMap::new();
-        messages.insert(MessageId::new(1), make_message(1, 1, 1, first));
+        let mut messages: IndexMap<MessageId, CachedMessage> = IndexMap::new();
+        messages.insert(MessageId::new(1), make_cached_message(1, 1, first));
 
-        let second_message = make_message(2, 1, 1, second);
+        let second_message = make_cached_message(2, 1, second);
         let offset = next_line_offset(
             messages
                 .iter()
@@ -334,23 +274,45 @@ mod tests {
     ) {
         let cache = MessageCache::new();
         let mut messages = IndexMap::new();
-        messages.insert(MessageId::new(10), make_message(10, 1, 1, "test"));
-        cache.insert(ChannelId::new(1), messages);
+        messages.insert(MessageId::new(10), make_cached_message(10, 1, "test"));
+        cache.insert(TrackedChannelId::new_for_test(ChannelId::new(1)), messages);
 
-        let result = cache.with_messages(channel_id, |msgs| msgs.len());
+        let tracked_id = TrackedChannelId::new_for_test(channel_id);
+        let result = cache.with_messages(tracked_id, |msgs| msgs.len());
         assert_eq!(result, expected);
     }
 
     #[test]
-    fn with_messages_does_not_expose_lock_guard() {
-        let cache = MessageCache::new();
-        let mut messages = IndexMap::new();
-        messages.insert(MessageId::new(10), make_message(10, 1, 1, "test"));
-        cache.insert(ChannelId::new(1), messages);
+    fn cached_message_from_message() {
+        let msg = make_message(1, 2, 3, "hello");
+        let cached = CachedMessage::from_message(msg);
+        assert_eq!(cached.id, MessageId::new(1));
+        assert_eq!(&*cached.content, "hello");
+        assert_eq!(cached.author_id, UserId::new(3));
+        assert!(!cached.is_bot);
+    }
 
-        let result = cache.with_messages(ChannelId::new(1), |msgs| {
-            msgs.get(&MessageId::new(10)).map(|m| m.content.clone())
-        });
-        assert_eq!(result, Some(Some("test".to_string())));
+    #[test]
+    fn next_line_offset_skips_marked_invalid_messages() {
+        let valid = make_cached_message(1, 1, "line1\nline2");
+        let mut marked_invalid = make_cached_message(2, 1, "line3");
+        marked_invalid.reaction_state = BotReactionState::HasCross;
+        let valid2 = make_cached_message(3, 1, "line4");
+
+        let offset = next_line_offset([&valid, &marked_invalid, &valid2]);
+        assert_eq!(offset, 3);
+    }
+
+    #[rstest::rstest]
+    #[case::marked_invalid_is_has_cross(BotReactionState::HasCross, true)]
+    #[case::has_check_is_not_marked_invalid(BotReactionState::HasCheck, false)]
+    #[case::none_is_not_marked_invalid(BotReactionState::None, false)]
+    fn is_marked_invalid_matches_has_cross(
+        #[case] reaction_state: BotReactionState,
+        #[case] expected: bool,
+    ) {
+        let mut cached = make_cached_message(1, 1, "test");
+        cached.reaction_state = reaction_state;
+        assert_eq!(cached.is_marked_invalid(), expected);
     }
 }

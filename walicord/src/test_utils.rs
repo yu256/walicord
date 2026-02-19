@@ -13,19 +13,23 @@ use serenity::{
 use std::{
     collections::HashMap,
     future::{Ready, ready},
+    sync::Arc,
+    sync::atomic::{AtomicUsize, Ordering},
 };
 use walicord_domain::model::{MemberId, MemberInfo};
 
-/// Mock ChannelService for testing
+/// Mock ChannelService for testing with fetch count tracking
 #[derive(Clone)]
 pub struct MockChannelService {
     messages: HashMap<ChannelId, IndexMap<MessageId, Message>>,
+    fetch_count: Arc<AtomicUsize>,
 }
 
 impl MockChannelService {
     pub fn new() -> Self {
         Self {
             messages: HashMap::new(),
+            fetch_count: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -37,6 +41,18 @@ impl MockChannelService {
     ) -> Self {
         self.messages.insert(channel_id, messages);
         self
+    }
+
+    /// Returns the number of times fetch_all_messages was called.
+    ///
+    /// Future integration tests for `ensure_cache_loaded`:
+    /// - Cache exists (empty or not) → fetch_count == 0
+    /// - Cache miss + tracked → fetch_count == 1
+    /// - Cache miss + not tracked → fetch_count == 0
+    /// Requires: Serenity Context construction in tests (currently difficult)
+    #[allow(dead_code)]
+    pub fn fetch_count(&self) -> usize {
+        self.fetch_count.load(Ordering::SeqCst)
     }
 }
 
@@ -53,6 +69,7 @@ impl ChannelService for MockChannelService {
         _ctx: &Context,
         channel_id: ChannelId,
     ) -> Ready<Result<IndexMap<MessageId, Message>, ServiceError>> {
+        self.fetch_count.fetch_add(1, Ordering::SeqCst);
         ready(
             self.messages
                 .get(&channel_id)
