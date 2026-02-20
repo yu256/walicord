@@ -35,6 +35,33 @@ pub enum ProcessingOutcome<'a> {
     InvalidAmountExpression { line: usize, detail: String },
 }
 
+impl<'a> ProcessingOutcome<'a> {
+    pub fn into_result(self) -> Result<Script<'a>, crate::error::ProgramParseError<'a>> {
+        use crate::error::ProgramParseError;
+        match self {
+            ProcessingOutcome::Success(script) => Ok(script),
+            ProcessingOutcome::FailedToEvaluateGroup { name, line } => {
+                Err(ProgramParseError::FailedToEvaluateGroup { name, line })
+            }
+            ProcessingOutcome::UndefinedGroup { name, line } => {
+                Err(ProgramParseError::UndefinedGroup { name, line })
+            }
+            ProcessingOutcome::UndefinedMember { id, line } => {
+                Err(ProgramParseError::UndefinedMember { id, line })
+            }
+            ProcessingOutcome::SyntaxError { line, detail } => {
+                Err(ProgramParseError::SyntaxError { line, detail })
+            }
+            ProcessingOutcome::MissingContextForImplicitAuthor { line } => {
+                Err(ProgramParseError::MissingContextForImplicitAuthor { line })
+            }
+            ProcessingOutcome::InvalidAmountExpression { line, detail } => {
+                Err(ProgramParseError::InvalidAmountExpression { line, detail })
+            }
+        }
+    }
+}
+
 fn line_count_increment(content: &str, prior_ended_with_newline: bool) -> usize {
     content.lines().count() + if prior_ended_with_newline { 1 } else { 0 }
 }

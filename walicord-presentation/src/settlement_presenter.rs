@@ -300,7 +300,7 @@ mod tests {
     ) {
         let mut directory = HashMap::new();
         if let Some(name) = display_name {
-            directory.insert(MemberId(1), name.to_string());
+            directory.insert(MemberId(1), name.into());
         }
 
         let view = SettlementPresenter::render_with_members(&sample_result(), &directory);

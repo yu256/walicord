@@ -1,3 +1,5 @@
+use super::ports::ServiceError;
+use arcstr::ArcStr;
 use indexmap::IndexMap;
 use serenity::{
     all::MessageId,
@@ -8,7 +10,7 @@ use serenity::{
     },
     prelude::*,
 };
-use std::sync::Arc;
+use smol_str::SmolStr;
 use walicord_application::{is_command_message, is_command_prefix};
 use walicord_domain::model::{MemberId, MemberInfo};
 
@@ -22,6 +24,17 @@ pub enum ChannelError {
     GuildNotCached,
 }
 
+impl From<ChannelError> for ServiceError {
+    fn from(err: ChannelError) -> Self {
+        match err {
+            ChannelError::Request(msg) => ServiceError::Request(msg),
+            ChannelError::NotGuildChannel => ServiceError::NotGuildChannel,
+            ChannelError::GuildNotCached => ServiceError::GuildNotCached,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
 pub struct DiscordChannelService;
 
 fn should_ignore_history_message(message: &Message) -> bool {
@@ -46,9 +59,12 @@ pub fn to_member_info(member: &Member) -> MemberInfo {
 
     MemberInfo {
         id: MemberId(member.user.id.get()),
-        display_name: Arc::from(display_name),
-        username: Arc::from(member.user.name.as_str()),
-        avatar_url: member.user.avatar_url().map(|url| Arc::from(url.as_str())),
+        display_name: SmolStr::from(display_name),
+        username: SmolStr::from(member.user.name.as_str()),
+        avatar_url: member
+            .user
+            .avatar_url()
+            .map(|url| ArcStr::from(url.as_str())),
     }
 }
 
@@ -108,6 +124,18 @@ impl DiscordChannelService {
     }
 }
 
+impl super::ports::ChannelService for DiscordChannelService {
+    async fn fetch_all_messages(
+        &self,
+        ctx: &Context,
+        channel_id: ChannelId,
+    ) -> Result<IndexMap<MessageId, Message>, super::ports::ServiceError> {
+        DiscordChannelService::fetch_all_messages(self, ctx, channel_id)
+            .await
+            .map_err(ServiceError::from)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -142,7 +170,7 @@ mod tests {
 
         assert_eq!(info.id, MemberId(1));
         assert_eq!(info.effective_name(), expected);
-        assert_eq!(info.username.as_ref(), "username");
+        assert_eq!(info.username.as_str(), "username");
     }
 
     #[rstest]
@@ -157,7 +185,7 @@ mod tests {
         let member = create_test_member(1, "username", global_name, nick);
         let info = to_member_info(&member);
 
-        assert_eq!(info.display_name.as_ref(), expected);
+        assert_eq!(info.display_name.as_str(), expected);
     }
 
     #[rstest]

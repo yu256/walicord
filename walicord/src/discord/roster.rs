@@ -1,4 +1,4 @@
-use crate::infrastructure::discord::{ChannelError, DiscordChannelService};
+use crate::discord::service::{ChannelError, DiscordChannelService};
 use dashmap::{DashMap, DashSet};
 use serenity::{
     model::id::{ChannelId, GuildId},
@@ -7,6 +7,8 @@ use serenity::{
 use std::collections::HashMap;
 use walicord_domain::model::{MemberId, MemberInfo};
 
+/// Provides member roster information for channels
+#[derive(Clone)]
 pub struct MemberRosterProvider {
     channel_service: DiscordChannelService,
     members: DashMap<GuildId, HashMap<MemberId, MemberInfo>>,
@@ -120,7 +122,7 @@ impl MemberRosterProvider {
         &self,
         guild_id: GuildId,
         member_ids: I,
-    ) -> HashMap<MemberId, String>
+    ) -> HashMap<MemberId, smol_str::SmolStr>
     where
         I: IntoIterator<Item = MemberId>,
     {
@@ -131,10 +133,55 @@ impl MemberRosterProvider {
         let mut result = HashMap::new();
         for member_id in member_ids {
             if let Some(member) = members.get(&member_id) {
-                result.insert(member_id, member.effective_name().to_string());
+                result.insert(member_id, member.effective_name().into());
             }
         }
         result
+    }
+}
+
+impl super::ports::RosterProvider for MemberRosterProvider {
+    async fn roster_for_channel(
+        &self,
+        ctx: &Context,
+        channel_id: ChannelId,
+    ) -> Result<Vec<MemberId>, super::ports::ServiceError> {
+        MemberRosterProvider::roster_for_channel(self, ctx, channel_id)
+            .await
+            .map_err(super::ports::ServiceError::from)
+    }
+
+    async fn warm_up(
+        &self,
+        ctx: &Context,
+        channel_id: ChannelId,
+    ) -> Result<(), super::ports::ServiceError> {
+        MemberRosterProvider::warm_up(self, ctx, channel_id)
+            .await
+            .map_err(super::ports::ServiceError::from)
+    }
+
+    fn apply_member_add(&self, guild_id: GuildId, member: MemberInfo) {
+        MemberRosterProvider::apply_member_add(self, guild_id, member);
+    }
+
+    fn apply_member_update(&self, guild_id: GuildId, member: MemberInfo) {
+        MemberRosterProvider::apply_member_update(self, guild_id, member);
+    }
+
+    fn apply_member_remove(&self, guild_id: GuildId, member_id: MemberId) {
+        MemberRosterProvider::apply_member_remove(self, guild_id, member_id);
+    }
+
+    fn display_names_for_guild<I>(
+        &self,
+        guild_id: GuildId,
+        member_ids: I,
+    ) -> HashMap<MemberId, smol_str::SmolStr>
+    where
+        I: IntoIterator<Item = MemberId>,
+    {
+        MemberRosterProvider::display_names_for_guild(self, guild_id, member_ids)
     }
 }
 
@@ -142,14 +189,14 @@ impl MemberRosterProvider {
 mod tests {
     use super::*;
     use rstest::rstest;
-    use std::sync::Arc;
+    use smol_str::SmolStr;
 
     fn create_test_member_info(user_id: u64, name: &str, nick: Option<&str>) -> MemberInfo {
         let display_name = nick.unwrap_or(name);
         MemberInfo {
             id: MemberId(user_id),
-            display_name: Arc::from(display_name),
-            username: Arc::from(name),
+            display_name: SmolStr::from(display_name),
+            username: SmolStr::from(name),
             avatar_url: None,
         }
     }
@@ -192,11 +239,11 @@ mod tests {
 
         assert_eq!(result.len(), expected.len());
         for (id, name) in expected {
-            assert_eq!(result.get(&MemberId(*id)), Some(&name.to_string()));
+            assert_eq!(result.get(&MemberId(*id)), Some(&SmolStr::from(*name)));
         }
     }
 
-    #[rstest]
+    #[test]
     fn display_names_for_guild_returns_empty_when_not_loaded() {
         let guild_id = GuildId::new(1);
         let provider = MemberRosterProvider::new(DiscordChannelService);
@@ -236,11 +283,11 @@ mod tests {
         let result = provider.display_names_for_guild(guild_id, vec![MemberId(expected_id)]);
         assert_eq!(
             result.get(&MemberId(expected_id)),
-            Some(&expected.to_string())
+            Some(&SmolStr::from(expected))
         );
     }
 
-    #[rstest]
+    #[test]
     fn apply_member_add_ignores_new_guild() {
         let guild_id = GuildId::new(1);
         let provider = MemberRosterProvider::new(DiscordChannelService);
