@@ -317,3 +317,20 @@ pub fn settlement_model_too_large(edge_count: usize, max_edges: usize) -> impl s
         )
     });
 }
+
+pub fn all_zero_weights() -> impl std::fmt::Display {
+    #[cfg(feature = "ja")]
+    return std::fmt::from_fn(move |f| {
+        write!(
+            f,
+            "すべての重みが0です。少なくとも1人の重みを0より大きくしてください"
+        )
+    });
+    #[cfg(not(feature = "ja"))]
+    return std::fmt::from_fn(move |f| {
+        write!(
+            f,
+            "All weights are zero. At least one member must have a weight greater than 0"
+        )
+    });
+}

@@ -76,6 +76,9 @@ fn parse_program_from_content<'a>(members: &'a [MemberId], content: &'a str) -> 
             ProgramParseError::InvalidAmountExpression { line, detail } => {
                 panic!("parse failed: invalid amount expression at line {line}: {detail}")
             }
+            ProgramParseError::AllZeroWeights { line } => {
+                panic!("parse failed: all weights are zero at line {line}")
+            }
         },
     }
 }

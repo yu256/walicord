@@ -33,6 +33,7 @@ pub enum ProcessingOutcome<'a> {
     SyntaxError { line: usize, detail: String },
     MissingContextForImplicitAuthor { line: usize },
     InvalidAmountExpression { line: usize, detail: String },
+    AllZeroWeights { line: usize },
 }
 
 impl<'a> ProcessingOutcome<'a> {
@@ -57,6 +58,9 @@ impl<'a> ProcessingOutcome<'a> {
             }
             ProcessingOutcome::InvalidAmountExpression { line, detail } => {
                 Err(ProgramParseError::InvalidAmountExpression { line, detail })
+            }
+            ProcessingOutcome::AllZeroWeights { line } => {
+                Err(ProgramParseError::AllZeroWeights { line })
             }
         }
     }
@@ -419,6 +423,9 @@ impl<'a> MessageProcessor<'a> {
                     detail,
                 }
             }
+            ProgramParseError::AllZeroWeights { line } => ProcessingOutcome::AllZeroWeights {
+                line: line + offset,
+            },
         }
     }
 }

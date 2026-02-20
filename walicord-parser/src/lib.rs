@@ -65,6 +65,11 @@ impl<'a> SetExpr<'a> {
             _ => None,
         })
     }
+
+    /// Returns true if there are any unweighted push operations (Push without weight).
+    pub fn has_unweighted_push(&self) -> bool {
+        self.ops.iter().any(|op| matches!(op, SetOp::Push(_)))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

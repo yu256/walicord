@@ -92,6 +92,16 @@ impl ProgramParser for WalicordProgramParser {
                             let payee_expr = to_member_set_expr(payee.clone());
                             let payee_weights = extract_payee_weights(&payee);
 
+                            // Validate that not all weights are zero.
+                            // This only applies when there are weighted members AND no unweighted members
+                            // (unweighted members default to weight 1, so total would be > 0).
+                            if !payee_weights.is_empty()
+                                && payee_weights.values().all(|w| w.0 == 0)
+                                && !payee.has_unweighted_push()
+                            {
+                                return Err(ProgramParseError::AllZeroWeights { line });
+                            }
+
                             let (app_payment, domain_payment) = if payee_weights.is_empty() {
                                 (
                                     Payment::even(
@@ -301,5 +311,34 @@ mod tests {
 
         let ids: Vec<_> = members.referenced_ids().collect();
         assert_eq!(ids, vec![MemberId(7)]);
+    }
+
+    #[test]
+    fn parse_all_zero_weights_returns_error() {
+        let parser = WalicordProgramParser;
+        let members: [MemberId; 0] = [];
+        let result = parser.parse(&members, "3000 <@1>*0 <@2>*0", Some(MemberId(3)));
+
+        match result {
+            Err(ProgramParseError::AllZeroWeights { line }) => {
+                assert_eq!(line, 1);
+            }
+            Ok(_) => panic!("expected all zero weights error, but parsing succeeded"),
+            Err(other) => panic!("expected all zero weights error, got other error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_mixed_zero_and_unweighted_succeeds() {
+        // When there are both zero-weighted and unweighted members,
+        // the unweighted members default to weight 1, so total > 0.
+        let parser = WalicordProgramParser;
+        let members: [MemberId; 0] = [];
+        let result = parser.parse(&members, "3000 <@1>*0 <@2>*0 <@3>", Some(MemberId(4)));
+
+        match result {
+            Ok(_) => {}
+            Err(other) => panic!("expected parsing to succeed, got error: {other:?}"),
+        }
     }
 }

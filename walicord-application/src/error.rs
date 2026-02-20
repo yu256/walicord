@@ -16,6 +16,7 @@ pub enum ProgramParseError<'a> {
     SyntaxError { line: usize, detail: String },
     MissingContextForImplicitAuthor { line: usize },
     InvalidAmountExpression { line: usize, detail: String },
+    AllZeroWeights { line: usize },
 }
 
 impl<'a> From<ProgramBuildError<'a>> for ProgramParseError<'a> {
@@ -82,7 +83,8 @@ impl ProgramParseError<'_> {
             | ProgramParseError::UndefinedGroup { .. }
             | ProgramParseError::UndefinedMember { .. }
             | ProgramParseError::SyntaxError { .. }
-            | ProgramParseError::InvalidAmountExpression { .. } => FailureKind::UserInput,
+            | ProgramParseError::InvalidAmountExpression { .. }
+            | ProgramParseError::AllZeroWeights { .. } => FailureKind::UserInput,
         }
     }
 }

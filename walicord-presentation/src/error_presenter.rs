@@ -35,6 +35,12 @@ pub fn format_program_parse_error(
                 walicord_i18n::invalid_amount_expression(line, detail)
             )
         }
+        ProgramParseError::AllZeroWeights { line } => {
+            format!(
+                "{mention} {} (line {line})",
+                walicord_i18n::all_zero_weights()
+            )
+        }
     }
 }
 
@@ -52,6 +58,7 @@ mod tests {
             ProgramParseError::SyntaxError { line, .. } => *line,
             ProgramParseError::MissingContextForImplicitAuthor { line } => *line,
             ProgramParseError::InvalidAmountExpression { line, .. } => *line,
+            ProgramParseError::AllZeroWeights { line } => *line,
         }
     }
 

@@ -1537,8 +1537,10 @@ pub fn distribute_balances(
                 .iter()
                 .map(|id| weights.get(&id).copied().unwrap_or(Weight(1)))
                 .collect();
-            let ratios = Ratios::try_new(weight_vec)
-                .expect("total weight must be non-zero after validation");
+            let ratios = match Ratios::try_new(weight_vec) {
+                Ok(r) => r,
+                Err(_) => return,
+            };
             amount.split_ratio(&ratios, RemainderPolicy::FrontLoad)
         }
     };
