@@ -17,8 +17,9 @@ use std::str::FromStr;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SetOp<'a> {
-    Push(u64),          // Discord user ID (mention)
-    PushGroup(&'a str), // Group name reference
+    Push(u64),              // Discord user ID (mention)
+    PushWeighted(u64, u64), // Discord user ID with weight (mention*weight)
+    PushGroup(&'a str),     // Group name reference
     Union,
     Intersection,
     Difference,
@@ -46,7 +47,7 @@ impl<'a> SetExpr<'a> {
 
     pub fn referenced_ids(&self) -> impl Iterator<Item = u64> + '_ {
         self.ops.iter().filter_map(|op| match op {
-            SetOp::Push(id) => Some(*id),
+            SetOp::Push(id) | SetOp::PushWeighted(id, _) => Some(*id),
             _ => None,
         })
     }
@@ -54,6 +55,13 @@ impl<'a> SetExpr<'a> {
     pub fn referenced_groups(&self) -> impl Iterator<Item = &'a str> + '_ {
         self.ops.iter().filter_map(|op| match op {
             SetOp::PushGroup(name) => Some(*name),
+            _ => None,
+        })
+    }
+
+    pub fn referenced_weighted(&self) -> impl Iterator<Item = (u64, u64)> + '_ {
+        self.ops.iter().filter_map(|op| match op {
+            SetOp::PushWeighted(id, weight) => Some((*id, *weight)),
             _ => None,
         })
     }
@@ -174,15 +182,25 @@ fn mention(input: &str) -> IResult<&str, u64> {
     Ok((input, id))
 }
 
+fn mention_with_weight(input: &str) -> IResult<&str, SetOp<'static>> {
+    let (input, id) = mention(input)?;
+    let (input, weight) = opt((char('*'), u64).map(|(_, w)| w)).parse(input)?;
+    let op = match weight {
+        Some(w) => SetOp::PushWeighted(id, w),
+        None => SetOp::Push(id),
+    };
+    Ok((input, op))
+}
+
 fn mention_sequence(input: &str) -> IResult<&str, SetExpr<'_>> {
     use nom::multi::many1;
 
-    let (input, mentions) = many1((mention, sp).map(|(id, _)| id)).parse(input)?;
+    let (input, ops) = many1((mention_with_weight, sp).map(|(op, _)| op)).parse(input)?;
 
     let mut expr = SetExpr::new();
-    let len = mentions.len();
-    for id in mentions {
-        expr.push(SetOp::Push(id));
+    let len = ops.len();
+    for op in ops {
+        expr.push(op);
     }
     for _ in 0..len - 1 {
         expr.push(SetOp::Union);
@@ -933,5 +951,47 @@ mod tests {
     fn test_parse_program_variants(#[case] input: &str) {
         let program = parse_program(input).expect("program variant should parse");
         assert!(!program.statements.is_empty());
+    }
+
+    #[rstest]
+    #[case::single_weighted(
+        "<@65>*2",
+        &[SetOp::PushWeighted(65, 2)]
+    )]
+    #[case::weighted_and_unweighted(
+        "<@65>*2 <@66>",
+        &[SetOp::PushWeighted(65, 2), SetOp::Push(66), SetOp::Union]
+    )]
+    #[case::multiple_weighted(
+        "<@65>*3 <@66>*0 <@67>",
+        &[SetOp::PushWeighted(65, 3), SetOp::PushWeighted(66, 0), SetOp::Push(67), SetOp::Union, SetOp::Union]
+    )]
+    fn test_weighted_set_expr_ops(#[case] input: &str, #[case] expected: &'static [SetOp]) {
+        let (_, expr) = set_expr(input).expect("weighted set expression should parse");
+        assert_eq!(expr.ops(), expected);
+    }
+
+    #[rstest]
+    #[case::weighted_payment_implicit("3000 <@65>*2 <@66>*0 <@67>")]
+    #[case::weighted_payment_to("3000 to <@65>*2 <@66>*0 <@67>")]
+    #[case::weighted_payment_ja("<@10> が <@65>*2 <@66>*0 <@67> に 3000 立て替えた")]
+    #[case::weighted_payment_en("<@10> paid 3000 to <@65>*2 <@66>*0 <@67>")]
+    fn test_weighted_payment_parses(#[case] input: &str) {
+        let program = parse_program(input).expect("weighted payment should parse");
+        assert!(!program.statements.is_empty());
+        let stmt = &program.statements[0].statement;
+        let Statement::Payment(payment) = stmt else {
+            panic!("expected payment statement");
+        };
+        let payee = &payment.payee;
+        let weighted: Vec<_> = payee.referenced_weighted().collect();
+        assert_eq!(weighted, vec![(65, 2), (66, 0)]);
+    }
+
+    #[rstest]
+    #[case::no_weight("<@65>", &[SetOp::Push(65)])]
+    fn test_unweighted_backward_compat(#[case] input: &str, #[case] expected: &'static [SetOp]) {
+        let (_, expr) = set_expr(input).expect("unweighted should still parse");
+        assert_eq!(expr.ops(), expected);
     }
 }

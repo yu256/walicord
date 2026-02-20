@@ -1,11 +1,11 @@
-use std::borrow::Cow;
+use std::{borrow::Cow, collections::BTreeMap};
 use walicord_application::{
     Command, ProgramParseError, ProgramParser, Script, ScriptStatement, ScriptStatementWithLine,
 };
 use walicord_domain::{
     AmountExpr, AmountOp, Declaration, Payment, Program as DomainProgram,
     Statement as DomainStatement, StatementWithLine as DomainStatementWithLine,
-    model::{MemberId, MemberSetExpr, MemberSetOp},
+    model::{MemberId, MemberSetExpr, MemberSetOp, Weight},
 };
 use walicord_parser::{
     AmountExpr as ParserAmountExpr, AmountOp as ParserAmountOp, Command as ParserCommand,
@@ -89,16 +89,33 @@ impl ProgramParser for WalicordProgramParser {
                                     MemberSetExpr::new([MemberSetOp::Push(author)])
                                 }
                             };
-                            let payee_expr = to_member_set_expr(payee);
-                            let app_payment = Payment {
-                                amount: amount_money,
-                                payer: payer_expr.clone(),
-                                payee: payee_expr.clone(),
-                            };
-                            let domain_payment = Payment {
-                                amount: amount_money,
-                                payer: payer_expr,
-                                payee: payee_expr,
+                            let payee_expr = to_member_set_expr(payee.clone());
+                            let payee_weights = extract_payee_weights(&payee);
+
+                            let (app_payment, domain_payment) = if payee_weights.is_empty() {
+                                (
+                                    Payment::even(
+                                        amount_money,
+                                        payer_expr.clone(),
+                                        payee_expr.clone(),
+                                    ),
+                                    Payment::even(amount_money, payer_expr, payee_expr),
+                                )
+                            } else {
+                                (
+                                    Payment::weighted(
+                                        amount_money,
+                                        payer_expr.clone(),
+                                        payee_expr.clone(),
+                                        payee_weights.clone(),
+                                    ),
+                                    Payment::weighted(
+                                        amount_money,
+                                        payer_expr,
+                                        payee_expr,
+                                        payee_weights,
+                                    ),
+                                )
                             };
                             let app_statement = DomainStatement::Payment(app_payment);
                             app_statements.push(ScriptStatementWithLine {
@@ -158,13 +175,19 @@ impl ProgramParser for WalicordProgramParser {
 
 fn to_member_set_expr<'a>(expr: walicord_parser::SetExpr<'a>) -> MemberSetExpr<'a> {
     let ops = expr.ops().iter().map(|op| match op {
-        SetOp::Push(id) => MemberSetOp::Push(MemberId(*id)),
+        SetOp::Push(id) | SetOp::PushWeighted(id, _) => MemberSetOp::Push(MemberId(*id)),
         SetOp::PushGroup(name) => MemberSetOp::PushGroup(name),
         SetOp::Union => MemberSetOp::Union,
         SetOp::Intersection => MemberSetOp::Intersection,
         SetOp::Difference => MemberSetOp::Difference,
     });
     MemberSetExpr::new(ops)
+}
+
+fn extract_payee_weights(expr: &walicord_parser::SetExpr<'_>) -> BTreeMap<MemberId, Weight> {
+    expr.referenced_weighted()
+        .map(|(id, w)| (MemberId(id), Weight(w)))
+        .collect()
 }
 
 fn to_amount_expr(expr: ParserAmountExpr) -> AmountExpr {

@@ -454,19 +454,19 @@ mod tests {
             let statements = vec![
                 ScriptStatementWithLine {
                     line: 1,
-                    statement: ScriptStatement::Domain(Statement::Payment(Payment {
-                        amount: Money::try_from(60).expect("amount should fit in i64"),
-                        payer: MemberSetExpr::new([MemberSetOp::Push(MemberId(1))]),
-                        payee: MemberSetExpr::new([MemberSetOp::Push(MemberId(3))]),
-                    })),
+                    statement: ScriptStatement::Domain(Statement::Payment(Payment::even(
+                        Money::try_from(60).expect("amount should fit in i64"),
+                        MemberSetExpr::new([MemberSetOp::Push(MemberId(1))]),
+                        MemberSetExpr::new([MemberSetOp::Push(MemberId(3))]),
+                    ))),
                 },
                 ScriptStatementWithLine {
                     line: 2,
-                    statement: ScriptStatement::Domain(Statement::Payment(Payment {
-                        amount: Money::try_from(40).expect("amount should fit in i64"),
-                        payer: MemberSetExpr::new([MemberSetOp::Push(MemberId(2))]),
-                        payee: MemberSetExpr::new([MemberSetOp::Push(MemberId(3))]),
-                    })),
+                    statement: ScriptStatement::Domain(Statement::Payment(Payment::even(
+                        Money::try_from(40).expect("amount should fit in i64"),
+                        MemberSetExpr::new([MemberSetOp::Push(MemberId(2))]),
+                        MemberSetExpr::new([MemberSetOp::Push(MemberId(3))]),
+                    ))),
                 },
                 ScriptStatementWithLine {
                     line: 3,
@@ -616,19 +616,19 @@ mod tests {
             vec![
                 ScriptStatementWithLine {
                     line: 1,
-                    statement: ScriptStatement::Domain(Statement::Payment(Payment {
-                        amount: Money::from_i64(60),
-                        payer: MemberSetExpr::new([MemberSetOp::Push(MemberId(1))]),
-                        payee: MemberSetExpr::new([MemberSetOp::Push(MemberId(3))]),
-                    })),
+                    statement: ScriptStatement::Domain(Statement::Payment(Payment::even(
+                        Money::from_i64(60),
+                        MemberSetExpr::new([MemberSetOp::Push(MemberId(1))]),
+                        MemberSetExpr::new([MemberSetOp::Push(MemberId(3))]),
+                    ))),
                 },
                 ScriptStatementWithLine {
                     line: 2,
-                    statement: ScriptStatement::Domain(Statement::Payment(Payment {
-                        amount: Money::from_i64(40),
-                        payer: MemberSetExpr::new([MemberSetOp::Push(MemberId(2))]),
-                        payee: MemberSetExpr::new([MemberSetOp::Push(MemberId(3))]),
-                    })),
+                    statement: ScriptStatement::Domain(Statement::Payment(Payment::even(
+                        Money::from_i64(40),
+                        MemberSetExpr::new([MemberSetOp::Push(MemberId(2))]),
+                        MemberSetExpr::new([MemberSetOp::Push(MemberId(3))]),
+                    ))),
                 },
             ],
         );
@@ -713,11 +713,11 @@ mod tests {
     ) -> ScriptStatementWithLine<'static> {
         ScriptStatementWithLine {
             line,
-            statement: ScriptStatement::Domain(Statement::Payment(Payment {
-                amount: Money::from_i64(amount),
-                payer: MemberSetExpr::new([MemberSetOp::Push(MemberId(payer))]),
-                payee: MemberSetExpr::new([MemberSetOp::Push(MemberId(payee))]),
-            })),
+            statement: ScriptStatement::Domain(Statement::Payment(Payment::even(
+                Money::from_i64(amount),
+                MemberSetExpr::new([MemberSetOp::Push(MemberId(payer))]),
+                MemberSetExpr::new([MemberSetOp::Push(MemberId(payee))]),
+            ))),
         }
     }
 
@@ -936,17 +936,17 @@ mod tests {
             &[],
             vec![ScriptStatementWithLine {
                 line: 1,
-                statement: ScriptStatement::Domain(Statement::Payment(Payment {
-                    amount: Money::from_i64(amount),
-                    payer: MemberSetExpr::new([MemberSetOp::Push(MemberId(1))]),
-                    payee: MemberSetExpr::new([
+                statement: ScriptStatement::Domain(Statement::Payment(Payment::even(
+                    Money::from_i64(amount),
+                    MemberSetExpr::new([MemberSetOp::Push(MemberId(1))]),
+                    MemberSetExpr::new([
                         MemberSetOp::Push(MemberId(1)),
                         MemberSetOp::Push(MemberId(2)),
                         MemberSetOp::Union,
                         MemberSetOp::Push(MemberId(3)),
                         MemberSetOp::Union,
                     ]),
-                })),
+                ))),
             }],
         );
 
