@@ -337,9 +337,7 @@ where
             ReactionService::react(ctx, msg, '✅').await;
         }
 
-        if result.has_effect_statement
-            && let Some(program) = result.program.as_ref()
-        {
+        if let Some(program) = result.program.as_ref() {
             let settlement_service = SettlementService::new(&self.processor, &self.roster_provider);
             let mut member_directory: Option<HashMap<MemberId, smol_str::SmolStr>> = None;
 
@@ -409,7 +407,7 @@ fn plan_cache_rebuild(
 
     for &idx in &sorted_indices {
         let message = &messages[idx];
-        if message.is_bot || message.is_marked_invalid() {
+        if message.is_bot {
             continue;
         }
 
@@ -979,7 +977,9 @@ mod tests {
     }
 
     #[rstest]
-    fn plan_cache_rebuild_skips_marked_invalid_messages(processor: MessageProcessor<'static>) {
+    fn plan_cache_rebuild_re_evaluates_marked_invalid_messages(
+        processor: MessageProcessor<'static>,
+    ) {
         let member_ids = [MemberId(1), MemberId(2)];
 
         let mut invalid_message = make_cached_message(1, "<@1> paid 100 to <@2>");
@@ -992,22 +992,32 @@ mod tests {
         let plan = plan_cache_rebuild(&processor, &member_ids, &messages);
 
         let cached_ids: Vec<u64> = plan.cache.keys().map(|id| id.get()).collect();
-        assert_eq!(cached_ids, [2]);
+        assert_eq!(cached_ids, [1, 2]);
 
-        let reaction_ids: Vec<u64> = plan.reactions.iter().map(|(id, _, _)| id.get()).collect();
-        assert_eq!(reaction_ids, [2]);
+        let reactions: Vec<(u64, MessageValidity)> = plan
+            .reactions
+            .iter()
+            .map(|(id, _, validity)| (id.get(), *validity))
+            .collect();
+        assert_eq!(
+            reactions,
+            [
+                (1, MessageValidity::Valid),
+                (2, MessageValidity::NotProgram),
+            ]
+        );
     }
 
     #[rstest]
-    fn plan_cache_rebuild_returns_empty_when_all_messages_invalid(
+    fn plan_cache_rebuild_returns_empty_cache_when_all_messages_parse_invalid(
         processor: MessageProcessor<'static>,
     ) {
         let member_ids = [MemberId(1), MemberId(2)];
 
-        let mut invalid1 = make_cached_message(1, "<@1> paid 100 to <@2>");
+        let mut invalid1 = make_cached_message(1, "<@1> paid x to <@2>");
         invalid1.reaction_state = BotReactionState::HasCross;
 
-        let mut invalid2 = make_cached_message(2, "!variables");
+        let mut invalid2 = make_cached_message(2, "<@1> paid y to <@2>");
         invalid2.reaction_state = BotReactionState::HasCross;
 
         let messages = vec![invalid1, invalid2];
@@ -1015,6 +1025,14 @@ mod tests {
         let plan = plan_cache_rebuild(&processor, &member_ids, &messages);
 
         assert!(plan.cache.is_empty());
-        assert!(plan.reactions.is_empty());
+        let reactions: Vec<(u64, MessageValidity)> = plan
+            .reactions
+            .iter()
+            .map(|(id, _, validity)| (id.get(), *validity))
+            .collect();
+        assert_eq!(
+            reactions,
+            [(1, MessageValidity::Invalid), (2, MessageValidity::Invalid),]
+        );
     }
 }
