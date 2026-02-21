@@ -601,7 +601,7 @@ impl MaskWord for u128 {
     const TRAILING_ZEROS: fn(Self) -> u32 = Self::trailing_zeros;
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum MemberSetOp<'a> {
     Push(MemberId),     // Discord user ID (from mention)
     PushGroup(&'a str), // Group name reference

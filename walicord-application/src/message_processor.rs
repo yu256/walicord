@@ -1,5 +1,5 @@
 use crate::{
-    SettlementOptimizationError,
+    BalanceCalculationError, SettlementOptimizationError,
     error::ProgramParseError,
     model::{
         Command, PersonBalance, Script, ScriptStatement, ScriptStatementWithLine, SettleUpContext,
@@ -155,19 +155,16 @@ impl<'a> MessageProcessor<'a> {
     pub async fn calculate_balances(
         &self,
         program: &Script<'_>,
-    ) -> Result<MemberBalances, SettlementOptimizationError> {
-        Ok(self.apply_statements(program, None, false).await?.balances)
+    ) -> Result<MemberBalances, BalanceCalculationError> {
+        self.apply_statements_without_settlement(program, None)
     }
 
     pub async fn calculate_balances_for_prefix(
         &self,
         program: &Script<'_>,
         prefix_len: usize,
-    ) -> Result<MemberBalances, SettlementOptimizationError> {
-        Ok(self
-            .apply_statements(program, Some(prefix_len), false)
-            .await?
-            .balances)
+    ) -> Result<MemberBalances, BalanceCalculationError> {
+        self.apply_statements_without_settlement(program, Some(prefix_len))
     }
 
     pub async fn build_settlement_result(
@@ -374,6 +371,29 @@ impl<'a> MessageProcessor<'a> {
         })
     }
 
+    fn apply_statements_without_settlement(
+        &self,
+        program: &Script<'_>,
+        prefix_len: Option<usize>,
+    ) -> Result<MemberBalances, BalanceCalculationError> {
+        let statements = program.statements();
+        let end = match prefix_len {
+            Some(prefix_len) => self.prefix_end(statements, prefix_len),
+            None => statements.len(),
+        };
+
+        let mut accumulator = BalanceAccumulator::new_with_members(program.members());
+        for stmt in &statements[..end] {
+            if let ScriptStatement::Domain(statement) = &stmt.statement {
+                accumulator
+                    .apply(statement)
+                    .map_err(BalanceCalculationError::from)?;
+            }
+        }
+
+        Ok(accumulator.into_balances())
+    }
+
     fn prefix_end<'b>(
         &self,
         statements: &[ScriptStatementWithLine<'b>],
@@ -430,7 +450,7 @@ impl<'a> MessageProcessor<'a> {
 mod tests {
     use super::*;
     use crate::{
-        error::SettlementOptimizationError,
+        error::{BalanceCalculationError, SettlementOptimizationError},
         ports::{ProgramParser, SettlementOptimizer},
     };
     use proptest::prelude::*;
@@ -764,6 +784,25 @@ mod tests {
         )
     }
 
+    fn script_with_weight_overflow_payment() -> Script<'static> {
+        Script::new(
+            &[],
+            vec![ScriptStatementWithLine {
+                line: 1,
+                statement: ScriptStatement::Domain(Statement::Payment(Payment::weighted(
+                    Money::from_i64(100),
+                    MemberSetExpr::new([MemberSetOp::Push(MemberId(1))]),
+                    MemberSetExpr::new([
+                        MemberSetOp::Push(MemberId(1)),
+                        MemberSetOp::Push(MemberId(2)),
+                        MemberSetOp::Union,
+                    ]),
+                    BTreeMap::from([(MemberId(1), Weight::MAX), (MemberId(2), Weight(1))]),
+                ))),
+            }],
+        )
+    }
+
     fn script_with_persisted_cash() -> Script<'static> {
         let members = union_members(&[1, 2, 3, 4]);
         let mut persisted_statements = base_cash_sensitivity_payments();
@@ -1002,7 +1041,7 @@ mod tests {
         let Err(err) = result else {
             panic!("expected zero total weight error");
         };
-        assert_eq!(err, SettlementOptimizationError::ZeroTotalWeight);
+        assert_eq!(err, BalanceCalculationError::ZeroTotalWeight);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1015,7 +1054,33 @@ mod tests {
         let Err(err) = result else {
             panic!("expected zero total weight error");
         };
-        assert_eq!(err, SettlementOptimizationError::ZeroTotalWeight);
+        assert_eq!(err, BalanceCalculationError::ZeroTotalWeight);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn calculate_balances_returns_error_on_weight_overflow() {
+        let processor = MessageProcessor::new(&StubParser, &NoopOptimizer);
+        let script = script_with_weight_overflow_payment();
+
+        let result = processor.calculate_balances(&script).await;
+
+        let Err(err) = result else {
+            panic!("expected weight overflow error");
+        };
+        assert_eq!(err, BalanceCalculationError::WeightOverflow);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn calculate_balances_for_prefix_returns_error_on_weight_overflow() {
+        let processor = MessageProcessor::new(&StubParser, &NoopOptimizer);
+        let script = script_with_weight_overflow_payment();
+
+        let result = processor.calculate_balances_for_prefix(&script, 1).await;
+
+        let Err(err) = result else {
+            panic!("expected weight overflow error");
+        };
+        assert_eq!(err, BalanceCalculationError::WeightOverflow);
     }
 
     #[rstest]

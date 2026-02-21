@@ -44,7 +44,7 @@ impl ProgramParser for WalicordProgramParser {
                     let walicord_parser::StatementWithLine { line, statement } = stmt;
                     match statement {
                         ParserStatement::Declaration(decl) => {
-                            let expression = to_member_set_expr(decl.expression);
+                            let expression = to_member_set_expr_no_weight(decl.expression, line)?;
                             let app_decl = Declaration {
                                 name: decl.name,
                                 expression: expression.clone(),
@@ -77,7 +77,9 @@ impl ProgramParser for WalicordProgramParser {
                                 }
                             })?;
                             let payer_expr = match payer {
-                                PayerSpec::Explicit(expr) => to_member_set_expr(expr),
+                                PayerSpec::Explicit(expr) => {
+                                    to_member_set_expr_no_weight(expr, line)?
+                                }
                                 PayerSpec::Implicit => {
                                     let Some(author) = author_id else {
                                         return Err(
@@ -89,7 +91,7 @@ impl ProgramParser for WalicordProgramParser {
                                     MemberSetExpr::new([MemberSetOp::Push(author)])
                                 }
                             };
-                            let payee_expr = to_member_set_expr(payee.clone());
+                            let payee_expr = to_member_set_expr_allow_weighted(payee.clone());
                             let payee_weights = extract_payee_weights(&payee);
 
                             // Validate that not all weights are zero.
@@ -146,7 +148,7 @@ impl ProgramParser for WalicordProgramParser {
                                 ParserCommand::Review => Command::Review,
                                 ParserCommand::MemberAddCash { members } => {
                                     Command::MemberAddCash {
-                                        members: to_member_set_expr(members),
+                                        members: to_member_set_expr_no_weight(members, line)?,
                                     }
                                 }
                                 ParserCommand::CashSelf => {
@@ -165,8 +167,10 @@ impl ProgramParser for WalicordProgramParser {
                                     members,
                                     cash_members,
                                 } => Command::SettleUp {
-                                    members: to_member_set_expr(members),
-                                    cash_members: cash_members.map(to_member_set_expr),
+                                    members: to_member_set_expr_no_weight(members, line)?,
+                                    cash_members: cash_members
+                                        .map(|set| to_member_set_expr_no_weight(set, line))
+                                        .transpose()?,
                                 },
                             };
                             app_statements.push(ScriptStatementWithLine {
@@ -186,7 +190,7 @@ impl ProgramParser for WalicordProgramParser {
     }
 }
 
-fn to_member_set_expr<'a>(expr: walicord_parser::SetExpr<'a>) -> MemberSetExpr<'a> {
+fn to_member_set_expr_allow_weighted<'a>(expr: walicord_parser::SetExpr<'a>) -> MemberSetExpr<'a> {
     let ops = expr.ops().iter().map(|op| match op {
         SetOp::Push(id) | SetOp::PushWeighted(id, _) => MemberSetOp::Push(MemberId(*id)),
         SetOp::PushGroup(name) => MemberSetOp::PushGroup(name),
@@ -195,6 +199,24 @@ fn to_member_set_expr<'a>(expr: walicord_parser::SetExpr<'a>) -> MemberSetExpr<'
         SetOp::Difference => MemberSetOp::Difference,
     });
     MemberSetExpr::new(ops)
+}
+
+fn to_member_set_expr_no_weight<'a>(
+    expr: walicord_parser::SetExpr<'a>,
+    line: usize,
+) -> Result<MemberSetExpr<'a>, ProgramParseError<'a>> {
+    if expr
+        .ops()
+        .iter()
+        .any(|op| matches!(op, SetOp::PushWeighted(_, _)))
+    {
+        return Err(ProgramParseError::SyntaxError {
+            line,
+            detail: "weighted mentions are only allowed in payment payee".to_string(),
+        });
+    }
+
+    Ok(to_member_set_expr_allow_weighted(expr))
 }
 
 fn extract_payee_weights(expr: &walicord_parser::SetExpr<'_>) -> BTreeMap<MemberId, Weight> {

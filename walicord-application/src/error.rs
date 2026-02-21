@@ -54,6 +54,12 @@ pub enum SettlementOptimizationError {
     ZeroTotalWeight,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BalanceCalculationError {
+    WeightOverflow,
+    ZeroTotalWeight,
+}
+
 impl SettlementOptimizationError {
     pub fn kind(&self) -> FailureKind {
         match self {
@@ -73,6 +79,16 @@ impl SettlementOptimizationError {
             }
             SettlementOptimizationError::WeightOverflow
             | SettlementOptimizationError::ZeroTotalWeight => FailureKind::UserInput,
+        }
+    }
+}
+
+impl BalanceCalculationError {
+    pub fn kind(&self) -> FailureKind {
+        match self {
+            BalanceCalculationError::WeightOverflow | BalanceCalculationError::ZeroTotalWeight => {
+                FailureKind::UserInput
+            }
         }
     }
 }
@@ -149,6 +165,19 @@ impl From<walicord_domain::BalanceError> for SettlementOptimizationError {
             }
             walicord_domain::BalanceError::ZeroTotalWeight => {
                 SettlementOptimizationError::ZeroTotalWeight
+            }
+        }
+    }
+}
+
+impl From<walicord_domain::BalanceError> for BalanceCalculationError {
+    fn from(err: walicord_domain::BalanceError) -> Self {
+        match err {
+            walicord_domain::BalanceError::WeightOverflow => {
+                BalanceCalculationError::WeightOverflow
+            }
+            walicord_domain::BalanceError::ZeroTotalWeight => {
+                BalanceCalculationError::ZeroTotalWeight
             }
         }
     }
@@ -258,5 +287,15 @@ mod tests {
         #[case] expected: SettlementOptimizationError,
     ) {
         assert_eq!(SettlementOptimizationError::from(input), expected);
+    }
+
+    #[rstest]
+    #[case::weight_overflow(BalanceCalculationError::WeightOverflow, FailureKind::UserInput)]
+    #[case::zero_total_weight(BalanceCalculationError::ZeroTotalWeight, FailureKind::UserInput)]
+    fn balance_calculation_error_kind_matches_intent(
+        #[case] err: BalanceCalculationError,
+        #[case] expected: FailureKind,
+    ) {
+        assert_eq!(err.kind(), expected);
     }
 }

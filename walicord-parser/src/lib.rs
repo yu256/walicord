@@ -3,19 +3,19 @@
 mod i18n;
 
 use nom::{
-    IResult, Parser,
     branch::alt,
     bytes::complete::{tag, tag_no_case, take_till, take_until, take_while, take_while1},
     character::complete::{char, digit1, multispace1, u64},
     combinator::{map_res, opt, recognize},
     multi::many0,
     sequence::delimited,
+    IResult, Parser,
 };
 use rust_decimal::Decimal;
-use smallvec::{SmallVec, smallvec};
+use smallvec::{smallvec, SmallVec};
 use std::str::FromStr;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SetOp<'a> {
     Push(u64),              // Discord user ID (mention)
     PushWeighted(u64, u64), // Discord user ID with weight (mention*weight)
@@ -204,20 +204,31 @@ fn mention_with_weight(input: &str) -> IResult<&str, SetOp<'static>> {
     Ok((input, op))
 }
 
-fn mention_sequence(input: &str) -> IResult<&str, SetExpr<'_>> {
+fn mention_sequence_generic<'a, P, T>(
+    parser: P,
+    to_op: fn(T) -> SetOp<'a>,
+    input: &'a str,
+) -> IResult<&'a str, SetExpr<'a>>
+where
+    P: Fn(&'a str) -> IResult<&'a str, T>,
+{
     use nom::multi::many1;
 
-    let (input, ops) = many1((mention_with_weight, sp).map(|(op, _)| op)).parse(input)?;
+    let (input, items) = many1((parser, sp).map(|(item, _)| item)).parse(input)?;
 
     let mut expr = SetExpr::new();
-    let len = ops.len();
-    for op in ops {
-        expr.push(op);
-    }
-    for _ in 0..len - 1 {
-        expr.push(SetOp::Union);
-    }
+    let len = items.len();
+    expr.ops.extend(items.into_iter().map(to_op));
+    expr.ops.extend(std::iter::repeat_n(SetOp::Union, len - 1));
     Ok((input, expr))
+}
+
+fn mention_sequence(input: &str) -> IResult<&str, SetExpr<'_>> {
+    mention_sequence_generic(mention, SetOp::Push, input)
+}
+
+fn mention_sequence_weighted(input: &str) -> IResult<&str, SetExpr<'_>> {
+    mention_sequence_generic(mention_with_weight, std::convert::identity, input)
 }
 
 fn identifier(input: &str) -> IResult<&str, &str> {
@@ -272,54 +283,75 @@ fn set_primary(input: &str) -> IResult<&str, SetExpr<'_>> {
     .parse(input)
 }
 
-fn set_difference(input: &str) -> IResult<&str, SetExpr<'_>> {
-    (
-        set_primary,
-        nom::multi::many0((sp, tag("-"), sp, set_primary)),
-    )
-        .map(|(first, ops)| {
-            ops.into_iter().fold(first, |mut acc, (_, _, _, right)| {
-                acc.ops.extend(right.ops);
-                acc.push(SetOp::Difference);
-                acc
-            })
-        })
-        .parse(input)
+fn set_primary_weighted(input: &str) -> IResult<&str, SetExpr<'_>> {
+    alt((
+        (char('('), sp, set_expr_weighted, sp, char(')')).map(|(_, _, expr, _, _)| expr),
+        mention_sequence_weighted,
+        identifier.map(|name| {
+            let mut expr = SetExpr::new();
+            expr.push(SetOp::PushGroup(name));
+            expr
+        }),
+    ))
+    .parse(input)
 }
 
-fn set_intersection(input: &str) -> IResult<&str, SetExpr<'_>> {
-    (
-        set_difference,
-        nom::multi::many0((sp, tag("∩"), sp, set_difference)),
-    )
-        .map(|(first, ops)| {
-            ops.into_iter().fold(first, |mut acc, (_, _, _, right)| {
-                acc.ops.extend(right.ops);
-                acc.push(SetOp::Intersection);
-                acc
-            })
-        })
-        .parse(input)
+fn diff_token(input: &str) -> IResult<&str, &str> {
+    tag("-")(input)
 }
 
-// Parse union operations (lowest precedence)
-fn set_expr(input: &str) -> IResult<&str, SetExpr<'_>> {
-    (
-        set_intersection,
-        nom::multi::many0((sp, union_token, sp, set_intersection)),
-    )
-        .map(|(first, ops)| {
-            ops.into_iter().fold(first, |mut acc, (_, _, _, right)| {
-                acc.ops.extend(right.ops);
-                acc.push(SetOp::Union);
-                acc
-            })
-        })
-        .parse(input)
+fn intersect_token(input: &str) -> IResult<&str, &str> {
+    tag("∩")(input)
 }
 
 fn union_token(input: &str) -> IResult<&str, &str> {
     alt((tag("∪"), tag(","), tag("，"))).parse(input)
+}
+
+fn set_op_expr<'a>(
+    primary: fn(&'a str) -> IResult<&'a str, SetExpr<'a>>,
+    op_token: fn(&'a str) -> IResult<&'a str, &'a str>,
+    set_op: SetOp<'a>,
+    input: &'a str,
+) -> IResult<&'a str, SetExpr<'a>> {
+    (primary, nom::multi::many0((sp, op_token, sp, primary)))
+        .map(|(first, ops)| {
+            ops.into_iter().fold(first, |mut acc, (_, _, _, right)| {
+                acc.ops.extend(right.ops);
+                acc.push(set_op);
+                acc
+            })
+        })
+        .parse(input)
+}
+
+fn set_difference(input: &str) -> IResult<&str, SetExpr<'_>> {
+    set_op_expr(set_primary, diff_token, SetOp::Difference, input)
+}
+
+fn set_difference_weighted(input: &str) -> IResult<&str, SetExpr<'_>> {
+    set_op_expr(set_primary_weighted, diff_token, SetOp::Difference, input)
+}
+
+fn set_intersection(input: &str) -> IResult<&str, SetExpr<'_>> {
+    set_op_expr(set_difference, intersect_token, SetOp::Intersection, input)
+}
+
+fn set_intersection_weighted(input: &str) -> IResult<&str, SetExpr<'_>> {
+    set_op_expr(
+        set_difference_weighted,
+        intersect_token,
+        SetOp::Intersection,
+        input,
+    )
+}
+
+fn set_expr(input: &str) -> IResult<&str, SetExpr<'_>> {
+    set_op_expr(set_intersection, union_token, SetOp::Union, input)
+}
+
+fn set_expr_weighted(input: &str) -> IResult<&str, SetExpr<'_>> {
+    set_op_expr(set_intersection_weighted, union_token, SetOp::Union, input)
 }
 
 // name := expression (e.g., name := (A ∪ B) ∩ C)
@@ -418,7 +450,7 @@ fn payment_lender_subject_ja(input: &str) -> IResult<&str, Payment<'_>> {
         sp,
         ga,
         sp,
-        set_expr, // payee
+        set_expr_weighted, // payee
         sp,
         ni,
         sp,
@@ -445,7 +477,7 @@ fn payment_lender_subject_en(input: &str) -> IResult<&str, Payment<'_>> {
         sp,
         to,
         sp,
-        set_expr, // payee
+        set_expr_weighted, // payee
     )
         .map(|(payer, _, _, _, amount, _, _, _, payee)| Payment {
             amount,
@@ -457,7 +489,7 @@ fn payment_lender_subject_en(input: &str) -> IResult<&str, Payment<'_>> {
 
 // {amount} {payee}
 fn payment_implicit_simple(input: &str) -> IResult<&str, Payment<'_>> {
-    (amount_expr, sp, set_expr)
+    (amount_expr, sp, set_expr_weighted)
         .map(|(amount, _, payee)| Payment {
             amount,
             payer: PayerSpec::Implicit,
@@ -468,7 +500,7 @@ fn payment_implicit_simple(input: &str) -> IResult<&str, Payment<'_>> {
 
 // {amount} to {payee}
 fn payment_implicit_with_to(input: &str) -> IResult<&str, Payment<'_>> {
-    (amount_expr, sp, to, sp, set_expr)
+    (amount_expr, sp, to, sp, set_expr_weighted)
         .map(|(amount, _, _, _, payee)| Payment {
             amount,
             payer: PayerSpec::Implicit,
@@ -591,7 +623,11 @@ mod tests {
                 AmountOp::Div => apply_bin(&mut stack, |a, b| a.checked_div(b))?,
             }
         }
-        if stack.len() == 1 { stack.pop() } else { None }
+        if stack.len() == 1 {
+            stack.pop()
+        } else {
+            None
+        }
     }
 
     fn apply_bin(
@@ -979,7 +1015,7 @@ mod tests {
         &[SetOp::PushWeighted(65, 3), SetOp::PushWeighted(66, 0), SetOp::Push(67), SetOp::Union, SetOp::Union]
     )]
     fn test_weighted_set_expr_ops(#[case] input: &str, #[case] expected: &'static [SetOp]) {
-        let (_, expr) = set_expr(input).expect("weighted set expression should parse");
+        let (_, expr) = set_expr_weighted(input).expect("weighted set expression should parse");
         assert_eq!(expr.ops(), expected);
     }
 
@@ -1005,5 +1041,16 @@ mod tests {
     fn test_unweighted_backward_compat(#[case] input: &str, #[case] expected: &'static [SetOp]) {
         let (_, expr) = set_expr(input).expect("unweighted should still parse");
         assert_eq!(expr.ops(), expected);
+    }
+
+    #[rstest]
+    #[case::declaration("team := <@1>*2 <@2>")]
+    #[case::settleup_members("!settleup <@1>*2 <@2>")]
+    #[case::settleup_cash("!settleup <@1> --cash <@2>*2")]
+    #[case::member_cash("!member set <@1>*2 cash")]
+    #[case::weighted_payer("<@10>*2 paid 3000 to <@20>")]
+    fn test_reject_weighted_outside_payment_payee(#[case] input: &str) {
+        let result = parse_program(input);
+        assert!(matches!(result, Err(ParseError::SyntaxError { .. })));
     }
 }
