@@ -24,6 +24,15 @@ pub struct Declaration<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct Weight(pub u64);
 
+impl Weight {
+    pub const ZERO: Weight = Weight(u64::ZERO);
+    pub const MAX: Weight = Weight(u64::MAX);
+
+    pub fn checked_add(self, rhs: Self) -> Option<Self> {
+        self.0.checked_add(rhs.0).map(Weight)
+    }
+}
+
 impl Add for Weight {
     type Output = Self;
     fn add(self, rhs: Self) -> Self::Output {
@@ -33,13 +42,13 @@ impl Add for Weight {
 
 impl std::iter::Sum for Weight {
     fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
-        iter.fold(Weight(0), Self::add)
+        iter.fold(Weight::ZERO, Self::add)
     }
 }
 
 impl<'a> std::iter::Sum<&'a Weight> for Weight {
     fn sum<I: Iterator<Item = &'a Self>>(iter: I) -> Self {
-        iter.fold(Weight(0), |a, b| a + *b)
+        iter.fold(Weight::ZERO, |a, b| a + *b)
     }
 }
 
@@ -170,6 +179,7 @@ pub enum SplitError {
     ZeroRecipients,
     EmptyRatios,
     ZeroTotalRatio,
+    WeightOverflow,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -184,12 +194,15 @@ impl Ratios {
             return Err(SplitError::EmptyRatios);
         }
 
-        let total: Weight = weights.iter().sum();
-        if total == Weight(0) {
-            return Err(SplitError::ZeroTotalRatio);
+        let total: Option<Weight> = weights
+            .iter()
+            .copied()
+            .try_fold(Weight::ZERO, Weight::checked_add);
+        match total {
+            None => Err(SplitError::WeightOverflow),
+            Some(Weight::ZERO) => Err(SplitError::ZeroTotalRatio),
+            Some(total) => Ok(Self { weights, total }),
         }
-
-        Ok(Self { weights, total })
     }
 
     pub fn len(&self) -> usize {
@@ -842,15 +855,12 @@ mod tests {
     }
 
     #[rstest]
-    fn ratios_reject_empty() {
-        let result = Ratios::try_new(vec![]);
-        assert_eq!(result, Err(SplitError::EmptyRatios));
-    }
-
-    #[rstest]
-    fn ratios_reject_zero_sum() {
-        let result = Ratios::try_new(vec![Weight(0), Weight(0)]);
-        assert_eq!(result, Err(SplitError::ZeroTotalRatio));
+    #[case::empty(Vec::new(), SplitError::EmptyRatios)]
+    #[case::zero_sum(vec![Weight::ZERO, Weight::ZERO], SplitError::ZeroTotalRatio)]
+    #[case::overflow(vec![Weight::MAX, Weight(1)], SplitError::WeightOverflow)]
+    fn ratios_reject(#[case] weights: Vec<Weight>, #[case] expected: SplitError) {
+        let result = Ratios::try_new(weights);
+        assert_eq!(result, Err(expected));
     }
 
     #[rstest]
@@ -1042,7 +1052,7 @@ mod tests {
     #[rstest]
     #[case::zero_weight_member(
         3000,
-        BTreeMap::from([(MemberId(1), Weight(2)), (MemberId(2), Weight(0))]),
+        BTreeMap::from([(MemberId(1), Weight(2)), (MemberId(2), Weight::ZERO)]),
         vec![
             MemberSetOp::Push(MemberId(1)),
             MemberSetOp::Push(MemberId(2)),
@@ -1190,7 +1200,7 @@ mod tests {
     #[rstest]
     #[case::zero_total_weight(
         1000,
-        BTreeMap::from([(MemberId(1), Weight(0))]),
+        BTreeMap::from([(MemberId(1), Weight::ZERO)]),
         vec![
             MemberSetOp::Push(MemberId(1)),
             MemberSetOp::Push(MemberId(2)),
@@ -1464,12 +1474,15 @@ impl<'a> BalanceAccumulator<'a> {
                 // Validate weighted distribution before mutating any balances
                 // to preserve zero-sum invariant
                 if let AllocationStrategy::Weighted(weights) = &payment.allocation {
-                    let total_weight: Weight = payee_members
-                        .iter()
-                        .map(|id| weights.get(&id).copied().unwrap_or(Weight(1)))
-                        .sum();
-                    if total_weight == Weight(0) {
-                        return;
+                    let total_weight: Option<Weight> =
+                        payee_members.iter().try_fold(Weight::ZERO, |acc, id| {
+                            let w = weights.get(&id).copied().unwrap_or(Weight(1));
+                            acc.checked_add(w)
+                        });
+                    match total_weight {
+                        None => return,               // Overflow - skip payment
+                        Some(Weight::ZERO) => return, // Zero total - skip payment
+                        Some(_) => {}
                     }
                 }
 

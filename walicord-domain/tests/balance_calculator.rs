@@ -74,7 +74,7 @@ proptest! {
             }
 
             // If all weights are zero, add a default fallback to avoid division by zero error in test
-            if payee_weights.values().all(|&w| w == Weight(0))
+            if payee_weights.values().all(|&w| w == Weight::ZERO)
                 && let Some(first_payee) = payee_ops.first()
                     && let MemberSetOp::Push(id) = first_payee {
                         payee_weights.insert(*id, Weight(1));
