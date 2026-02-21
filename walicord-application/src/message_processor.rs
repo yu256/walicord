@@ -152,26 +152,22 @@ impl<'a> MessageProcessor<'a> {
         ProcessingOutcome::Success(Script::new(member_ids, statements))
     }
 
-    pub async fn calculate_balances(&self, program: &Script<'_>) -> MemberBalances {
-        // apply_settle=false skips settle-up quantization/optimization paths, so rounding-related
-        // failures are not expected in this code path.
-        self.apply_statements(program, None, false)
-            .await
-            .expect("apply_statements should not fail without settlement")
-            .balances
+    pub async fn calculate_balances(
+        &self,
+        program: &Script<'_>,
+    ) -> Result<MemberBalances, SettlementOptimizationError> {
+        Ok(self.apply_statements(program, None, false).await?.balances)
     }
 
     pub async fn calculate_balances_for_prefix(
         &self,
         program: &Script<'_>,
         prefix_len: usize,
-    ) -> MemberBalances {
-        // apply_settle=false skips settle-up quantization/optimization paths, so rounding-related
-        // failures are not expected in this code path.
-        self.apply_statements(program, Some(prefix_len), false)
-            .await
-            .expect("apply_statements should not fail without settlement")
-            .balances
+    ) -> Result<MemberBalances, SettlementOptimizationError> {
+        Ok(self
+            .apply_statements(program, Some(prefix_len), false)
+            .await?
+            .balances)
     }
 
     pub async fn build_settlement_result(
@@ -439,9 +435,10 @@ mod tests {
     };
     use proptest::prelude::*;
     use rstest::{fixture, rstest};
+    use std::collections::BTreeMap;
     use walicord_domain::{
         Payment, Statement,
-        model::{MemberId, MemberSetExpr, MemberSetOp, Money},
+        model::{MemberId, MemberSetExpr, MemberSetOp, Money, Weight},
     };
 
     fn any_string() -> impl Strategy<Value = String> {
@@ -748,6 +745,25 @@ mod tests {
         ]
     }
 
+    fn script_with_zero_total_weight_payment() -> Script<'static> {
+        Script::new(
+            &[],
+            vec![ScriptStatementWithLine {
+                line: 1,
+                statement: ScriptStatement::Domain(Statement::Payment(Payment::weighted(
+                    Money::from_i64(100),
+                    MemberSetExpr::new([MemberSetOp::Push(MemberId(1))]),
+                    MemberSetExpr::new([
+                        MemberSetOp::Push(MemberId(1)),
+                        MemberSetOp::Push(MemberId(2)),
+                        MemberSetOp::Union,
+                    ]),
+                    BTreeMap::from([(MemberId(1), Weight::ZERO), (MemberId(2), Weight::ZERO)]),
+                ))),
+            }],
+        )
+    }
+
     fn script_with_persisted_cash() -> Script<'static> {
         let members = union_members(&[1, 2, 3, 4]);
         let mut persisted_statements = base_cash_sensitivity_payments();
@@ -974,6 +990,32 @@ mod tests {
             apply.balances.get(&MemberId(3)),
             Some(&Money::from_i64(expected_member_3))
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn calculate_balances_returns_error_on_zero_total_weight() {
+        let processor = MessageProcessor::new(&StubParser, &NoopOptimizer);
+        let script = script_with_zero_total_weight_payment();
+
+        let result = processor.calculate_balances(&script).await;
+
+        let Err(err) = result else {
+            panic!("expected zero total weight error");
+        };
+        assert_eq!(err, SettlementOptimizationError::ZeroTotalWeight);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn calculate_balances_for_prefix_returns_error_on_zero_total_weight() {
+        let processor = MessageProcessor::new(&StubParser, &NoopOptimizer);
+        let script = script_with_zero_total_weight_payment();
+
+        let result = processor.calculate_balances_for_prefix(&script, 1).await;
+
+        let Err(err) = result else {
+            panic!("expected zero total weight error");
+        };
+        assert_eq!(err, SettlementOptimizationError::ZeroTotalWeight);
     }
 
     #[rstest]

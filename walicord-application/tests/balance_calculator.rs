@@ -176,7 +176,8 @@ async fn settle_up_pre_and_post_balances(
 
     let pre_balances = processor
         .calculate_balances_for_prefix(&program, prefix_len)
-        .await;
+        .await
+        .expect("pre-balance calculation failed");
     assert_balances(&pre_balances, expected_pre);
 
     let result = processor
