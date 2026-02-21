@@ -29,6 +29,8 @@ pub mod strings {
         "清算の丸めに失敗しました (ゼロサム整合性を満たせませんでした)";
     pub const SETTLEMENT_QUANTIZATION_NON_INTEGRAL: &str =
         "清算の丸めに失敗しました (整数化できません)";
+    pub const WEIGHT_OVERFLOW: &str = "重みの合計がオーバーフローしました";
+    pub const ZERO_TOTAL_WEIGHT: &str = "重みの合計が0です";
 }
 
 #[cfg(feature = "en")]
@@ -57,6 +59,8 @@ pub mod strings {
         "Settlement quantization failed (zero-sum invariant violation)";
     pub const SETTLEMENT_QUANTIZATION_NON_INTEGRAL: &str =
         "Settlement quantization failed (non-integral amount)";
+    pub const WEIGHT_OVERFLOW: &str = "Weight sum overflow";
+    pub const ZERO_TOTAL_WEIGHT: &str = "Total weight is zero";
 }
 
 #[cfg(not(any(feature = "ja", feature = "en")))]
@@ -85,6 +89,8 @@ pub mod strings {
         "Settlement quantization failed (zero-sum invariant violation)";
     pub const SETTLEMENT_QUANTIZATION_NON_INTEGRAL: &str =
         "Settlement quantization failed (non-integral amount)";
+    pub const WEIGHT_OVERFLOW: &str = "Weight sum overflow";
+    pub const ZERO_TOTAL_WEIGHT: &str = "Total weight is zero";
 }
 
 pub use strings::*;

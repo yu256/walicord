@@ -175,6 +175,12 @@ pub enum AmountError {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BalanceError {
+    WeightOverflow,
+    ZeroTotalWeight,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SplitError {
     ZeroRecipients,
     EmptyRatios,
@@ -1046,7 +1052,9 @@ mod tests {
             &[],
         )
         .expect("program should build");
-        program.calculate_balances()
+        program
+            .calculate_balances()
+            .expect("balance calculation should succeed")
     }
 
     #[rstest]
@@ -1209,16 +1217,22 @@ mod tests {
             MemberSetOp::Difference,
         ],
     )]
-    fn weighted_distribution_zero_total_weight_preserves_invariant(
+    fn weighted_distribution_zero_total_weight_returns_error(
         #[case] amount: i64,
         #[case] weights: BTreeMap<MemberId, Weight>,
         #[case] payee_ops: Vec<MemberSetOp<'static>>,
     ) {
         let payment = make_weighted_payment(amount, weights, payee_ops);
-        let balances = calculate_payment_balances(payment);
-
-        let sum: Money = balances.values().copied().sum();
-        assert_eq!(sum, Money::ZERO, "balances must sum to zero");
+        let program = Program::try_new(
+            vec![StatementWithLine {
+                line: 1,
+                statement: Statement::Payment(payment),
+            }],
+            &[],
+        )
+        .expect("program should build");
+        let result = program.calculate_balances();
+        assert_eq!(result, Err(BalanceError::ZeroTotalWeight));
     }
 }
 
@@ -1414,12 +1428,12 @@ impl<'a> Program<'a> {
         &self.statements
     }
 
-    pub fn calculate_balances(&self) -> MemberBalances {
+    pub fn calculate_balances(&self) -> Result<MemberBalances, BalanceError> {
         let mut accumulator = BalanceAccumulator::new_with_members(&self.members);
         for stmt in &self.statements {
-            accumulator.apply(stmt);
+            accumulator.apply(stmt)?;
         }
-        accumulator.into_balances()
+        Ok(accumulator.into_balances())
     }
 }
 
@@ -1441,14 +1455,14 @@ impl<'a> BalanceAccumulator<'a> {
         Self { balances, resolver }
     }
 
-    pub fn apply(&mut self, statement: &Statement<'a>) {
+    pub fn apply(&mut self, statement: &Statement<'a>) -> Result<(), BalanceError> {
         match statement {
             Statement::Declaration(decl) => {
                 for member_id in decl.expression.referenced_ids() {
                     self.balances.entry(member_id).or_insert(Money::ZERO);
                 }
                 let Some(members_vec) = self.resolver.evaluate_members(&decl.expression) else {
-                    return;
+                    return Ok(());
                 };
                 for member in members_vec.iter() {
                     self.balances.entry(member).or_insert(Money::ZERO);
@@ -1465,10 +1479,10 @@ impl<'a> BalanceAccumulator<'a> {
                     self.balances.entry(member_id).or_insert(Money::ZERO);
                 }
                 let Some(payer_members) = self.resolver.evaluate_members(&payment.payer) else {
-                    return;
+                    return Ok(());
                 };
                 let Some(payee_members) = self.resolver.evaluate_members(&payment.payee) else {
-                    return;
+                    return Ok(());
                 };
 
                 // Validate weighted distribution before mutating any balances
@@ -1480,8 +1494,8 @@ impl<'a> BalanceAccumulator<'a> {
                             acc.checked_add(w)
                         });
                     match total_weight {
-                        None => return,               // Overflow - skip payment
-                        Some(Weight::ZERO) => return, // Zero total - skip payment
+                        None => return Err(BalanceError::WeightOverflow),
+                        Some(Weight::ZERO) => return Err(BalanceError::ZeroTotalWeight),
                         Some(_) => {}
                     }
                 }
@@ -1505,6 +1519,7 @@ impl<'a> BalanceAccumulator<'a> {
                 .expect("weighted distribution validated above");
             }
         }
+        Ok(())
     }
 
     pub fn balances(&self) -> &MemberBalances {

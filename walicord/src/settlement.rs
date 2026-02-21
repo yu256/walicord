@@ -55,6 +55,10 @@ pub fn format_settlement_error(err: SettlementOptimizationError) -> String {
             max_supported,
         } => walicord_i18n::settlement_quantization_unsupported_scale(scale, max_supported)
             .to_string(),
+        SettlementOptimizationError::WeightOverflow => walicord_i18n::WEIGHT_OVERFLOW.to_string(),
+        SettlementOptimizationError::ZeroTotalWeight => {
+            walicord_i18n::ZERO_TOTAL_WEIGHT.to_string()
+        }
     }
 }
 

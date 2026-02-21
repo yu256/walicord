@@ -276,7 +276,7 @@ impl<'a> MessageProcessor<'a> {
         for stmt in &statements[..end] {
             match &stmt.statement {
                 ScriptStatement::Domain(statement) => {
-                    accumulator.apply(statement);
+                    accumulator.apply(statement)?;
                 }
                 ScriptStatement::Command(command) => {
                     if !apply_settle {

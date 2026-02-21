@@ -50,6 +50,8 @@ pub enum SettlementOptimizationError {
     QuantizationNonIntegral,
     QuantizationOutOfRange,
     QuantizationUnsupportedScale { scale: u32, max_supported: u32 },
+    WeightOverflow,
+    ZeroTotalWeight,
 }
 
 impl SettlementOptimizationError {
@@ -69,6 +71,8 @@ impl SettlementOptimizationError {
             | SettlementOptimizationError::QuantizationUnsupportedScale { .. } => {
                 FailureKind::Misconfiguration
             }
+            SettlementOptimizationError::WeightOverflow
+            | SettlementOptimizationError::ZeroTotalWeight => FailureKind::UserInput,
         }
     }
 }
@@ -132,6 +136,19 @@ impl From<SettlementRoundingError> for SettlementOptimizationError {
             }
             SettlementRoundingError::TransferConstructionImbalancedTotal(total) => {
                 SettlementOptimizationError::ImbalancedTotal(total)
+            }
+        }
+    }
+}
+
+impl From<walicord_domain::BalanceError> for SettlementOptimizationError {
+    fn from(err: walicord_domain::BalanceError) -> Self {
+        match err {
+            walicord_domain::BalanceError::WeightOverflow => {
+                SettlementOptimizationError::WeightOverflow
+            }
+            walicord_domain::BalanceError::ZeroTotalWeight => {
+                SettlementOptimizationError::ZeroTotalWeight
             }
         }
     }

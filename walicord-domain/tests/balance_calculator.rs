@@ -34,7 +34,7 @@ proptest! {
         }
 
         let program = Program::try_new(statements, &[]).expect("program build failed");
-        let balances = program.calculate_balances();
+        let balances = program.calculate_balances().expect("balance calculation should succeed");
         let total: Money = balances.values().sum();
         let epsilon = Decimal::new(1, 6);
         prop_assert!(total.as_decimal().abs() <= epsilon);
@@ -92,7 +92,7 @@ proptest! {
         }
 
         let program = Program::try_new(statements, &[]).expect("program build failed");
-        let balances = program.calculate_balances();
+        let balances = program.calculate_balances().expect("balance calculation should succeed");
         let total: Money = balances.values().sum();
         let epsilon = Decimal::new(1, 6);
         prop_assert!(total.as_decimal().abs() <= epsilon);
@@ -145,7 +145,7 @@ proptest! {
         }
 
         let program = Program::try_new(statements, &[]).expect("program build failed");
-        let balances = program.calculate_balances();
+        let balances = program.calculate_balances().expect("balance calculation should succeed");
 
         let settle_expr = MemberSetExpr::new(ops);
         let resolver = MemberSetResolver::new();

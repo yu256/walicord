@@ -4,8 +4,8 @@ pub mod model;
 pub mod services;
 
 pub use model::{
-    AllocationStrategy, AmountError, AmountExpr, AmountOp, BalanceAccumulator, Declaration,
-    MemberBalances, MemberSet, MemberSetExpr, MemberSetOp, Money, Payment, Program,
+    AllocationStrategy, AmountError, AmountExpr, AmountOp, BalanceAccumulator, BalanceError,
+    Declaration, MemberBalances, MemberSet, MemberSetExpr, MemberSetOp, Money, Payment, Program,
     ProgramBuildError, Ratios, RemainderPolicy, Settlement, SplitError, Statement,
     StatementWithLine, Transfer, Weight, distribute_balances,
 };
