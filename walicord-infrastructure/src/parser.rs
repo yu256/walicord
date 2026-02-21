@@ -93,8 +93,9 @@ impl ProgramParser for WalicordProgramParser {
                             let payee_weights = extract_payee_weights(&payee);
 
                             // Validate that not all weights are zero.
-                            // This only applies when there are weighted members AND no unweighted members
-                            // (unweighted members default to weight 1, so total would be > 0).
+                            // This only applies when ALL members have explicit zero weights
+                            // (no unweighted members and all weighted members have weight 0).
+                            // Unweighted members default to weight 1, so total would be > 0.
                             if !payee_weights.is_empty()
                                 && payee_weights.values().all(|w| w.0 == 0)
                                 && !payee.has_unweighted_push()

@@ -33,7 +33,7 @@ impl Add for Weight {
 
 impl std::iter::Sum for Weight {
     fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
-        iter.fold(Weight(0), |a, b| a + b)
+        iter.fold(Weight(0), Self::add)
     }
 }
 

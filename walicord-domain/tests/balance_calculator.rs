@@ -69,9 +69,8 @@ proptest! {
                 if i > 0 {
                     payee_ops.push(MemberSetOp::Union);
                 }
-                if *weight > 0 {
-                    payee_weights.insert(payee_id, Weight(*weight));
-                }
+                // Mirror production behavior by inserting all weights (including zeros)
+                payee_weights.insert(payee_id, Weight(*weight));
             }
 
             // If all weights are zero, add a default fallback to avoid division by zero error in test
