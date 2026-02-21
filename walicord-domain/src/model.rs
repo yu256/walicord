@@ -20,10 +20,105 @@ pub struct Declaration<'a> {
     pub expression: MemberSetExpr<'a>,
 }
 
+/// Represents the distribution weight of a member.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct Weight(pub u64);
+
+impl Weight {
+    pub const ZERO: Weight = Weight(u64::ZERO);
+    pub const MAX: Weight = Weight(u64::MAX);
+
+    pub fn checked_add(self, rhs: Self) -> Option<Self> {
+        self.0.checked_add(rhs.0).map(Weight)
+    }
+}
+
+impl Add for Weight {
+    type Output = Self;
+    fn add(self, rhs: Self) -> Self::Output {
+        Self(self.0 + rhs.0)
+    }
+}
+
+impl std::iter::Sum for Weight {
+    fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
+        iter.fold(Weight::ZERO, Self::add)
+    }
+}
+
+impl<'a> std::iter::Sum<&'a Weight> for Weight {
+    fn sum<I: Iterator<Item = &'a Self>>(iter: I) -> Self {
+        iter.fold(Weight::ZERO, |a, b| a + *b)
+    }
+}
+
+impl From<Weight> for Decimal {
+    fn from(weight: Weight) -> Self {
+        Decimal::from(weight.0)
+    }
+}
+
+/// Strategy for distributing an amount among members.
+///
+/// This value object encapsulates the allocation logic, providing
+/// a clear domain intent rather than exposing raw collections.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub enum AllocationStrategy {
+    /// Distribute the amount evenly (`split_even`).
+    #[default]
+    Even,
+    /// Distribute the amount proportionally by member specific weights (`split_ratio`).
+    /// Members not present in the map default to a weight of 1.
+    Weighted(BTreeMap<MemberId, Weight>),
+}
+
+impl AllocationStrategy {
+    /// Returns true if this is an even distribution strategy.
+    pub fn is_even(&self) -> bool {
+        matches!(self, Self::Even)
+    }
+
+    /// Returns the weights map if this is a weighted strategy, otherwise None.
+    pub fn weights(&self) -> Option<&BTreeMap<MemberId, Weight>> {
+        match self {
+            Self::Even => None,
+            Self::Weighted(weights) => Some(weights),
+        }
+    }
+}
+
 pub struct Payment<'a> {
     pub amount: Money,
     pub payer: MemberSetExpr<'a>,
     pub payee: MemberSetExpr<'a>,
+    pub allocation: AllocationStrategy,
+}
+
+impl<'a> Payment<'a> {
+    /// Constructs a Payment with even distribution.
+    pub fn even(amount: Money, payer: MemberSetExpr<'a>, payee: MemberSetExpr<'a>) -> Self {
+        Self {
+            amount,
+            payer,
+            payee,
+            allocation: AllocationStrategy::Even,
+        }
+    }
+
+    /// Constructs a Payment with weighted distribution.
+    pub fn weighted(
+        amount: Money,
+        payer: MemberSetExpr<'a>,
+        payee: MemberSetExpr<'a>,
+        weights: BTreeMap<MemberId, Weight>,
+    ) -> Self {
+        Self {
+            amount,
+            payer,
+            payee,
+            allocation: AllocationStrategy::Weighted(weights),
+        }
+    }
 }
 
 pub enum Statement<'a> {
@@ -80,30 +175,40 @@ pub enum AmountError {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BalanceError {
+    WeightOverflow,
+    ZeroTotalWeight,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SplitError {
     ZeroRecipients,
     EmptyRatios,
     ZeroTotalRatio,
+    WeightOverflow,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Ratios {
-    weights: Vec<u64>,
-    total: u64,
+    weights: Vec<Weight>,
+    total: Weight,
 }
 
 impl Ratios {
-    pub fn try_new(weights: Vec<u64>) -> Result<Self, SplitError> {
+    pub fn try_new(weights: Vec<Weight>) -> Result<Self, SplitError> {
         if weights.is_empty() {
             return Err(SplitError::EmptyRatios);
         }
 
-        let total: u64 = weights.iter().sum();
-        if total == 0 {
-            return Err(SplitError::ZeroTotalRatio);
+        let total: Option<Weight> = weights
+            .iter()
+            .copied()
+            .try_fold(Weight::ZERO, Weight::checked_add);
+        match total {
+            None => Err(SplitError::WeightOverflow),
+            Some(Weight::ZERO) => Err(SplitError::ZeroTotalRatio),
+            Some(total) => Ok(Self { weights, total }),
         }
-
-        Ok(Self { weights, total })
     }
 
     pub fn len(&self) -> usize {
@@ -114,11 +219,11 @@ impl Ratios {
         self.weights.is_empty()
     }
 
-    pub fn weights(&self) -> &[u64] {
+    pub fn weights(&self) -> &[Weight] {
         &self.weights
     }
 
-    pub fn total(&self) -> u64 {
+    pub fn total(&self) -> Weight {
         self.total
     }
 }
@@ -496,7 +601,7 @@ impl MaskWord for u128 {
     const TRAILING_ZEROS: fn(Self) -> u32 = Self::trailing_zeros;
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum MemberSetOp<'a> {
     Push(MemberId),     // Discord user ID (from mention)
     PushGroup(&'a str), // Group name reference
@@ -743,27 +848,25 @@ mod tests {
     #[case::ratio_3_1(100, vec![3, 1])]
     fn split_ratio_distributes_correctly(#[case] amount: i64, #[case] ratios: Vec<u64>) {
         let money = Money::from_i64(amount);
-        let ratios = Ratios::try_new(ratios).expect("ratios must be non-empty and non-zero");
+        let weight_vec = ratios.into_iter().map(Weight).collect();
+        let ratios = Ratios::try_new(weight_vec).expect("ratios must be non-empty and non-zero");
         let result = money.split_ratio(&ratios, RemainderPolicy::FrontLoad);
         let total = dec(amount);
-        let sum = dec(ratios.total() as i64);
+        let sum = Decimal::from(ratios.total());
         for (share, &weight) in result.iter().zip(ratios.weights()) {
-            let expected = total * dec(weight as i64) / sum;
+            let expected = total * Decimal::from(weight) / sum;
             assert_eq!(share.as_decimal(), expected);
         }
         assert_sum_within_epsilon(&result, dec(amount));
     }
 
     #[rstest]
-    fn ratios_reject_empty() {
-        let result = Ratios::try_new(vec![]);
-        assert_eq!(result, Err(SplitError::EmptyRatios));
-    }
-
-    #[rstest]
-    fn ratios_reject_zero_sum() {
-        let result = Ratios::try_new(vec![0, 0]);
-        assert_eq!(result, Err(SplitError::ZeroTotalRatio));
+    #[case::empty(Vec::new(), SplitError::EmptyRatios)]
+    #[case::zero_sum(vec![Weight::ZERO, Weight::ZERO], SplitError::ZeroTotalRatio)]
+    #[case::overflow(vec![Weight::MAX, Weight(1)], SplitError::WeightOverflow)]
+    fn ratios_reject(#[case] weights: Vec<Weight>, #[case] expected: SplitError) {
+        let result = Ratios::try_new(weights);
+        assert_eq!(result, Err(expected));
     }
 
     #[rstest]
@@ -864,11 +967,11 @@ mod tests {
     #[case::payment_undefined_group(
         StatementWithLine {
             line: 1,
-            statement: Statement::Payment(Payment {
-                amount: Money::try_from(100).expect("amount should fit in i64"),
-                payer: MemberSetExpr::new([MemberSetOp::PushGroup("team")]),
-                payee: MemberSetExpr::new([MemberSetOp::Push(MemberId(1))]),
-            }),
+            statement: Statement::Payment(Payment::even(
+                Money::try_from(100).expect("amount should fit in i64"),
+                MemberSetExpr::new([MemberSetOp::PushGroup("team")]),
+                MemberSetExpr::new([MemberSetOp::Push(MemberId(1))]),
+            )),
         },
         "team",
         1
@@ -915,16 +1018,221 @@ mod tests {
         };
         let payment = StatementWithLine {
             line: 2,
-            statement: Statement::Payment(Payment {
-                amount: Money::try_from(120).expect("amount should fit in i64"),
-                payer: MemberSetExpr::new([MemberSetOp::PushGroup("group_a")]),
-                payee: MemberSetExpr::new([MemberSetOp::Push(MemberId(3))]),
-            }),
+            statement: Statement::Payment(Payment::even(
+                Money::try_from(120).expect("amount should fit in i64"),
+                MemberSetExpr::new([MemberSetOp::PushGroup("group_a")]),
+                MemberSetExpr::new([MemberSetOp::Push(MemberId(3))]),
+            )),
         };
 
         let result = Program::try_new(vec![declaration, payment], &[]);
         let program = result.expect("program should accept declaration before reference");
         assert_eq!(program.statements().len(), 2);
+    }
+
+    fn make_weighted_payment(
+        amount: i64,
+        weights: BTreeMap<MemberId, Weight>,
+        payee_ops: Vec<MemberSetOp<'static>>,
+    ) -> Payment<'static> {
+        Payment::weighted(
+            Money::from_i64(amount),
+            MemberSetExpr::new([MemberSetOp::Push(MemberId(10))]),
+            MemberSetExpr::new(payee_ops),
+            weights,
+        )
+    }
+
+    fn calculate_payment_balances(payment: Payment<'static>) -> MemberBalances {
+        let program = Program::try_new(
+            vec![StatementWithLine {
+                line: 1,
+                statement: Statement::Payment(payment),
+            }],
+            &[],
+        )
+        .expect("program should build");
+        program
+            .calculate_balances()
+            .expect("balance calculation should succeed")
+    }
+
+    #[rstest]
+    #[case::zero_weight_member(
+        3000,
+        BTreeMap::from([(MemberId(1), Weight(2)), (MemberId(2), Weight::ZERO)]),
+        vec![
+            MemberSetOp::Push(MemberId(1)),
+            MemberSetOp::Push(MemberId(2)),
+            MemberSetOp::Union,
+            MemberSetOp::Push(MemberId(3)),
+            MemberSetOp::Union,
+        ],
+        Money::from_i64(-2000), // A: 3000 * 2/3
+        Money::from_i64(0),      // B: weight 0
+        Money::from_i64(-1000),  // C: 3000 * 1/3 (default weight)
+    )]
+    #[case::proportional_3_2_1(
+        6000,
+        BTreeMap::from([(MemberId(1), Weight(3)), (MemberId(2), Weight(2)), (MemberId(3), Weight(1))]),
+        vec![
+            MemberSetOp::Push(MemberId(1)),
+            MemberSetOp::Push(MemberId(2)),
+            MemberSetOp::Union,
+            MemberSetOp::Push(MemberId(3)),
+            MemberSetOp::Union,
+        ],
+        Money::from_i64(-3000), // A: 6000 * 3/6
+        Money::from_i64(-2000), // B: 6000 * 2/6
+        Money::from_i64(-1000), // C: 6000 * 1/6
+    )]
+    #[case::default_weight_unweighted(
+        4000,
+        BTreeMap::from([(MemberId(1), Weight(2))]),
+        vec![
+            MemberSetOp::Push(MemberId(1)),
+            MemberSetOp::Push(MemberId(2)),
+            MemberSetOp::Union,
+            MemberSetOp::Push(MemberId(3)),
+            MemberSetOp::Union,
+        ],
+        Money::from_i64(-2000), // A: 4000 * 2/4
+        Money::from_i64(-1000), // B: 4000 * 1/4 (default weight)
+        Money::from_i64(-1000), // C: 4000 * 1/4 (default weight)
+    )]
+    #[case::empty_weights_equals_even(
+        3000,
+        BTreeMap::new(), // Empty weights = even distribution
+        vec![
+            MemberSetOp::Push(MemberId(1)),
+            MemberSetOp::Push(MemberId(2)),
+            MemberSetOp::Union,
+            MemberSetOp::Push(MemberId(3)),
+            MemberSetOp::Union,
+        ],
+        Money::from_i64(-1000), // A: 3000 / 3
+        Money::from_i64(-1000), // B: 3000 / 3
+        Money::from_i64(-1000), // C: 3000 / 3
+    )]
+    #[case::all_weights_equal_one(
+        3000,
+        BTreeMap::from([(MemberId(1), Weight(1)), (MemberId(2), Weight(1)), (MemberId(3), Weight(1))]),
+        vec![
+            MemberSetOp::Push(MemberId(1)),
+            MemberSetOp::Push(MemberId(2)),
+            MemberSetOp::Union,
+            MemberSetOp::Push(MemberId(3)),
+            MemberSetOp::Union,
+        ],
+        Money::from_i64(-1000), // A: 3000 / 3
+        Money::from_i64(-1000), // B: 3000 / 3
+        Money::from_i64(-1000), // C: 3000 / 3
+    )]
+    #[case::weight_for_non_payee_ignored(
+        3000,
+        BTreeMap::from([(MemberId(1), Weight(2)), (MemberId(99), Weight(5))]), // MemberId(99) not in payee set
+        vec![
+            MemberSetOp::Push(MemberId(1)),
+            MemberSetOp::Push(MemberId(2)),
+            MemberSetOp::Union,
+        ],
+        Money::from_i64(-2000), // A: 3000 * 2/3 (weight 2, total weight = 2+1=3)
+        Money::from_i64(-1000), // B: 3000 * 1/3 (default weight 1)
+        Money::ZERO,            // C: not in payee set
+    )]
+    fn weighted_distribution_proportional(
+        #[case] amount: i64,
+        #[case] weights: BTreeMap<MemberId, Weight>,
+        #[case] payee_ops: Vec<MemberSetOp<'static>>,
+        #[case] expected_a: Money,
+        #[case] expected_b: Money,
+        #[case] expected_c: Money,
+    ) {
+        let payment = make_weighted_payment(amount, weights, payee_ops);
+        let balances = calculate_payment_balances(payment);
+
+        assert_eq!(balances.get(&MemberId(1)), Some(&expected_a));
+        assert_eq!(balances.get(&MemberId(2)), Some(&expected_b));
+        // For cases where C is not in payee set, check it's not in balances or is zero
+        if expected_c != Money::ZERO {
+            assert_eq!(balances.get(&MemberId(3)), Some(&expected_c));
+        }
+    }
+
+    #[rstest]
+    #[case::last_weight_wins(
+        3000,
+        BTreeMap::from([(MemberId(1), Weight(3))]),
+        vec![MemberSetOp::Push(MemberId(1)), MemberSetOp::Push(MemberId(1)), MemberSetOp::Union],
+        Money::from_i64(-3000), // A receives all (only member)
+    )]
+    fn weighted_distribution_single_member(
+        #[case] amount: i64,
+        #[case] weights: BTreeMap<MemberId, Weight>,
+        #[case] payee_ops: Vec<MemberSetOp<'static>>,
+        #[case] expected_a: Money,
+    ) {
+        let payment = make_weighted_payment(amount, weights, payee_ops);
+        let balances = calculate_payment_balances(payment);
+
+        assert_eq!(balances.get(&MemberId(1)), Some(&expected_a));
+    }
+
+    #[rstest]
+    #[case::excluded_member(
+        1000,
+        BTreeMap::from([(MemberId(1), Weight(2))]),
+        vec![
+            MemberSetOp::Push(MemberId(1)),
+            MemberSetOp::Push(MemberId(2)),
+            MemberSetOp::Union,
+            MemberSetOp::Push(MemberId(1)),
+            MemberSetOp::Difference,
+        ],
+        MemberId(2),
+        Money::from_i64(-1000), // B receives all (A excluded)
+    )]
+    fn weighted_distribution_excluded_member(
+        #[case] amount: i64,
+        #[case] weights: BTreeMap<MemberId, Weight>,
+        #[case] payee_ops: Vec<MemberSetOp<'static>>,
+        #[case] recipient: MemberId,
+        #[case] expected: Money,
+    ) {
+        let payment = make_weighted_payment(amount, weights, payee_ops);
+        let balances = calculate_payment_balances(payment);
+
+        assert_eq!(balances.get(&recipient), Some(&expected));
+    }
+
+    #[rstest]
+    #[case::zero_total_weight(
+        1000,
+        BTreeMap::from([(MemberId(1), Weight::ZERO)]),
+        vec![
+            MemberSetOp::Push(MemberId(1)),
+            MemberSetOp::Push(MemberId(2)),
+            MemberSetOp::Union,
+            MemberSetOp::Push(MemberId(2)),
+            MemberSetOp::Difference,
+        ],
+    )]
+    fn weighted_distribution_zero_total_weight_returns_error(
+        #[case] amount: i64,
+        #[case] weights: BTreeMap<MemberId, Weight>,
+        #[case] payee_ops: Vec<MemberSetOp<'static>>,
+    ) {
+        let payment = make_weighted_payment(amount, weights, payee_ops);
+        let program = Program::try_new(
+            vec![StatementWithLine {
+                line: 1,
+                statement: Statement::Payment(payment),
+            }],
+            &[],
+        )
+        .expect("program should build");
+        let result = program.calculate_balances();
+        assert_eq!(result, Err(BalanceError::ZeroTotalWeight));
     }
 }
 
@@ -1120,12 +1428,12 @@ impl<'a> Program<'a> {
         &self.statements
     }
 
-    pub fn calculate_balances(&self) -> MemberBalances {
+    pub fn calculate_balances(&self) -> Result<MemberBalances, BalanceError> {
         let mut accumulator = BalanceAccumulator::new_with_members(&self.members);
         for stmt in &self.statements {
-            accumulator.apply(stmt);
+            accumulator.apply(stmt)?;
         }
-        accumulator.into_balances()
+        Ok(accumulator.into_balances())
     }
 }
 
@@ -1147,14 +1455,14 @@ impl<'a> BalanceAccumulator<'a> {
         Self { balances, resolver }
     }
 
-    pub fn apply(&mut self, statement: &Statement<'a>) {
+    pub fn apply(&mut self, statement: &Statement<'a>) -> Result<(), BalanceError> {
         match statement {
             Statement::Declaration(decl) => {
                 for member_id in decl.expression.referenced_ids() {
                     self.balances.entry(member_id).or_insert(Money::ZERO);
                 }
                 let Some(members_vec) = self.resolver.evaluate_members(&decl.expression) else {
-                    return;
+                    return Ok(());
                 };
                 for member in members_vec.iter() {
                     self.balances.entry(member).or_insert(Money::ZERO);
@@ -1171,16 +1479,47 @@ impl<'a> BalanceAccumulator<'a> {
                     self.balances.entry(member_id).or_insert(Money::ZERO);
                 }
                 let Some(payer_members) = self.resolver.evaluate_members(&payment.payer) else {
-                    return;
+                    return Ok(());
                 };
                 let Some(payee_members) = self.resolver.evaluate_members(&payment.payee) else {
-                    return;
+                    return Ok(());
                 };
 
-                distribute_balances(&mut self.balances, &payer_members, payment.amount, 1);
-                distribute_balances(&mut self.balances, &payee_members, payment.amount, -1);
+                // Validate weighted distribution before mutating any balances
+                // to preserve zero-sum invariant
+                if let AllocationStrategy::Weighted(weights) = &payment.allocation {
+                    let total_weight: Option<Weight> =
+                        payee_members.iter().try_fold(Weight::ZERO, |acc, id| {
+                            let w = weights.get(&id).copied().unwrap_or(Weight(1));
+                            acc.checked_add(w)
+                        });
+                    match total_weight {
+                        None => return Err(BalanceError::WeightOverflow),
+                        Some(Weight::ZERO) => return Err(BalanceError::ZeroTotalWeight),
+                        Some(_) => {}
+                    }
+                }
+
+                distribute_balances(
+                    &mut self.balances,
+                    &payer_members,
+                    payment.amount,
+                    1,
+                    &AllocationStrategy::Even,
+                )
+                .expect("even distribution should never fail");
+
+                distribute_balances(
+                    &mut self.balances,
+                    &payee_members,
+                    payment.amount,
+                    -1,
+                    &payment.allocation,
+                )
+                .expect("weighted distribution validated above");
             }
         }
+        Ok(())
     }
 
     pub fn balances(&self) -> &MemberBalances {
@@ -1213,54 +1552,48 @@ pub struct Settlement {
     pub transfers: Vec<Transfer>,
 }
 
-/// Distributes an amount evenly among members, updating their balances.
-///
-/// This function performs a logical split of the amount and adds/subtracts
-/// shares from each member's balance. It uses deferred rounding - shares
-/// maintain full precision, with rounding only happening at settlement time.
+/// Distributes an amount among members, updating their balances.
 ///
 /// # Arguments
 /// * `balances` - Map of member balances to update
 /// * `members` - Set of members to distribute among
 /// * `amount` - Total amount to distribute
 /// * `direction` - +1 for debt/net-pay side (payer), -1 for credit/net-receive side (payee)
+/// * `allocation` - The strategy used to split the amount (even or weighted)
 ///
-/// # Semantics
-/// * Uses `split_even` to divide amount with full precision
-/// * Each member gets exactly `amount / n` (no remainder absorption)
-/// * Guarantees sum of shares equals original amount (within Decimal epsilon)
-///
-/// # Example
-/// ```
-/// use walicord_domain::model::{MemberBalances, MemberSet, MemberId, Money, distribute_balances};
-/// use rust_decimal::Decimal;
-///
-/// let mut balances = MemberBalances::new();
-/// let members = MemberSet::new(vec![MemberId(1), MemberId(2), MemberId(3)]);
-/// let amount = Money::from_decimal(Decimal::new(100, 0));
-///
-/// // Debt side (payer)
-/// distribute_balances(&mut balances, &members, amount, 1);
-/// // Each member's balance is +33.33333333333333333333333333
-///
-/// // Credit side (payee)
-/// distribute_balances(&mut balances, &members, amount, -1);
-/// // Each member's balance is 0 (credited then debited)
-/// ```
+/// # Returns
+/// * `Ok(())` if distribution succeeded
+/// * `Err(SplitError::EmptyRatios)` if members set is empty (should not happen due to early return)
+/// * `Err(SplitError::ZeroTotalRatio)` if weighted distribution has zero total weight
 pub fn distribute_balances(
     balances: &mut MemberBalances,
     members: &MemberSet,
     amount: Money,
     direction: i64,
-) {
+    allocation: &AllocationStrategy,
+) -> Result<(), SplitError> {
     if members.is_empty() {
-        return;
+        return Ok(());
     }
 
-    let shares = amount.split_even(members.members().len(), RemainderPolicy::FrontLoad);
+    let shares: Vec<Money> = match allocation {
+        AllocationStrategy::Even => amount
+            .split_even(members.members().len(), RemainderPolicy::FrontLoad)
+            .collect(),
+        AllocationStrategy::Weighted(weights) => {
+            let weight_vec: Vec<Weight> = members
+                .iter()
+                .map(|id| weights.get(&id).copied().unwrap_or(Weight(1)))
+                .collect();
+            let ratios = Ratios::try_new(weight_vec)?;
+            amount.split_ratio(&ratios, RemainderPolicy::FrontLoad)
+        }
+    };
 
     for (member, share) in members.iter().zip(shares) {
         let signed = share * Decimal::from(direction);
         *balances.entry(member).or_insert(Money::ZERO) += signed;
     }
+
+    Ok(())
 }

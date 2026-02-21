@@ -7,7 +7,9 @@ pub mod model;
 pub mod ports;
 
 pub use command_syntax::{COMMAND_PREFIXES, is_command_message, is_command_prefix};
-pub use error::{FailureKind, ProgramParseError, SettlementOptimizationError};
+pub use error::{
+    BalanceCalculationError, FailureKind, ProgramParseError, SettlementOptimizationError,
+};
 pub use message_processor::{MessageProcessor, ProcessingOutcome, SettlementResult};
 pub use model::{
     Command, PersonBalance, Script, ScriptStatement, ScriptStatementWithLine, SettleUpContext,

@@ -16,6 +16,7 @@ pub enum ProgramParseError<'a> {
     SyntaxError { line: usize, detail: String },
     MissingContextForImplicitAuthor { line: usize },
     InvalidAmountExpression { line: usize, detail: String },
+    AllZeroWeights { line: usize },
 }
 
 impl<'a> From<ProgramBuildError<'a>> for ProgramParseError<'a> {
@@ -49,6 +50,14 @@ pub enum SettlementOptimizationError {
     QuantizationNonIntegral,
     QuantizationOutOfRange,
     QuantizationUnsupportedScale { scale: u32, max_supported: u32 },
+    WeightOverflow,
+    ZeroTotalWeight,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BalanceCalculationError {
+    WeightOverflow,
+    ZeroTotalWeight,
 }
 
 impl SettlementOptimizationError {
@@ -68,6 +77,18 @@ impl SettlementOptimizationError {
             | SettlementOptimizationError::QuantizationUnsupportedScale { .. } => {
                 FailureKind::Misconfiguration
             }
+            SettlementOptimizationError::WeightOverflow
+            | SettlementOptimizationError::ZeroTotalWeight => FailureKind::UserInput,
+        }
+    }
+}
+
+impl BalanceCalculationError {
+    pub fn kind(&self) -> FailureKind {
+        match self {
+            BalanceCalculationError::WeightOverflow | BalanceCalculationError::ZeroTotalWeight => {
+                FailureKind::UserInput
+            }
         }
     }
 }
@@ -82,7 +103,8 @@ impl ProgramParseError<'_> {
             | ProgramParseError::UndefinedGroup { .. }
             | ProgramParseError::UndefinedMember { .. }
             | ProgramParseError::SyntaxError { .. }
-            | ProgramParseError::InvalidAmountExpression { .. } => FailureKind::UserInput,
+            | ProgramParseError::InvalidAmountExpression { .. }
+            | ProgramParseError::AllZeroWeights { .. } => FailureKind::UserInput,
         }
     }
 }
@@ -130,6 +152,32 @@ impl From<SettlementRoundingError> for SettlementOptimizationError {
             }
             SettlementRoundingError::TransferConstructionImbalancedTotal(total) => {
                 SettlementOptimizationError::ImbalancedTotal(total)
+            }
+        }
+    }
+}
+
+impl From<walicord_domain::BalanceError> for SettlementOptimizationError {
+    fn from(err: walicord_domain::BalanceError) -> Self {
+        match err {
+            walicord_domain::BalanceError::WeightOverflow => {
+                SettlementOptimizationError::WeightOverflow
+            }
+            walicord_domain::BalanceError::ZeroTotalWeight => {
+                SettlementOptimizationError::ZeroTotalWeight
+            }
+        }
+    }
+}
+
+impl From<walicord_domain::BalanceError> for BalanceCalculationError {
+    fn from(err: walicord_domain::BalanceError) -> Self {
+        match err {
+            walicord_domain::BalanceError::WeightOverflow => {
+                BalanceCalculationError::WeightOverflow
+            }
+            walicord_domain::BalanceError::ZeroTotalWeight => {
+                BalanceCalculationError::ZeroTotalWeight
             }
         }
     }
@@ -239,5 +287,15 @@ mod tests {
         #[case] expected: SettlementOptimizationError,
     ) {
         assert_eq!(SettlementOptimizationError::from(input), expected);
+    }
+
+    #[rstest]
+    #[case::weight_overflow(BalanceCalculationError::WeightOverflow, FailureKind::UserInput)]
+    #[case::zero_total_weight(BalanceCalculationError::ZeroTotalWeight, FailureKind::UserInput)]
+    fn balance_calculation_error_kind_matches_intent(
+        #[case] err: BalanceCalculationError,
+        #[case] expected: FailureKind,
+    ) {
+        assert_eq!(err.kind(), expected);
     }
 }

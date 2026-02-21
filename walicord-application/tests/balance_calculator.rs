@@ -76,6 +76,9 @@ fn parse_program_from_content<'a>(members: &'a [MemberId], content: &'a str) -> 
             ProgramParseError::InvalidAmountExpression { line, detail } => {
                 panic!("parse failed: invalid amount expression at line {line}: {detail}")
             }
+            ProgramParseError::AllZeroWeights { line } => {
+                panic!("parse failed: all weights are zero at line {line}")
+            }
         },
     }
 }
@@ -173,7 +176,8 @@ async fn settle_up_pre_and_post_balances(
 
     let pre_balances = processor
         .calculate_balances_for_prefix(&program, prefix_len)
-        .await;
+        .await
+        .expect("pre-balance calculation failed");
     assert_balances(&pre_balances, expected_pre);
 
     let result = processor

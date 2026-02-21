@@ -315,11 +315,13 @@ mod tests {
     #[test]
     fn payment_sign_convention_flows_to_transfer_direction() {
         let mut accumulator = BalanceAccumulator::new_with_members(&[MemberId(1), MemberId(2)]);
-        accumulator.apply(&Statement::Payment(Payment {
-            amount: Money::from_i64(100),
-            payer: MemberSetExpr::new([MemberSetOp::Push(MemberId(1))]),
-            payee: MemberSetExpr::new([MemberSetOp::Push(MemberId(2))]),
-        }));
+        accumulator
+            .apply(&Statement::Payment(Payment::even(
+                Money::from_i64(100),
+                MemberSetExpr::new([MemberSetOp::Push(MemberId(1))]),
+                MemberSetExpr::new([MemberSetOp::Push(MemberId(2))]),
+            )))
+            .expect("even distribution should succeed");
         let balances = accumulator.into_balances();
 
         assert_eq!(balances.get(&MemberId(1)), Some(&Money::from_i64(100)));

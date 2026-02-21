@@ -1,5 +1,5 @@
 use crate::{
-    SettlementOptimizationError,
+    BalanceCalculationError, SettlementOptimizationError,
     error::ProgramParseError,
     model::{
         Command, PersonBalance, Script, ScriptStatement, ScriptStatementWithLine, SettleUpContext,
@@ -33,6 +33,7 @@ pub enum ProcessingOutcome<'a> {
     SyntaxError { line: usize, detail: String },
     MissingContextForImplicitAuthor { line: usize },
     InvalidAmountExpression { line: usize, detail: String },
+    AllZeroWeights { line: usize },
 }
 
 impl<'a> ProcessingOutcome<'a> {
@@ -57,6 +58,9 @@ impl<'a> ProcessingOutcome<'a> {
             }
             ProcessingOutcome::InvalidAmountExpression { line, detail } => {
                 Err(ProgramParseError::InvalidAmountExpression { line, detail })
+            }
+            ProcessingOutcome::AllZeroWeights { line } => {
+                Err(ProgramParseError::AllZeroWeights { line })
             }
         }
     }
@@ -148,26 +152,19 @@ impl<'a> MessageProcessor<'a> {
         ProcessingOutcome::Success(Script::new(member_ids, statements))
     }
 
-    pub async fn calculate_balances(&self, program: &Script<'_>) -> MemberBalances {
-        // apply_settle=false skips settle-up quantization/optimization paths, so rounding-related
-        // failures are not expected in this code path.
-        self.apply_statements(program, None, false)
-            .await
-            .expect("apply_statements should not fail without settlement")
-            .balances
+    pub async fn calculate_balances(
+        &self,
+        program: &Script<'_>,
+    ) -> Result<MemberBalances, BalanceCalculationError> {
+        self.apply_statements_without_settlement(program, None)
     }
 
     pub async fn calculate_balances_for_prefix(
         &self,
         program: &Script<'_>,
         prefix_len: usize,
-    ) -> MemberBalances {
-        // apply_settle=false skips settle-up quantization/optimization paths, so rounding-related
-        // failures are not expected in this code path.
-        self.apply_statements(program, Some(prefix_len), false)
-            .await
-            .expect("apply_statements should not fail without settlement")
-            .balances
+    ) -> Result<MemberBalances, BalanceCalculationError> {
+        self.apply_statements_without_settlement(program, Some(prefix_len))
     }
 
     pub async fn build_settlement_result(
@@ -272,7 +269,7 @@ impl<'a> MessageProcessor<'a> {
         for stmt in &statements[..end] {
             match &stmt.statement {
                 ScriptStatement::Domain(statement) => {
-                    accumulator.apply(statement);
+                    accumulator.apply(statement)?;
                 }
                 ScriptStatement::Command(command) => {
                     if !apply_settle {
@@ -374,6 +371,29 @@ impl<'a> MessageProcessor<'a> {
         })
     }
 
+    fn apply_statements_without_settlement(
+        &self,
+        program: &Script<'_>,
+        prefix_len: Option<usize>,
+    ) -> Result<MemberBalances, BalanceCalculationError> {
+        let statements = program.statements();
+        let end = match prefix_len {
+            Some(prefix_len) => self.prefix_end(statements, prefix_len),
+            None => statements.len(),
+        };
+
+        let mut accumulator = BalanceAccumulator::new_with_members(program.members());
+        for stmt in &statements[..end] {
+            if let ScriptStatement::Domain(statement) = &stmt.statement {
+                accumulator
+                    .apply(statement)
+                    .map_err(BalanceCalculationError::from)?;
+            }
+        }
+
+        Ok(accumulator.into_balances())
+    }
+
     fn prefix_end<'b>(
         &self,
         statements: &[ScriptStatementWithLine<'b>],
@@ -419,6 +439,9 @@ impl<'a> MessageProcessor<'a> {
                     detail,
                 }
             }
+            ProgramParseError::AllZeroWeights { line } => ProcessingOutcome::AllZeroWeights {
+                line: line + offset,
+            },
         }
     }
 }
@@ -427,14 +450,15 @@ impl<'a> MessageProcessor<'a> {
 mod tests {
     use super::*;
     use crate::{
-        error::SettlementOptimizationError,
+        error::{BalanceCalculationError, SettlementOptimizationError},
         ports::{ProgramParser, SettlementOptimizer},
     };
     use proptest::prelude::*;
     use rstest::{fixture, rstest};
+    use std::collections::BTreeMap;
     use walicord_domain::{
         Payment, Statement,
-        model::{MemberId, MemberSetExpr, MemberSetOp, Money},
+        model::{MemberId, MemberSetExpr, MemberSetOp, Money, Weight},
     };
 
     fn any_string() -> impl Strategy<Value = String> {
@@ -454,19 +478,19 @@ mod tests {
             let statements = vec![
                 ScriptStatementWithLine {
                     line: 1,
-                    statement: ScriptStatement::Domain(Statement::Payment(Payment {
-                        amount: Money::try_from(60).expect("amount should fit in i64"),
-                        payer: MemberSetExpr::new([MemberSetOp::Push(MemberId(1))]),
-                        payee: MemberSetExpr::new([MemberSetOp::Push(MemberId(3))]),
-                    })),
+                    statement: ScriptStatement::Domain(Statement::Payment(Payment::even(
+                        Money::try_from(60).expect("amount should fit in i64"),
+                        MemberSetExpr::new([MemberSetOp::Push(MemberId(1))]),
+                        MemberSetExpr::new([MemberSetOp::Push(MemberId(3))]),
+                    ))),
                 },
                 ScriptStatementWithLine {
                     line: 2,
-                    statement: ScriptStatement::Domain(Statement::Payment(Payment {
-                        amount: Money::try_from(40).expect("amount should fit in i64"),
-                        payer: MemberSetExpr::new([MemberSetOp::Push(MemberId(2))]),
-                        payee: MemberSetExpr::new([MemberSetOp::Push(MemberId(3))]),
-                    })),
+                    statement: ScriptStatement::Domain(Statement::Payment(Payment::even(
+                        Money::try_from(40).expect("amount should fit in i64"),
+                        MemberSetExpr::new([MemberSetOp::Push(MemberId(2))]),
+                        MemberSetExpr::new([MemberSetOp::Push(MemberId(3))]),
+                    ))),
                 },
                 ScriptStatementWithLine {
                     line: 3,
@@ -616,19 +640,19 @@ mod tests {
             vec![
                 ScriptStatementWithLine {
                     line: 1,
-                    statement: ScriptStatement::Domain(Statement::Payment(Payment {
-                        amount: Money::from_i64(60),
-                        payer: MemberSetExpr::new([MemberSetOp::Push(MemberId(1))]),
-                        payee: MemberSetExpr::new([MemberSetOp::Push(MemberId(3))]),
-                    })),
+                    statement: ScriptStatement::Domain(Statement::Payment(Payment::even(
+                        Money::from_i64(60),
+                        MemberSetExpr::new([MemberSetOp::Push(MemberId(1))]),
+                        MemberSetExpr::new([MemberSetOp::Push(MemberId(3))]),
+                    ))),
                 },
                 ScriptStatementWithLine {
                     line: 2,
-                    statement: ScriptStatement::Domain(Statement::Payment(Payment {
-                        amount: Money::from_i64(40),
-                        payer: MemberSetExpr::new([MemberSetOp::Push(MemberId(2))]),
-                        payee: MemberSetExpr::new([MemberSetOp::Push(MemberId(3))]),
-                    })),
+                    statement: ScriptStatement::Domain(Statement::Payment(Payment::even(
+                        Money::from_i64(40),
+                        MemberSetExpr::new([MemberSetOp::Push(MemberId(2))]),
+                        MemberSetExpr::new([MemberSetOp::Push(MemberId(3))]),
+                    ))),
                 },
             ],
         );
@@ -713,11 +737,11 @@ mod tests {
     ) -> ScriptStatementWithLine<'static> {
         ScriptStatementWithLine {
             line,
-            statement: ScriptStatement::Domain(Statement::Payment(Payment {
-                amount: Money::from_i64(amount),
-                payer: MemberSetExpr::new([MemberSetOp::Push(MemberId(payer))]),
-                payee: MemberSetExpr::new([MemberSetOp::Push(MemberId(payee))]),
-            })),
+            statement: ScriptStatement::Domain(Statement::Payment(Payment::even(
+                Money::from_i64(amount),
+                MemberSetExpr::new([MemberSetOp::Push(MemberId(payer))]),
+                MemberSetExpr::new([MemberSetOp::Push(MemberId(payee))]),
+            ))),
         }
     }
 
@@ -739,6 +763,44 @@ mod tests {
             payment_stmt(3, 2, 3, 50),
             payment_stmt(4, 2, 4, 50),
         ]
+    }
+
+    fn script_with_zero_total_weight_payment() -> Script<'static> {
+        Script::new(
+            &[],
+            vec![ScriptStatementWithLine {
+                line: 1,
+                statement: ScriptStatement::Domain(Statement::Payment(Payment::weighted(
+                    Money::from_i64(100),
+                    MemberSetExpr::new([MemberSetOp::Push(MemberId(1))]),
+                    MemberSetExpr::new([
+                        MemberSetOp::Push(MemberId(1)),
+                        MemberSetOp::Push(MemberId(2)),
+                        MemberSetOp::Union,
+                    ]),
+                    BTreeMap::from([(MemberId(1), Weight::ZERO), (MemberId(2), Weight::ZERO)]),
+                ))),
+            }],
+        )
+    }
+
+    fn script_with_weight_overflow_payment() -> Script<'static> {
+        Script::new(
+            &[],
+            vec![ScriptStatementWithLine {
+                line: 1,
+                statement: ScriptStatement::Domain(Statement::Payment(Payment::weighted(
+                    Money::from_i64(100),
+                    MemberSetExpr::new([MemberSetOp::Push(MemberId(1))]),
+                    MemberSetExpr::new([
+                        MemberSetOp::Push(MemberId(1)),
+                        MemberSetOp::Push(MemberId(2)),
+                        MemberSetOp::Union,
+                    ]),
+                    BTreeMap::from([(MemberId(1), Weight::MAX), (MemberId(2), Weight(1))]),
+                ))),
+            }],
+        )
     }
 
     fn script_with_persisted_cash() -> Script<'static> {
@@ -936,17 +998,17 @@ mod tests {
             &[],
             vec![ScriptStatementWithLine {
                 line: 1,
-                statement: ScriptStatement::Domain(Statement::Payment(Payment {
-                    amount: Money::from_i64(amount),
-                    payer: MemberSetExpr::new([MemberSetOp::Push(MemberId(1))]),
-                    payee: MemberSetExpr::new([
+                statement: ScriptStatement::Domain(Statement::Payment(Payment::even(
+                    Money::from_i64(amount),
+                    MemberSetExpr::new([MemberSetOp::Push(MemberId(1))]),
+                    MemberSetExpr::new([
                         MemberSetOp::Push(MemberId(1)),
                         MemberSetOp::Push(MemberId(2)),
                         MemberSetOp::Union,
                         MemberSetOp::Push(MemberId(3)),
                         MemberSetOp::Union,
                     ]),
-                })),
+                ))),
             }],
         );
 
@@ -967,6 +1029,58 @@ mod tests {
             apply.balances.get(&MemberId(3)),
             Some(&Money::from_i64(expected_member_3))
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn calculate_balances_returns_error_on_zero_total_weight() {
+        let processor = MessageProcessor::new(&StubParser, &NoopOptimizer);
+        let script = script_with_zero_total_weight_payment();
+
+        let result = processor.calculate_balances(&script).await;
+
+        let Err(err) = result else {
+            panic!("expected zero total weight error");
+        };
+        assert_eq!(err, BalanceCalculationError::ZeroTotalWeight);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn calculate_balances_for_prefix_returns_error_on_zero_total_weight() {
+        let processor = MessageProcessor::new(&StubParser, &NoopOptimizer);
+        let script = script_with_zero_total_weight_payment();
+
+        let result = processor.calculate_balances_for_prefix(&script, 1).await;
+
+        let Err(err) = result else {
+            panic!("expected zero total weight error");
+        };
+        assert_eq!(err, BalanceCalculationError::ZeroTotalWeight);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn calculate_balances_returns_error_on_weight_overflow() {
+        let processor = MessageProcessor::new(&StubParser, &NoopOptimizer);
+        let script = script_with_weight_overflow_payment();
+
+        let result = processor.calculate_balances(&script).await;
+
+        let Err(err) = result else {
+            panic!("expected weight overflow error");
+        };
+        assert_eq!(err, BalanceCalculationError::WeightOverflow);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn calculate_balances_for_prefix_returns_error_on_weight_overflow() {
+        let processor = MessageProcessor::new(&StubParser, &NoopOptimizer);
+        let script = script_with_weight_overflow_payment();
+
+        let result = processor.calculate_balances_for_prefix(&script, 1).await;
+
+        let Err(err) = result else {
+            panic!("expected weight overflow error");
+        };
+        assert_eq!(err, BalanceCalculationError::WeightOverflow);
     }
 
     #[rstest]

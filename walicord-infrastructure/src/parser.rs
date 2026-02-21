@@ -1,11 +1,11 @@
-use std::borrow::Cow;
+use std::{borrow::Cow, collections::BTreeMap};
 use walicord_application::{
     Command, ProgramParseError, ProgramParser, Script, ScriptStatement, ScriptStatementWithLine,
 };
 use walicord_domain::{
     AmountExpr, AmountOp, Declaration, Payment, Program as DomainProgram,
     Statement as DomainStatement, StatementWithLine as DomainStatementWithLine,
-    model::{MemberId, MemberSetExpr, MemberSetOp},
+    model::{MemberId, MemberSetExpr, MemberSetOp, Weight},
 };
 use walicord_parser::{
     AmountExpr as ParserAmountExpr, AmountOp as ParserAmountOp, Command as ParserCommand,
@@ -44,7 +44,7 @@ impl ProgramParser for WalicordProgramParser {
                     let walicord_parser::StatementWithLine { line, statement } = stmt;
                     match statement {
                         ParserStatement::Declaration(decl) => {
-                            let expression = to_member_set_expr(decl.expression);
+                            let expression = to_member_set_expr_no_weight(decl.expression, line)?;
                             let app_decl = Declaration {
                                 name: decl.name,
                                 expression: expression.clone(),
@@ -77,7 +77,9 @@ impl ProgramParser for WalicordProgramParser {
                                 }
                             })?;
                             let payer_expr = match payer {
-                                PayerSpec::Explicit(expr) => to_member_set_expr(expr),
+                                PayerSpec::Explicit(expr) => {
+                                    to_member_set_expr_no_weight(expr, line)?
+                                }
                                 PayerSpec::Implicit => {
                                     let Some(author) = author_id else {
                                         return Err(
@@ -89,16 +91,46 @@ impl ProgramParser for WalicordProgramParser {
                                     MemberSetExpr::new([MemberSetOp::Push(author)])
                                 }
                             };
-                            let payee_expr = to_member_set_expr(payee);
-                            let app_payment = Payment {
-                                amount: amount_money,
-                                payer: payer_expr.clone(),
-                                payee: payee_expr.clone(),
-                            };
-                            let domain_payment = Payment {
-                                amount: amount_money,
-                                payer: payer_expr,
-                                payee: payee_expr,
+                            let payee_expr = to_member_set_expr_allow_weighted(payee.clone());
+                            let payee_weights = extract_payee_weights(&payee);
+
+                            // Validate that not all weights are zero.
+                            // This only applies when ALL members have explicit zero weights
+                            // (no unweighted members, no group references, and all weighted members have weight 0).
+                            // Unweighted members and group members default to weight 1, so total would be > 0.
+                            // Group references are skipped because their members are resolved at runtime.
+                            if !payee_weights.is_empty()
+                                && payee_weights.values().all(|w| w.0 == 0)
+                                && !payee.has_unweighted_push()
+                                && !payee.has_group_reference()
+                            {
+                                return Err(ProgramParseError::AllZeroWeights { line });
+                            }
+
+                            let (app_payment, domain_payment) = if payee_weights.is_empty() {
+                                (
+                                    Payment::even(
+                                        amount_money,
+                                        payer_expr.clone(),
+                                        payee_expr.clone(),
+                                    ),
+                                    Payment::even(amount_money, payer_expr, payee_expr),
+                                )
+                            } else {
+                                (
+                                    Payment::weighted(
+                                        amount_money,
+                                        payer_expr.clone(),
+                                        payee_expr.clone(),
+                                        payee_weights.clone(),
+                                    ),
+                                    Payment::weighted(
+                                        amount_money,
+                                        payer_expr,
+                                        payee_expr,
+                                        payee_weights,
+                                    ),
+                                )
                             };
                             let app_statement = DomainStatement::Payment(app_payment);
                             app_statements.push(ScriptStatementWithLine {
@@ -116,7 +148,7 @@ impl ProgramParser for WalicordProgramParser {
                                 ParserCommand::Review => Command::Review,
                                 ParserCommand::MemberAddCash { members } => {
                                     Command::MemberAddCash {
-                                        members: to_member_set_expr(members),
+                                        members: to_member_set_expr_no_weight(members, line)?,
                                     }
                                 }
                                 ParserCommand::CashSelf => {
@@ -135,8 +167,10 @@ impl ProgramParser for WalicordProgramParser {
                                     members,
                                     cash_members,
                                 } => Command::SettleUp {
-                                    members: to_member_set_expr(members),
-                                    cash_members: cash_members.map(to_member_set_expr),
+                                    members: to_member_set_expr_no_weight(members, line)?,
+                                    cash_members: cash_members
+                                        .map(|set| to_member_set_expr_no_weight(set, line))
+                                        .transpose()?,
                                 },
                             };
                             app_statements.push(ScriptStatementWithLine {
@@ -156,15 +190,39 @@ impl ProgramParser for WalicordProgramParser {
     }
 }
 
-fn to_member_set_expr<'a>(expr: walicord_parser::SetExpr<'a>) -> MemberSetExpr<'a> {
+fn to_member_set_expr_allow_weighted<'a>(expr: walicord_parser::SetExpr<'a>) -> MemberSetExpr<'a> {
     let ops = expr.ops().iter().map(|op| match op {
-        SetOp::Push(id) => MemberSetOp::Push(MemberId(*id)),
+        SetOp::Push(id) | SetOp::PushWeighted(id, _) => MemberSetOp::Push(MemberId(*id)),
         SetOp::PushGroup(name) => MemberSetOp::PushGroup(name),
         SetOp::Union => MemberSetOp::Union,
         SetOp::Intersection => MemberSetOp::Intersection,
         SetOp::Difference => MemberSetOp::Difference,
     });
     MemberSetExpr::new(ops)
+}
+
+fn to_member_set_expr_no_weight<'a>(
+    expr: walicord_parser::SetExpr<'a>,
+    line: usize,
+) -> Result<MemberSetExpr<'a>, ProgramParseError<'a>> {
+    if expr
+        .ops()
+        .iter()
+        .any(|op| matches!(op, SetOp::PushWeighted(_, _)))
+    {
+        return Err(ProgramParseError::SyntaxError {
+            line,
+            detail: "weighted mentions are only allowed in payment payee".to_string(),
+        });
+    }
+
+    Ok(to_member_set_expr_allow_weighted(expr))
+}
+
+fn extract_payee_weights(expr: &walicord_parser::SetExpr<'_>) -> BTreeMap<MemberId, Weight> {
+    expr.referenced_weighted()
+        .map(|(id, w)| (MemberId(id), Weight(w)))
+        .collect()
 }
 
 fn to_amount_expr(expr: ParserAmountExpr) -> AmountExpr {
@@ -278,5 +336,53 @@ mod tests {
 
         let ids: Vec<_> = members.referenced_ids().collect();
         assert_eq!(ids, vec![MemberId(7)]);
+    }
+
+    #[test]
+    fn parse_all_zero_weights_returns_error() {
+        let parser = WalicordProgramParser;
+        let members: [MemberId; 0] = [];
+        let result = parser.parse(&members, "3000 <@1>*0 <@2>*0", Some(MemberId(3)));
+
+        match result {
+            Err(ProgramParseError::AllZeroWeights { line }) => {
+                assert_eq!(line, 1);
+            }
+            Ok(_) => panic!("expected all zero weights error, but parsing succeeded"),
+            Err(other) => panic!("expected all zero weights error, got other error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_mixed_zero_and_unweighted_succeeds() {
+        // When there are both zero-weighted and unweighted members,
+        // the unweighted members default to weight 1, so total > 0.
+        let parser = WalicordProgramParser;
+        let members: [MemberId; 0] = [];
+        let result = parser.parse(&members, "3000 <@1>*0 <@2>*0 <@3>", Some(MemberId(4)));
+
+        match result {
+            Ok(_) => {}
+            Err(other) => panic!("expected parsing to succeed, got error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_group_reference_with_zero_weights_succeeds() {
+        // When there is a group reference, its members default to weight 1,
+        // so even if all explicit weights are zero, the total is > 0.
+        // Example: "team := <@2>" then "1000 team, <@1>*0"
+        let parser = WalicordProgramParser;
+        let members: [MemberId; 0] = [];
+        let result = parser.parse(
+            &members,
+            "team := <@2>\n1000 team, <@1>*0",
+            Some(MemberId(3)),
+        );
+
+        match result {
+            Ok(_) => {}
+            Err(other) => panic!("expected parsing to succeed, got error: {other:?}"),
+        }
     }
 }
