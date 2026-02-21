@@ -94,11 +94,13 @@ impl ProgramParser for WalicordProgramParser {
 
                             // Validate that not all weights are zero.
                             // This only applies when ALL members have explicit zero weights
-                            // (no unweighted members and all weighted members have weight 0).
-                            // Unweighted members default to weight 1, so total would be > 0.
+                            // (no unweighted members, no group references, and all weighted members have weight 0).
+                            // Unweighted members and group members default to weight 1, so total would be > 0.
+                            // Group references are skipped because their members are resolved at runtime.
                             if !payee_weights.is_empty()
                                 && payee_weights.values().all(|w| w.0 == 0)
                                 && !payee.has_unweighted_push()
+                                && !payee.has_group_reference()
                             {
                                 return Err(ProgramParseError::AllZeroWeights { line });
                             }
@@ -336,6 +338,25 @@ mod tests {
         let parser = WalicordProgramParser;
         let members: [MemberId; 0] = [];
         let result = parser.parse(&members, "3000 <@1>*0 <@2>*0 <@3>", Some(MemberId(4)));
+
+        match result {
+            Ok(_) => {}
+            Err(other) => panic!("expected parsing to succeed, got error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_group_reference_with_zero_weights_succeeds() {
+        // When there is a group reference, its members default to weight 1,
+        // so even if all explicit weights are zero, the total is > 0.
+        // Example: "team := <@2>" then "1000 team, <@1>*0"
+        let parser = WalicordProgramParser;
+        let members: [MemberId; 0] = [];
+        let result = parser.parse(
+            &members,
+            "team := <@2>\n1000 team, <@1>*0",
+            Some(MemberId(3)),
+        );
 
         match result {
             Ok(_) => {}

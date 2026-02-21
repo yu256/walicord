@@ -70,6 +70,13 @@ impl<'a> SetExpr<'a> {
     pub fn has_unweighted_push(&self) -> bool {
         self.ops.iter().any(|op| matches!(op, SetOp::Push(_)))
     }
+
+    /// Returns true if there are any group references (PushGroup).
+    /// Group references resolve to members at runtime with default weight 1,
+    /// so they should be treated as potentially having unweighted members.
+    pub fn has_group_reference(&self) -> bool {
+        self.ops.iter().any(|op| matches!(op, SetOp::PushGroup(_)))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

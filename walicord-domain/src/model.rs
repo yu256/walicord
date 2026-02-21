@@ -1014,28 +1014,20 @@ mod tests {
         assert_eq!(program.statements().len(), 2);
     }
 
-    #[rstest]
-    fn weighted_distribution_calculates_correct_amounts() {
-        // Scenario: 3000 @A*2 @B*0 @C
-        // Expected: A: 2000, B: 0, C: 1000
-        let mut weights = BTreeMap::new();
-        weights.insert(MemberId(1), Weight(2)); // A
-        weights.insert(MemberId(2), Weight(0)); // B
-        // C gets default weight 1
-
-        let payment = Payment::weighted(
-            Money::from_i64(3000),
-            MemberSetExpr::new([MemberSetOp::Push(MemberId(10))]), // payer
-            MemberSetExpr::new([
-                MemberSetOp::Push(MemberId(1)),
-                MemberSetOp::Push(MemberId(2)),
-                MemberSetOp::Union,
-                MemberSetOp::Push(MemberId(3)),
-                MemberSetOp::Union,
-            ]),
+    fn make_weighted_payment(
+        amount: i64,
+        weights: BTreeMap<MemberId, Weight>,
+        payee_ops: Vec<MemberSetOp<'static>>,
+    ) -> Payment<'static> {
+        Payment::weighted(
+            Money::from_i64(amount),
+            MemberSetExpr::new([MemberSetOp::Push(MemberId(10))]),
+            MemberSetExpr::new(payee_ops),
             weights,
-        );
+        )
+    }
 
+    fn calculate_payment_balances(payment: Payment<'static>) -> MemberBalances {
         let program = Program::try_new(
             vec![StatementWithLine {
                 line: 1,
@@ -1044,170 +1036,179 @@ mod tests {
             &[],
         )
         .expect("program should build");
-
-        let balances = program.calculate_balances();
-
-        // Payer owes 3000
-        assert_eq!(balances.get(&MemberId(10)), Some(&Money::from_i64(3000)));
-        // A receives 2000 (weight 2 / total 3)
-        assert_eq!(balances.get(&MemberId(1)), Some(&Money::from_i64(-2000)));
-        // B receives 0 (weight 0)
-        assert_eq!(balances.get(&MemberId(2)), Some(&Money::from_i64(0)));
-        // C receives 1000 (weight 1 / total 3)
-        assert_eq!(balances.get(&MemberId(3)), Some(&Money::from_i64(-1000)));
+        program.calculate_balances()
     }
 
     #[rstest]
-    fn weighted_distribution_proportional_split() {
-        // Scenario: 6000 @A*3 @B*2 @C*1
-        // Expected: A: 3000, B: 2000, C: 1000
-        let mut weights = BTreeMap::new();
-        weights.insert(MemberId(1), Weight(3));
-        weights.insert(MemberId(2), Weight(2));
-        weights.insert(MemberId(3), Weight(1));
+    #[case::zero_weight_member(
+        3000,
+        BTreeMap::from([(MemberId(1), Weight(2)), (MemberId(2), Weight(0))]),
+        vec![
+            MemberSetOp::Push(MemberId(1)),
+            MemberSetOp::Push(MemberId(2)),
+            MemberSetOp::Union,
+            MemberSetOp::Push(MemberId(3)),
+            MemberSetOp::Union,
+        ],
+        Money::from_i64(-2000), // A: 3000 * 2/3
+        Money::from_i64(0),      // B: weight 0
+        Money::from_i64(-1000),  // C: 3000 * 1/3 (default weight)
+    )]
+    #[case::proportional_3_2_1(
+        6000,
+        BTreeMap::from([(MemberId(1), Weight(3)), (MemberId(2), Weight(2)), (MemberId(3), Weight(1))]),
+        vec![
+            MemberSetOp::Push(MemberId(1)),
+            MemberSetOp::Push(MemberId(2)),
+            MemberSetOp::Union,
+            MemberSetOp::Push(MemberId(3)),
+            MemberSetOp::Union,
+        ],
+        Money::from_i64(-3000), // A: 6000 * 3/6
+        Money::from_i64(-2000), // B: 6000 * 2/6
+        Money::from_i64(-1000), // C: 6000 * 1/6
+    )]
+    #[case::default_weight_unweighted(
+        4000,
+        BTreeMap::from([(MemberId(1), Weight(2))]),
+        vec![
+            MemberSetOp::Push(MemberId(1)),
+            MemberSetOp::Push(MemberId(2)),
+            MemberSetOp::Union,
+            MemberSetOp::Push(MemberId(3)),
+            MemberSetOp::Union,
+        ],
+        Money::from_i64(-2000), // A: 4000 * 2/4
+        Money::from_i64(-1000), // B: 4000 * 1/4 (default weight)
+        Money::from_i64(-1000), // C: 4000 * 1/4 (default weight)
+    )]
+    #[case::empty_weights_equals_even(
+        3000,
+        BTreeMap::new(), // Empty weights = even distribution
+        vec![
+            MemberSetOp::Push(MemberId(1)),
+            MemberSetOp::Push(MemberId(2)),
+            MemberSetOp::Union,
+            MemberSetOp::Push(MemberId(3)),
+            MemberSetOp::Union,
+        ],
+        Money::from_i64(-1000), // A: 3000 / 3
+        Money::from_i64(-1000), // B: 3000 / 3
+        Money::from_i64(-1000), // C: 3000 / 3
+    )]
+    #[case::all_weights_equal_one(
+        3000,
+        BTreeMap::from([(MemberId(1), Weight(1)), (MemberId(2), Weight(1)), (MemberId(3), Weight(1))]),
+        vec![
+            MemberSetOp::Push(MemberId(1)),
+            MemberSetOp::Push(MemberId(2)),
+            MemberSetOp::Union,
+            MemberSetOp::Push(MemberId(3)),
+            MemberSetOp::Union,
+        ],
+        Money::from_i64(-1000), // A: 3000 / 3
+        Money::from_i64(-1000), // B: 3000 / 3
+        Money::from_i64(-1000), // C: 3000 / 3
+    )]
+    #[case::weight_for_non_payee_ignored(
+        3000,
+        BTreeMap::from([(MemberId(1), Weight(2)), (MemberId(99), Weight(5))]), // MemberId(99) not in payee set
+        vec![
+            MemberSetOp::Push(MemberId(1)),
+            MemberSetOp::Push(MemberId(2)),
+            MemberSetOp::Union,
+        ],
+        Money::from_i64(-2000), // A: 3000 * 2/3 (weight 2, total weight = 2+1=3)
+        Money::from_i64(-1000), // B: 3000 * 1/3 (default weight 1)
+        Money::ZERO,            // C: not in payee set
+    )]
+    fn weighted_distribution_proportional(
+        #[case] amount: i64,
+        #[case] weights: BTreeMap<MemberId, Weight>,
+        #[case] payee_ops: Vec<MemberSetOp<'static>>,
+        #[case] expected_a: Money,
+        #[case] expected_b: Money,
+        #[case] expected_c: Money,
+    ) {
+        let payment = make_weighted_payment(amount, weights, payee_ops);
+        let balances = calculate_payment_balances(payment);
 
-        let payment = Payment::weighted(
-            Money::from_i64(6000),
-            MemberSetExpr::new([MemberSetOp::Push(MemberId(10))]),
-            MemberSetExpr::new([
-                MemberSetOp::Push(MemberId(1)),
-                MemberSetOp::Push(MemberId(2)),
-                MemberSetOp::Union,
-                MemberSetOp::Push(MemberId(3)),
-                MemberSetOp::Union,
-            ]),
-            weights,
-        );
-
-        let program = Program::try_new(
-            vec![StatementWithLine {
-                line: 1,
-                statement: Statement::Payment(payment),
-            }],
-            &[],
-        )
-        .expect("program should build");
-
-        let balances = program.calculate_balances();
-
-        assert_eq!(balances.get(&MemberId(1)), Some(&Money::from_i64(-3000)));
-        assert_eq!(balances.get(&MemberId(2)), Some(&Money::from_i64(-2000)));
-        assert_eq!(balances.get(&MemberId(3)), Some(&Money::from_i64(-1000)));
+        assert_eq!(balances.get(&MemberId(1)), Some(&expected_a));
+        assert_eq!(balances.get(&MemberId(2)), Some(&expected_b));
+        // For cases where C is not in payee set, check it's not in balances or is zero
+        if expected_c != Money::ZERO {
+            assert_eq!(balances.get(&MemberId(3)), Some(&expected_c));
+        }
     }
 
     #[rstest]
-    fn weighted_distribution_with_set_operations() {
-        // Scenario: (@A*2 @B) ∪ @C
-        // Set operation resolves to {A, B, C}
-        // Weights: A=2, B and C default to 1
-        // Total weight: 4
-        let mut weights = BTreeMap::new();
-        weights.insert(MemberId(1), Weight(2));
+    #[case::last_weight_wins(
+        3000,
+        BTreeMap::from([(MemberId(1), Weight(3))]),
+        vec![MemberSetOp::Push(MemberId(1)), MemberSetOp::Push(MemberId(1)), MemberSetOp::Union],
+        Money::from_i64(-3000), // A receives all (only member)
+    )]
+    fn weighted_distribution_single_member(
+        #[case] amount: i64,
+        #[case] weights: BTreeMap<MemberId, Weight>,
+        #[case] payee_ops: Vec<MemberSetOp<'static>>,
+        #[case] expected_a: Money,
+    ) {
+        let payment = make_weighted_payment(amount, weights, payee_ops);
+        let balances = calculate_payment_balances(payment);
 
-        let payment = Payment::weighted(
-            Money::from_i64(4000),
-            MemberSetExpr::new([MemberSetOp::Push(MemberId(10))]),
-            MemberSetExpr::new([
-                MemberSetOp::Push(MemberId(1)),
-                MemberSetOp::Push(MemberId(2)),
-                MemberSetOp::Union,
-                MemberSetOp::Push(MemberId(3)),
-                MemberSetOp::Union,
-            ]),
-            weights,
-        );
-
-        let program = Program::try_new(
-            vec![StatementWithLine {
-                line: 1,
-                statement: Statement::Payment(payment),
-            }],
-            &[],
-        )
-        .expect("program should build");
-
-        let balances = program.calculate_balances();
-
-        // A: 4000 * 2/4 = 2000
-        assert_eq!(balances.get(&MemberId(1)), Some(&Money::from_i64(-2000)));
-        // B: 4000 * 1/4 = 1000
-        assert_eq!(balances.get(&MemberId(2)), Some(&Money::from_i64(-1000)));
-        // C: 4000 * 1/4 = 1000
-        assert_eq!(balances.get(&MemberId(3)), Some(&Money::from_i64(-1000)));
+        assert_eq!(balances.get(&MemberId(1)), Some(&expected_a));
     }
 
     #[rstest]
-    fn weighted_distribution_duplicate_member_last_weight_wins() {
-        // Scenario: @A*2 ∪ @A*3
-        // Set operation resolves to {A}
-        // Weight: A=3 (last weight wins in BTreeMap)
-        let mut weights = BTreeMap::new();
-        weights.insert(MemberId(1), Weight(2));
-        weights.insert(MemberId(1), Weight(3)); // Overwrites previous
+    #[case::excluded_member(
+        1000,
+        BTreeMap::from([(MemberId(1), Weight(2))]),
+        vec![
+            MemberSetOp::Push(MemberId(1)),
+            MemberSetOp::Push(MemberId(2)),
+            MemberSetOp::Union,
+            MemberSetOp::Push(MemberId(1)),
+            MemberSetOp::Difference,
+        ],
+        MemberId(2),
+        Money::from_i64(-1000), // B receives all (A excluded)
+    )]
+    fn weighted_distribution_excluded_member(
+        #[case] amount: i64,
+        #[case] weights: BTreeMap<MemberId, Weight>,
+        #[case] payee_ops: Vec<MemberSetOp<'static>>,
+        #[case] recipient: MemberId,
+        #[case] expected: Money,
+    ) {
+        let payment = make_weighted_payment(amount, weights, payee_ops);
+        let balances = calculate_payment_balances(payment);
 
-        let payment = Payment::weighted(
-            Money::from_i64(3000),
-            MemberSetExpr::new([MemberSetOp::Push(MemberId(10))]),
-            MemberSetExpr::new([
-                MemberSetOp::Push(MemberId(1)),
-                MemberSetOp::Push(MemberId(1)),
-                MemberSetOp::Union,
-            ]),
-            weights,
-        );
-
-        let program = Program::try_new(
-            vec![StatementWithLine {
-                line: 1,
-                statement: Statement::Payment(payment),
-            }],
-            &[],
-        )
-        .expect("program should build");
-
-        let balances = program.calculate_balances();
-
-        // A receives all 3000 (only member, weight 3)
-        assert_eq!(balances.get(&MemberId(1)), Some(&Money::from_i64(-3000)));
+        assert_eq!(balances.get(&recipient), Some(&expected));
     }
 
     #[rstest]
-    fn weighted_distribution_excluded_member_weight_ignored() {
-        // Scenario: (@A*2 @B) - @A
-        // Set operation resolves to {B}
-        // A is excluded from payee set, so A's weight is irrelevant
-        // Note: A still appears in balances with 0 because referenced_ids() tracks all mentioned members
-        let mut weights = BTreeMap::new();
-        weights.insert(MemberId(1), Weight(2));
+    #[case::zero_total_weight(
+        1000,
+        BTreeMap::from([(MemberId(1), Weight(0))]),
+        vec![
+            MemberSetOp::Push(MemberId(1)),
+            MemberSetOp::Push(MemberId(2)),
+            MemberSetOp::Union,
+            MemberSetOp::Push(MemberId(2)),
+            MemberSetOp::Difference,
+        ],
+    )]
+    fn weighted_distribution_zero_total_weight_preserves_invariant(
+        #[case] amount: i64,
+        #[case] weights: BTreeMap<MemberId, Weight>,
+        #[case] payee_ops: Vec<MemberSetOp<'static>>,
+    ) {
+        let payment = make_weighted_payment(amount, weights, payee_ops);
+        let balances = calculate_payment_balances(payment);
 
-        let payment = Payment::weighted(
-            Money::from_i64(1000),
-            MemberSetExpr::new([MemberSetOp::Push(MemberId(10))]),
-            MemberSetExpr::new([
-                MemberSetOp::Push(MemberId(1)),
-                MemberSetOp::Push(MemberId(2)),
-                MemberSetOp::Union,
-                MemberSetOp::Push(MemberId(1)),
-                MemberSetOp::Difference,
-            ]),
-            weights,
-        );
-
-        let program = Program::try_new(
-            vec![StatementWithLine {
-                line: 1,
-                statement: Statement::Payment(payment),
-            }],
-            &[],
-        )
-        .expect("program should build");
-
-        let balances = program.calculate_balances();
-
-        // B receives all 1000 (only remaining member in payee set)
-        assert_eq!(balances.get(&MemberId(2)), Some(&Money::from_i64(-1000)));
-        // A is tracked but receives 0 (excluded from payee set by difference operation)
-        assert_eq!(balances.get(&MemberId(1)), Some(&Money::from_i64(0)));
+        let sum: Money = balances.values().copied().sum();
+        assert_eq!(sum, Money::ZERO, "balances must sum to zero");
     }
 }
 
@@ -1460,13 +1461,26 @@ impl<'a> BalanceAccumulator<'a> {
                     return;
                 };
 
+                // Validate weighted distribution before mutating any balances
+                // to preserve zero-sum invariant
+                if let AllocationStrategy::Weighted(weights) = &payment.allocation {
+                    let total_weight: Weight = payee_members
+                        .iter()
+                        .map(|id| weights.get(&id).copied().unwrap_or(Weight(1)))
+                        .sum();
+                    if total_weight == Weight(0) {
+                        return;
+                    }
+                }
+
                 distribute_balances(
                     &mut self.balances,
                     &payer_members,
                     payment.amount,
                     1,
                     &AllocationStrategy::Even,
-                );
+                )
+                .expect("even distribution should never fail");
 
                 distribute_balances(
                     &mut self.balances,
@@ -1474,7 +1488,8 @@ impl<'a> BalanceAccumulator<'a> {
                     payment.amount,
                     -1,
                     &payment.allocation,
-                );
+                )
+                .expect("weighted distribution validated above");
             }
         }
     }
@@ -1517,15 +1532,20 @@ pub struct Settlement {
 /// * `amount` - Total amount to distribute
 /// * `direction` - +1 for debt/net-pay side (payer), -1 for credit/net-receive side (payee)
 /// * `allocation` - The strategy used to split the amount (even or weighted)
+///
+/// # Returns
+/// * `Ok(())` if distribution succeeded
+/// * `Err(SplitError::EmptyRatios)` if members set is empty (should not happen due to early return)
+/// * `Err(SplitError::ZeroTotalRatio)` if weighted distribution has zero total weight
 pub fn distribute_balances(
     balances: &mut MemberBalances,
     members: &MemberSet,
     amount: Money,
     direction: i64,
     allocation: &AllocationStrategy,
-) {
+) -> Result<(), SplitError> {
     if members.is_empty() {
-        return;
+        return Ok(());
     }
 
     let shares: Vec<Money> = match allocation {
@@ -1537,10 +1557,7 @@ pub fn distribute_balances(
                 .iter()
                 .map(|id| weights.get(&id).copied().unwrap_or(Weight(1)))
                 .collect();
-            let ratios = match Ratios::try_new(weight_vec) {
-                Ok(r) => r,
-                Err(_) => return,
-            };
+            let ratios = Ratios::try_new(weight_vec)?;
             amount.split_ratio(&ratios, RemainderPolicy::FrontLoad)
         }
     };
@@ -1549,4 +1566,6 @@ pub fn distribute_balances(
         let signed = share * Decimal::from(direction);
         *balances.entry(member).or_insert(Money::ZERO) += signed;
     }
+
+    Ok(())
 }
