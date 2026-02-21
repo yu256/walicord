@@ -2848,7 +2848,7 @@ dependencies = [
 
 [[package]]
 name = "walicord"
-version = "2.0.0"
+version = "2.1.0"
 dependencies = [
  "arcstr",
  "dashmap 6.1.0",

@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.1.0](https://github.com/yu256/walicord/compare/walicord-v2.0.0...walicord-v2.1.0) (2026-02-21)
+
+
+### Features
+
+* add per-member weight support for debt registration ([#64](https://github.com/yu256/walicord/issues/64)) ([31eae6a](https://github.com/yu256/walicord/commit/31eae6ac21fff22077ac13bc5ec3d9955d1ff052))
+
 ## [2.0.0](https://github.com/yu256/walicord/compare/walicord-v1.0.0...walicord-v2.0.0) (2026-02-16)
 
 
