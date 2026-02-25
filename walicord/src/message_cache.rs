@@ -31,6 +31,11 @@ impl CachedMessage {
     pub fn is_marked_invalid(&self) -> bool {
         self.reaction_state == BotReactionState::HasCross
     }
+
+    /// Returns true if message content was cached but not yet re-evaluated.
+    pub fn is_pending_evaluation(&self) -> bool {
+        self.reaction_state == BotReactionState::Pending
+    }
 }
 
 /// Extract bot's reaction state from a full Message object.
@@ -205,7 +210,7 @@ where
     let mut has_any = false;
 
     for message in messages {
-        if message.is_bot || message.is_marked_invalid() {
+        if message.is_bot || message.is_marked_invalid() || message.is_pending_evaluation() {
             continue;
         }
         let content = message.content.as_ref();
@@ -310,10 +315,22 @@ mod tests {
         assert_eq!(offset, 3);
     }
 
+    #[test]
+    fn next_line_offset_skips_pending_messages() {
+        let valid = make_cached_message(1, 1, "line1\nline2");
+        let mut pending = make_cached_message(2, 1, "line3");
+        pending.reaction_state = BotReactionState::Pending;
+        let valid2 = make_cached_message(3, 1, "line4");
+
+        let offset = next_line_offset([&valid, &pending, &valid2]);
+        assert_eq!(offset, 3);
+    }
+
     #[rstest::rstest]
     #[case::marked_invalid_is_has_cross(BotReactionState::HasCross, true)]
     #[case::has_check_is_not_marked_invalid(BotReactionState::HasCheck, false)]
     #[case::none_is_not_marked_invalid(BotReactionState::None, false)]
+    #[case::pending_is_not_marked_invalid(BotReactionState::Pending, false)]
     fn is_marked_invalid_matches_has_cross(
         #[case] reaction_state: BotReactionState,
         #[case] expected: bool,

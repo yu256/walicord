@@ -14,6 +14,7 @@ pub enum MessageValidity {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BotReactionState {
     None,
+    Pending,
     HasCheck,
     HasCross,
 }
@@ -242,6 +243,8 @@ mod tests {
     #[case::none_to_valid(BotReactionState::None, MessageValidity::Valid, true)]
     #[case::none_to_invalid(BotReactionState::None, MessageValidity::Invalid, true)]
     #[case::none_to_not_program(BotReactionState::None, MessageValidity::NotProgram, false)]
+    #[case::pending_to_valid(BotReactionState::Pending, MessageValidity::Valid, true)]
+    #[case::pending_to_not_program(BotReactionState::Pending, MessageValidity::NotProgram, false)]
     #[case::has_check_to_valid(BotReactionState::HasCheck, MessageValidity::Valid, false)]
     #[case::has_check_to_invalid(BotReactionState::HasCheck, MessageValidity::Invalid, true)]
     #[case::has_check_to_not_program(BotReactionState::HasCheck, MessageValidity::NotProgram, true)]
@@ -253,8 +256,7 @@ mod tests {
         #[case] desired: MessageValidity,
         #[case] expects_change: bool,
     ) {
-        let desired_state = BotReaction::state_from_validity(desired);
-        let should_change = current != desired_state;
+        let should_change = !reaction_ops(current, desired).is_empty();
         assert_eq!(should_change, expects_change);
     }
 
@@ -271,6 +273,16 @@ mod tests {
     )]
     #[case::none_to_not_program(
         BotReactionState::None,
+        MessageValidity::NotProgram,
+        &[]
+    )]
+    #[case::pending_to_valid(
+        BotReactionState::Pending,
+        MessageValidity::Valid,
+        &[ReactionOp::AddCheck]
+    )]
+    #[case::pending_to_not_program(
+        BotReactionState::Pending,
         MessageValidity::NotProgram,
         &[]
     )]

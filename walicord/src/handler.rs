@@ -38,6 +38,13 @@ pub enum CacheLoadResult {
     Failed,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProcessProgramMessageResult {
+    Store,
+    Skip,
+    Deferred,
+}
+
 /// Discord bot event handler with generic service dependencies
 pub struct BotHandler<'a, CS, RP>
 where
@@ -147,6 +154,19 @@ where
         }
     }
 
+    fn has_pending_messages(&self, tracked_id: TrackedChannelId) -> bool {
+        self.message_cache
+            .with_messages(tracked_id, |messages| {
+                messages.values().any(CachedMessage::is_pending_evaluation)
+            })
+            .unwrap_or(false)
+    }
+
+    fn mark_pending(mut cached: CachedMessage) -> CachedMessage {
+        cached.reaction_state = BotReactionState::Pending;
+        cached
+    }
+
     pub(crate) async fn ensure_cache_loaded(
         &self,
         ctx: &Context,
@@ -215,11 +235,14 @@ where
         channel_id: ChannelId,
         updated_cached: Option<CachedMessage>,
     ) {
+        let updated_message_id = updated_cached.as_ref().map(|m| m.id);
         let load_result = self.ensure_cache_loaded(ctx, channel_id).await;
 
         match load_result {
-            CacheLoadResult::NotTracked | CacheLoadResult::Failed => return,
+            CacheLoadResult::NotTracked => return,
+            CacheLoadResult::Failed if updated_cached.is_none() => return,
             CacheLoadResult::LoadedEmpty | CacheLoadResult::LoadedNonEmpty => {}
+            CacheLoadResult::Failed => {}
         }
 
         let Some(tracked_id) = self.channel_manager.get_tracked(channel_id) else {
@@ -256,6 +279,16 @@ where
             Ok(snapshot) => snapshot,
             Err(e) => {
                 tracing::warn!("Failed to fetch roster for {}: {:?}", channel_id, e);
+                if let Some(updated_id) = updated_message_id
+                    && let Some(updated) = messages.iter_mut().find(|m| m.id == updated_id)
+                {
+                    updated.reaction_state = BotReactionState::Pending;
+                }
+                let fallback_cache: IndexMap<MessageId, CachedMessage> =
+                    messages.into_iter().map(|m| (m.id, m)).collect();
+                if let Some(tracked_id) = self.channel_manager.get_tracked(channel_id) {
+                    self.message_cache.insert(tracked_id, fallback_cache);
+                }
                 return;
             }
         };
@@ -286,7 +319,7 @@ where
         ctx: &Context,
         msg: &Message,
         tracked_id: TrackedChannelId,
-    ) -> bool {
+    ) -> ProcessProgramMessageResult {
         let roster = match self
             .roster_provider
             .roster_for_channel(ctx, msg.channel_id)
@@ -295,7 +328,7 @@ where
             Ok(snapshot) => snapshot,
             Err(e) => {
                 tracing::warn!("Failed to fetch roster for {}: {:?}", msg.channel_id, e);
-                return false;
+                return ProcessProgramMessageResult::Deferred;
             }
         };
 
@@ -306,7 +339,9 @@ where
                 let offset = next_line_offset(messages.iter().map(|(_, m)| m));
                 let contents: Vec<(ArcStr, Option<MemberId>)> = messages
                     .iter()
-                    .filter(|(_, m)| !m.is_bot && !m.is_marked_invalid())
+                    .filter(|(_, m)| {
+                        !m.is_bot && !m.is_marked_invalid() && !m.is_pending_evaluation()
+                    })
                     .map(|(_, m)| (m.content.clone(), Some(MemberId(m.author_id.get()))))
                     .collect();
                 (contents, offset)
@@ -327,7 +362,7 @@ where
                 ReactionService::update_state(ctx, msg, MessageValidity::Invalid).await;
                 let content = format_program_parse_error(failure, msg.author.mention());
                 let _ = msg.reply(&ctx.http, content).await;
-                return false;
+                return ProcessProgramMessageResult::Skip;
             }
         };
 
@@ -371,7 +406,11 @@ where
             }
         }
 
-        result.should_store
+        if result.should_store {
+            ProcessProgramMessageResult::Store
+        } else {
+            ProcessProgramMessageResult::Skip
+        }
     }
 }
 
@@ -513,9 +552,28 @@ where
             return;
         };
 
-        if self.process_program_message(&ctx, &msg, tracked_id).await {
-            self.message_cache
-                .upsert_message(tracked_id, CachedMessage::from_message(msg));
+        if self.has_pending_messages(tracked_id) {
+            self.rebuild_channel_cache(
+                &ctx,
+                msg.channel_id,
+                Some(CachedMessage::from_message(msg)),
+            )
+            .await;
+            return;
+        }
+
+        match self.process_program_message(&ctx, &msg, tracked_id).await {
+            ProcessProgramMessageResult::Store => {
+                self.message_cache
+                    .upsert_message(tracked_id, CachedMessage::from_message(msg));
+            }
+            ProcessProgramMessageResult::Deferred => {
+                self.message_cache.upsert_message(
+                    tracked_id,
+                    Self::mark_pending(CachedMessage::from_message(msg)),
+                );
+            }
+            ProcessProgramMessageResult::Skip => {}
         }
     }
 
