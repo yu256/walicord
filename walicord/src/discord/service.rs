@@ -12,7 +12,7 @@ use serenity::{
 };
 use smol_str::SmolStr;
 use walicord_application::{is_command_message, is_command_prefix};
-use walicord_domain::model::{MemberId, MemberInfo};
+use walicord_domain::model::{MemberId, MemberInfo, RoleId};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ChannelError {
@@ -68,18 +68,39 @@ pub fn to_member_info(member: &Member) -> MemberInfo {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct GuildMemberRecord {
+    pub member: MemberInfo,
+    pub role_ids: Vec<RoleId>,
+}
+
+fn member_role_ids(member: &Member) -> Vec<RoleId> {
+    member
+        .roles
+        .iter()
+        .map(|role_id| RoleId(role_id.get()))
+        .collect()
+}
+
+pub fn to_member_record(member: &Member) -> GuildMemberRecord {
+    GuildMemberRecord {
+        member: to_member_info(member),
+        role_ids: member_role_ids(member),
+    }
+}
+
 impl DiscordChannelService {
     pub async fn fetch_guild_members(
         &self,
         ctx: &Context,
         guild_id: GuildId,
-    ) -> Result<Vec<MemberInfo>, ChannelError> {
+    ) -> Result<Vec<GuildMemberRecord>, ChannelError> {
         use futures::stream::TryStreamExt;
         let bot_id = ctx.cache.current_user().id;
         guild_id
             .members_iter(&ctx.http)
             .try_filter(|m| std::future::ready(m.user.id != bot_id))
-            .map_ok(|m| to_member_info(&m))
+            .map_ok(|m| to_member_record(&m))
             .try_collect()
             .await
             .map_err(|e| ChannelError::Request(format!("{e:?}")))

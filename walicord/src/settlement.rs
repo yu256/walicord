@@ -10,7 +10,7 @@ use walicord_application::{
     Command as ProgramCommand, FailureKind, MessageProcessor, ProgramParseError, ScriptStatement,
     SettlementOptimizationError, SettlementResult,
 };
-use walicord_domain::model::MemberId;
+use walicord_domain::model::{MemberId, RoleMembers};
 use walicord_presentation::{SettlementPresenter, SettlementView};
 
 /// Formats settlement optimization error for user display
@@ -242,16 +242,22 @@ pub struct ProcessResult<'a> {
 pub fn evaluate_program<'b>(
     processor: &MessageProcessor<'b>,
     member_ids: &'b [MemberId],
+    role_members: &'b RoleMembers,
     cached_contents: &'b [(arcstr::ArcStr, Option<MemberId>)],
     content: &'b str,
     author_id: MemberId,
     next_line_offset: usize,
 ) -> Result<ProcessResult<'b>, ProgramParseError<'b>> {
     let parse_outcome = if cached_contents.is_empty() {
-        processor.parse_program_sequence(member_ids, std::iter::once((content, Some(author_id))))
+        processor.parse_program_sequence(
+            member_ids,
+            role_members,
+            std::iter::once((content, Some(author_id))),
+        )
     } else {
         processor.parse_program_sequence(
             member_ids,
+            role_members,
             cached_contents
                 .iter()
                 .map(|(cached, author)| (cached.as_ref(), *author))
@@ -320,10 +326,12 @@ mod tests {
         let msg = make_message(content, 1, 1);
         let processor = make_processor();
         let member_ids = vec![MemberId(1)];
+        let role_members = RoleMembers::default();
 
         let result = evaluate_program(
             &processor,
             &member_ids,
+            &role_members,
             &[],
             msg.content.as_str(),
             MemberId(1),
@@ -342,10 +350,12 @@ mod tests {
         let msg = make_message(content, 1, 1);
         let processor = make_processor();
         let member_ids = vec![MemberId(1)];
+        let role_members = RoleMembers::default();
 
         let result = evaluate_program(
             &processor,
             &member_ids,
+            &role_members,
             &[],
             msg.content.as_str(),
             MemberId(1),

@@ -5,7 +5,7 @@ use walicord_application::{
 use walicord_domain::{
     AmountExpr, AmountOp, Declaration, Payment, Program as DomainProgram,
     Statement as DomainStatement, StatementWithLine as DomainStatementWithLine,
-    model::{MemberId, MemberSetExpr, MemberSetOp, Weight},
+    model::{MemberId, MemberSetExpr, MemberSetOp, RoleId, RoleMembers, Weight},
 };
 use walicord_parser::{
     AmountExpr as ParserAmountExpr, AmountOp as ParserAmountOp, Command as ParserCommand,
@@ -30,6 +30,7 @@ impl ProgramParser for WalicordProgramParser {
     fn parse<'a>(
         &self,
         member_ids: &'a [MemberId],
+        role_members: &'a RoleMembers,
         content: &'a str,
         author_id: Option<MemberId>,
     ) -> Result<Script<'a>, ProgramParseError<'a>> {
@@ -181,9 +182,9 @@ impl ProgramParser for WalicordProgramParser {
                     }
                 }
 
-                DomainProgram::try_new(domain_statements, member_ids)
+                DomainProgram::try_new_with_roles(domain_statements, member_ids, role_members)
                     .map_err(ProgramParseError::from)?;
-                Ok(Script::new(member_ids, app_statements))
+                Ok(Script::new(member_ids, role_members, app_statements))
             }
             Err(err) => Err(map_parse_error(err)),
         }
@@ -193,6 +194,7 @@ impl ProgramParser for WalicordProgramParser {
 fn to_member_set_expr_allow_weighted<'a>(expr: walicord_parser::SetExpr<'a>) -> MemberSetExpr<'a> {
     let ops = expr.ops().iter().map(|op| match op {
         SetOp::Push(id) | SetOp::PushWeighted(id, _) => MemberSetOp::Push(MemberId(*id)),
+        SetOp::PushRole(id) => MemberSetOp::PushRole(RoleId(*id)),
         SetOp::PushGroup(name) => MemberSetOp::PushGroup(name),
         SetOp::Union => MemberSetOp::Union,
         SetOp::Intersection => MemberSetOp::Intersection,
@@ -241,48 +243,100 @@ mod tests {
     use super::*;
     use rstest::rstest;
     use walicord_application::{Command, ProgramParser, ScriptStatement};
-    use walicord_domain::Statement;
+    use walicord_domain::{
+        Statement,
+        model::{RoleId, RoleMembers},
+    };
 
-    #[rstest]
-    #[case("1000 <@2>")]
-    #[case("1000 to <@2>")]
-    fn parse_implicit_payer_injects_author(#[case] input: &str) {
+    fn empty_roles() -> &'static RoleMembers {
+        use std::sync::OnceLock;
+        static ROLES: OnceLock<RoleMembers> = OnceLock::new();
+        ROLES.get_or_init(RoleMembers::default)
+    }
+
+    const EMPTY_MEMBERS: [MemberId; 0] = [];
+
+    fn parse_payment_payer_ids(
+        input: &'static str,
+        author: Option<MemberId>,
+    ) -> Result<Vec<MemberId>, ProgramParseError<'static>> {
         let parser = WalicordProgramParser;
-        let members: [MemberId; 0] = [];
-        let script = parser
-            .parse(&members, input, Some(MemberId(1)))
-            .expect("parse should succeed");
+        parser
+            .parse(&EMPTY_MEMBERS, empty_roles(), input, author)
+            .map(|script| {
+                let statement = &script.statements()[0].statement;
+                let ScriptStatement::Domain(Statement::Payment(payment)) = statement else {
+                    panic!("expected payment statement");
+                };
+                payment.payer.referenced_ids().collect()
+            })
+    }
 
-        let statement = &script.statements()[0].statement;
-        let ScriptStatement::Domain(Statement::Payment(payment)) = statement else {
-            panic!("expected payment statement");
-        };
+    fn parse_payment_payee_role_ids(
+        input: &'static str,
+        author: Option<MemberId>,
+        roles: &'static RoleMembers,
+    ) -> Result<Vec<RoleId>, ProgramParseError<'static>> {
+        let parser = WalicordProgramParser;
+        parser
+            .parse(&EMPTY_MEMBERS, roles, input, author)
+            .map(|script| {
+                let statement = &script.statements()[0].statement;
+                let ScriptStatement::Domain(Statement::Payment(payment)) = statement else {
+                    panic!("expected payment statement");
+                };
+                payment.payee.referenced_role_ids().collect()
+            })
+    }
 
-        let payer_ids: Vec<_> = payment.payer.referenced_ids().collect();
-        assert_eq!(payer_ids, vec![MemberId(1)]);
+    fn roles_with_role_10() -> &'static RoleMembers {
+        use std::sync::OnceLock;
+        static ROLES: OnceLock<RoleMembers> = OnceLock::new();
+        ROLES.get_or_init(|| {
+            RoleMembers::from_iter([(RoleId(10), [MemberId(2), MemberId(3)].into_iter().collect())])
+        })
     }
 
     #[rstest]
-    #[case("1000 <@2>")]
-    #[case("1000 to <@2>")]
-    fn parse_implicit_payer_without_author_returns_error(#[case] input: &str) {
-        let parser = WalicordProgramParser;
-        let members: [MemberId; 0] = [];
-        let result = parser.parse(&members, input, None);
-        match result {
-            Err(ProgramParseError::MissingContextForImplicitAuthor { line }) => {
-                assert_eq!(line, 1);
-            }
-            _ => panic!("expected implicit payer without author error"),
-        }
+    #[case::implicit_without_to_with_author(
+        "1000 <@2>",
+        Some(MemberId(1)),
+        Ok(vec![MemberId(1)])
+    )]
+    #[case::implicit_with_to_with_author(
+        "1000 to <@2>",
+        Some(MemberId(1)),
+        Ok(vec![MemberId(1)])
+    )]
+    #[case::implicit_without_to_missing_author(
+        "1000 <@2>",
+        None,
+        Err(ProgramParseError::MissingContextForImplicitAuthor { line: 1 })
+    )]
+    #[case::implicit_with_to_missing_author(
+        "1000 to <@2>",
+        None,
+        Err(ProgramParseError::MissingContextForImplicitAuthor { line: 1 })
+    )]
+    fn parse_implicit_payer(
+        #[case] input: &'static str,
+        #[case] author: Option<MemberId>,
+        #[case] expected: Result<Vec<MemberId>, ProgramParseError<'static>>,
+    ) {
+        let actual = parse_payment_payer_ids(input, author);
+        assert_eq!(actual, expected);
     }
 
     #[test]
     fn parse_settleup_with_cash_maps_to_command_model() {
         let parser = WalicordProgramParser;
-        let members: [MemberId; 0] = [];
         let script = parser
-            .parse(&members, "!settleup <@1> --cash <@2>", None)
+            .parse(
+                &EMPTY_MEMBERS,
+                empty_roles(),
+                "!settleup <@1> --cash <@2>",
+                None,
+            )
             .expect("parse should succeed");
 
         let statement = &script.statements()[0].statement;
@@ -307,9 +361,13 @@ mod tests {
     #[test]
     fn parse_member_cash_command_maps_to_command_model() {
         let parser = WalicordProgramParser;
-        let members: [MemberId; 0] = [];
         let script = parser
-            .parse(&members, "!member set <@1> <@2> cash", None)
+            .parse(
+                &EMPTY_MEMBERS,
+                empty_roles(),
+                "!member set <@1> <@2> cash",
+                None,
+            )
             .expect("parse should succeed");
 
         let statement = &script.statements()[0].statement;
@@ -324,9 +382,8 @@ mod tests {
     #[test]
     fn parse_cash_self_command_maps_to_member_cash() {
         let parser = WalicordProgramParser;
-        let members: [MemberId; 0] = [];
         let script = parser
-            .parse(&members, "!cash", Some(MemberId(7)))
+            .parse(&EMPTY_MEMBERS, empty_roles(), "!cash", Some(MemberId(7)))
             .expect("parse should succeed");
 
         let statement = &script.statements()[0].statement;
@@ -338,51 +395,60 @@ mod tests {
         assert_eq!(ids, vec![MemberId(7)]);
     }
 
-    #[test]
-    fn parse_all_zero_weights_returns_error() {
+    #[rstest]
+    #[case::all_zero_weights(
+        "3000 <@1>*0 <@2>*0",
+        MemberId(3),
+        Err(ProgramParseError::AllZeroWeights { line: 1 })
+    )]
+    #[case::mixed_zero_and_unweighted(
+        "3000 <@1>*0 <@2>*0 <@3>",
+        MemberId(4),
+        Ok(())
+    )]
+    #[case::group_reference_with_zero_weights(
+        "team := <@2>\n1000 team, <@1>*0",
+        MemberId(3),
+        Ok(())
+    )]
+    fn parse_weighted_payment_paths(
+        #[case] input: &'static str,
+        #[case] author: MemberId,
+        #[case] expected: Result<(), ProgramParseError<'static>>,
+    ) {
         let parser = WalicordProgramParser;
-        let members: [MemberId; 0] = [];
-        let result = parser.parse(&members, "3000 <@1>*0 <@2>*0", Some(MemberId(3)));
-
-        match result {
-            Err(ProgramParseError::AllZeroWeights { line }) => {
-                assert_eq!(line, 1);
-            }
-            Ok(_) => panic!("expected all zero weights error, but parsing succeeded"),
-            Err(other) => panic!("expected all zero weights error, got other error: {other:?}"),
-        }
+        let actual = parser
+            .parse(&EMPTY_MEMBERS, empty_roles(), input, Some(author))
+            .map(|_| ());
+        assert_eq!(actual, expected);
     }
 
-    #[test]
-    fn parse_mixed_zero_and_unweighted_succeeds() {
-        // When there are both zero-weighted and unweighted members,
-        // the unweighted members default to weight 1, so total > 0.
-        let parser = WalicordProgramParser;
-        let members: [MemberId; 0] = [];
-        let result = parser.parse(&members, "3000 <@1>*0 <@2>*0 <@3>", Some(MemberId(4)));
-
-        match result {
-            Ok(_) => {}
-            Err(other) => panic!("expected parsing to succeed, got error: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn parse_group_reference_with_zero_weights_succeeds() {
-        // When there is a group reference, its members default to weight 1,
-        // so even if all explicit weights are zero, the total is > 0.
-        // Example: "team := <@2>" then "1000 team, <@1>*0"
-        let parser = WalicordProgramParser;
-        let members: [MemberId; 0] = [];
-        let result = parser.parse(
-            &members,
-            "team := <@2>\n1000 team, <@1>*0",
-            Some(MemberId(3)),
-        );
-
-        match result {
-            Ok(_) => {}
-            Err(other) => panic!("expected parsing to succeed, got error: {other:?}"),
-        }
+    #[rstest]
+    #[case::defined_role_with_author(
+        "1000 to <@&10>",
+        Some(MemberId(1)),
+        roles_with_role_10(),
+        Ok(vec![RoleId(10)])
+    )]
+    #[case::undefined_role_with_author(
+        "1000 to <@&10>",
+        Some(MemberId(1)),
+        empty_roles(),
+        Err(ProgramParseError::UndefinedRole { id: 10, line: 1 })
+    )]
+    #[case::undefined_role_without_author(
+        "<@1> paid 1000 to <@&10>",
+        None,
+        empty_roles(),
+        Err(ProgramParseError::UndefinedRole { id: 10, line: 1 })
+    )]
+    fn parse_role_reference(
+        #[case] input: &'static str,
+        #[case] author: Option<MemberId>,
+        #[case] roles: &'static RoleMembers,
+        #[case] expected: Result<Vec<RoleId>, ProgramParseError<'static>>,
+    ) {
+        let actual = parse_payment_payee_role_ids(input, author, roles);
+        assert_eq!(actual, expected);
     }
 }

@@ -1,6 +1,6 @@
 //! Mock implementations for testing
 
-use crate::discord::ports::{ChannelService, RosterProvider, ServiceError};
+use crate::discord::ports::{ChannelService, RosterProvider, RosterSnapshot, ServiceError};
 use indexmap::IndexMap;
 use serenity::{
     all::MessageId,
@@ -19,7 +19,7 @@ use std::{
         atomic::{AtomicUsize, Ordering},
     },
 };
-use walicord_domain::model::{MemberId, MemberInfo};
+use walicord_domain::model::{MemberId, MemberInfo, RoleId, RoleMembers};
 
 /// Mock ChannelService for testing with fetch count tracking
 #[derive(Clone)]
@@ -115,24 +115,27 @@ impl RosterProvider for MockRosterProvider {
         &self,
         _ctx: &Context,
         _channel_id: ChannelId,
-    ) -> Result<Vec<MemberId>, ServiceError> {
+    ) -> Result<RosterSnapshot, ServiceError> {
         // For testing, return all members from first guild
-        Ok(self
-            .members
-            .values()
-            .flat_map(|guild_members| guild_members.keys().copied())
-            .collect())
+        Ok(RosterSnapshot {
+            member_ids: self
+                .members
+                .values()
+                .flat_map(|guild_members| guild_members.keys().copied())
+                .collect(),
+            role_members: RoleMembers::default(),
+        })
     }
 
     async fn warm_up(&self, _ctx: &Context, _channel_id: ChannelId) -> Result<(), ServiceError> {
         Ok(())
     }
 
-    fn apply_member_add(&self, _guild_id: GuildId, _member: MemberInfo) {
+    fn apply_member_add(&self, _guild_id: GuildId, _member: MemberInfo, _role_ids: &[RoleId]) {
         // No-op for mock
     }
 
-    fn apply_member_update(&self, _guild_id: GuildId, _member: MemberInfo) {
+    fn apply_member_update(&self, _guild_id: GuildId, _member: MemberInfo, _role_ids: &[RoleId]) {
         // No-op for mock
     }
 

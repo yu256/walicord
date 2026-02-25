@@ -9,7 +9,8 @@ use crate::{
 use std::{borrow::Cow, collections::HashSet};
 use walicord_domain::{
     BalanceAccumulator, MemberBalances, SettleUpPolicy, SettlementContext, Transfer,
-    model::MemberId, quantize_balances,
+    model::{MemberId, RoleMembers},
+    quantize_balances,
 };
 
 pub struct SettlementResult {
@@ -29,6 +30,7 @@ pub enum ProcessingOutcome<'a> {
     Success(Script<'a>),
     FailedToEvaluateGroup { name: Cow<'a, str>, line: usize },
     UndefinedGroup { name: Cow<'a, str>, line: usize },
+    UndefinedRole { id: u64, line: usize },
     UndefinedMember { id: u64, line: usize },
     SyntaxError { line: usize, detail: String },
     MissingContextForImplicitAuthor { line: usize },
@@ -46,6 +48,9 @@ impl<'a> ProcessingOutcome<'a> {
             }
             ProcessingOutcome::UndefinedGroup { name, line } => {
                 Err(ProgramParseError::UndefinedGroup { name, line })
+            }
+            ProcessingOutcome::UndefinedRole { id, line } => {
+                Err(ProgramParseError::UndefinedRole { id, line })
             }
             ProcessingOutcome::UndefinedMember { id, line } => {
                 Err(ProgramParseError::UndefinedMember { id, line })
@@ -92,13 +97,17 @@ impl<'a> MessageProcessor<'a> {
     pub fn parse_program<'b>(
         &self,
         member_ids: &'b [MemberId],
+        role_members: &'b RoleMembers,
         content: &'b str,
         author_id: Option<MemberId>,
     ) -> ProcessingOutcome<'b>
     where
         'a: 'b,
     {
-        match self.parser.parse(member_ids, content, author_id) {
+        match self
+            .parser
+            .parse(member_ids, role_members, content, author_id)
+        {
             Ok(program) => ProcessingOutcome::Success(program),
             Err(err) => Self::map_parse_error(err, 0),
         }
@@ -107,6 +116,7 @@ impl<'a> MessageProcessor<'a> {
     pub fn parse_program_sequence<'b, I>(
         &self,
         member_ids: &'b [MemberId],
+        role_members: &'b RoleMembers,
         messages: I,
     ) -> ProcessingOutcome<'b>
     where
@@ -125,7 +135,10 @@ impl<'a> MessageProcessor<'a> {
                 0
             };
 
-            match self.parser.parse(member_ids, content, author_id) {
+            match self
+                .parser
+                .parse(member_ids, role_members, content, author_id)
+            {
                 Ok(program) => {
                     let mut program_statements = program.into_statements();
                     for statement in &mut program_statements {
@@ -149,7 +162,7 @@ impl<'a> MessageProcessor<'a> {
             has_any = true;
         }
 
-        ProcessingOutcome::Success(Script::new(member_ids, statements))
+        ProcessingOutcome::Success(Script::new(member_ids, role_members, statements))
     }
 
     pub async fn calculate_balances(
@@ -253,7 +266,8 @@ impl<'a> MessageProcessor<'a> {
             None => statements.len(),
         };
 
-        let mut accumulator = BalanceAccumulator::new_with_members(program.members());
+        let mut accumulator =
+            BalanceAccumulator::new_with_context(program.members(), program.role_members());
         let mut last_settle_members: Vec<MemberId> = Vec::new();
         let mut last_settle_cash_members: Vec<MemberId> = Vec::new();
         let mut last_settle_transfers: Vec<Transfer> = Vec::new();
@@ -382,7 +396,8 @@ impl<'a> MessageProcessor<'a> {
             None => statements.len(),
         };
 
-        let mut accumulator = BalanceAccumulator::new_with_members(program.members());
+        let mut accumulator =
+            BalanceAccumulator::new_with_context(program.members(), program.role_members());
         for stmt in &statements[..end] {
             if let ScriptStatement::Domain(statement) = &stmt.statement {
                 accumulator
@@ -418,6 +433,10 @@ impl<'a> MessageProcessor<'a> {
             }
             ProgramParseError::UndefinedGroup { name, line } => ProcessingOutcome::UndefinedGroup {
                 name,
+                line: line + offset,
+            },
+            ProgramParseError::UndefinedRole { id, line } => ProcessingOutcome::UndefinedRole {
+                id,
                 line: line + offset,
             },
             ProgramParseError::UndefinedMember { id, line } => ProcessingOutcome::UndefinedMember {
@@ -458,12 +477,18 @@ mod tests {
     use std::collections::BTreeMap;
     use walicord_domain::{
         Payment, Statement,
-        model::{MemberId, MemberSetExpr, MemberSetOp, Money, Weight},
+        model::{MemberId, MemberSetExpr, MemberSetOp, Money, RoleMembers, Weight},
     };
 
     fn any_string() -> impl Strategy<Value = String> {
         proptest::collection::vec(any::<char>(), 0..40)
             .prop_map(|chars| chars.into_iter().collect())
+    }
+
+    fn empty_roles() -> &'static RoleMembers {
+        use std::sync::OnceLock;
+        static ROLES: OnceLock<RoleMembers> = OnceLock::new();
+        ROLES.get_or_init(RoleMembers::default)
     }
 
     struct StubParser;
@@ -472,6 +497,7 @@ mod tests {
         fn parse<'a>(
             &self,
             _member_ids: &'a [MemberId],
+            _role_members: &'a RoleMembers,
             _content: &'a str,
             _author_id: Option<MemberId>,
         ) -> Result<Script<'a>, ProgramParseError<'a>> {
@@ -501,7 +527,7 @@ mod tests {
                 },
             ];
 
-            Ok(Script::new(&[], statements))
+            Ok(Script::new(&[], empty_roles(), statements))
         }
     }
 
@@ -566,6 +592,7 @@ mod tests {
         fn parse<'a>(
             &self,
             _member_ids: &'a [MemberId],
+            _role_members: &'a RoleMembers,
             content: &'a str,
             _author_id: Option<MemberId>,
         ) -> Result<Script<'a>, ProgramParseError<'a>> {
@@ -581,6 +608,7 @@ mod tests {
 
             Ok(Script::new(
                 &[],
+                empty_roles(),
                 vec![ScriptStatementWithLine {
                     line: 1,
                     statement: ScriptStatement::Command(Command::Variables),
@@ -593,7 +621,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn settle_up_response_groups_transfers(processor: MessageProcessor<'_>) {
         let members: [MemberId; 0] = [];
-        let program = match processor.parse_program(&members, "unused", None) {
+        let program = match processor.parse_program(&members, empty_roles(), "unused", None) {
             ProcessingOutcome::Success(program) => program,
             _ => panic!("unexpected parse outcome"),
         };
@@ -617,7 +645,7 @@ mod tests {
         let processor = MessageProcessor::new(&parser, &optimizer);
 
         let members: [MemberId; 0] = [];
-        let program = match processor.parse_program(&members, "unused", None) {
+        let program = match processor.parse_program(&members, empty_roles(), "unused", None) {
             ProcessingOutcome::Success(program) => program,
             _ => panic!("unexpected parse outcome"),
         };
@@ -637,6 +665,7 @@ mod tests {
 
         let script = Script::new(
             &[],
+            empty_roles(),
             vec![
                 ScriptStatementWithLine {
                     line: 1,
@@ -673,6 +702,7 @@ mod tests {
 
         let script = Script::new(
             &[],
+            empty_roles(),
             vec![
                 payment_stmt(1, 1, 3, 700),
                 payment_stmt(2, 1, 4, 600),
@@ -721,7 +751,7 @@ mod tests {
                 statement: ScriptStatement::Command(Command::Review),
             },
         ]);
-        let script = Script::new(&[], statements);
+        let script = Script::new(&[], empty_roles(), statements);
 
         let _ = processor
             .build_settlement_result_for_prefix(&script, 5)
@@ -768,6 +798,7 @@ mod tests {
     fn script_with_zero_total_weight_payment() -> Script<'static> {
         Script::new(
             &[],
+            empty_roles(),
             vec![ScriptStatementWithLine {
                 line: 1,
                 statement: ScriptStatement::Domain(Statement::Payment(Payment::weighted(
@@ -787,6 +818,7 @@ mod tests {
     fn script_with_weight_overflow_payment() -> Script<'static> {
         Script::new(
             &[],
+            empty_roles(),
             vec![ScriptStatementWithLine {
                 line: 1,
                 statement: ScriptStatement::Domain(Statement::Payment(Payment::weighted(
@@ -822,7 +854,7 @@ mod tests {
             },
         ]);
 
-        Script::new(&[], persisted_statements)
+        Script::new(&[], empty_roles(), persisted_statements)
     }
 
     fn script_with_command_cash() -> Script<'static> {
@@ -836,7 +868,7 @@ mod tests {
             }),
         });
 
-        Script::new(&[], command_statements)
+        Script::new(&[], empty_roles(), command_statements)
     }
 
     fn script_with_invalid_member_cash_expr() -> Script<'static> {
@@ -864,7 +896,7 @@ mod tests {
             },
         ]);
 
-        Script::new(&[], with_invalid_cash)
+        Script::new(&[], empty_roles(), with_invalid_cash)
     }
 
     fn script_with_member_cash_on() -> Script<'static> {
@@ -886,7 +918,7 @@ mod tests {
             },
         ]);
 
-        Script::new(&[], baseline)
+        Script::new(&[], empty_roles(), baseline)
     }
 
     async fn assert_settle_transfers_equal(
@@ -962,7 +994,7 @@ mod tests {
             },
         ]);
 
-        let script = Script::new(&[], statements);
+        let script = Script::new(&[], empty_roles(), statements);
 
         let first = processor
             .build_settlement_result_for_prefix(&script, 5)
@@ -985,7 +1017,8 @@ mod tests {
     }
 
     #[rstest]
-    #[case::jpy_thirds(100, 67, -34, -33)]
+    #[case::fractional_thirds_rounding(100, 67, -34, -33)]
+    #[case::exact_thirds_no_rounding(99, 66, -33, -33)]
     #[tokio::test(flavor = "multi_thread")]
     async fn apply_statements_quantizes_balances_when_settlement_enabled(
         #[case] amount: i64,
@@ -996,6 +1029,7 @@ mod tests {
         let processor = MessageProcessor::new(&StubParser, &NoopOptimizer);
         let script = Script::new(
             &[],
+            empty_roles(),
             vec![ScriptStatementWithLine {
                 line: 1,
                 statement: ScriptStatement::Domain(Statement::Payment(Payment::even(
@@ -1138,6 +1172,7 @@ mod tests {
         let members: [MemberId; 0] = [];
         let outcome = processor.parse_program_sequence(
             &members,
+            empty_roles(),
             vec![(first, Some(MemberId(1))), (second, Some(MemberId(2)))],
         );
 
@@ -1161,6 +1196,7 @@ mod tests {
         let members: [MemberId; 0] = [];
         let outcome = processor.parse_program_sequence(
             &members,
+            empty_roles(),
             vec![(first, Some(MemberId(1))), ("SYNTAX", Some(MemberId(2)))],
         );
 
@@ -1183,6 +1219,7 @@ mod tests {
         let members: [MemberId; 0] = [];
         let outcome = processor.parse_program_sequence(
             &members,
+            empty_roles(),
             vec![(first, Some(MemberId(1))), ("IMPLICIT", Some(MemberId(2)))],
         );
 

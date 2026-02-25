@@ -1,6 +1,6 @@
 use crate::{
     channel::{ChannelEvent, ChannelManager, TrackedChannelId},
-    discord::ports::{ChannelService, RosterProvider},
+    discord::ports::{ChannelService, RosterProvider, RosterSnapshot},
     message_cache::{CachedMessage, MessageCache, next_line_offset},
     reaction::{BotReaction, BotReactionState, MessageValidity, ReactionService},
     settlement::{SettlementService, evaluate_program},
@@ -22,7 +22,7 @@ use serenity::{
 };
 use std::collections::HashMap;
 use walicord_application::{Command as ProgramCommand, MessageProcessor, ScriptStatement};
-use walicord_domain::model::MemberId;
+use walicord_domain::model::{MemberId, RoleId, RoleMembers};
 use walicord_presentation::{VariablesPresenter, format_program_parse_error};
 
 /// Result of attempting to load channel cache.
@@ -248,23 +248,28 @@ where
             return;
         }
 
-        let member_ids = match self
+        let roster = match self
             .roster_provider
             .roster_for_channel(ctx, channel_id)
             .await
         {
-            Ok(ids) => ids,
+            Ok(snapshot) => snapshot,
             Err(e) => {
                 tracing::warn!(
                     "Failed to fetch channel member IDs for {}: {:?}",
                     channel_id,
                     e
                 );
-                Vec::new()
+                RosterSnapshot::default()
             }
         };
 
-        let plan = plan_cache_rebuild(&self.processor, &member_ids, &messages);
+        let plan = plan_cache_rebuild(
+            &self.processor,
+            &roster.member_ids,
+            &roster.role_members,
+            &messages,
+        );
 
         if let Some(tracked_id) = self.channel_manager.get_tracked(channel_id) {
             self.message_cache.insert(tracked_id, plan.cache);
@@ -286,19 +291,19 @@ where
         msg: &Message,
         tracked_id: TrackedChannelId,
     ) -> bool {
-        let member_ids = match self
+        let roster = match self
             .roster_provider
             .roster_for_channel(ctx, msg.channel_id)
             .await
         {
-            Ok(member_ids) => member_ids,
+            Ok(snapshot) => snapshot,
             Err(e) => {
                 tracing::warn!(
                     "Failed to fetch channel member IDs for {}: {:?}",
                     msg.channel_id,
                     e
                 );
-                Vec::new()
+                RosterSnapshot::default()
             }
         };
 
@@ -318,7 +323,8 @@ where
 
         let result = match evaluate_program(
             &self.processor,
-            &member_ids,
+            &roster.member_ids,
+            &roster.role_members,
             &cached_contents,
             msg.content.as_str(),
             author_id,
@@ -351,7 +357,7 @@ where
                             let reply = VariablesPresenter::render_for_prefix_with_members(
                                 program,
                                 stmt_index,
-                                &member_ids,
+                                &roster.member_ids,
                             );
                             let _ = msg.reply(&ctx.http, reply).await;
                         }
@@ -362,7 +368,7 @@ where
                                     msg,
                                     stmt_index,
                                     program,
-                                    &member_ids,
+                                    &roster.member_ids,
                                     &mut member_directory,
                                 )
                                 .await;
@@ -393,6 +399,7 @@ struct CacheRebuildPlan {
 fn plan_cache_rebuild(
     processor: &MessageProcessor,
     member_ids: &[MemberId],
+    role_members: &RoleMembers,
     messages: &[CachedMessage],
 ) -> CacheRebuildPlan {
     let mut sorted_indices: Vec<usize> = (0..messages.len()).collect();
@@ -421,6 +428,7 @@ fn plan_cache_rebuild(
         let (desired_validity, should_store) = {
             let outcome = processor.parse_program_sequence(
                 member_ids,
+                role_members,
                 inputs
                     .iter()
                     .copied()
@@ -541,7 +549,13 @@ where
     async fn guild_member_addition(&self, _ctx: Context, new_member: Member) {
         let guild_id = new_member.guild_id;
         let member_info = crate::discord::service::to_member_info(&new_member);
-        self.roster_provider.apply_member_add(guild_id, member_info);
+        let role_ids: Vec<RoleId> = new_member
+            .roles
+            .iter()
+            .map(|role_id| RoleId(role_id.get()))
+            .collect();
+        self.roster_provider
+            .apply_member_add(guild_id, member_info, &role_ids);
     }
 
     async fn guild_member_update(
@@ -556,8 +570,13 @@ where
         };
         let guild_id = new_member.guild_id;
         let member_info = crate::discord::service::to_member_info(&new_member);
+        let role_ids: Vec<RoleId> = new_member
+            .roles
+            .iter()
+            .map(|role_id| RoleId(role_id.get()))
+            .collect();
         self.roster_provider
-            .apply_member_update(guild_id, member_info);
+            .apply_member_update(guild_id, member_info, &role_ids);
     }
 
     async fn guild_member_removal(
@@ -899,13 +918,14 @@ mod tests {
         processor: MessageProcessor<'static>,
     ) {
         let member_ids = [MemberId(1), MemberId(2)];
+        let role_members = RoleMembers::default();
         let messages = vec![
             make_cached_message(3, "<@1> paid x to <@2>"),
             make_cached_message(1, "<@1> paid 100 to <@2>"),
             make_cached_message(2, "!variables"),
         ];
 
-        let plan = plan_cache_rebuild(&processor, &member_ids, &messages);
+        let plan = plan_cache_rebuild(&processor, &member_ids, &role_members, &messages);
 
         let reaction_order: Vec<(u64, MessageValidity)> = plan
             .reactions
@@ -940,12 +960,13 @@ mod tests {
         #[case] expected_cached: [u64; 2],
     ) {
         let member_ids = [MemberId(1), MemberId(2)];
+        let role_members = RoleMembers::default();
         let messages = vec![
             make_cached_message(1, first),
             make_cached_message(2, second),
         ];
 
-        let plan = plan_cache_rebuild(&processor, &member_ids, &messages);
+        let plan = plan_cache_rebuild(&processor, &member_ids, &role_members, &messages);
 
         let reaction_order: Vec<(u64, MessageValidity)> = plan
             .reactions
@@ -988,8 +1009,9 @@ mod tests {
         let valid_message = make_cached_message(2, "!variables");
 
         let messages = vec![invalid_message, valid_message];
+        let role_members = RoleMembers::default();
 
-        let plan = plan_cache_rebuild(&processor, &member_ids, &messages);
+        let plan = plan_cache_rebuild(&processor, &member_ids, &role_members, &messages);
 
         let cached_ids: Vec<u64> = plan.cache.keys().map(|id| id.get()).collect();
         assert_eq!(cached_ids, [1, 2]);
@@ -1021,8 +1043,9 @@ mod tests {
         invalid2.reaction_state = BotReactionState::HasCross;
 
         let messages = vec![invalid1, invalid2];
+        let role_members = RoleMembers::default();
 
-        let plan = plan_cache_rebuild(&processor, &member_ids, &messages);
+        let plan = plan_cache_rebuild(&processor, &member_ids, &role_members, &messages);
 
         assert!(plan.cache.is_empty());
         let reactions: Vec<(u64, MessageValidity)> = plan
