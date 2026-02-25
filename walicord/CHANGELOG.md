@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.2.0](https://github.com/yu256/walicord/compare/walicord-v2.1.0...walicord-v2.2.0) (2026-02-25)
+
+
+### Features
+
+* Support Role mention ([#67](https://github.com/yu256/walicord/issues/67)) ([57ee361](https://github.com/yu256/walicord/commit/57ee361dad220053a3fb846e1c9c35dda0e3065f))
+
 ## [2.1.0](https://github.com/yu256/walicord/compare/walicord-v2.0.0...walicord-v2.1.0) (2026-02-21)
 
 
