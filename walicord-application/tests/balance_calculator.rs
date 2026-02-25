@@ -3,7 +3,10 @@ use walicord_application::{
     MessageProcessor, PersonBalance, ProgramParseError, ProgramParser, Script,
     SettlementOptimizationError, SettlementOptimizer,
 };
-use walicord_domain::{MemberBalances, Money, SettlementContext, Transfer, model::MemberId};
+use walicord_domain::{
+    MemberBalances, Money, SettlementContext, Transfer,
+    model::{MemberId, RoleMembers},
+};
 use walicord_infrastructure::WalicordProgramParser;
 
 struct NoopOptimizer;
@@ -48,6 +51,12 @@ const MEMBERS_1_2_3: [MemberId; 3] = [
 ];
 const EMPTY_MEMBERS: [MemberId; 0] = [];
 
+fn empty_roles() -> &'static RoleMembers {
+    use std::sync::OnceLock;
+    static ROLES: OnceLock<RoleMembers> = OnceLock::new();
+    ROLES.get_or_init(RoleMembers::default)
+}
+
 #[fixture]
 fn processor() -> MessageProcessor<'static> {
     MessageProcessor::new(&TEST_PARSER, &TEST_OPTIMIZER)
@@ -55,7 +64,7 @@ fn processor() -> MessageProcessor<'static> {
 
 fn parse_program_from_content<'a>(members: &'a [MemberId], content: &'a str) -> Script<'a> {
     let parser = WalicordProgramParser;
-    match parser.parse(members, content, None) {
+    match parser.parse(members, empty_roles(), content, None) {
         Ok(program) => program,
         Err(err) => match err {
             ProgramParseError::FailedToEvaluateGroup { name, line } => {
@@ -63,6 +72,9 @@ fn parse_program_from_content<'a>(members: &'a [MemberId], content: &'a str) -> 
             }
             ProgramParseError::UndefinedGroup { name, line } => {
                 panic!("parse failed: undefined group {name} at line {line}")
+            }
+            ProgramParseError::UndefinedRole { id, line } => {
+                panic!("parse failed: undefined role <@&{id}> at line {line}")
             }
             ProgramParseError::UndefinedMember { id, line } => {
                 panic!("parse failed: undefined member <@{id}> at line {line}")
@@ -85,7 +97,7 @@ fn parse_program_from_content<'a>(members: &'a [MemberId], content: &'a str) -> 
 
 fn assert_parse_undefined_group(members: &[MemberId], content: &str, name: &str, line: usize) {
     let parser = WalicordProgramParser;
-    match parser.parse(members, content, None) {
+    match parser.parse(members, empty_roles(), content, None) {
         Ok(_) => panic!("expected undefined group error"),
         Err(ProgramParseError::UndefinedGroup {
             name: actual_name,

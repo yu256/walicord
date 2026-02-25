@@ -4,12 +4,16 @@ use crate::{
     model::PersonBalance,
 };
 use std::collections::HashMap;
-use walicord_domain::{SettlementContext, Transfer, model::MemberId};
+use walicord_domain::{
+    SettlementContext, Transfer,
+    model::{MemberId, RoleMembers},
+};
 
 pub trait ProgramParser: Send + Sync {
     fn parse<'a>(
         &self,
         member_ids: &'a [MemberId],
+        role_members: &'a RoleMembers,
         content: &'a str,
         author_id: Option<MemberId>,
     ) -> Result<Script<'a>, ProgramParseError<'a>>;

@@ -106,6 +106,11 @@ pub fn undefined_group(name: impl std::fmt::Display) -> impl std::fmt::Display {
 }
 
 #[cfg(feature = "ja")]
+pub fn undefined_role(id: u64) -> impl std::fmt::Display {
+    std::fmt::from_fn(move |f| write!(f, "未定義のロール <@&{id}> です"))
+}
+
+#[cfg(feature = "ja")]
 pub fn undefined_member(id: u64) -> impl std::fmt::Display {
     std::fmt::from_fn(move |f| write!(f, "未定義のメンバー <@{id}> です"))
 }
@@ -121,6 +126,11 @@ pub fn undefined_group(name: impl std::fmt::Display) -> impl std::fmt::Display {
 }
 
 #[cfg(feature = "en")]
+pub fn undefined_role(id: u64) -> impl std::fmt::Display {
+    std::fmt::from_fn(move |f| write!(f, "Undefined role <@&{id}>"))
+}
+
+#[cfg(feature = "en")]
 pub fn undefined_member(id: u64) -> impl std::fmt::Display {
     std::fmt::from_fn(move |f| write!(f, "Undefined member <@{id}>"))
 }
@@ -133,6 +143,11 @@ pub fn failed_to_evaluate_group(name: impl std::fmt::Display) -> impl std::fmt::
 #[cfg(not(any(feature = "ja", feature = "en")))]
 pub fn undefined_group(name: impl std::fmt::Display) -> impl std::fmt::Display {
     std::fmt::from_fn(move |f| write!(f, "Undefined group '{}'", name))
+}
+
+#[cfg(not(any(feature = "ja", feature = "en")))]
+pub fn undefined_role(id: u64) -> impl std::fmt::Display {
+    std::fmt::from_fn(move |f| write!(f, "Undefined role <@&{id}>"))
 }
 
 #[cfg(not(any(feature = "ja", feature = "en")))]

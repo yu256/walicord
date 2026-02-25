@@ -4,7 +4,7 @@ use serenity::{
     model::{channel::Message, id::ChannelId},
     prelude::*,
 };
-use walicord_domain::model::{MemberId, MemberInfo};
+use walicord_domain::model::{MemberId, MemberInfo, RoleId, RoleMembers};
 
 /// Error type for Discord service operations
 #[derive(Debug, thiserror::Error)]
@@ -34,7 +34,7 @@ pub trait RosterProvider: Clone + Send + Sync + 'static {
         &self,
         ctx: &Context,
         channel_id: ChannelId,
-    ) -> impl Future<Output = Result<Vec<MemberId>, ServiceError>> + Send;
+    ) -> impl Future<Output = Result<RosterSnapshot, ServiceError>> + Send;
 
     /// Warm up the roster for a channel
     fn warm_up(
@@ -44,10 +44,20 @@ pub trait RosterProvider: Clone + Send + Sync + 'static {
     ) -> impl Future<Output = Result<(), ServiceError>> + Send;
 
     /// Apply member addition
-    fn apply_member_add(&self, guild_id: serenity::model::id::GuildId, member: MemberInfo);
+    fn apply_member_add(
+        &self,
+        guild_id: serenity::model::id::GuildId,
+        member: MemberInfo,
+        role_ids: &[RoleId],
+    );
 
     /// Apply member update
-    fn apply_member_update(&self, guild_id: serenity::model::id::GuildId, member: MemberInfo);
+    fn apply_member_update(
+        &self,
+        guild_id: serenity::model::id::GuildId,
+        member: MemberInfo,
+        role_ids: &[RoleId],
+    );
 
     /// Apply member removal
     fn apply_member_remove(&self, guild_id: serenity::model::id::GuildId, member_id: MemberId);
@@ -60,4 +70,10 @@ pub trait RosterProvider: Clone + Send + Sync + 'static {
     ) -> std::collections::HashMap<MemberId, smol_str::SmolStr>
     where
         I: IntoIterator<Item = MemberId>;
+}
+
+#[derive(Clone, Default)]
+pub struct RosterSnapshot {
+    pub member_ids: Vec<MemberId>,
+    pub role_members: RoleMembers,
 }

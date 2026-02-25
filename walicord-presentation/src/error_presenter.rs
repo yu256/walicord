@@ -17,6 +17,12 @@ pub fn format_program_parse_error(
                 walicord_i18n::undefined_group(&name)
             )
         }
+        ProgramParseError::UndefinedRole { id, line } => {
+            format!(
+                "{mention} {} (line {line})",
+                walicord_i18n::undefined_role(id)
+            )
+        }
         ProgramParseError::UndefinedMember { id, line } => {
             format!(
                 "{mention} {} (line {line})",
@@ -54,6 +60,7 @@ mod tests {
         match error {
             ProgramParseError::FailedToEvaluateGroup { line, .. } => *line,
             ProgramParseError::UndefinedGroup { line, .. } => *line,
+            ProgramParseError::UndefinedRole { line, .. } => *line,
             ProgramParseError::UndefinedMember { line, .. } => *line,
             ProgramParseError::SyntaxError { line, .. } => *line,
             ProgramParseError::MissingContextForImplicitAuthor { line } => *line,
@@ -75,6 +82,10 @@ mod tests {
             name: Cow::Borrowed("unknown"),
             line: 3,
         },
+        "@user"
+    )]
+    #[case::undefined_role(
+        ProgramParseError::UndefinedRole { id: 10, line: 4 },
         "@user"
     )]
     #[case::undefined_member(

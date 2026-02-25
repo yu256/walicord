@@ -3,22 +3,23 @@
 mod i18n;
 
 use nom::{
+    IResult, Parser,
     branch::alt,
     bytes::complete::{tag, tag_no_case, take_till, take_until, take_while, take_while1},
     character::complete::{char, digit1, multispace1, u64},
     combinator::{map_res, opt, recognize},
     multi::many0,
     sequence::delimited,
-    IResult, Parser,
 };
 use rust_decimal::Decimal;
-use smallvec::{smallvec, SmallVec};
+use smallvec::{SmallVec, smallvec};
 use std::str::FromStr;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SetOp<'a> {
     Push(u64),              // Discord user ID (mention)
     PushWeighted(u64, u64), // Discord user ID with weight (mention*weight)
+    PushRole(u64),          // Discord role ID (role mention)
     PushGroup(&'a str),     // Group name reference
     Union,
     Intersection,
@@ -59,6 +60,13 @@ impl<'a> SetExpr<'a> {
         })
     }
 
+    pub fn referenced_roles(&self) -> impl Iterator<Item = u64> + '_ {
+        self.ops.iter().filter_map(|op| match op {
+            SetOp::PushRole(id) => Some(*id),
+            _ => None,
+        })
+    }
+
     pub fn referenced_weighted(&self) -> impl Iterator<Item = (u64, u64)> + '_ {
         self.ops.iter().filter_map(|op| match op {
             SetOp::PushWeighted(id, weight) => Some((*id, *weight)),
@@ -71,11 +79,13 @@ impl<'a> SetExpr<'a> {
         self.ops.iter().any(|op| matches!(op, SetOp::Push(_)))
     }
 
-    /// Returns true if there are any group references (PushGroup).
-    /// Group references resolve to members at runtime with default weight 1,
+    /// Returns true if there are any runtime-resolved references.
+    /// Group and role references resolve to members at runtime with default weight 1,
     /// so they should be treated as potentially having unweighted members.
     pub fn has_group_reference(&self) -> bool {
-        self.ops.iter().any(|op| matches!(op, SetOp::PushGroup(_)))
+        self.ops
+            .iter()
+            .any(|op| matches!(op, SetOp::PushGroup(_) | SetOp::PushRole(_)))
     }
 }
 
@@ -194,7 +204,14 @@ fn mention(input: &str) -> IResult<&str, u64> {
     Ok((input, id))
 }
 
-fn mention_with_weight(input: &str) -> IResult<&str, SetOp<'static>> {
+fn role_mention(input: &str) -> IResult<&str, u64> {
+    let (input, _) = tag("<@&")(input)?;
+    let (input, id) = u64(input)?;
+    let (input, _) = char('>')(input)?;
+    Ok((input, id))
+}
+
+fn mention_with_weight(input: &str) -> IResult<&str, SetOp<'_>> {
     let (input, id) = mention(input)?;
     let (input, weight) = opt((char('*'), u64).map(|(_, w)| w)).parse(input)?;
     let op = match weight {
@@ -204,31 +221,35 @@ fn mention_with_weight(input: &str) -> IResult<&str, SetOp<'static>> {
     Ok((input, op))
 }
 
-fn mention_sequence_generic<'a, P, T>(
-    parser: P,
-    to_op: fn(T) -> SetOp<'a>,
-    input: &'a str,
-) -> IResult<&'a str, SetExpr<'a>>
+fn mention_or_role(input: &str) -> IResult<&str, SetOp<'_>> {
+    alt((mention.map(SetOp::Push), role_mention.map(SetOp::PushRole))).parse(input)
+}
+
+fn mention_or_role_weighted(input: &str) -> IResult<&str, SetOp<'_>> {
+    alt((mention_with_weight, role_mention.map(SetOp::PushRole))).parse(input)
+}
+
+fn mention_sequence_generic<'a, P>(parser: P, input: &'a str) -> IResult<&'a str, SetExpr<'a>>
 where
-    P: Fn(&'a str) -> IResult<&'a str, T>,
+    P: Fn(&'a str) -> IResult<&'a str, SetOp<'a>>,
 {
     use nom::multi::many1;
 
-    let (input, items) = many1((parser, sp).map(|(item, _)| item)).parse(input)?;
+    let (input, ops) = many1((parser, sp).map(|(op, _)| op)).parse(input)?;
 
     let mut expr = SetExpr::new();
-    let len = items.len();
-    expr.ops.extend(items.into_iter().map(to_op));
+    let len = ops.len();
+    expr.ops.extend(ops);
     expr.ops.extend(std::iter::repeat_n(SetOp::Union, len - 1));
     Ok((input, expr))
 }
 
 fn mention_sequence(input: &str) -> IResult<&str, SetExpr<'_>> {
-    mention_sequence_generic(mention, SetOp::Push, input)
+    mention_sequence_generic(mention_or_role, input)
 }
 
 fn mention_sequence_weighted(input: &str) -> IResult<&str, SetExpr<'_>> {
-    mention_sequence_generic(mention_with_weight, std::convert::identity, input)
+    mention_sequence_generic(mention_or_role_weighted, input)
 }
 
 fn identifier(input: &str) -> IResult<&str, &str> {
@@ -623,11 +644,7 @@ mod tests {
                 AmountOp::Div => apply_bin(&mut stack, |a, b| a.checked_div(b))?,
             }
         }
-        if stack.len() == 1 {
-            stack.pop()
-        } else {
-            None
-        }
+        if stack.len() == 1 { stack.pop() } else { None }
     }
 
     fn apply_bin(
@@ -643,6 +660,7 @@ mod tests {
     #[rstest]
     #[case::members("MEMBERS", &[SetOp::PushGroup("MEMBERS")])]
     #[case::mention("<@65>", &[SetOp::Push(65)])] // 'A' = 65 in ASCII
+    #[case::role("<@&42>", &[SetOp::PushRole(42)])]
     #[case::union_symbol(
         "<@65> ∪ <@66>",
         &[SetOp::Push(65), SetOp::Push(66), SetOp::Union]
@@ -650,6 +668,10 @@ mod tests {
     #[case::union_space(
         "<@65> <@66>",
         &[SetOp::Push(65), SetOp::Push(66), SetOp::Union]
+    )]
+    #[case::union_space_with_role(
+        "<@&42> <@66>",
+        &[SetOp::PushRole(42), SetOp::Push(66), SetOp::Union]
     )]
     #[case::intersection(
         "<@65> ∩ <@66>",
@@ -792,6 +814,14 @@ mod tests {
     #[case::nickname("<@!123456789>", 123456789)] // nickname mention
     fn test_parse_mention(#[case] input: &str, #[case] expected: u64) {
         let (_, id) = mention(input).expect("mention should parse");
+        assert_eq!(id, expected);
+    }
+
+    #[rstest]
+    #[case::smallest_nonzero("<@&1>", 1)]
+    #[case::basic("<@&987654321>", 987654321)]
+    fn test_parse_role_mention(#[case] input: &str, #[case] expected: u64) {
+        let (_, id) = role_mention(input).expect("role mention should parse");
         assert_eq!(id, expected);
     }
 
@@ -1014,17 +1044,34 @@ mod tests {
         "<@65>*3 <@66>*0 <@67>",
         &[SetOp::PushWeighted(65, 3), SetOp::PushWeighted(66, 0), SetOp::Push(67), SetOp::Union, SetOp::Union]
     )]
+    #[case::role_and_weighted_member(
+        "<@&70> <@65>*2",
+        &[SetOp::PushRole(70), SetOp::PushWeighted(65, 2), SetOp::Union]
+    )]
     fn test_weighted_set_expr_ops(#[case] input: &str, #[case] expected: &'static [SetOp]) {
         let (_, expr) = set_expr_weighted(input).expect("weighted set expression should parse");
         assert_eq!(expr.ops(), expected);
     }
 
     #[rstest]
-    #[case::weighted_payment_implicit("3000 <@65>*2 <@66>*0 <@67>")]
-    #[case::weighted_payment_to("3000 to <@65>*2 <@66>*0 <@67>")]
-    #[case::weighted_payment_ja("<@10> が <@65>*2 <@66>*0 <@67> に 3000 立て替えた")]
-    #[case::weighted_payment_en("<@10> paid 3000 to <@65>*2 <@66>*0 <@67>")]
-    fn test_weighted_payment_parses(#[case] input: &str) {
+    #[case::weighted_payment_implicit(
+        "3000 <@65>*2 <@66>*0 <@67>",
+        vec![(65, 2), (66, 0)]
+    )]
+    #[case::weighted_payment_to(
+        "3000 to <@65>*2 <@66>*0 <@67>",
+        vec![(65, 2), (66, 0)]
+    )]
+    #[case::weighted_payment_ja(
+        "<@10> が <@65>*2 <@66>*0 <@67> に 3000 立て替えた",
+        vec![(65, 2), (66, 0)]
+    )]
+    #[case::weighted_payment_en(
+        "<@10> paid 3000 to <@65>*2 <@66>*0 <@67>",
+        vec![(65, 2), (66, 0)]
+    )]
+    #[case::weighted_with_role("3000 to <@&70> <@65>*2", vec![(65, 2)])]
+    fn test_weighted_payment_parses(#[case] input: &str, #[case] expected: Vec<(u64, u64)>) {
         let program = parse_program(input).expect("weighted payment should parse");
         assert!(!program.statements.is_empty());
         let stmt = &program.statements[0].statement;
@@ -1033,14 +1080,25 @@ mod tests {
         };
         let payee = &payment.payee;
         let weighted: Vec<_> = payee.referenced_weighted().collect();
-        assert_eq!(weighted, vec![(65, 2), (66, 0)]);
+        assert_eq!(weighted, expected);
     }
 
-    #[rstest]
-    #[case::no_weight("<@65>", &[SetOp::Push(65)])]
-    fn test_unweighted_backward_compat(#[case] input: &str, #[case] expected: &'static [SetOp]) {
-        let (_, expr) = set_expr(input).expect("unweighted should still parse");
-        assert_eq!(expr.ops(), expected);
+    #[test]
+    fn test_weighted_payment_with_role_includes_role_reference() {
+        let program = parse_program("3000 to <@&70> <@65>*2")
+            .expect("weighted payment with role should parse");
+        let Statement::Payment(payment) = &program.statements[0].statement else {
+            panic!("expected payment statement");
+        };
+
+        let roles: Vec<_> = payment.payee.referenced_roles().collect();
+        assert_eq!(roles, vec![70]);
+    }
+
+    #[test]
+    fn test_unweighted_backward_compat() {
+        let (_, expr) = set_expr("<@65>").expect("unweighted should still parse");
+        assert_eq!(expr.ops(), &[SetOp::Push(65)]);
     }
 
     #[rstest]
@@ -1051,6 +1109,12 @@ mod tests {
     #[case::weighted_payer("<@10>*2 paid 3000 to <@20>")]
     fn test_reject_weighted_outside_payment_payee(#[case] input: &str) {
         let result = parse_program(input);
+        assert!(matches!(result, Err(ParseError::SyntaxError { .. })));
+    }
+
+    #[test]
+    fn test_reject_weighted_role_mention_in_payee() {
+        let result = parse_program("3000 to <@&20>*2");
         assert!(matches!(result, Err(ParseError::SyntaxError { .. })));
     }
 }

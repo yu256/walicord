@@ -1,14 +1,21 @@
-use crate::model::{MemberId, MemberSet, MemberSetExpr};
+use crate::model::{MemberId, MemberSet, MemberSetExpr, RoleId, RoleMembers};
 use fxhash::{FxHashMap, FxHashSet};
+use std::sync::OnceLock;
 
 /// Resolves group names to sets of member IDs
 pub struct MemberSetResolver<'a> {
     // Groups map group names to sets of member IDs
     groups: FxHashMap<&'a str, FxHashSet<MemberId>>,
+    roles: &'a RoleMembers,
     default_members: Option<FxHashSet<MemberId>>,
 }
 
 impl<'a> MemberSetResolver<'a> {
+    fn empty_roles() -> &'static RoleMembers {
+        static ROLES: OnceLock<RoleMembers> = OnceLock::new();
+        ROLES.get_or_init(RoleMembers::default)
+    }
+
     pub fn new() -> Self {
         Self::new_with_members(std::iter::empty())
     }
@@ -17,9 +24,17 @@ impl<'a> MemberSetResolver<'a> {
     where
         I: IntoIterator<Item = MemberId>,
     {
+        Self::new_with_context(members, Self::empty_roles())
+    }
+
+    pub fn new_with_context<I>(members: I, roles: &'a RoleMembers) -> Self
+    where
+        I: IntoIterator<Item = MemberId>,
+    {
         let default_members: FxHashSet<MemberId> = members.into_iter().collect();
         Self {
             groups: FxHashMap::default(),
+            roles,
             default_members: if default_members.is_empty() {
                 None
             } else {
@@ -46,13 +61,16 @@ impl<'a> MemberSetResolver<'a> {
     }
 
     pub fn evaluate_members(&self, expr: &MemberSetExpr<'a>) -> Option<MemberSet> {
-        let set = expr.evaluate(&|name| {
-            if name == "MEMBERS" {
-                self.default_members.as_ref()
-            } else {
-                self.groups.get(name)
-            }
-        })?;
+        let set = expr.evaluate(
+            &|name| {
+                if name == "MEMBERS" {
+                    self.default_members.as_ref()
+                } else {
+                    self.groups.get(name)
+                }
+            },
+            &|role_id| self.roles.get(&role_id),
+        )?;
         let mut ordered: Vec<MemberId> = set.iter().copied().collect();
         ordered.sort_unstable();
         Some(MemberSet::new(ordered))
@@ -69,6 +87,10 @@ impl<'a> MemberSetResolver<'a> {
     pub fn is_group_defined(&self, name: &str) -> bool {
         self.groups.contains_key(name)
     }
+
+    pub fn is_role_defined(&self, role_id: RoleId) -> bool {
+        self.roles.contains_key(&role_id)
+    }
 }
 
 impl<'a> Default for MemberSetResolver<'a> {
@@ -80,7 +102,7 @@ impl<'a> Default for MemberSetResolver<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{MemberSetExpr, MemberSetOp};
+    use crate::model::{MemberSetExpr, MemberSetOp, RoleId, RoleMembers};
     use rstest::rstest;
 
     #[test]
@@ -155,5 +177,47 @@ mod tests {
         let expr = MemberSetExpr::new([MemberSetOp::PushGroup("missing")]);
 
         assert!(resolver.evaluate_members(&expr).is_none());
+    }
+
+    #[test]
+    fn evaluate_members_resolves_role_reference() {
+        let roles = RoleMembers::from_iter([(
+            RoleId(10),
+            FxHashSet::from_iter([MemberId(2), MemberId(1)]),
+        )]);
+        let resolver = MemberSetResolver::new_with_context(std::iter::empty(), &roles);
+        let expr = MemberSetExpr::new([MemberSetOp::PushRole(RoleId(10))]);
+
+        let members = resolver
+            .evaluate_members(&expr)
+            .expect("role members should resolve");
+        assert_eq!(members.members(), [MemberId(1), MemberId(2)]);
+    }
+
+    #[test]
+    fn evaluate_members_returns_none_for_unknown_role() {
+        let resolver = MemberSetResolver::new();
+        let expr = MemberSetExpr::new([MemberSetOp::PushRole(RoleId(999))]);
+        assert!(resolver.evaluate_members(&expr).is_none());
+    }
+
+    #[test]
+    fn evaluate_members_supports_union_between_group_and_role() {
+        let roles = RoleMembers::from_iter([(
+            RoleId(10),
+            FxHashSet::from_iter([MemberId(2), MemberId(3)]),
+        )]);
+        let mut resolver = MemberSetResolver::new_with_context(std::iter::empty(), &roles);
+        resolver.register_group_members("A", [MemberId(1), MemberId(2)]);
+
+        let expr = MemberSetExpr::new([
+            MemberSetOp::PushGroup("A"),
+            MemberSetOp::PushRole(RoleId(10)),
+            MemberSetOp::Union,
+        ]);
+        let members = resolver
+            .evaluate_members(&expr)
+            .expect("members should resolve");
+        assert_eq!(members.members(), [MemberId(1), MemberId(2), MemberId(3)]);
     }
 }

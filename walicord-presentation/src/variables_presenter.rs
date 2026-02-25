@@ -1,7 +1,10 @@
 use std::fmt::Write as _;
 
 use walicord_application::{Script, ScriptStatement, ScriptStatementWithLine};
-use walicord_domain::{MemberSetResolver, Statement, model::MemberId};
+use walicord_domain::{
+    MemberSetResolver, Statement,
+    model::{MemberId, RoleMembers},
+};
 
 pub struct VariablesPresenter;
 
@@ -11,7 +14,7 @@ impl VariablesPresenter {
     }
 
     pub fn render_with_members(program: &Script<'_>, member_ids: &[MemberId]) -> String {
-        Self::render_from_slice(program.statements(), member_ids)
+        Self::render_from_slice(program.statements(), member_ids, program.role_members())
     }
 
     pub fn render_for_prefix(program: &Script<'_>, prefix_len: usize) -> String {
@@ -33,16 +36,18 @@ impl VariablesPresenter {
             &statements[..prefix_len]
         };
 
-        Self::render_from_slice(statements_slice, member_ids)
+        Self::render_from_slice(statements_slice, member_ids, program.role_members())
     }
 
-    fn render_from_slice(
-        statements: &[ScriptStatementWithLine<'_>],
+    fn render_from_slice<'a>(
+        statements: &[ScriptStatementWithLine<'a>],
         member_ids: &[MemberId],
+        role_members: &'a RoleMembers,
     ) -> String {
         let mut reply = String::with_capacity(512);
 
-        let mut resolver = MemberSetResolver::new_with_members(member_ids.iter().copied());
+        let mut resolver =
+            MemberSetResolver::new_with_context(member_ids.iter().copied(), role_members);
 
         for stmt in statements {
             let ScriptStatement::Domain(Statement::Declaration(decl)) = &stmt.statement else {

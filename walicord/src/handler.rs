@@ -22,7 +22,7 @@ use serenity::{
 };
 use std::collections::HashMap;
 use walicord_application::{Command as ProgramCommand, MessageProcessor, ScriptStatement};
-use walicord_domain::model::MemberId;
+use walicord_domain::model::{MemberId, RoleId, RoleMembers};
 use walicord_presentation::{VariablesPresenter, format_program_parse_error};
 
 /// Result of attempting to load channel cache.
@@ -36,6 +36,13 @@ pub enum CacheLoadResult {
     NotTracked,
     /// Fetch failed, cache not loaded.
     Failed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProcessProgramMessageResult {
+    Store,
+    Skip,
+    Deferred,
 }
 
 /// Discord bot event handler with generic service dependencies
@@ -147,6 +154,33 @@ where
         }
     }
 
+    fn has_pending_messages(&self, tracked_id: TrackedChannelId) -> bool {
+        self.message_cache
+            .with_messages(tracked_id, |messages| {
+                messages.values().any(CachedMessage::is_pending_evaluation)
+            })
+            .unwrap_or(false)
+    }
+
+    fn mark_pending(mut cached: CachedMessage) -> CachedMessage {
+        cached.mark_pending_evaluation();
+        cached
+    }
+
+    fn defer_current_message_if_pending_remains(
+        &self,
+        tracked_id: TrackedChannelId,
+        cached: CachedMessage,
+    ) -> bool {
+        if !self.has_pending_messages(tracked_id) {
+            return false;
+        }
+
+        self.message_cache
+            .upsert_message(tracked_id, Self::mark_pending(cached));
+        true
+    }
+
     pub(crate) async fn ensure_cache_loaded(
         &self,
         ctx: &Context,
@@ -215,11 +249,11 @@ where
         channel_id: ChannelId,
         updated_cached: Option<CachedMessage>,
     ) {
+        let updated_message_id = updated_cached.as_ref().map(|m| m.id);
         let load_result = self.ensure_cache_loaded(ctx, channel_id).await;
 
-        match load_result {
-            CacheLoadResult::NotTracked | CacheLoadResult::Failed => return,
-            CacheLoadResult::LoadedEmpty | CacheLoadResult::LoadedNonEmpty => {}
+        if should_abort_rebuild_after_cache_load(load_result) {
+            return;
         }
 
         let Some(tracked_id) = self.channel_manager.get_tracked(channel_id) else {
@@ -248,23 +282,34 @@ where
             return;
         }
 
-        let member_ids = match self
+        let roster = match self
             .roster_provider
             .roster_for_channel(ctx, channel_id)
             .await
         {
-            Ok(ids) => ids,
+            Ok(snapshot) => snapshot,
             Err(e) => {
-                tracing::warn!(
-                    "Failed to fetch channel member IDs for {}: {:?}",
-                    channel_id,
-                    e
-                );
-                Vec::new()
+                tracing::warn!("Failed to fetch roster for {}: {:?}", channel_id, e);
+                if let Some(updated_id) = updated_message_id
+                    && let Some(updated) = messages.iter_mut().find(|m| m.id == updated_id)
+                {
+                    updated.mark_pending_evaluation();
+                }
+                let fallback_cache: IndexMap<MessageId, CachedMessage> =
+                    messages.into_iter().map(|m| (m.id, m)).collect();
+                if let Some(tracked_id) = self.channel_manager.get_tracked(channel_id) {
+                    self.message_cache.insert(tracked_id, fallback_cache);
+                }
+                return;
             }
         };
 
-        let plan = plan_cache_rebuild(&self.processor, &member_ids, &messages);
+        let plan = plan_cache_rebuild(
+            &self.processor,
+            &roster.member_ids,
+            &roster.role_members,
+            &messages,
+        );
 
         if let Some(tracked_id) = self.channel_manager.get_tracked(channel_id) {
             self.message_cache.insert(tracked_id, plan.cache);
@@ -285,20 +330,16 @@ where
         ctx: &Context,
         msg: &Message,
         tracked_id: TrackedChannelId,
-    ) -> bool {
-        let member_ids = match self
+    ) -> ProcessProgramMessageResult {
+        let roster = match self
             .roster_provider
             .roster_for_channel(ctx, msg.channel_id)
             .await
         {
-            Ok(member_ids) => member_ids,
+            Ok(snapshot) => snapshot,
             Err(e) => {
-                tracing::warn!(
-                    "Failed to fetch channel member IDs for {}: {:?}",
-                    msg.channel_id,
-                    e
-                );
-                Vec::new()
+                tracing::warn!("Failed to fetch roster for {}: {:?}", msg.channel_id, e);
+                return ProcessProgramMessageResult::Deferred;
             }
         };
 
@@ -309,7 +350,9 @@ where
                 let offset = next_line_offset(messages.iter().map(|(_, m)| m));
                 let contents: Vec<(ArcStr, Option<MemberId>)> = messages
                     .iter()
-                    .filter(|(_, m)| !m.is_bot && !m.is_marked_invalid())
+                    .filter(|(_, m)| {
+                        !m.is_bot && !m.is_marked_invalid() && !m.is_pending_evaluation()
+                    })
                     .map(|(_, m)| (m.content.clone(), Some(MemberId(m.author_id.get()))))
                     .collect();
                 (contents, offset)
@@ -318,7 +361,8 @@ where
 
         let result = match evaluate_program(
             &self.processor,
-            &member_ids,
+            &roster.member_ids,
+            &roster.role_members,
             &cached_contents,
             msg.content.as_str(),
             author_id,
@@ -329,7 +373,7 @@ where
                 ReactionService::update_state(ctx, msg, MessageValidity::Invalid).await;
                 let content = format_program_parse_error(failure, msg.author.mention());
                 let _ = msg.reply(&ctx.http, content).await;
-                return false;
+                return ProcessProgramMessageResult::Skip;
             }
         };
 
@@ -351,7 +395,7 @@ where
                             let reply = VariablesPresenter::render_for_prefix_with_members(
                                 program,
                                 stmt_index,
-                                &member_ids,
+                                &roster.member_ids,
                             );
                             let _ = msg.reply(&ctx.http, reply).await;
                         }
@@ -362,7 +406,7 @@ where
                                     msg,
                                     stmt_index,
                                     program,
-                                    &member_ids,
+                                    &roster.member_ids,
                                     &mut member_directory,
                                 )
                                 .await;
@@ -373,7 +417,11 @@ where
             }
         }
 
-        result.should_store
+        if result.should_store {
+            ProcessProgramMessageResult::Store
+        } else {
+            ProcessProgramMessageResult::Skip
+        }
     }
 }
 
@@ -393,6 +441,7 @@ struct CacheRebuildPlan {
 fn plan_cache_rebuild(
     processor: &MessageProcessor,
     member_ids: &[MemberId],
+    role_members: &RoleMembers,
     messages: &[CachedMessage],
 ) -> CacheRebuildPlan {
     let mut sorted_indices: Vec<usize> = (0..messages.len()).collect();
@@ -421,6 +470,7 @@ fn plan_cache_rebuild(
         let (desired_validity, should_store) = {
             let outcome = processor.parse_program_sequence(
                 member_ids,
+                role_members,
                 inputs
                     .iter()
                     .copied()
@@ -465,6 +515,7 @@ fn plan_cache_rebuild(
         if should_store {
             let mut cached = message.clone();
             cached.reaction_state = BotReaction::state_from_validity(desired_validity);
+            cached.clear_pending_evaluation();
             cache.insert(message.id, cached);
             if has_any {
                 line_count += line_count_with_prior_newline(&message.content, ends_with_newline);
@@ -483,6 +534,13 @@ fn plan_cache_rebuild(
     }
 
     CacheRebuildPlan { cache, reactions }
+}
+
+fn should_abort_rebuild_after_cache_load(load_result: CacheLoadResult) -> bool {
+    matches!(
+        load_result,
+        CacheLoadResult::NotTracked | CacheLoadResult::Failed
+    )
 }
 
 /// Calculate line count with prior newline consideration
@@ -513,9 +571,28 @@ where
             return;
         };
 
-        if self.process_program_message(&ctx, &msg, tracked_id).await {
-            self.message_cache
-                .upsert_message(tracked_id, CachedMessage::from_message(msg));
+        if self.has_pending_messages(tracked_id) {
+            self.rebuild_channel_cache(&ctx, msg.channel_id, None).await;
+            if self.defer_current_message_if_pending_remains(
+                tracked_id,
+                CachedMessage::from_message(msg.clone()),
+            ) {
+                return;
+            }
+        }
+
+        match self.process_program_message(&ctx, &msg, tracked_id).await {
+            ProcessProgramMessageResult::Store => {
+                self.message_cache
+                    .upsert_message(tracked_id, CachedMessage::from_message(msg));
+            }
+            ProcessProgramMessageResult::Deferred => {
+                self.message_cache.upsert_message(
+                    tracked_id,
+                    Self::mark_pending(CachedMessage::from_message(msg)),
+                );
+            }
+            ProcessProgramMessageResult::Skip => {}
         }
     }
 
@@ -541,7 +618,13 @@ where
     async fn guild_member_addition(&self, _ctx: Context, new_member: Member) {
         let guild_id = new_member.guild_id;
         let member_info = crate::discord::service::to_member_info(&new_member);
-        self.roster_provider.apply_member_add(guild_id, member_info);
+        let role_ids: Vec<RoleId> = new_member
+            .roles
+            .iter()
+            .map(|role_id| RoleId(role_id.get()))
+            .collect();
+        self.roster_provider
+            .apply_member_add(guild_id, member_info, &role_ids);
     }
 
     async fn guild_member_update(
@@ -556,8 +639,13 @@ where
         };
         let guild_id = new_member.guild_id;
         let member_info = crate::discord::service::to_member_info(&new_member);
+        let role_ids: Vec<RoleId> = new_member
+            .roles
+            .iter()
+            .map(|role_id| RoleId(role_id.get()))
+            .collect();
         self.roster_provider
-            .apply_member_update(guild_id, member_info);
+            .apply_member_update(guild_id, member_info, &role_ids);
     }
 
     async fn guild_member_removal(
@@ -781,6 +869,7 @@ mod tests {
             author_id: UserId::new(1),
             is_bot: false,
             reaction_state: BotReactionState::None,
+            pending_evaluation: false,
         }
     }
 
@@ -899,13 +988,14 @@ mod tests {
         processor: MessageProcessor<'static>,
     ) {
         let member_ids = [MemberId(1), MemberId(2)];
+        let role_members = RoleMembers::default();
         let messages = vec![
             make_cached_message(3, "<@1> paid x to <@2>"),
             make_cached_message(1, "<@1> paid 100 to <@2>"),
             make_cached_message(2, "!variables"),
         ];
 
-        let plan = plan_cache_rebuild(&processor, &member_ids, &messages);
+        let plan = plan_cache_rebuild(&processor, &member_ids, &role_members, &messages);
 
         let reaction_order: Vec<(u64, MessageValidity)> = plan
             .reactions
@@ -926,6 +1016,19 @@ mod tests {
     }
 
     #[rstest]
+    #[case::failed(CacheLoadResult::Failed, true)]
+    #[case::not_tracked(CacheLoadResult::NotTracked, true)]
+    #[case::loaded_empty(CacheLoadResult::LoadedEmpty, false)]
+    #[case::loaded_non_empty(CacheLoadResult::LoadedNonEmpty, false)]
+    fn should_abort_rebuild_after_cache_load_matches_terminal_states(
+        #[case] load_result: CacheLoadResult,
+        #[case] expected: bool,
+    ) {
+        let actual = should_abort_rebuild_after_cache_load(load_result);
+        assert_eq!(actual, expected);
+    }
+
+    #[rstest]
     #[case::multiline_domain_then_settleup(
         "<@1> paid 100 to <@2>\n<@1> paid 50 to <@2>",
         "!settleup <@1>",
@@ -940,12 +1043,13 @@ mod tests {
         #[case] expected_cached: [u64; 2],
     ) {
         let member_ids = [MemberId(1), MemberId(2)];
+        let role_members = RoleMembers::default();
         let messages = vec![
             make_cached_message(1, first),
             make_cached_message(2, second),
         ];
 
-        let plan = plan_cache_rebuild(&processor, &member_ids, &messages);
+        let plan = plan_cache_rebuild(&processor, &member_ids, &role_members, &messages);
 
         let reaction_order: Vec<(u64, MessageValidity)> = plan
             .reactions
@@ -977,6 +1081,36 @@ mod tests {
     }
 
     #[rstest]
+    fn defer_current_message_if_pending_remains_stores_current_message_as_pending(
+        handler: BotHandler<'static, MockChannelService, MockRosterProvider>,
+    ) {
+        let channel_id = ChannelId::new(1);
+        let Some(ChannelEvent::Tracked(tracked_id)) = handler.channel_manager.track(channel_id)
+        else {
+            panic!("track should succeed");
+        };
+
+        let mut pending = make_cached_message(1, "<@1> paid 100 to <@2>");
+        pending.pending_evaluation = true;
+        let mut messages = IndexMap::new();
+        messages.insert(pending.id, pending);
+        handler.message_cache.insert(tracked_id, messages);
+
+        let current = make_cached_message(2, "!variables");
+        let deferred = handler.defer_current_message_if_pending_remains(tracked_id, current);
+
+        assert!(deferred);
+
+        let stored = handler
+            .message_cache
+            .with_messages(tracked_id, |msgs| msgs.get(&MessageId::new(2)).cloned())
+            .flatten()
+            .expect("current message should be cached");
+        assert!(stored.pending_evaluation);
+        assert_eq!(stored.reaction_state, BotReactionState::None);
+    }
+
+    #[rstest]
     fn plan_cache_rebuild_re_evaluates_marked_invalid_messages(
         processor: MessageProcessor<'static>,
     ) {
@@ -988,8 +1122,9 @@ mod tests {
         let valid_message = make_cached_message(2, "!variables");
 
         let messages = vec![invalid_message, valid_message];
+        let role_members = RoleMembers::default();
 
-        let plan = plan_cache_rebuild(&processor, &member_ids, &messages);
+        let plan = plan_cache_rebuild(&processor, &member_ids, &role_members, &messages);
 
         let cached_ids: Vec<u64> = plan.cache.keys().map(|id| id.get()).collect();
         assert_eq!(cached_ids, [1, 2]);
@@ -1009,6 +1144,27 @@ mod tests {
     }
 
     #[rstest]
+    fn plan_cache_rebuild_clears_pending_flag_on_re_evaluation(
+        processor: MessageProcessor<'static>,
+    ) {
+        let member_ids = [MemberId(1), MemberId(2)];
+        let role_members = RoleMembers::default();
+
+        let mut pending = make_cached_message(1, "<@1> paid 100 to <@2>");
+        pending.pending_evaluation = true;
+        pending.reaction_state = BotReactionState::HasCross;
+
+        let plan = plan_cache_rebuild(&processor, &member_ids, &role_members, &[pending]);
+
+        let rebuilt = plan
+            .cache
+            .get(&MessageId::new(1))
+            .expect("rebuild should cache valid message");
+        assert!(!rebuilt.pending_evaluation);
+        assert_eq!(rebuilt.reaction_state, BotReactionState::HasCheck);
+    }
+
+    #[rstest]
     fn plan_cache_rebuild_returns_empty_cache_when_all_messages_parse_invalid(
         processor: MessageProcessor<'static>,
     ) {
@@ -1021,8 +1177,9 @@ mod tests {
         invalid2.reaction_state = BotReactionState::HasCross;
 
         let messages = vec![invalid1, invalid2];
+        let role_members = RoleMembers::default();
 
-        let plan = plan_cache_rebuild(&processor, &member_ids, &messages);
+        let plan = plan_cache_rebuild(&processor, &member_ids, &role_members, &messages);
 
         assert!(plan.cache.is_empty());
         let reactions: Vec<(u64, MessageValidity)> = plan

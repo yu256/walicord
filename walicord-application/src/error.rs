@@ -12,6 +12,7 @@ pub enum FailureKind {
 pub enum ProgramParseError<'a> {
     FailedToEvaluateGroup { name: Cow<'a, str>, line: usize },
     UndefinedGroup { name: Cow<'a, str>, line: usize },
+    UndefinedRole { id: u64, line: usize },
     UndefinedMember { id: u64, line: usize },
     SyntaxError { line: usize, detail: String },
     MissingContextForImplicitAuthor { line: usize },
@@ -26,6 +27,9 @@ impl<'a> From<ProgramBuildError<'a>> for ProgramParseError<'a> {
                 name: Cow::Borrowed(name),
                 line,
             },
+            ProgramBuildError::UndefinedRole { id, line } => {
+                ProgramParseError::UndefinedRole { id: id.0, line }
+            }
             ProgramBuildError::FailedToEvaluateGroup { name, line } => {
                 ProgramParseError::FailedToEvaluateGroup {
                     name: Cow::Borrowed(name),
@@ -101,6 +105,7 @@ impl ProgramParseError<'_> {
             }
             ProgramParseError::FailedToEvaluateGroup { .. }
             | ProgramParseError::UndefinedGroup { .. }
+            | ProgramParseError::UndefinedRole { .. }
             | ProgramParseError::UndefinedMember { .. }
             | ProgramParseError::SyntaxError { .. }
             | ProgramParseError::InvalidAmountExpression { .. }

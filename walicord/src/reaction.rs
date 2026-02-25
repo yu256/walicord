@@ -253,8 +253,7 @@ mod tests {
         #[case] desired: MessageValidity,
         #[case] expects_change: bool,
     ) {
-        let desired_state = BotReaction::state_from_validity(desired);
-        let should_change = current != desired_state;
+        let should_change = !reaction_ops(current, desired).is_empty();
         assert_eq!(should_change, expects_change);
     }
 

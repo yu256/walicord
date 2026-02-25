@@ -1,6 +1,6 @@
 use walicord_domain::{
     Money, Statement, Transfer,
-    model::{MemberId, MemberSetExpr},
+    model::{MemberId, MemberSetExpr, RoleMembers},
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -28,19 +28,29 @@ pub struct ScriptStatementWithLine<'a> {
 
 pub struct Script<'a> {
     members: &'a [MemberId],
+    role_members: &'a RoleMembers,
     statements: Vec<ScriptStatementWithLine<'a>>,
 }
 
 impl<'a> Script<'a> {
-    pub fn new(member_ids: &'a [MemberId], statements: Vec<ScriptStatementWithLine<'a>>) -> Self {
+    pub fn new(
+        member_ids: &'a [MemberId],
+        role_members: &'a RoleMembers,
+        statements: Vec<ScriptStatementWithLine<'a>>,
+    ) -> Self {
         Self {
             members: member_ids,
+            role_members,
             statements,
         }
     }
 
     pub fn members(&self) -> &'a [MemberId] {
         self.members
+    }
+
+    pub fn role_members(&self) -> &'a RoleMembers {
+        self.role_members
     }
 
     pub fn statements(&self) -> &[ScriptStatementWithLine<'a>] {

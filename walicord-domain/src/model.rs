@@ -11,6 +11,7 @@ use std::{
         Add, AddAssign, BitAnd, BitAndAssign, BitOr, BitOrAssign, BitXor, BitXorAssign, Neg, Not,
         Shl, Sub, SubAssign,
     },
+    sync::OnceLock,
 };
 
 use crate::services::MemberSetResolver;
@@ -128,6 +129,7 @@ pub enum Statement<'a> {
 
 pub struct Program<'a> {
     members: Vec<MemberId>,
+    roles: &'a RoleMembers,
     statements: Vec<Statement<'a>>,
 }
 
@@ -144,6 +146,7 @@ pub struct StatementWithLine<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProgramBuildError<'a> {
     UndefinedGroup { name: &'a str, line: usize },
+    UndefinedRole { id: RoleId, line: usize },
     FailedToEvaluateGroup { name: &'a str, line: usize },
 }
 
@@ -556,7 +559,12 @@ impl std::ops::Div<Decimal> for Money {
 pub struct MemberId(pub u64);
 impl walicord_transfer_construction::MemberIdTrait for MemberId {}
 
+/// Discord role ID
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct RoleId(pub u64);
+
 pub type MemberBalances = BTreeMap<MemberId, Money>;
+pub type RoleMembers = FxHashMap<RoleId, FxHashSet<MemberId>>;
 
 trait MaskWord:
     Copy
@@ -604,6 +612,7 @@ impl MaskWord for u128 {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum MemberSetOp<'a> {
     Push(MemberId),     // Discord user ID (from mention)
+    PushRole(RoleId),   // Discord role ID (from role mention)
     PushGroup(&'a str), // Group name reference
     Union,
     Intersection,
@@ -822,7 +831,7 @@ mod tests {
         assert_sum_within_epsilon(&result, dec(amount));
     }
 
-    #[rstest]
+    #[test]
     #[should_panic(expected = "Cannot split by zero")]
     fn split_even_zero_count_panics() {
         let _ = Money::from_i64(100).split_even(0, RemainderPolicy::FrontLoad);
@@ -881,7 +890,7 @@ mod tests {
         assert_eq!(info.effective_name(), display_name);
     }
 
-    #[rstest]
+    #[test]
     fn member_info_clone_preserves_fields() {
         let info1 = MemberInfo {
             id: MemberId(1),
@@ -896,7 +905,7 @@ mod tests {
         assert_eq!(info1.avatar_url, info2.avatar_url);
     }
 
-    #[rstest]
+    #[test]
     fn member_index_mask_roundtrip() {
         let members = [MemberId(10), MemberId(20), MemberId(30)];
         let index = MemberIndex::try_new::<u32>(members).expect("index should fit u32");
@@ -911,7 +920,7 @@ mod tests {
         assert!(roundtrip.contains(&MemberId(30)));
     }
 
-    #[rstest]
+    #[test]
     fn member_set_expr_evaluate_mask_supports_set_operations() {
         let index =
             MemberIndex::try_new::<u32>([MemberId(1), MemberId(2), MemberId(3)]).expect("fit");
@@ -937,8 +946,9 @@ mod tests {
             MemberSetOp::Difference,
         ]);
 
+        let roles: FxHashMap<RoleId, u32> = FxHashMap::default();
         let mask = expr
-            .evaluate_mask::<u32, _>(&index, &|name| groups.get(name).copied())
+            .evaluate_mask::<u32>(&index, &groups, &roles)
             .expect("expression should evaluate");
         let mut result = index.mask_to_set(mask).into_iter().collect::<Vec<_>>();
         result.sort_unstable();
@@ -946,7 +956,7 @@ mod tests {
         assert_eq!(result, vec![MemberId(1), MemberId(3)]);
     }
 
-    #[rstest]
+    #[test]
     fn member_set_expr_evaluate_returns_none_when_member_count_exceeds_u128() {
         let member_count = 129usize;
         let mut ops = Vec::with_capacity(member_count + member_count - 1);
@@ -958,7 +968,7 @@ mod tests {
         }
 
         let expr = MemberSetExpr::new(ops);
-        let result = expr.evaluate(&|_| None);
+        let result = expr.evaluate(&|_| None, &|_| None);
 
         assert!(result.is_none());
     }
@@ -973,8 +983,10 @@ mod tests {
                 MemberSetExpr::new([MemberSetOp::Push(MemberId(1))]),
             )),
         },
-        "team",
-        1
+        Err(ProgramBuildError::UndefinedGroup {
+            name: "team",
+            line: 1
+        })
     )]
     #[case::declaration_undefined_group(
         StatementWithLine {
@@ -984,26 +996,50 @@ mod tests {
                 expression: MemberSetExpr::new([MemberSetOp::PushGroup("group_a")]),
             }),
         },
-        "group_a",
-        1
+        Err(ProgramBuildError::UndefinedGroup {
+            name: "group_a",
+            line: 1
+        })
     )]
     fn program_rejects_undefined_group_references(
         #[case] statement: StatementWithLine<'static>,
-        #[case] expected_name: &str,
-        #[case] expected_line: usize,
+        #[case] expected: Result<(), ProgramBuildError<'static>>,
     ) {
-        let result = Program::try_new(vec![statement], &[]);
+        let actual = Program::try_new(vec![statement], &[]).map(|_| ());
+        assert_eq!(actual, expected);
+    }
 
-        match result {
-            Err(ProgramBuildError::UndefinedGroup { name, line }) => {
-                assert_eq!(name, expected_name);
-                assert_eq!(line, expected_line);
-            }
-            _ => panic!("expected undefined group error"),
-        }
+    fn roles_with_role_10() -> RoleMembers {
+        RoleMembers::from_iter([(RoleId(10), FxHashSet::from_iter([MemberId(1), MemberId(2)]))])
     }
 
     #[rstest]
+    #[case::undefined_role(
+        RoleMembers::default(),
+        Err(ProgramBuildError::UndefinedRole {
+            id: RoleId(10),
+            line: 1
+        })
+    )]
+    #[case::defined_role(roles_with_role_10(), Ok(()))]
+    fn program_validates_role_references(
+        #[case] roles: RoleMembers,
+        #[case] expected: Result<(), ProgramBuildError<'static>>,
+    ) {
+        let statement = StatementWithLine {
+            line: 1,
+            statement: Statement::Payment(Payment::even(
+                Money::try_from(100).expect("amount should fit in i64"),
+                MemberSetExpr::new([MemberSetOp::PushRole(RoleId(10))]),
+                MemberSetExpr::new([MemberSetOp::Push(MemberId(3))]),
+            )),
+        };
+
+        let actual = Program::try_new_with_roles(vec![statement], &[], &roles).map(|_| ());
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
     fn program_accepts_declaration_then_reference() {
         let declaration = StatementWithLine {
             line: 1,
@@ -1248,13 +1284,15 @@ impl<'a> MemberSetExpr<'a> {
         Self { ops: values }
     }
 
-    /// Evaluate the expression to produce a set of member IDs
-    ///
-    /// # Arguments
-    /// * `member_resolver` - Resolves a group name to a borrowed set of member IDs
-    pub fn evaluate<'r, F>(&self, member_resolver: &F) -> Option<Cow<'r, FxHashSet<MemberId>>>
+    /// Evaluate the expression to produce a set of member IDs.
+    pub fn evaluate<'r, FG, FR>(
+        &self,
+        group_resolver: &FG,
+        role_resolver: &FR,
+    ) -> Option<Cow<'r, FxHashSet<MemberId>>>
     where
-        F: Fn(&str) -> Option<&'r FxHashSet<MemberId>>,
+        FG: Fn(&str) -> Option<&'r FxHashSet<MemberId>>,
+        FR: Fn(RoleId) -> Option<&'r FxHashSet<MemberId>>,
     {
         if self.ops.len() == 1 {
             return match self.ops[0] {
@@ -1263,7 +1301,8 @@ impl<'a> MemberSetExpr<'a> {
                     set.insert(id);
                     Some(Cow::Owned(set))
                 }
-                MemberSetOp::PushGroup(name) => Some(Cow::Borrowed(member_resolver(name)?)),
+                MemberSetOp::PushRole(id) => Some(Cow::Borrowed(role_resolver(id)?)),
+                MemberSetOp::PushGroup(name) => Some(Cow::Borrowed(group_resolver(name)?)),
                 _ => None,
             };
         }
@@ -1272,17 +1311,29 @@ impl<'a> MemberSetExpr<'a> {
         for name in self.referenced_groups() {
             if let std::collections::hash_map::Entry::Vacant(entry) = referenced_groups.entry(name)
             {
-                entry.insert(member_resolver(name)?);
+                entry.insert(group_resolver(name)?);
             }
         }
 
-        if let Some(result) = self.evaluate_with_mask::<u32>(&referenced_groups) {
+        let mut referenced_roles = FxHashMap::default();
+        for role_id in self.referenced_role_ids() {
+            if let std::collections::hash_map::Entry::Vacant(entry) =
+                referenced_roles.entry(role_id)
+            {
+                entry.insert(role_resolver(role_id)?);
+            }
+        }
+
+        if let Some(result) = self.evaluate_with_mask::<u32>(&referenced_groups, &referenced_roles)
+        {
             return Some(Cow::Owned(result));
         }
-        if let Some(result) = self.evaluate_with_mask::<u64>(&referenced_groups) {
+        if let Some(result) = self.evaluate_with_mask::<u64>(&referenced_groups, &referenced_roles)
+        {
             return Some(Cow::Owned(result));
         }
-        if let Some(result) = self.evaluate_with_mask::<u128>(&referenced_groups) {
+        if let Some(result) = self.evaluate_with_mask::<u128>(&referenced_groups, &referenced_roles)
+        {
             return Some(Cow::Owned(result));
         }
 
@@ -1292,16 +1343,23 @@ impl<'a> MemberSetExpr<'a> {
     fn evaluate_with_mask<M>(
         &self,
         referenced_groups: &FxHashMap<&'a str, &'_ FxHashSet<MemberId>>,
+        referenced_roles: &FxHashMap<RoleId, &'_ FxHashSet<MemberId>>,
     ) -> Option<FxHashSet<MemberId>>
     where
         M: MaskWord,
     {
         let index = MemberIndex::try_new::<M>(
-            self.referenced_ids().chain(
-                referenced_groups
-                    .values()
-                    .flat_map(|set| set.iter().copied()),
-            ),
+            self.referenced_ids()
+                .chain(
+                    referenced_groups
+                        .values()
+                        .flat_map(|set| set.iter().copied()),
+                )
+                .chain(
+                    referenced_roles
+                        .values()
+                        .flat_map(|set| set.iter().copied()),
+                ),
         )?;
 
         let mut group_masks =
@@ -1310,14 +1368,24 @@ impl<'a> MemberSetExpr<'a> {
             group_masks.insert(name, index.set_to_mask::<_, M>(members.iter().copied())?);
         }
 
-        let mask = self.evaluate_mask::<M, _>(&index, &|name| group_masks.get(name).copied())?;
+        let mut role_masks =
+            FxHashMap::with_capacity_and_hasher(referenced_roles.len(), Default::default());
+        for (&role_id, members) in referenced_roles {
+            role_masks.insert(role_id, index.set_to_mask::<_, M>(members.iter().copied())?);
+        }
+
+        let mask = self.evaluate_mask::<M>(&index, &group_masks, &role_masks)?;
         Some(index.mask_to_set(mask))
     }
 
-    fn evaluate_mask<M, F>(&self, index: &MemberIndex, group_resolver: &F) -> Option<M>
+    fn evaluate_mask<M>(
+        &self,
+        index: &MemberIndex,
+        group_masks: &FxHashMap<&'a str, M>,
+        role_masks: &FxHashMap<RoleId, M>,
+    ) -> Option<M>
     where
         M: MaskWord,
-        F: Fn(&str) -> Option<M>,
     {
         let mut stack: Vec<M> = Vec::with_capacity(self.ops.len());
 
@@ -1327,8 +1395,12 @@ impl<'a> MemberSetExpr<'a> {
                     let bit = index.bit_of::<M>(id)?;
                     stack.push(bit);
                 }
+                MemberSetOp::PushRole(role_id) => {
+                    let mask = role_masks.get(&role_id).copied()?;
+                    stack.push(mask);
+                }
                 MemberSetOp::PushGroup(name) => {
-                    let mask = group_resolver(name)?;
+                    let mask = group_masks.get(name).copied()?;
                     stack.push(mask);
                 }
                 MemberSetOp::Union => {
@@ -1367,15 +1439,37 @@ impl<'a> MemberSetExpr<'a> {
             _ => None,
         })
     }
+
+    /// Returns all referenced role IDs.
+    pub fn referenced_role_ids(&self) -> impl Iterator<Item = RoleId> + '_ {
+        self.ops.iter().filter_map(|op| match op {
+            MemberSetOp::PushRole(id) => Some(*id),
+            _ => None,
+        })
+    }
 }
 
 impl<'a> Program<'a> {
+    fn empty_roles() -> &'static RoleMembers {
+        static ROLES: OnceLock<RoleMembers> = OnceLock::new();
+        ROLES.get_or_init(RoleMembers::default)
+    }
+
     pub fn try_new(
         statements: Vec<StatementWithLine<'a>>,
         member_ids: &[MemberId],
     ) -> Result<Self, ProgramBuildError<'a>> {
+        Self::try_new_with_roles(statements, member_ids, Self::empty_roles())
+    }
+
+    pub fn try_new_with_roles(
+        statements: Vec<StatementWithLine<'a>>,
+        member_ids: &[MemberId],
+        role_members: &'a RoleMembers,
+    ) -> Result<Self, ProgramBuildError<'a>> {
         let mut validated_statements = Vec::with_capacity(statements.len());
-        let mut resolver = MemberSetResolver::new_with_members(member_ids.iter().copied());
+        let mut resolver =
+            MemberSetResolver::new_with_context(member_ids.iter().copied(), role_members);
 
         for StatementWithLine { line, statement } in statements {
             match &statement {
@@ -1387,6 +1481,11 @@ impl<'a> Program<'a> {
                                 name: group_name,
                                 line,
                             });
+                        }
+                    }
+                    for role_id in decl.expression.referenced_role_ids() {
+                        if !resolver.is_role_defined(role_id) {
+                            return Err(ProgramBuildError::UndefinedRole { id: role_id, line });
                         }
                     }
 
@@ -1412,6 +1511,15 @@ impl<'a> Program<'a> {
                             });
                         }
                     }
+                    for role_id in payment
+                        .payer
+                        .referenced_role_ids()
+                        .chain(payment.payee.referenced_role_ids())
+                    {
+                        if !resolver.is_role_defined(role_id) {
+                            return Err(ProgramBuildError::UndefinedRole { id: role_id, line });
+                        }
+                    }
                 }
             }
 
@@ -1420,6 +1528,7 @@ impl<'a> Program<'a> {
 
         Ok(Self {
             members: member_ids.to_vec(),
+            roles: role_members,
             statements: validated_statements,
         })
     }
@@ -1429,7 +1538,7 @@ impl<'a> Program<'a> {
     }
 
     pub fn calculate_balances(&self) -> Result<MemberBalances, BalanceError> {
-        let mut accumulator = BalanceAccumulator::new_with_members(&self.members);
+        let mut accumulator = BalanceAccumulator::new_with_context(&self.members, self.roles);
         for stmt in &self.statements {
             accumulator.apply(stmt)?;
         }
@@ -1444,13 +1553,23 @@ impl<'a> Default for BalanceAccumulator<'a> {
 }
 
 impl<'a> BalanceAccumulator<'a> {
+    fn empty_roles() -> &'static RoleMembers {
+        static ROLES: OnceLock<RoleMembers> = OnceLock::new();
+        ROLES.get_or_init(RoleMembers::default)
+    }
+
     pub fn new() -> Self {
         Self::new_with_members(&[])
     }
 
     pub fn new_with_members(member_ids: &[MemberId]) -> Self {
+        Self::new_with_context(member_ids, Self::empty_roles())
+    }
+
+    pub fn new_with_context(member_ids: &[MemberId], role_members: &'a RoleMembers) -> Self {
         let balances: MemberBalances = MemberBalances::default();
-        let resolver = MemberSetResolver::new_with_members(member_ids.iter().copied());
+        let resolver =
+            MemberSetResolver::new_with_context(member_ids.iter().copied(), role_members);
 
         Self { balances, resolver }
     }
