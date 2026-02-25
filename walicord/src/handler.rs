@@ -167,6 +167,20 @@ where
         cached
     }
 
+    fn defer_current_message_if_pending_remains(
+        &self,
+        tracked_id: TrackedChannelId,
+        cached: CachedMessage,
+    ) -> bool {
+        if !self.has_pending_messages(tracked_id) {
+            return false;
+        }
+
+        self.message_cache
+            .upsert_message(tracked_id, Self::mark_pending(cached));
+        true
+    }
+
     pub(crate) async fn ensure_cache_loaded(
         &self,
         ctx: &Context,
@@ -238,11 +252,8 @@ where
         let updated_message_id = updated_cached.as_ref().map(|m| m.id);
         let load_result = self.ensure_cache_loaded(ctx, channel_id).await;
 
-        match load_result {
-            CacheLoadResult::NotTracked => return,
-            CacheLoadResult::Failed if updated_cached.is_none() => return,
-            CacheLoadResult::LoadedEmpty | CacheLoadResult::LoadedNonEmpty => {}
-            CacheLoadResult::Failed => {}
+        if should_abort_rebuild_after_cache_load(load_result) {
+            return;
         }
 
         let Some(tracked_id) = self.channel_manager.get_tracked(channel_id) else {
@@ -525,6 +536,13 @@ fn plan_cache_rebuild(
     CacheRebuildPlan { cache, reactions }
 }
 
+fn should_abort_rebuild_after_cache_load(load_result: CacheLoadResult) -> bool {
+    matches!(
+        load_result,
+        CacheLoadResult::NotTracked | CacheLoadResult::Failed
+    )
+}
+
 /// Calculate line count with prior newline consideration
 fn line_count_with_prior_newline(content: &str, prior_ended_with_newline: bool) -> usize {
     content.lines().count() + if prior_ended_with_newline { 1 } else { 0 }
@@ -555,6 +573,12 @@ where
 
         if self.has_pending_messages(tracked_id) {
             self.rebuild_channel_cache(&ctx, msg.channel_id, None).await;
+            if self.defer_current_message_if_pending_remains(
+                tracked_id,
+                CachedMessage::from_message(msg.clone()),
+            ) {
+                return;
+            }
         }
 
         match self.process_program_message(&ctx, &msg, tracked_id).await {
@@ -992,6 +1016,19 @@ mod tests {
     }
 
     #[rstest]
+    #[case::failed(CacheLoadResult::Failed, true)]
+    #[case::not_tracked(CacheLoadResult::NotTracked, true)]
+    #[case::loaded_empty(CacheLoadResult::LoadedEmpty, false)]
+    #[case::loaded_non_empty(CacheLoadResult::LoadedNonEmpty, false)]
+    fn should_abort_rebuild_after_cache_load_matches_terminal_states(
+        #[case] load_result: CacheLoadResult,
+        #[case] expected: bool,
+    ) {
+        let actual = should_abort_rebuild_after_cache_load(load_result);
+        assert_eq!(actual, expected);
+    }
+
+    #[rstest]
     #[case::multiline_domain_then_settleup(
         "<@1> paid 100 to <@2>\n<@1> paid 50 to <@2>",
         "!settleup <@1>",
@@ -1041,6 +1078,36 @@ mod tests {
 
         let is_empty = cache.with_messages(tracked_id, |msgs| msgs.is_empty());
         assert_eq!(is_empty, Some(true));
+    }
+
+    #[rstest]
+    fn defer_current_message_if_pending_remains_stores_current_message_as_pending(
+        handler: BotHandler<'static, MockChannelService, MockRosterProvider>,
+    ) {
+        let channel_id = ChannelId::new(1);
+        let Some(ChannelEvent::Tracked(tracked_id)) = handler.channel_manager.track(channel_id)
+        else {
+            panic!("track should succeed");
+        };
+
+        let mut pending = make_cached_message(1, "<@1> paid 100 to <@2>");
+        pending.pending_evaluation = true;
+        let mut messages = IndexMap::new();
+        messages.insert(pending.id, pending);
+        handler.message_cache.insert(tracked_id, messages);
+
+        let current = make_cached_message(2, "!variables");
+        let deferred = handler.defer_current_message_if_pending_remains(tracked_id, current);
+
+        assert!(deferred);
+
+        let stored = handler
+            .message_cache
+            .with_messages(tracked_id, |msgs| msgs.get(&MessageId::new(2)).cloned())
+            .flatten()
+            .expect("current message should be cached");
+        assert!(stored.pending_evaluation);
+        assert_eq!(stored.reaction_state, BotReactionState::None);
     }
 
     #[rstest]
