@@ -1,6 +1,6 @@
 use crate::{
     channel::{ChannelEvent, ChannelManager, TrackedChannelId},
-    discord::ports::{ChannelService, RosterProvider, RosterSnapshot},
+    discord::ports::{ChannelService, RosterProvider},
     message_cache::{CachedMessage, MessageCache, next_line_offset},
     reaction::{BotReaction, BotReactionState, MessageValidity, ReactionService},
     settlement::{SettlementService, evaluate_program},
@@ -255,12 +255,8 @@ where
         {
             Ok(snapshot) => snapshot,
             Err(e) => {
-                tracing::warn!(
-                    "Failed to fetch channel member IDs for {}: {:?}",
-                    channel_id,
-                    e
-                );
-                RosterSnapshot::default()
+                tracing::warn!("Failed to fetch roster for {}: {:?}", channel_id, e);
+                return;
             }
         };
 
@@ -298,12 +294,8 @@ where
         {
             Ok(snapshot) => snapshot,
             Err(e) => {
-                tracing::warn!(
-                    "Failed to fetch channel member IDs for {}: {:?}",
-                    msg.channel_id,
-                    e
-                );
-                RosterSnapshot::default()
+                tracing::warn!("Failed to fetch roster for {}: {:?}", msg.channel_id, e);
+                return false;
             }
         };
 
