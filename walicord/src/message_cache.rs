@@ -23,6 +23,7 @@ pub struct CachedMessage {
     pub author_id: UserId,
     pub is_bot: bool,
     pub reaction_state: BotReactionState,
+    pub pending_evaluation: bool,
 }
 
 impl CachedMessage {
@@ -34,7 +35,15 @@ impl CachedMessage {
 
     /// Returns true if message content was cached but not yet re-evaluated.
     pub fn is_pending_evaluation(&self) -> bool {
-        self.reaction_state == BotReactionState::Pending
+        self.pending_evaluation
+    }
+
+    pub fn mark_pending_evaluation(&mut self) {
+        self.pending_evaluation = true;
+    }
+
+    pub fn clear_pending_evaluation(&mut self) {
+        self.pending_evaluation = false;
     }
 }
 
@@ -71,6 +80,7 @@ impl CachedMessage {
             author_id: msg.author.id,
             is_bot: msg.author.bot,
             reaction_state,
+            pending_evaluation: false,
         }
     }
 
@@ -242,6 +252,7 @@ mod tests {
             author_id: UserId::new(author_id),
             is_bot: false,
             reaction_state: BotReactionState::None,
+            pending_evaluation: false,
         }
     }
 
@@ -319,18 +330,31 @@ mod tests {
     fn next_line_offset_skips_pending_messages() {
         let valid = make_cached_message(1, 1, "line1\nline2");
         let mut pending = make_cached_message(2, 1, "line3");
-        pending.reaction_state = BotReactionState::Pending;
+        pending.mark_pending_evaluation();
         let valid2 = make_cached_message(3, 1, "line4");
 
         let offset = next_line_offset([&valid, &pending, &valid2]);
         assert_eq!(offset, 3);
     }
 
+    #[test]
+    fn pending_evaluation_flag_preserves_existing_reaction_state() {
+        let mut cached = make_cached_message(1, 1, "test");
+        cached.reaction_state = BotReactionState::HasCheck;
+
+        cached.mark_pending_evaluation();
+        assert!(cached.is_pending_evaluation());
+        assert_eq!(cached.reaction_state, BotReactionState::HasCheck);
+
+        cached.clear_pending_evaluation();
+        assert!(!cached.is_pending_evaluation());
+        assert_eq!(cached.reaction_state, BotReactionState::HasCheck);
+    }
+
     #[rstest::rstest]
     #[case::marked_invalid_is_has_cross(BotReactionState::HasCross, true)]
     #[case::has_check_is_not_marked_invalid(BotReactionState::HasCheck, false)]
     #[case::none_is_not_marked_invalid(BotReactionState::None, false)]
-    #[case::pending_is_not_marked_invalid(BotReactionState::Pending, false)]
     fn is_marked_invalid_matches_has_cross(
         #[case] reaction_state: BotReactionState,
         #[case] expected: bool,

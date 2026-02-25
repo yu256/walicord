@@ -163,7 +163,7 @@ where
     }
 
     fn mark_pending(mut cached: CachedMessage) -> CachedMessage {
-        cached.reaction_state = BotReactionState::Pending;
+        cached.mark_pending_evaluation();
         cached
     }
 
@@ -282,7 +282,7 @@ where
                 if let Some(updated_id) = updated_message_id
                     && let Some(updated) = messages.iter_mut().find(|m| m.id == updated_id)
                 {
-                    updated.reaction_state = BotReactionState::Pending;
+                    updated.mark_pending_evaluation();
                 }
                 let fallback_cache: IndexMap<MessageId, CachedMessage> =
                     messages.into_iter().map(|m| (m.id, m)).collect();
@@ -504,6 +504,7 @@ fn plan_cache_rebuild(
         if should_store {
             let mut cached = message.clone();
             cached.reaction_state = BotReaction::state_from_validity(desired_validity);
+            cached.clear_pending_evaluation();
             cache.insert(message.id, cached);
             if has_any {
                 line_count += line_count_with_prior_newline(&message.content, ends_with_newline);
@@ -553,13 +554,7 @@ where
         };
 
         if self.has_pending_messages(tracked_id) {
-            self.rebuild_channel_cache(
-                &ctx,
-                msg.channel_id,
-                Some(CachedMessage::from_message(msg)),
-            )
-            .await;
-            return;
+            self.rebuild_channel_cache(&ctx, msg.channel_id, None).await;
         }
 
         match self.process_program_message(&ctx, &msg, tracked_id).await {
@@ -850,6 +845,7 @@ mod tests {
             author_id: UserId::new(1),
             is_bot: false,
             reaction_state: BotReactionState::None,
+            pending_evaluation: false,
         }
     }
 
@@ -1078,6 +1074,27 @@ mod tests {
                 (2, MessageValidity::NotProgram),
             ]
         );
+    }
+
+    #[rstest]
+    fn plan_cache_rebuild_clears_pending_flag_on_re_evaluation(
+        processor: MessageProcessor<'static>,
+    ) {
+        let member_ids = [MemberId(1), MemberId(2)];
+        let role_members = RoleMembers::default();
+
+        let mut pending = make_cached_message(1, "<@1> paid 100 to <@2>");
+        pending.pending_evaluation = true;
+        pending.reaction_state = BotReactionState::HasCross;
+
+        let plan = plan_cache_rebuild(&processor, &member_ids, &role_members, &[pending]);
+
+        let rebuilt = plan
+            .cache
+            .get(&MessageId::new(1))
+            .expect("rebuild should cache valid message");
+        assert!(!rebuilt.pending_evaluation);
+        assert_eq!(rebuilt.reaction_state, BotReactionState::HasCheck);
     }
 
     #[rstest]
