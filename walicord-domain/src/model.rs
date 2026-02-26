@@ -1753,6 +1753,78 @@ mod tests {
     }
 
     #[rstest]
+    #[case::even_empty_payee(
+        vec![StatementWithLine {
+            line: 1,
+            statement: Statement::Payment(Payment::even(
+                Money::from_i64(100),
+                MemberSetExpr::new([MemberSetOp::Push(MemberId(10))]),
+                empty_member_set_expr(MemberId(1)),
+            )),
+        }],
+        empty_roles_ref(),
+        Ok(MemberBalances::from([
+            (MemberId(1), Money::ZERO),
+            (MemberId(10), Money::ZERO),
+        ]))
+    )]
+    #[case::even_empty_payer(
+        vec![StatementWithLine {
+            line: 1,
+            statement: Statement::Payment(Payment::even(
+                Money::from_i64(100),
+                empty_member_set_expr(MemberId(10)),
+                MemberSetExpr::new([MemberSetOp::Push(MemberId(1))]),
+            )),
+        }],
+        empty_roles_ref(),
+        Ok(MemberBalances::from([
+            (MemberId(1), Money::ZERO),
+            (MemberId(10), Money::ZERO),
+        ]))
+    )]
+    #[case::weighted_empty_payee(
+        vec![StatementWithLine {
+            line: 1,
+            statement: Statement::Payment(Payment::weighted_with_overrides(
+                Money::from_i64(100),
+                MemberSetExpr::new([MemberSetOp::Push(MemberId(10))]),
+                empty_member_set_expr(MemberId(1)),
+                WeightOverrides::new([WeightOverride::member(MemberId(1), Weight(2))]),
+            )),
+        }],
+        empty_roles_ref(),
+        Ok(MemberBalances::from([
+            (MemberId(1), Money::ZERO),
+            (MemberId(10), Money::ZERO),
+        ]))
+    )]
+    #[case::weighted_empty_payer(
+        vec![StatementWithLine {
+            line: 1,
+            statement: Statement::Payment(Payment::weighted_with_overrides(
+                Money::from_i64(100),
+                empty_member_set_expr(MemberId(10)),
+                MemberSetExpr::new([MemberSetOp::Push(MemberId(1))]),
+                WeightOverrides::new([WeightOverride::member(MemberId(1), Weight(2))]),
+            )),
+        }],
+        empty_roles_ref(),
+        Ok(MemberBalances::from([
+            (MemberId(1), Money::ZERO),
+            (MemberId(10), Money::ZERO),
+        ]))
+    )]
+    fn calculate_balances_skips_payments_with_empty_payer_or_payee(
+        #[case] statements: Vec<StatementWithLine<'static>>,
+        #[case] roles: &'static RoleMembers,
+        #[case] expected: Result<MemberBalances, BalanceError>,
+    ) {
+        let actual = calculate_statement_balances_with_roles(statements, roles);
+        assert_eq!(actual, expected);
+    }
+
+    #[rstest]
     #[case::zero_weight_member(
         3000,
         BTreeMap::from([(MemberId(1), Weight(2)), (MemberId(2), Weight::ZERO)]),
