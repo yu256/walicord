@@ -6,8 +6,9 @@ pub mod services;
 pub use model::{
     AllocationStrategy, AmountError, AmountExpr, AmountOp, BalanceAccumulator,
     BalanceDeltaDirection, BalanceError, Declaration, MemberBalances, MemberSet, MemberSetExpr,
-    MemberSetOp, Money, Payment, Program, ProgramBuildError, Ratios, RemainderPolicy, RoleId,
-    RoleMembers, Settlement, SplitError, Statement, StatementWithLine, Transfer, Weight,
+    MemberSetOp, Money, Payment, Program, ProgramBuildError, Ratios, RemainderPolicy,
+    ResolvedAllocationStrategy, RoleId, RoleMembers, Settlement, SplitError, Statement,
+    StatementWithLine, Transfer, Weight, WeightOverride, WeightOverrideTarget, WeightOverrides,
     distribute_balances,
 };
 pub use services::{

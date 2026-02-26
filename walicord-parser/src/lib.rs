@@ -17,10 +17,12 @@ use std::str::FromStr;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SetOp<'a> {
-    Push(u64),              // Discord user ID (mention)
-    PushWeighted(u64, u64), // Discord user ID with weight (mention*weight)
-    PushRole(u64),          // Discord role ID (role mention)
-    PushGroup(&'a str),     // Group name reference
+    Push(u64),                       // Discord user ID (mention)
+    PushWeighted(u64, u64),          // Discord user ID with weight (mention*weight)
+    PushRole(u64),                   // Discord role ID (role mention)
+    PushWeightedRole(u64, u64),      // Discord role ID with weight (role mention*weight)
+    PushGroup(&'a str),              // Group name reference
+    PushWeightedGroup(&'a str, u64), // Group name reference with weight (group*weight)
     Union,
     Intersection,
     Difference,
@@ -55,14 +57,14 @@ impl<'a> SetExpr<'a> {
 
     pub fn referenced_groups(&self) -> impl Iterator<Item = &'a str> + '_ {
         self.ops.iter().filter_map(|op| match op {
-            SetOp::PushGroup(name) => Some(*name),
+            SetOp::PushGroup(name) | SetOp::PushWeightedGroup(name, _) => Some(*name),
             _ => None,
         })
     }
 
     pub fn referenced_roles(&self) -> impl Iterator<Item = u64> + '_ {
         self.ops.iter().filter_map(|op| match op {
-            SetOp::PushRole(id) => Some(*id),
+            SetOp::PushRole(id) | SetOp::PushWeightedRole(id, _) => Some(*id),
             _ => None,
         })
     }
@@ -80,12 +82,19 @@ impl<'a> SetExpr<'a> {
     }
 
     /// Returns true if there are any runtime-resolved references.
-    /// Group and role references resolve to members at runtime with default weight 1,
-    /// so they should be treated as potentially having unweighted members.
+    /// Group and role references (both weighted and unweighted) resolve to members at runtime.
+    /// Unweighted references may contribute default weight 1 members, so parser-side
+    /// all-zero checks must treat them as runtime-dependent.
     pub fn has_group_reference(&self) -> bool {
-        self.ops
-            .iter()
-            .any(|op| matches!(op, SetOp::PushGroup(_) | SetOp::PushRole(_)))
+        self.ops.iter().any(|op| {
+            matches!(
+                op,
+                SetOp::PushGroup(_)
+                    | SetOp::PushWeightedGroup(_, _)
+                    | SetOp::PushRole(_)
+                    | SetOp::PushWeightedRole(_, _)
+            )
+        })
     }
 }
 
@@ -221,12 +230,22 @@ fn mention_with_weight(input: &str) -> IResult<&str, SetOp<'_>> {
     Ok((input, op))
 }
 
+fn role_mention_with_weight(input: &str) -> IResult<&str, SetOp<'_>> {
+    let (input, id) = role_mention(input)?;
+    let (input, weight) = opt((char('*'), u64).map(|(_, w)| w)).parse(input)?;
+    let op = match weight {
+        Some(w) => SetOp::PushWeightedRole(id, w),
+        None => SetOp::PushRole(id),
+    };
+    Ok((input, op))
+}
+
 fn mention_or_role(input: &str) -> IResult<&str, SetOp<'_>> {
     alt((mention.map(SetOp::Push), role_mention.map(SetOp::PushRole))).parse(input)
 }
 
 fn mention_or_role_weighted(input: &str) -> IResult<&str, SetOp<'_>> {
-    alt((mention_with_weight, role_mention.map(SetOp::PushRole))).parse(input)
+    alt((mention_with_weight, role_mention_with_weight)).parse(input)
 }
 
 fn mention_sequence_generic<'a, P>(parser: P, input: &'a str) -> IResult<&'a str, SetExpr<'a>>
@@ -305,14 +324,21 @@ fn set_primary(input: &str) -> IResult<&str, SetExpr<'_>> {
 }
 
 fn set_primary_weighted(input: &str) -> IResult<&str, SetExpr<'_>> {
+    fn identifier_with_weight(input: &str) -> IResult<&str, SetExpr<'_>> {
+        let (input, name) = identifier(input)?;
+        let (input, weight) = opt((char('*'), u64).map(|(_, w)| w)).parse(input)?;
+        let mut expr = SetExpr::new();
+        match weight {
+            Some(w) => expr.push(SetOp::PushWeightedGroup(name, w)),
+            None => expr.push(SetOp::PushGroup(name)),
+        }
+        Ok((input, expr))
+    }
+
     alt((
         (char('('), sp, set_expr_weighted, sp, char(')')).map(|(_, _, expr, _, _)| expr),
         mention_sequence_weighted,
-        identifier.map(|name| {
-            let mut expr = SetExpr::new();
-            expr.push(SetOp::PushGroup(name));
-            expr
-        }),
+        identifier_with_weight,
     ))
     .parse(input)
 }
@@ -1048,6 +1074,14 @@ mod tests {
         "<@&70> <@65>*2",
         &[SetOp::PushRole(70), SetOp::PushWeighted(65, 2), SetOp::Union]
     )]
+    #[case::weighted_role(
+        "<@&70>*2 <@65>",
+        &[SetOp::PushWeightedRole(70, 2), SetOp::Push(65), SetOp::Union]
+    )]
+    #[case::weighted_group(
+        "team*3, <@65>",
+        &[SetOp::PushWeightedGroup("team", 3), SetOp::Push(65), SetOp::Union]
+    )]
     fn test_weighted_set_expr_ops(#[case] input: &str, #[case] expected: &'static [SetOp]) {
         let (_, expr) = set_expr_weighted(input).expect("weighted set expression should parse");
         assert_eq!(expr.ops(), expected);
@@ -1071,6 +1105,8 @@ mod tests {
         vec![(65, 2), (66, 0)]
     )]
     #[case::weighted_with_role("3000 to <@&70> <@65>*2", vec![(65, 2)])]
+    #[case::weighted_with_weighted_role("3000 to <@&70>*2 <@65>", vec![])]
+    #[case::weighted_with_weighted_group("3000 to team*2, <@65>", vec![])]
     fn test_weighted_payment_parses(#[case] input: &str, #[case] expected: Vec<(u64, u64)>) {
         let program = parse_program(input).expect("weighted payment should parse");
         assert!(!program.statements.is_empty());
@@ -1096,6 +1132,18 @@ mod tests {
     }
 
     #[test]
+    fn test_weighted_payment_with_weighted_group_includes_group_reference() {
+        let program = parse_program("3000 to team*2, <@65>")
+            .expect("weighted payment with group should parse");
+        let Statement::Payment(payment) = &program.statements[0].statement else {
+            panic!("expected payment statement");
+        };
+
+        let groups: Vec<_> = payment.payee.referenced_groups().collect();
+        assert_eq!(groups, vec!["team"]);
+    }
+
+    #[test]
     fn test_unweighted_backward_compat() {
         let (_, expr) = set_expr("<@65>").expect("unweighted should still parse");
         assert_eq!(expr.ops(), &[SetOp::Push(65)]);
@@ -1113,8 +1161,14 @@ mod tests {
     }
 
     #[test]
-    fn test_reject_weighted_role_mention_in_payee() {
+    fn test_accept_weighted_role_mention_in_payee() {
         let result = parse_program("3000 to <@&20>*2");
-        assert!(matches!(result, Err(ParseError::SyntaxError { .. })));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_accept_weighted_group_reference_in_payee() {
+        let result = parse_program("3000 to team*2");
+        assert!(result.is_ok());
     }
 }

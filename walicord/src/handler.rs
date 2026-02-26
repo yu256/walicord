@@ -105,8 +105,7 @@ where
         warm_up_roster: FWarm,
     ) where
         FFetch: FnOnce() -> FutFetch,
-        FutFetch:
-            Future<Output = Result<IndexMap<MessageId, CachedMessage>, ServiceError>>,
+        FutFetch: Future<Output = Result<IndexMap<MessageId, CachedMessage>, ServiceError>>,
         FWarm: FnOnce() -> FutWarm,
         FutWarm: Future<Output = Result<(), ServiceError>>,
     {

@@ -1,6 +1,6 @@
 use super::{
-    AllocationStrategy, MemberBalances, MemberId, MemberSet, Money, Ratios, RemainderPolicy,
-    SplitError, Weight,
+    MemberBalances, MemberId, MemberSet, Money, RemainderPolicy, ResolvedAllocationStrategy,
+    SplitError,
 };
 use rust_decimal::Decimal;
 
@@ -39,34 +39,31 @@ impl BalanceDeltaDirection {
 /// * `members` - Set of members to distribute among
 /// * `amount` - Total amount to distribute
 /// * `direction` - Whether distributed shares increase or decrease balances
-/// * `allocation` - The strategy used to split the amount (even or weighted)
+/// * `allocation` - The resolved strategy used to split the amount
 ///
 /// # Returns
 /// * `Ok(())` if distribution succeeded
-/// * `Err(SplitError::EmptyRatios)` if members set is empty (should not happen due to early return)
-/// * `Err(SplitError::ZeroTotalRatio)` if weighted distribution has zero total weight
+///
+/// `allocation` is already validated and resolved, so the current implementation
+/// has no runtime error path. The `Result` return type is retained for API
+/// compatibility with earlier versions of this helper.
 pub fn distribute_balances(
     balances: &mut MemberBalances,
     members: &MemberSet,
     amount: Money,
     direction: BalanceDeltaDirection,
-    allocation: &AllocationStrategy,
+    allocation: &ResolvedAllocationStrategy,
 ) -> Result<(), SplitError> {
     if members.is_empty() {
         return Ok(());
     }
 
     let shares: Vec<Money> = match allocation {
-        AllocationStrategy::Even => amount
+        ResolvedAllocationStrategy::Even => amount
             .split_even(members.members().len(), RemainderPolicy::FrontLoad)
             .collect(),
-        AllocationStrategy::Weighted(weights) => {
-            let weight_vec: Vec<Weight> = members
-                .iter()
-                .map(|id| weights.get(&id).copied().unwrap_or(Weight(1)))
-                .collect();
-            let ratios = Ratios::try_new(weight_vec)?;
-            amount.split_ratio(&ratios, RemainderPolicy::FrontLoad)
+        ResolvedAllocationStrategy::Weighted(ratios) => {
+            amount.split_ratio(ratios, RemainderPolicy::FrontLoad)
         }
     };
 

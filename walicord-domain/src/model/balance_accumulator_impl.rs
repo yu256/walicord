@@ -58,28 +58,23 @@ impl<'a> BalanceAccumulator<'a> {
                 let Ok(payee_members) = self.resolver.try_evaluate_members(&payment.payee) else {
                     return Ok(());
                 };
-
-                // Validate weighted distribution before mutating any balances
-                // to preserve zero-sum invariant
-                if let AllocationStrategy::Weighted(weights) = &payment.allocation {
-                    let total_weight: Option<Weight> =
-                        payee_members.iter().try_fold(Weight::ZERO, |acc, id| {
-                            let w = weights.get(&id).copied().unwrap_or(Weight(1));
-                            acc.checked_add(w)
-                        });
-                    match total_weight {
-                        None => return Err(BalanceError::WeightOverflow),
-                        Some(Weight::ZERO) => return Err(BalanceError::ZeroTotalWeight),
-                        Some(_) => {}
-                    }
+                if payer_members.is_empty() || payee_members.is_empty() {
+                    return Ok(());
                 }
+
+                let Some(resolved_payee_allocation) = payment
+                    .allocation
+                    .resolve_for_payee_members(&payee_members, &self.resolver)?
+                else {
+                    return Ok(());
+                };
 
                 distribute_balances(
                     &mut self.balances,
                     &payer_members,
                     payment.amount,
                     BalanceDeltaDirection::Increase,
-                    &AllocationStrategy::Even,
+                    &ResolvedAllocationStrategy::Even,
                 )
                 .expect("even distribution should never fail");
 
@@ -88,9 +83,9 @@ impl<'a> BalanceAccumulator<'a> {
                     &payee_members,
                     payment.amount,
                     BalanceDeltaDirection::Decrease,
-                    &payment.allocation,
+                    &resolved_payee_allocation,
                 )
-                .expect("weighted distribution validated above");
+                .expect("resolved allocation should be valid");
             }
         }
         Ok(())

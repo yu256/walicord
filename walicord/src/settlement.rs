@@ -141,8 +141,7 @@ where
     where
         I: IntoIterator<Item = MemberId>,
         FResolve: FnOnce(serenity::model::id::ChannelId) -> FutResolve,
-        FutResolve:
-            Future<Output = Result<serenity::model::id::GuildId, ServiceError>>,
+        FutResolve: Future<Output = Result<serenity::model::id::GuildId, ServiceError>>,
         FWarm: FnOnce(serenity::model::id::ChannelId) -> FutWarm,
         FutWarm: Future<Output = Result<(), ServiceError>>,
     {

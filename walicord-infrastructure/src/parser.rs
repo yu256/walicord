@@ -1,11 +1,14 @@
-use std::{borrow::Cow, collections::BTreeMap};
+use std::borrow::Cow;
 use walicord_application::{
     Command, ProgramParseError, ProgramParser, Script, ScriptStatement, ScriptStatementWithLine,
 };
 use walicord_domain::{
     AmountExpr, AmountOp, Declaration, Payment, Program as DomainProgram,
     Statement as DomainStatement, StatementWithLine as DomainStatementWithLine,
-    model::{MemberId, MemberSetExpr, MemberSetOp, RoleId, RoleMembers, Weight},
+    model::{
+        MemberId, MemberSetExpr, MemberSetOp, RoleId, RoleMembers, Weight, WeightOverride,
+        WeightOverrides,
+    },
 };
 use walicord_parser::{
     AmountExpr as ParserAmountExpr, AmountOp as ParserAmountOp, Command as ParserCommand,
@@ -93,22 +96,23 @@ impl ProgramParser for WalicordProgramParser {
                                 }
                             };
                             let payee_expr = to_member_set_expr_allow_weighted(payee.clone());
-                            let payee_weights = extract_payee_weights(&payee);
+                            let payee_overrides = extract_payee_weight_overrides(&payee);
+                            let has_explicit_weights = !payee_overrides.is_empty();
 
                             // Validate that not all weights are zero.
                             // This only applies when ALL members have explicit zero weights
                             // (no unweighted members, no group references, and all weighted members have weight 0).
-                            // Unweighted members and group members default to weight 1, so total would be > 0.
-                            // Group references are skipped because their members are resolved at runtime.
-                            if !payee_weights.is_empty()
-                                && payee_weights.values().all(|w| w.0 == 0)
+                            // Unweighted members default to weight 1, so total would be > 0.
+                            // Group/role references are skipped because their members are resolved at runtime.
+                            if has_explicit_weights
+                                && final_explicit_overrides_are_all_zero(&payee_overrides)
                                 && !payee.has_unweighted_push()
                                 && !payee.has_group_reference()
                             {
                                 return Err(ProgramParseError::AllZeroWeights { line });
                             }
 
-                            let (app_payment, domain_payment) = if payee_weights.is_empty() {
+                            let (app_payment, domain_payment) = if !has_explicit_weights {
                                 (
                                     Payment::even(
                                         amount_money,
@@ -119,17 +123,17 @@ impl ProgramParser for WalicordProgramParser {
                                 )
                             } else {
                                 (
-                                    Payment::weighted(
+                                    Payment::weighted_with_overrides(
                                         amount_money,
                                         payer_expr.clone(),
                                         payee_expr.clone(),
-                                        payee_weights.clone(),
+                                        payee_overrides.clone(),
                                     ),
-                                    Payment::weighted(
+                                    Payment::weighted_with_overrides(
                                         amount_money,
                                         payer_expr,
                                         payee_expr,
-                                        payee_weights,
+                                        payee_overrides,
                                     ),
                                 )
                             };
@@ -194,8 +198,8 @@ impl ProgramParser for WalicordProgramParser {
 fn to_member_set_expr_allow_weighted<'a>(expr: walicord_parser::SetExpr<'a>) -> MemberSetExpr<'a> {
     let ops = expr.ops().iter().map(|op| match op {
         SetOp::Push(id) | SetOp::PushWeighted(id, _) => MemberSetOp::Push(MemberId(*id)),
-        SetOp::PushRole(id) => MemberSetOp::PushRole(RoleId(*id)),
-        SetOp::PushGroup(name) => MemberSetOp::PushGroup(name),
+        SetOp::PushRole(id) | SetOp::PushWeightedRole(id, _) => MemberSetOp::PushRole(RoleId(*id)),
+        SetOp::PushGroup(name) | SetOp::PushWeightedGroup(name, _) => MemberSetOp::PushGroup(name),
         SetOp::Union => MemberSetOp::Union,
         SetOp::Intersection => MemberSetOp::Intersection,
         SetOp::Difference => MemberSetOp::Difference,
@@ -207,24 +211,40 @@ fn to_member_set_expr_no_weight<'a>(
     expr: walicord_parser::SetExpr<'a>,
     line: usize,
 ) -> Result<MemberSetExpr<'a>, ProgramParseError<'a>> {
-    if expr
-        .ops()
-        .iter()
-        .any(|op| matches!(op, SetOp::PushWeighted(_, _)))
-    {
+    if expr.ops().iter().any(|op| {
+        matches!(
+            op,
+            SetOp::PushWeighted(_, _)
+                | SetOp::PushWeightedRole(_, _)
+                | SetOp::PushWeightedGroup(_, _)
+        )
+    }) {
         return Err(ProgramParseError::SyntaxError {
             line,
-            detail: "weighted mentions are only allowed in payment payee".to_string(),
+            detail: "weighted references are only allowed in payment payee".to_string(),
         });
     }
 
     Ok(to_member_set_expr_allow_weighted(expr))
 }
 
-fn extract_payee_weights(expr: &walicord_parser::SetExpr<'_>) -> BTreeMap<MemberId, Weight> {
-    expr.referenced_weighted()
-        .map(|(id, w)| (MemberId(id), Weight(w)))
-        .collect()
+fn extract_payee_weight_overrides(expr: &walicord_parser::SetExpr<'_>) -> WeightOverrides {
+    WeightOverrides::new(expr.ops().iter().filter_map(|op| match op {
+        SetOp::PushWeighted(id, w) => Some(WeightOverride::member(MemberId(*id), Weight(*w))),
+        SetOp::PushWeightedRole(id, w) => Some(WeightOverride::role(RoleId(*id), Weight(*w))),
+        SetOp::PushWeightedGroup(name, w) => Some(WeightOverride::group(*name, Weight(*w))),
+        _ => None,
+    }))
+}
+
+fn final_explicit_overrides_are_all_zero(overrides: &WeightOverrides) -> bool {
+    let entries = overrides.entries();
+    entries.iter().enumerate().all(|(idx, entry)| {
+        let overwritten = entries[idx + 1..]
+            .iter()
+            .any(|later| later.target == entry.target);
+        overwritten || entry.weight == Weight::ZERO
+    })
 }
 
 fn to_amount_expr(expr: ParserAmountExpr) -> AmountExpr {
@@ -286,6 +306,28 @@ mod tests {
                     panic!("expected payment statement");
                 };
                 payment.payee.referenced_role_ids().collect()
+            })
+    }
+
+    fn parse_payment_is_even_allocation(
+        input: &'static str,
+        author: Option<MemberId>,
+        roles: &'static RoleMembers,
+    ) -> Result<bool, ProgramParseError<'static>> {
+        let parser = WalicordProgramParser;
+        parser
+            .parse(&EMPTY_MEMBERS, roles, input, author)
+            .map(|script| {
+                let Some(payment) = script.statements().iter().find_map(|stmt| {
+                    let ScriptStatement::Domain(Statement::Payment(payment)) = &stmt.statement
+                    else {
+                        return None;
+                    };
+                    Some(payment)
+                }) else {
+                    panic!("expected payment statement");
+                };
+                payment.allocation.is_even()
             })
     }
 
@@ -401,6 +443,16 @@ mod tests {
         MemberId(3),
         Err(ProgramParseError::AllZeroWeights { line: 1 })
     )]
+    #[case::later_zero_override_makes_total_zero(
+        "3000 <@1>*1 <@1>*0",
+        MemberId(3),
+        Err(ProgramParseError::AllZeroWeights { line: 1 })
+    )]
+    #[case::later_non_zero_override_avoids_false_positive(
+        "3000 <@1>*0 <@1>*1",
+        MemberId(3),
+        Ok(())
+    )]
     #[case::mixed_zero_and_unweighted(
         "3000 <@1>*0 <@2>*0 <@3>",
         MemberId(4),
@@ -430,6 +482,12 @@ mod tests {
         roles_with_role_10(),
         Ok(vec![RoleId(10)])
     )]
+    #[case::defined_weighted_role_with_author(
+        "1000 to <@&10>*2",
+        Some(MemberId(1)),
+        roles_with_role_10(),
+        Ok(vec![RoleId(10)])
+    )]
     #[case::undefined_role_with_author(
         "1000 to <@&10>",
         Some(MemberId(1)),
@@ -449,6 +507,18 @@ mod tests {
         #[case] expected: Result<Vec<RoleId>, ProgramParseError<'static>>,
     ) {
         let actual = parse_payment_payee_role_ids(input, author, roles);
+        assert_eq!(actual, expected);
+    }
+
+    #[rstest]
+    #[case::weighted_role_only("1000 to <@&10>*2", roles_with_role_10(), Ok(false))]
+    #[case::weighted_group_only("team := <@2>\n1000 team*2", empty_roles(), Ok(false))]
+    fn parse_weighted_runtime_reference_creates_weighted_allocation(
+        #[case] input: &'static str,
+        #[case] roles: &'static RoleMembers,
+        #[case] expected: Result<bool, ProgramParseError<'static>>,
+    ) {
+        let actual = parse_payment_is_even_allocation(input, Some(MemberId(1)), roles);
         assert_eq!(actual, expected);
     }
 }

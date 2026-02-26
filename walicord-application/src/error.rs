@@ -23,10 +23,9 @@ pub enum ProgramParseError<'a> {
 impl<'a> From<ProgramBuildError<'a>> for ProgramParseError<'a> {
     fn from(err: ProgramBuildError<'a>) -> Self {
         match err {
-            ProgramBuildError::UndefinedGroup { name, line } => ProgramParseError::UndefinedGroup {
-                name: Cow::Borrowed(name),
-                line,
-            },
+            ProgramBuildError::UndefinedGroup { name, line } => {
+                ProgramParseError::UndefinedGroup { name, line }
+            }
             ProgramBuildError::UndefinedRole { id, line } => {
                 ProgramParseError::UndefinedRole { id: id.0, line }
             }
