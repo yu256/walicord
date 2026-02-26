@@ -105,10 +105,7 @@ impl ProgramParser for WalicordProgramParser {
                             // Unweighted members default to weight 1, so total would be > 0.
                             // Group/role references are skipped because their members are resolved at runtime.
                             if has_explicit_weights
-                                && payee_overrides
-                                    .entries()
-                                    .iter()
-                                    .all(|entry| entry.weight.0 == 0)
+                                && final_explicit_overrides_are_all_zero(&payee_overrides)
                                 && !payee.has_unweighted_push()
                                 && !payee.has_group_reference()
                             {
@@ -238,6 +235,16 @@ fn extract_payee_weight_overrides(expr: &walicord_parser::SetExpr<'_>) -> Weight
         SetOp::PushWeightedGroup(name, w) => Some(WeightOverride::group(*name, Weight(*w))),
         _ => None,
     }))
+}
+
+fn final_explicit_overrides_are_all_zero(overrides: &WeightOverrides) -> bool {
+    let entries = overrides.entries();
+    entries.iter().enumerate().all(|(idx, entry)| {
+        let overwritten = entries[idx + 1..]
+            .iter()
+            .any(|later| later.target == entry.target);
+        overwritten || entry.weight == Weight::ZERO
+    })
 }
 
 fn to_amount_expr(expr: ParserAmountExpr) -> AmountExpr {
@@ -435,6 +442,16 @@ mod tests {
         "3000 <@1>*0 <@2>*0",
         MemberId(3),
         Err(ProgramParseError::AllZeroWeights { line: 1 })
+    )]
+    #[case::later_zero_override_makes_total_zero(
+        "3000 <@1>*1 <@1>*0",
+        MemberId(3),
+        Err(ProgramParseError::AllZeroWeights { line: 1 })
+    )]
+    #[case::later_non_zero_override_avoids_false_positive(
+        "3000 <@1>*0 <@1>*1",
+        MemberId(3),
+        Ok(())
     )]
     #[case::mixed_zero_and_unweighted(
         "3000 <@1>*0 <@2>*0 <@3>",

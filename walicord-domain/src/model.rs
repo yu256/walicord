@@ -315,7 +315,7 @@ pub struct StatementWithLine<'a> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProgramBuildError<'a> {
-    UndefinedGroup { name: &'a str, line: usize },
+    UndefinedGroup { name: Cow<'a, str>, line: usize },
     UndefinedRole { id: RoleId, line: usize },
     FailedToEvaluateGroup { name: &'a str, line: usize },
 }
@@ -1115,7 +1115,7 @@ impl<'a> Program<'a> {
                     for group_name in decl.expression.referenced_groups() {
                         if !resolver.is_defined(group_name) {
                             return Err(ProgramBuildError::UndefinedGroup {
-                                name: group_name,
+                                name: Cow::Borrowed(group_name),
                                 line,
                             });
                         }
@@ -1144,7 +1144,7 @@ impl<'a> Program<'a> {
                     {
                         if !resolver.is_defined(group_name) {
                             return Err(ProgramBuildError::UndefinedGroup {
-                                name: group_name,
+                                name: Cow::Borrowed(group_name),
                                 line,
                             });
                         }
@@ -1156,6 +1156,29 @@ impl<'a> Program<'a> {
                     {
                         if !resolver.is_role_defined(role_id) {
                             return Err(ProgramBuildError::UndefinedRole { id: role_id, line });
+                        }
+                    }
+                    if let Some(overrides) = payment.allocation.weight_overrides() {
+                        for entry in overrides.entries() {
+                            match &entry.target {
+                                WeightOverrideTarget::Member(_) => {}
+                                WeightOverrideTarget::Role(role_id) => {
+                                    if !resolver.is_role_defined(*role_id) {
+                                        return Err(ProgramBuildError::UndefinedRole {
+                                            id: *role_id,
+                                            line,
+                                        });
+                                    }
+                                }
+                                WeightOverrideTarget::Group(group_name) => {
+                                    if !resolver.is_defined(group_name.as_str()) {
+                                        return Err(ProgramBuildError::UndefinedGroup {
+                                            name: Cow::Owned(group_name.to_string()),
+                                            line,
+                                        });
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -1429,7 +1452,7 @@ mod tests {
             )),
         },
         Err(ProgramBuildError::UndefinedGroup {
-            name: "team",
+            name: Cow::Borrowed("team"),
             line: 1
         })
     )]
@@ -1442,7 +1465,7 @@ mod tests {
             }),
         },
         Err(ProgramBuildError::UndefinedGroup {
-            name: "group_a",
+            name: Cow::Borrowed("group_a"),
             line: 1
         })
     )]
@@ -1481,6 +1504,79 @@ mod tests {
         };
 
         let actual = Program::try_new_with_roles(vec![statement], &[], &roles).map(|_| ());
+        assert_eq!(actual, expected);
+    }
+
+    #[rstest]
+    #[case::undefined_group_override(
+        vec![StatementWithLine {
+            line: 1,
+            statement: Statement::Payment(make_weighted_payment_with_overrides(
+                100,
+                WeightOverrides::new([WeightOverride::group("vip", Weight(2))]),
+                vec![MemberSetOp::Push(MemberId(1))],
+            )),
+        }],
+        empty_roles_ref(),
+        Err(ProgramBuildError::UndefinedGroup {
+            name: Cow::Owned("vip".to_string()),
+            line: 1
+        })
+    )]
+    #[case::undefined_role_override(
+        vec![StatementWithLine {
+            line: 1,
+            statement: Statement::Payment(make_weighted_payment_with_overrides(
+                100,
+                WeightOverrides::new([WeightOverride::role(RoleId(10), Weight(2))]),
+                vec![MemberSetOp::Push(MemberId(1))],
+            )),
+        }],
+        empty_roles_ref(),
+        Err(ProgramBuildError::UndefinedRole {
+            id: RoleId(10),
+            line: 1
+        })
+    )]
+    #[case::defined_group_override(
+        vec![
+            StatementWithLine {
+                line: 1,
+                statement: Statement::Declaration(Declaration {
+                    name: "vip",
+                    expression: MemberSetExpr::new([MemberSetOp::Push(MemberId(1))]),
+                }),
+            },
+            StatementWithLine {
+                line: 2,
+                statement: Statement::Payment(make_weighted_payment_with_overrides(
+                    100,
+                    WeightOverrides::new([WeightOverride::group("vip", Weight(2))]),
+                    vec![MemberSetOp::Push(MemberId(1))],
+                )),
+            },
+        ],
+        empty_roles_ref(),
+        Ok(())
+    )]
+    #[case::defined_role_override(
+        vec![StatementWithLine {
+            line: 1,
+            statement: Statement::Payment(make_weighted_payment_with_overrides(
+                100,
+                WeightOverrides::new([WeightOverride::role(RoleId(10), Weight(2))]),
+                vec![MemberSetOp::Push(MemberId(1))],
+            )),
+        }],
+        roles_with_members_1_2(),
+        Ok(())
+    )]
+    fn program_validates_weight_override_references(
+        #[case] statements: Vec<StatementWithLine<'static>>,
+        #[case] roles: &'static RoleMembers,
+        #[case] expected: Result<(), ProgramBuildError<'static>>,
+    ) {
+        let actual = Program::try_new_with_roles(statements, &[], roles).map(|_| ());
         assert_eq!(actual, expected);
     }
 
