@@ -1,7 +1,7 @@
-use rstest::{fixture, rstest};
+use rstest::rstest;
 use walicord_application::{
-    MessageProcessor, PersonBalance, ProgramParseError, ProgramParser, Script,
-    SettlementOptimizationError, SettlementOptimizer,
+    MessageProcessor, PersonBalance, ProgramParseError, ProgramParser, SettlementOptimizationError,
+    SettlementOptimizer,
 };
 use walicord_domain::{
     MemberBalances, Money, SettlementContext, Transfer,
@@ -55,59 +55,6 @@ fn empty_roles() -> &'static RoleMembers {
     use std::sync::OnceLock;
     static ROLES: OnceLock<RoleMembers> = OnceLock::new();
     ROLES.get_or_init(RoleMembers::default)
-}
-
-#[fixture]
-fn processor() -> MessageProcessor<'static> {
-    MessageProcessor::new(&TEST_PARSER, &TEST_OPTIMIZER)
-}
-
-fn parse_program_from_content<'a>(members: &'a [MemberId], content: &'a str) -> Script<'a> {
-    let parser = WalicordProgramParser;
-    match parser.parse(members, empty_roles(), content, None) {
-        Ok(program) => program,
-        Err(err) => match err {
-            ProgramParseError::FailedToEvaluateGroup { name, line } => {
-                panic!("parse failed: failed to evaluate group {name} at line {line}")
-            }
-            ProgramParseError::UndefinedGroup { name, line } => {
-                panic!("parse failed: undefined group {name} at line {line}")
-            }
-            ProgramParseError::UndefinedRole { id, line } => {
-                panic!("parse failed: undefined role <@&{id}> at line {line}")
-            }
-            ProgramParseError::UndefinedMember { id, line } => {
-                panic!("parse failed: undefined member <@{id}> at line {line}")
-            }
-            ProgramParseError::SyntaxError { line, detail } => {
-                panic!("parse failed at line {line}: {detail}")
-            }
-            ProgramParseError::MissingContextForImplicitAuthor { line } => {
-                panic!("parse failed: implicit author without context at line {line}")
-            }
-            ProgramParseError::InvalidAmountExpression { line, detail } => {
-                panic!("parse failed: invalid amount expression at line {line}: {detail}")
-            }
-            ProgramParseError::AllZeroWeights { line } => {
-                panic!("parse failed: all weights are zero at line {line}")
-            }
-        },
-    }
-}
-
-fn assert_parse_undefined_group(members: &[MemberId], content: &str, name: &str, line: usize) {
-    let parser = WalicordProgramParser;
-    match parser.parse(members, empty_roles(), content, None) {
-        Ok(_) => panic!("expected undefined group error"),
-        Err(ProgramParseError::UndefinedGroup {
-            name: actual_name,
-            line: actual_line,
-        }) => {
-            assert_eq!(actual_name.as_ref(), name);
-            assert_eq!(actual_line, line);
-        }
-        Err(err) => panic!("unexpected parse error: {err:?}"),
-    }
 }
 
 fn assert_balances(balances: &MemberBalances, expected: &[(TestMember, i64)]) {
@@ -184,7 +131,9 @@ async fn settle_up_pre_and_post_balances(
     #[case] expected_post: &'static [(TestMember, i64)],
 ) {
     let processor = MessageProcessor::new(&TEST_PARSER, &TEST_OPTIMIZER);
-    let program = parse_program_from_content(members, content);
+    let program = TEST_PARSER
+        .parse(members, empty_roles(), content, None)
+        .expect("program should parse");
 
     let pre_balances = processor
         .calculate_balances_for_prefix(&program, prefix_len)
@@ -279,7 +228,9 @@ async fn settle_up_post_balances(
     #[case] expected_post: &'static [(TestMember, i64)],
 ) {
     let processor = MessageProcessor::new(&TEST_PARSER, &TEST_OPTIMIZER);
-    let program = parse_program_from_content(members, content);
+    let program = TEST_PARSER
+        .parse(members, empty_roles(), content, None)
+        .expect("program should parse");
     let result = processor
         .build_settlement_result(&program)
         .await
@@ -400,7 +351,9 @@ async fn payment_distribution_balances(
     #[case] expected_post: &'static [(TestMember, i64)],
 ) {
     let processor = MessageProcessor::new(&TEST_PARSER, &TEST_OPTIMIZER);
-    let program = parse_program_from_content(members, content);
+    let program = TEST_PARSER
+        .parse(members, empty_roles(), content, None)
+        .expect("program should parse");
     let result = processor
         .build_settlement_result(&program)
         .await
@@ -411,5 +364,18 @@ async fn payment_distribution_balances(
 
 #[test]
 fn members_reference_requires_roster() {
-    assert_parse_undefined_group(&EMPTY_MEMBERS, "<@1> paid 90 to MEMBERS", "MEMBERS", 1);
+    assert_eq!(
+        TEST_PARSER
+            .parse(
+                &EMPTY_MEMBERS,
+                empty_roles(),
+                "<@1> paid 90 to MEMBERS",
+                None
+            )
+            .map(|_| ()),
+        Err(ProgramParseError::UndefinedGroup {
+            name: "MEMBERS".into(),
+            line: 1,
+        })
+    );
 }

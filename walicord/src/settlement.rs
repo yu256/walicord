@@ -5,7 +5,7 @@ use crate::discord::{
 use serenity::{
     all::CreateAttachment, builder::CreateMessage, model::channel::Message, prelude::*,
 };
-use std::collections::HashMap;
+use std::{collections::HashMap, fmt::Debug};
 use walicord_application::{
     Command as ProgramCommand, FailureKind, MessageProcessor, ProgramParseError, ScriptStatement,
     SettlementOptimizationError, SettlementResult,
@@ -111,17 +111,46 @@ where
     where
         I: IntoIterator<Item = MemberId>,
     {
-        let channel = channel_id
-            .to_channel(&ctx.http)
-            .await
-            .map_err(|e| ServiceError::Request(format!("{e:?}")))?;
-        let Some(guild_channel) = channel.guild() else {
-            return Err(ServiceError::NotGuildChannel);
-        };
-        let guild_id = guild_channel.guild_id;
+        self.ensure_member_directory_with_io(
+            channel_id,
+            member_ids,
+            member_directory,
+            async move |channel_id| {
+                let channel = channel_id
+                    .to_channel(&ctx.http)
+                    .await
+                    .map_err(|e| ServiceError::Request(format!("{e:?}")))?;
+                let Some(guild_channel) = channel.guild() else {
+                    return Err(ServiceError::NotGuildChannel);
+                };
+                Ok(guild_channel.guild_id)
+            },
+            |channel_id| self.roster_provider.warm_up(ctx, channel_id),
+        )
+        .await
+    }
 
-        // Ensure roster is loaded (warm_up if needed)
-        if let Err(e) = self.roster_provider.warm_up(ctx, channel_id).await {
+    async fn ensure_member_directory_with_io<'b, I, FResolve, FutResolve, FWarm, FutWarm>(
+        &self,
+        channel_id: serenity::model::id::ChannelId,
+        member_ids: I,
+        member_directory: &'b mut Option<HashMap<MemberId, smol_str::SmolStr>>,
+        resolve_guild_id: FResolve,
+        warm_up_roster: FWarm,
+    ) -> Result<&'b HashMap<MemberId, smol_str::SmolStr>, ServiceError>
+    where
+        I: IntoIterator<Item = MemberId>,
+        FResolve: FnOnce(serenity::model::id::ChannelId) -> FutResolve,
+        FutResolve:
+            Future<Output = Result<serenity::model::id::GuildId, ServiceError>>,
+        FWarm: FnOnce(serenity::model::id::ChannelId) -> FutWarm,
+        FutWarm: Future<Output = Result<(), ServiceError>>,
+    {
+        let guild_id = resolve_guild_id(channel_id).await?;
+
+        // Warm-up failure is non-fatal because settlement rendering can continue with
+        // whatever member data is already cached.
+        if let Err(e) = warm_up_roster(channel_id).await {
             tracing::warn!(
                 "Failed to warm up roster for channel {}: {:?}",
                 channel_id,
@@ -141,29 +170,61 @@ where
     /// Send a text reply to a message
     async fn reply(&self, ctx: &Context, msg: &Message, content: impl Into<String>) {
         let content = content.into();
-        if let Err(e) = msg.reply(&ctx.http, content).await {
+        self.reply_with_io(content, async move |content| {
+            msg.reply(&ctx.http, content).await.map(|_| ())
+        })
+        .await;
+    }
+
+    async fn reply_with_io<FSend, FutSend, E>(&self, content: String, send_message: FSend)
+    where
+        FSend: FnOnce(String) -> FutSend,
+        FutSend: Future<Output = Result<(), E>>,
+        E: Debug,
+    {
+        if let Err(e) = send_message(content).await {
             tracing::error!("Failed to send message: {:?}", e);
         }
     }
 
     /// Send a settlement result with image attachment
     async fn reply_with_settlement(&self, ctx: &Context, msg: &Message, response: SettlementView) {
-        let message_builder = CreateMessage::new().reference_message(msg);
+        self.reply_with_settlement_with_io(
+            msg,
+            response,
+            svg_to_png,
+            async move |attachment_png| {
+                let message_builder = CreateMessage::new().reference_message(msg);
+                let message_builder = if let Some(png) = attachment_png {
+                    message_builder.add_file(CreateAttachment::bytes(png, "settlement.png"))
+                } else {
+                    message_builder
+                };
 
-        let attachment = svg_to_png(&response.combined_svg)
-            .map(|png| CreateAttachment::bytes(png, "settlement.png"));
+                msg.channel_id
+                    .send_message(&ctx.http, message_builder)
+                    .await
+                    .map(|_| ())
+            },
+        )
+        .await;
+    }
 
-        let message_builder = if let Some(a) = attachment {
-            message_builder.add_file(a)
-        } else {
-            message_builder
-        };
-
-        if let Err(e) = msg
-            .channel_id
-            .send_message(&ctx.http, message_builder)
-            .await
-        {
+    async fn reply_with_settlement_with_io<FRender, FSend, FutSend, E>(
+        &self,
+        msg: &Message,
+        response: SettlementView,
+        render_png: FRender,
+        send_message: FSend,
+    ) where
+        FRender: FnOnce(&str) -> Option<Vec<u8>>,
+        FSend: FnOnce(Option<Vec<u8>>) -> FutSend,
+        FutSend: Future<Output = Result<(), E>>,
+        E: Debug,
+    {
+        let attachment_png = render_png(&response.combined_svg);
+        let _ = msg;
+        if let Err(e) = send_message(attachment_png).await {
             tracing::error!("Failed to send message with attachments: {:?}", e);
         }
     }
@@ -298,8 +359,16 @@ pub fn evaluate_program<'b>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::{MockRosterProvider, member_info};
     use rstest::rstest;
-    use serenity::model::{channel::Message, id::UserId};
+    use serenity::model::{
+        channel::Message,
+        id::{ChannelId, GuildId, UserId},
+    };
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
     use walicord_infrastructure::{WalicordProgramParser, WalicordSettlementOptimizer};
 
     fn make_message(content: &str, author_id: u64, channel_id: u64) -> Message {
@@ -313,6 +382,13 @@ mod tests {
 
     fn make_processor() -> MessageProcessor<'static> {
         MessageProcessor::new(&WalicordProgramParser, &WalicordSettlementOptimizer)
+    }
+
+    fn make_settlement_service<'a>(
+        processor: &'a MessageProcessor<'a>,
+        roster_provider: &'a MockRosterProvider,
+    ) -> SettlementService<'a, MockRosterProvider> {
+        SettlementService::new(processor, roster_provider)
     }
 
     #[rstest]
@@ -366,6 +442,209 @@ mod tests {
         assert!(!result.should_store);
         assert!(!result.has_effect_statement);
         assert!(result.program.is_some());
+    }
+
+    #[rstest]
+    #[case::png_and_send_success(Some(vec![1, 2, 3]), Ok(()), Some(Some(vec![1, 2, 3])))]
+    #[case::png_render_fails(None, Ok(()), Some(None))]
+    #[case::send_error_is_ignored(Some(vec![1]), Err(()), Some(Some(vec![1])))]
+    #[tokio::test(flavor = "current_thread")]
+    async fn reply_with_settlement_with_io_cases(
+        #[case] rendered_png: Option<Vec<u8>>,
+        #[case] send_result: Result<(), ()>,
+        #[case] expected_sent_attachment: Option<Option<Vec<u8>>>,
+    ) {
+        let processor = make_processor();
+        let roster_provider = MockRosterProvider::new();
+        let service = make_settlement_service(&processor, &roster_provider);
+        let msg = make_message("!settleup <@1>", 1, 10);
+        let response = SettlementView {
+            combined_svg: "<svg/>".to_string(),
+        };
+
+        let sent_attachment = Arc::new(Mutex::new(None::<Option<Vec<u8>>>));
+        let sent_attachment_clone = Arc::clone(&sent_attachment);
+        let send_count = Arc::new(AtomicUsize::new(0));
+        let send_count_clone = Arc::clone(&send_count);
+        let rendered_png_for_render = rendered_png.clone();
+        let send_result_for_send = send_result;
+
+        service
+            .reply_with_settlement_with_io(
+                &msg,
+                response,
+                move |_svg| rendered_png_for_render,
+                async move |attachment_png| {
+                    send_count_clone.fetch_add(1, Ordering::SeqCst);
+                    let sent_attachment_clone = Arc::clone(&sent_attachment_clone);
+                    *sent_attachment_clone
+                        .lock()
+                        .expect("sent attachment mutex poisoned") = Some(attachment_png);
+                    send_result_for_send
+                },
+            )
+            .await;
+
+        assert_eq!(send_count.load(Ordering::SeqCst), 1);
+        let actual = sent_attachment
+            .lock()
+            .expect("sent attachment mutex poisoned")
+            .clone();
+        assert_eq!(actual, expected_sent_attachment);
+    }
+
+    #[rstest]
+    #[case::send_success(Ok(()))]
+    #[case::send_error_is_ignored(Err(()))]
+    #[tokio::test(flavor = "current_thread")]
+    async fn reply_with_io_cases(#[case] send_result: Result<(), ()>) {
+        let processor = make_processor();
+        let roster_provider = MockRosterProvider::new();
+        let service = make_settlement_service(&processor, &roster_provider);
+        let sent = Arc::new(Mutex::new(None::<String>));
+        let sent_clone = Arc::clone(&sent);
+        let send_count = Arc::new(AtomicUsize::new(0));
+        let send_count_clone = Arc::clone(&send_count);
+        let send_result_for_send = send_result;
+
+        service
+            .reply_with_io("hello".to_string(), async move |content| {
+                send_count_clone.fetch_add(1, Ordering::SeqCst);
+                let sent_clone = Arc::clone(&sent_clone);
+                *sent_clone.lock().expect("sent content mutex poisoned") = Some(content);
+                send_result_for_send
+            })
+            .await;
+
+        assert_eq!(send_count.load(Ordering::SeqCst), 1);
+        let actual = sent.lock().expect("sent content mutex poisoned").clone();
+        assert_eq!(actual, Some("hello".to_string()));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ensure_member_directory_with_io_merges_display_names_after_warm_up() {
+        let processor = make_processor();
+        let guild_id = GuildId::new(1);
+        let channel_id = ChannelId::new(10);
+        let roster_provider = MockRosterProvider::new()
+            .with_member(guild_id, member_info(1, "Alice"))
+            .with_member(guild_id, member_info(2, "Bob"));
+        let service = SettlementService::new(&processor, &roster_provider);
+        let mut member_directory = Some(HashMap::from([(
+            MemberId(9),
+            smol_str::SmolStr::from("Existing"),
+        )]));
+
+        let resolve_count = Arc::new(AtomicUsize::new(0));
+        let resolve_count_clone = Arc::clone(&resolve_count);
+        let warm_count = Arc::new(AtomicUsize::new(0));
+        let warm_count_clone = Arc::clone(&warm_count);
+
+        let result = service
+            .ensure_member_directory_with_io(
+                channel_id,
+                [MemberId(1), MemberId(2), MemberId(99)],
+                &mut member_directory,
+                move |_| {
+                    resolve_count_clone.fetch_add(1, Ordering::SeqCst);
+                    std::future::ready(Ok(guild_id))
+                },
+                move |_| {
+                    warm_count_clone.fetch_add(1, Ordering::SeqCst);
+                    std::future::ready(Ok(()))
+                },
+            )
+            .await
+            .expect("member directory should load");
+
+        assert_eq!(resolve_count.load(Ordering::SeqCst), 1);
+        assert_eq!(warm_count.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            result.get(&MemberId(1)),
+            Some(&smol_str::SmolStr::from("Alice"))
+        );
+        assert_eq!(
+            result.get(&MemberId(2)),
+            Some(&smol_str::SmolStr::from("Bob"))
+        );
+        assert_eq!(
+            result.get(&MemberId(9)),
+            Some(&smol_str::SmolStr::from("Existing"))
+        );
+        assert!(!result.contains_key(&MemberId(99)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ensure_member_directory_with_io_tolerates_warm_up_failure() {
+        let processor = make_processor();
+        let guild_id = GuildId::new(1);
+        let channel_id = ChannelId::new(10);
+        let roster_provider =
+            MockRosterProvider::new().with_member(guild_id, member_info(1, "Alice"));
+        let service = SettlementService::new(&processor, &roster_provider);
+        let mut member_directory = None;
+
+        let warm_count = Arc::new(AtomicUsize::new(0));
+        let warm_count_clone = Arc::clone(&warm_count);
+
+        let result = service
+            .ensure_member_directory_with_io(
+                channel_id,
+                [MemberId(1)],
+                &mut member_directory,
+                move |_| std::future::ready(Ok(guild_id)),
+                move |_| {
+                    warm_count_clone.fetch_add(1, Ordering::SeqCst);
+                    std::future::ready(Err(ServiceError::Request("warm failed".into())))
+                },
+            )
+            .await
+            .expect("warm-up failure should be non-fatal");
+
+        assert_eq!(warm_count.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            result.get(&MemberId(1)),
+            Some(&smol_str::SmolStr::from("Alice"))
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ensure_member_directory_with_io_propagates_guild_resolution_error() {
+        let processor = make_processor();
+        let guild_id = GuildId::new(1);
+        let channel_id = ChannelId::new(10);
+        let roster_provider =
+            MockRosterProvider::new().with_member(guild_id, member_info(1, "Alice"));
+        let service = SettlementService::new(&processor, &roster_provider);
+        let mut member_directory = Some(HashMap::from([(
+            MemberId(9),
+            smol_str::SmolStr::from("Existing"),
+        )]));
+
+        let warm_count = Arc::new(AtomicUsize::new(0));
+        let warm_count_clone = Arc::clone(&warm_count);
+        let actual = service
+            .ensure_member_directory_with_io(
+                channel_id,
+                [MemberId(1)],
+                &mut member_directory,
+                move |_| std::future::ready(Err(ServiceError::NotGuildChannel)),
+                move |_| {
+                    warm_count_clone.fetch_add(1, Ordering::SeqCst);
+                    std::future::ready(Ok(()))
+                },
+            )
+            .await
+            .map(|_| ());
+
+        assert_eq!(actual, Err(ServiceError::NotGuildChannel));
+        assert_eq!(warm_count.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            member_directory
+                .as_ref()
+                .and_then(|directory| directory.get(&MemberId(9))),
+            Some(&smol_str::SmolStr::from("Existing"))
+        );
     }
 
     #[rstest]

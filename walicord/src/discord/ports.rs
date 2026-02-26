@@ -7,7 +7,7 @@ use serenity::{
 use walicord_domain::model::{MemberId, MemberInfo, RoleId, RoleMembers};
 
 /// Error type for Discord service operations
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ServiceError {
     #[error("Failed to fetch data: {0}")]
     Request(String),

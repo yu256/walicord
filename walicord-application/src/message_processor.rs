@@ -8,8 +8,8 @@ use crate::{
 };
 use std::{borrow::Cow, collections::HashSet};
 use walicord_domain::{
-    BalanceAccumulator, MemberBalances, SettleUpPolicy, SettlementContext, Transfer,
-    model::{MemberId, RoleMembers},
+    BalanceAccumulator, MemberBalances, MemberSet, SettleUpPolicy, SettlementContext, Transfer,
+    model::{MemberId, MemberSetExpr, RoleMembers},
     quantize_balances,
 };
 
@@ -81,6 +81,58 @@ struct ApplyResult {
     settle_up_cash_members: Vec<MemberId>,
     review_cash_members: Vec<MemberId>,
     quantization_scale: u32,
+}
+
+#[derive(Default)]
+struct CashPreferenceState {
+    script_local_cash_members: HashSet<MemberId>,
+}
+
+impl CashPreferenceState {
+    fn extend(&mut self, members: &MemberSet) {
+        self.script_local_cash_members.extend(members.iter());
+    }
+
+    fn effective_with(&self, command_cash_members: Option<&MemberSet>) -> Vec<MemberId> {
+        let mut effective_cash_members: Vec<MemberId> =
+            self.script_local_cash_members.iter().copied().collect();
+        effective_cash_members.extend(command_cash_members.iter().flat_map(|set| set.iter()));
+        effective_cash_members.sort_unstable();
+        effective_cash_members.dedup();
+        effective_cash_members
+    }
+
+    fn into_sorted_members(self) -> Vec<MemberId> {
+        let mut members: Vec<MemberId> = self.script_local_cash_members.into_iter().collect();
+        members.sort_unstable();
+        members
+    }
+}
+
+#[derive(Default)]
+struct LastSettleState {
+    settle_members: Vec<MemberId>,
+    cash_members: Vec<MemberId>,
+    transfers: Vec<Transfer>,
+}
+
+impl LastSettleState {
+    fn clear(&mut self) {
+        self.settle_members.clear();
+        self.cash_members.clear();
+        self.transfers.clear();
+    }
+
+    fn record(
+        &mut self,
+        settle_members: &MemberSet,
+        effective_cash_members: Vec<MemberId>,
+        transfers: Vec<Transfer>,
+    ) {
+        self.settle_members.extend(settle_members.iter());
+        self.cash_members.extend(effective_cash_members);
+        self.transfers.extend(transfers);
+    }
 }
 
 impl<'a> MessageProcessor<'a> {
@@ -268,9 +320,7 @@ impl<'a> MessageProcessor<'a> {
 
         let mut accumulator =
             BalanceAccumulator::new_with_context(program.members(), program.role_members());
-        let mut last_settle_members: Vec<MemberId> = Vec::new();
-        let mut last_settle_cash_members: Vec<MemberId> = Vec::new();
-        let mut last_settle_transfers: Vec<Transfer> = Vec::new();
+        let mut last_settle_state = LastSettleState::default();
         let last_is_settle = apply_settle
             && end > 0
             && matches!(
@@ -278,7 +328,7 @@ impl<'a> MessageProcessor<'a> {
                 ScriptStatement::Command(Command::SettleUp { .. })
             );
         // Script-local cash preference state while scanning commands in order.
-        let mut script_local_cash_members: HashSet<MemberId> = HashSet::new();
+        let mut cash_preference_state = CashPreferenceState::default();
 
         for stmt in &statements[..end] {
             match &stmt.statement {
@@ -292,68 +342,35 @@ impl<'a> MessageProcessor<'a> {
                     match command {
                         Command::Variables | Command::Review => {}
                         Command::MemberAddCash { members } => {
-                            let Some(target_members) = accumulator.evaluate_members(members) else {
+                            let Some(target_members) =
+                                Self::evaluate_command_members_leniently(&accumulator, members)
+                            else {
                                 continue;
                             };
-                            script_local_cash_members.extend(target_members.iter());
+                            cash_preference_state.extend(&target_members);
                         }
                         Command::SettleUp {
                             members,
                             cash_members,
                         } => {
-                            last_settle_members.clear();
-                            last_settle_cash_members.clear();
-                            last_settle_transfers.clear();
-
-                            let Some(settle_members) = accumulator.evaluate_members(members) else {
-                                continue;
-                            };
-                            if settle_members.is_empty() {
-                                continue;
-                            }
-
-                            last_settle_members.extend(settle_members.iter());
-
-                            let command_cash_members =
-                                if let Some(command_cash_members) = cash_members {
-                                    let Some(command_set) =
-                                        accumulator.evaluate_members(command_cash_members)
-                                    else {
-                                        continue;
-                                    };
-                                    Some(command_set)
-                                } else {
-                                    None
-                                };
-
-                            let mut effective_cash_members: Vec<MemberId> =
-                                script_local_cash_members.iter().copied().collect();
-                            effective_cash_members
-                                .extend(command_cash_members.iter().flat_map(|set| set.iter()));
-                            effective_cash_members.sort_unstable();
-                            effective_cash_members.dedup();
-
-                            let balances = accumulator.balances().clone();
-                            let settle_members_vec: Vec<_> = settle_members.members().to_vec();
-                            let effective_cash_vec = effective_cash_members.clone();
-                            let context = Self::settlement_context();
-                            let result = tokio::task::block_in_place(move || {
-                                SettleUpPolicy::settle(
-                                    &balances,
-                                    &settle_members_vec,
-                                    effective_cash_vec.iter().copied(),
-                                    context,
-                                )
-                            })
-                            .map_err(SettlementOptimizationError::from)?;
-                            accumulator.set_balances(result.new_balances);
-                            last_settle_cash_members.extend(effective_cash_members);
-                            last_settle_transfers.extend(result.transfers);
+                            self.apply_settle_command(
+                                &mut accumulator,
+                                members,
+                                cash_members.as_ref(),
+                                &cash_preference_state,
+                                &mut last_settle_state,
+                            )?;
                         }
                     }
                 }
             }
         }
+
+        let LastSettleState {
+            settle_members: last_settle_members,
+            cash_members: last_settle_cash_members,
+            transfers: last_settle_transfers,
+        } = last_settle_state;
 
         let settle_up = if last_is_settle {
             Some(SettleUpContext {
@@ -372,9 +389,7 @@ impl<'a> MessageProcessor<'a> {
             balances
         };
 
-        let mut review_cash_members: Vec<MemberId> =
-            script_local_cash_members.iter().copied().collect();
-        review_cash_members.sort_unstable();
+        let review_cash_members = cash_preference_state.into_sorted_members();
 
         Ok(ApplyResult {
             balances,
@@ -383,6 +398,66 @@ impl<'a> MessageProcessor<'a> {
             review_cash_members,
             quantization_scale: context.scale,
         })
+    }
+
+    fn apply_settle_command<'b>(
+        &self,
+        accumulator: &mut BalanceAccumulator<'b>,
+        members: &MemberSetExpr<'b>,
+        cash_members: Option<&MemberSetExpr<'b>>,
+        cash_preference_state: &CashPreferenceState,
+        last_settle_state: &mut LastSettleState,
+    ) -> Result<(), SettlementOptimizationError> {
+        last_settle_state.clear();
+
+        let Some(settle_members) = Self::evaluate_command_members_leniently(accumulator, members)
+        else {
+            return Ok(());
+        };
+        if settle_members.is_empty() {
+            return Ok(());
+        }
+
+        let command_cash_members = if let Some(command_cash_members) = cash_members {
+            let Some(command_set) =
+                Self::evaluate_command_members_leniently(accumulator, command_cash_members)
+            else {
+                return Ok(());
+            };
+            Some(command_set)
+        } else {
+            None
+        };
+
+        let effective_cash_members =
+            cash_preference_state.effective_with(command_cash_members.as_ref());
+
+        let balances = accumulator.balances().clone();
+        let settle_members_vec: Vec<_> = settle_members.members().to_vec();
+        let effective_cash_vec = effective_cash_members.clone();
+        let context = Self::settlement_context();
+        let result = tokio::task::block_in_place(move || {
+            SettleUpPolicy::settle(
+                &balances,
+                &settle_members_vec,
+                effective_cash_vec.iter().copied(),
+                context,
+            )
+        })
+        .map_err(SettlementOptimizationError::from)?;
+        accumulator.set_balances(result.new_balances);
+        last_settle_state.record(&settle_members, effective_cash_members, result.transfers);
+
+        Ok(())
+    }
+
+    fn evaluate_command_members_leniently<'b>(
+        accumulator: &BalanceAccumulator<'b>,
+        expr: &MemberSetExpr<'b>,
+    ) -> Option<MemberSet> {
+        // Preserve existing command behavior: invalid member-set expressions in commands
+        // are ignored so prior script-local state remains effective.
+        accumulator.try_evaluate_members(expr).ok()
     }
 
     fn apply_statements_without_settlement(
@@ -472,12 +547,13 @@ mod tests {
         error::{BalanceCalculationError, SettlementOptimizationError},
         ports::{ProgramParser, SettlementOptimizer},
     };
+    use fxhash::FxHashSet;
     use proptest::prelude::*;
     use rstest::{fixture, rstest};
     use std::collections::BTreeMap;
     use walicord_domain::{
         Payment, Statement,
-        model::{MemberId, MemberSetExpr, MemberSetOp, Money, RoleMembers, Weight},
+        model::{MemberId, MemberSetExpr, MemberSetOp, Money, RoleId, RoleMembers, Weight},
     };
 
     fn any_string() -> impl Strategy<Value = String> {
@@ -489,6 +565,14 @@ mod tests {
         use std::sync::OnceLock;
         static ROLES: OnceLock<RoleMembers> = OnceLock::new();
         ROLES.get_or_init(RoleMembers::default)
+    }
+
+    fn roles_with_large_cash_role() -> &'static RoleMembers {
+        use std::sync::OnceLock;
+        static ROLES: OnceLock<RoleMembers> = OnceLock::new();
+        ROLES.get_or_init(|| {
+            RoleMembers::from_iter([(RoleId(999), FxHashSet::from_iter((1..=129).map(MemberId)))])
+        })
     }
 
     struct StubParser;
@@ -621,10 +705,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn settle_up_response_groups_transfers(processor: MessageProcessor<'_>) {
         let members: [MemberId; 0] = [];
-        let program = match processor.parse_program(&members, empty_roles(), "unused", None) {
-            ProcessingOutcome::Success(program) => program,
-            _ => panic!("unexpected parse outcome"),
-        };
+        let program = processor
+            .parse_program(&members, empty_roles(), "unused", None)
+            .into_result()
+            .expect("program should parse");
 
         let last_index = program.statements().len().saturating_sub(1);
         let result = processor
@@ -645,10 +729,10 @@ mod tests {
         let processor = MessageProcessor::new(&parser, &optimizer);
 
         let members: [MemberId; 0] = [];
-        let program = match processor.parse_program(&members, empty_roles(), "unused", None) {
-            ProcessingOutcome::Success(program) => program,
-            _ => panic!("unexpected parse outcome"),
-        };
+        let program = processor
+            .parse_program(&members, empty_roles(), "unused", None)
+            .into_result()
+            .expect("program should parse");
 
         let _ = processor
             .build_settlement_result(&program)
@@ -858,48 +942,27 @@ mod tests {
     }
 
     fn script_with_command_cash() -> Script<'static> {
+        script_with_command_cash_with_roles(union_members(&[1]), empty_roles())
+    }
+
+    fn script_with_command_cash_with_roles(
+        cash_members: MemberSetExpr<'static>,
+        roles: &'static RoleMembers,
+    ) -> Script<'static> {
         let members = union_members(&[1, 2, 3, 4]);
         let mut command_statements = base_cash_sensitivity_payments();
         command_statements.push(ScriptStatementWithLine {
             line: 5,
             statement: ScriptStatement::Command(Command::SettleUp {
                 members,
-                cash_members: Some(union_members(&[1])),
+                cash_members: Some(cash_members),
             }),
         });
 
-        Script::new(&[], empty_roles(), command_statements)
+        Script::new(&[], roles, command_statements)
     }
 
-    fn script_with_invalid_member_cash_expr() -> Script<'static> {
-        let members = union_members(&[1, 2, 3, 4]);
-        let mut with_invalid_cash = base_cash_sensitivity_payments();
-        with_invalid_cash.extend([
-            ScriptStatementWithLine {
-                line: 5,
-                statement: ScriptStatement::Command(Command::MemberAddCash {
-                    members: union_members(&[1]),
-                }),
-            },
-            ScriptStatementWithLine {
-                line: 6,
-                statement: ScriptStatement::Command(Command::MemberAddCash {
-                    members: MemberSetExpr::new([MemberSetOp::PushGroup("unknown")]),
-                }),
-            },
-            ScriptStatementWithLine {
-                line: 7,
-                statement: ScriptStatement::Command(Command::SettleUp {
-                    members,
-                    cash_members: None,
-                }),
-            },
-        ]);
-
-        Script::new(&[], empty_roles(), with_invalid_cash)
-    }
-
-    fn script_with_member_cash_on() -> Script<'static> {
+    fn script_with_member_cash_on_with_roles(roles: &'static RoleMembers) -> Script<'static> {
         let members = union_members(&[1, 2, 3, 4]);
         let mut baseline = base_cash_sensitivity_payments();
         baseline.extend([
@@ -918,7 +981,77 @@ mod tests {
             },
         ]);
 
-        Script::new(&[], empty_roles(), baseline)
+        Script::new(&[], roles, baseline)
+    }
+
+    fn script_with_invalid_member_cash_expr_with_roles(
+        invalid_members: MemberSetExpr<'static>,
+        roles: &'static RoleMembers,
+    ) -> Script<'static> {
+        let members = union_members(&[1, 2, 3, 4]);
+        let mut with_invalid_cash = base_cash_sensitivity_payments();
+        with_invalid_cash.extend([
+            ScriptStatementWithLine {
+                line: 5,
+                statement: ScriptStatement::Command(Command::MemberAddCash {
+                    members: union_members(&[1]),
+                }),
+            },
+            ScriptStatementWithLine {
+                line: 6,
+                statement: ScriptStatement::Command(Command::MemberAddCash {
+                    members: invalid_members,
+                }),
+            },
+            ScriptStatementWithLine {
+                line: 7,
+                statement: ScriptStatement::Command(Command::SettleUp {
+                    members,
+                    cash_members: None,
+                }),
+            },
+        ]);
+
+        Script::new(&[], roles, with_invalid_cash)
+    }
+
+    fn script_with_invalid_member_cash_unknown_group_expr() -> Script<'static> {
+        script_with_invalid_member_cash_expr_with_roles(
+            MemberSetExpr::new([MemberSetOp::PushGroup("unknown")]),
+            empty_roles(),
+        )
+    }
+
+    fn script_with_invalid_member_cash_unknown_role_expr() -> Script<'static> {
+        script_with_invalid_member_cash_expr_with_roles(
+            MemberSetExpr::new([MemberSetOp::PushRole(RoleId(42))]),
+            empty_roles(),
+        )
+    }
+
+    fn script_with_invalid_member_cash_invalid_expression() -> Script<'static> {
+        script_with_invalid_member_cash_expr_with_roles(
+            MemberSetExpr::new([MemberSetOp::Union]),
+            empty_roles(),
+        )
+    }
+
+    fn script_with_invalid_member_cash_oversized_role_expr() -> Script<'static> {
+        script_with_invalid_member_cash_expr_with_roles(
+            MemberSetExpr::new([MemberSetOp::PushRole(RoleId(999))]),
+            roles_with_large_cash_role(),
+        )
+    }
+
+    fn script_with_member_cash_on() -> Script<'static> {
+        script_with_member_cash_on_with_roles(empty_roles())
+    }
+
+    fn script_with_command_cash_large_role() -> Script<'static> {
+        script_with_command_cash_with_roles(
+            MemberSetExpr::new([MemberSetOp::PushRole(RoleId(999))]),
+            roles_with_large_cash_role(),
+        )
     }
 
     async fn assert_settle_transfers_equal(
@@ -948,9 +1081,21 @@ mod tests {
 
     #[rstest]
     #[case::persisted_and_command_cash(script_with_persisted_cash(), script_with_command_cash())]
-    #[case::invalid_cash_expr_keeps_previous_state(
-        script_with_invalid_member_cash_expr(),
+    #[case::invalid_group_cash_expr_keeps_previous_state(
+        script_with_invalid_member_cash_unknown_group_expr(),
         script_with_member_cash_on()
+    )]
+    #[case::invalid_role_cash_expr_keeps_previous_state(
+        script_with_invalid_member_cash_unknown_role_expr(),
+        script_with_member_cash_on()
+    )]
+    #[case::invalid_stack_cash_expr_keeps_previous_state(
+        script_with_invalid_member_cash_invalid_expression(),
+        script_with_member_cash_on()
+    )]
+    #[case::oversized_single_role_cash_expr_is_applied(
+        script_with_invalid_member_cash_oversized_role_expr(),
+        script_with_command_cash_large_role()
     )]
     #[tokio::test(flavor = "multi_thread")]
     async fn cash_configuration_equivalence(
@@ -1065,56 +1210,59 @@ mod tests {
         );
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn calculate_balances_returns_error_on_zero_total_weight() {
-        let processor = MessageProcessor::new(&StubParser, &NoopOptimizer);
-        let script = script_with_zero_total_weight_payment();
-
-        let result = processor.calculate_balances(&script).await;
-
-        let Err(err) = result else {
-            panic!("expected zero total weight error");
-        };
-        assert_eq!(err, BalanceCalculationError::ZeroTotalWeight);
+    #[derive(Clone, Copy, Debug)]
+    enum BalanceCalculationRequest {
+        Full,
+        Prefix(usize),
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn calculate_balances_for_prefix_returns_error_on_zero_total_weight() {
-        let processor = MessageProcessor::new(&StubParser, &NoopOptimizer);
-        let script = script_with_zero_total_weight_payment();
-
-        let result = processor.calculate_balances_for_prefix(&script, 1).await;
-
-        let Err(err) = result else {
-            panic!("expected zero total weight error");
-        };
-        assert_eq!(err, BalanceCalculationError::ZeroTotalWeight);
+    async fn calculate_balances_for_request(
+        processor: &MessageProcessor<'_>,
+        script: &Script<'_>,
+        request: BalanceCalculationRequest,
+    ) -> Result<walicord_domain::MemberBalances, BalanceCalculationError> {
+        match request {
+            BalanceCalculationRequest::Full => processor.calculate_balances(script).await,
+            BalanceCalculationRequest::Prefix(prefix_len) => {
+                processor
+                    .calculate_balances_for_prefix(script, prefix_len)
+                    .await
+            }
+        }
     }
 
+    #[rstest]
+    #[case::full_zero_total_weight(
+        script_with_zero_total_weight_payment(),
+        BalanceCalculationRequest::Full,
+        Err(BalanceCalculationError::ZeroTotalWeight)
+    )]
+    #[case::prefix_zero_total_weight(
+        script_with_zero_total_weight_payment(),
+        BalanceCalculationRequest::Prefix(1),
+        Err(BalanceCalculationError::ZeroTotalWeight)
+    )]
+    #[case::full_weight_overflow(
+        script_with_weight_overflow_payment(),
+        BalanceCalculationRequest::Full,
+        Err(BalanceCalculationError::WeightOverflow)
+    )]
+    #[case::prefix_weight_overflow(
+        script_with_weight_overflow_payment(),
+        BalanceCalculationRequest::Prefix(1),
+        Err(BalanceCalculationError::WeightOverflow)
+    )]
     #[tokio::test(flavor = "multi_thread")]
-    async fn calculate_balances_returns_error_on_weight_overflow() {
+    async fn calculate_balances_error_cases(
+        #[case] script: Script<'static>,
+        #[case] request: BalanceCalculationRequest,
+        #[case] expected: Result<(), BalanceCalculationError>,
+    ) {
         let processor = MessageProcessor::new(&StubParser, &NoopOptimizer);
-        let script = script_with_weight_overflow_payment();
 
-        let result = processor.calculate_balances(&script).await;
+        let result = calculate_balances_for_request(&processor, &script, request).await;
 
-        let Err(err) = result else {
-            panic!("expected weight overflow error");
-        };
-        assert_eq!(err, BalanceCalculationError::WeightOverflow);
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn calculate_balances_for_prefix_returns_error_on_weight_overflow() {
-        let processor = MessageProcessor::new(&StubParser, &NoopOptimizer);
-        let script = script_with_weight_overflow_payment();
-
-        let result = processor.calculate_balances_for_prefix(&script, 1).await;
-
-        let Err(err) = result else {
-            panic!("expected weight overflow error");
-        };
-        assert_eq!(err, BalanceCalculationError::WeightOverflow);
+        assert_eq!(result.map(|_| ()), expected);
     }
 
     #[rstest]
@@ -1176,58 +1324,53 @@ mod tests {
             vec![(first, Some(MemberId(1))), (second, Some(MemberId(2)))],
         );
 
-        let program = match outcome {
-            ProcessingOutcome::Success(program) => program,
-            _ => panic!("unexpected parse outcome"),
-        };
+        let program = outcome.into_result().expect("sequence should parse");
 
         let lines: Vec<_> = program.statements().iter().map(|stmt| stmt.line).collect();
         assert_eq!(lines, vec![1, expected_second_line]);
     }
 
     #[rstest]
-    #[case("a\nb", 3)]
-    #[case("a\nb\n", 4)]
-    fn parse_program_sequence_offsets_syntax_error(
+    #[case::syntax_without_trailing_newline(
+        "a\nb",
+        "SYNTAX",
+        Err(ProgramParseError::SyntaxError {
+            line: 3,
+            detail: "Syntax error - stub".to_string(),
+        })
+    )]
+    #[case::syntax_with_trailing_newline(
+        "a\nb\n",
+        "SYNTAX",
+        Err(ProgramParseError::SyntaxError {
+            line: 4,
+            detail: "Syntax error - stub".to_string(),
+        })
+    )]
+    #[case::implicit_without_trailing_newline(
+        "a\nb",
+        "IMPLICIT",
+        Err(ProgramParseError::MissingContextForImplicitAuthor { line: 3 })
+    )]
+    #[case::implicit_with_trailing_newline(
+        "a\nb\n",
+        "IMPLICIT",
+        Err(ProgramParseError::MissingContextForImplicitAuthor { line: 4 })
+    )]
+    fn parse_program_sequence_offsets_error_cases(
         #[case] first: &str,
-        #[case] expected_line: usize,
+        #[case] second: &str,
+        #[case] expected: Result<(), ProgramParseError>,
     ) {
         let processor = MessageProcessor::new(&SequenceParser, &NoopOptimizer);
         let members: [MemberId; 0] = [];
         let outcome = processor.parse_program_sequence(
             &members,
             empty_roles(),
-            vec![(first, Some(MemberId(1))), ("SYNTAX", Some(MemberId(2)))],
+            vec![(first, Some(MemberId(1))), (second, Some(MemberId(2)))],
         );
 
-        let ProcessingOutcome::SyntaxError { line, detail } = outcome else {
-            panic!("unexpected parse outcome");
-        };
-
-        assert_eq!(line, expected_line);
-        assert_eq!(detail, "Syntax error - stub");
-    }
-
-    #[rstest]
-    #[case("a\nb", 3)]
-    #[case("a\nb\n", 4)]
-    fn parse_program_sequence_offsets_implicit_payer_error(
-        #[case] first: &str,
-        #[case] expected_line: usize,
-    ) {
-        let processor = MessageProcessor::new(&SequenceParser, &NoopOptimizer);
-        let members: [MemberId; 0] = [];
-        let outcome = processor.parse_program_sequence(
-            &members,
-            empty_roles(),
-            vec![(first, Some(MemberId(1))), ("IMPLICIT", Some(MemberId(2)))],
-        );
-
-        let ProcessingOutcome::MissingContextForImplicitAuthor { line } = outcome else {
-            panic!("unexpected parse outcome");
-        };
-
-        assert_eq!(line, expected_line);
+        assert_eq!(outcome.into_result().map(|_| ()), expected);
     }
 
     proptest! {
