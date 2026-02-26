@@ -1665,6 +1665,14 @@ mod tests {
         Ok(accumulator.into_balances())
     }
 
+    fn empty_member_set_expr(member_id: MemberId) -> MemberSetExpr<'static> {
+        MemberSetExpr::new([
+            MemberSetOp::Push(member_id),
+            MemberSetOp::Push(member_id),
+            MemberSetOp::Difference,
+        ])
+    }
+
     fn empty_roles_ref() -> &'static RoleMembers {
         use std::sync::OnceLock;
         static ROLES: OnceLock<RoleMembers> = OnceLock::new();
@@ -1710,6 +1718,37 @@ mod tests {
         #[case] expected: Result<MemberBalances, BalanceError>,
     ) {
         let actual = apply_single_statement_with_roles(statement, roles);
+        assert_eq!(actual, expected);
+    }
+
+    #[rstest]
+    #[case::empty_payee(
+        Statement::Payment(Payment::even(
+            Money::from_i64(100),
+            MemberSetExpr::new([MemberSetOp::Push(MemberId(10))]),
+            empty_member_set_expr(MemberId(1)),
+        )),
+        Ok(MemberBalances::from([
+            (MemberId(1), Money::ZERO),
+            (MemberId(10), Money::ZERO),
+        ]))
+    )]
+    #[case::empty_payer(
+        Statement::Payment(Payment::even(
+            Money::from_i64(100),
+            empty_member_set_expr(MemberId(10)),
+            MemberSetExpr::new([MemberSetOp::Push(MemberId(1))]),
+        )),
+        Ok(MemberBalances::from([
+            (MemberId(1), Money::ZERO),
+            (MemberId(10), Money::ZERO),
+        ]))
+    )]
+    fn balance_accumulator_apply_skips_payments_with_empty_payer_or_payee(
+        #[case] statement: Statement<'static>,
+        #[case] expected: Result<MemberBalances, BalanceError>,
+    ) {
+        let actual = apply_single_statement_with_roles(statement, empty_roles_ref());
         assert_eq!(actual, expected);
     }
 

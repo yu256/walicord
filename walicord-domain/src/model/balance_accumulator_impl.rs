@@ -58,6 +58,9 @@ impl<'a> BalanceAccumulator<'a> {
                 let Ok(payee_members) = self.resolver.try_evaluate_members(&payment.payee) else {
                     return Ok(());
                 };
+                if payer_members.is_empty() || payee_members.is_empty() {
+                    return Ok(());
+                }
 
                 let Some(resolved_payee_allocation) = payment
                     .allocation
