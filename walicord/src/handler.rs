@@ -1,6 +1,6 @@
 use crate::{
     channel::{ChannelEvent, ChannelManager, TrackedChannelId},
-    discord::ports::{ChannelService, RosterProvider},
+    discord::ports::{ChannelService, RosterProvider, ServiceError},
     message_cache::{CachedMessage, MessageCache, next_line_offset},
     reaction::{BotReaction, BotReactionState, MessageValidity, ReactionService},
     settlement::{SettlementService, evaluate_program},
@@ -80,23 +80,45 @@ where
     }
 
     async fn track_channel(&self, ctx: &Context, channel_id: ChannelId) {
+        self.track_channel_with_io(
+            channel_id,
+            async || {
+                let messages = self
+                    .channel_service
+                    .fetch_all_messages(ctx, channel_id)
+                    .await?;
+                let cached = messages
+                    .into_iter()
+                    .map(|(id, msg)| (id, CachedMessage::from_message(msg)))
+                    .collect();
+                Ok(cached)
+            },
+            || self.roster_provider.warm_up(ctx, channel_id),
+        )
+        .await;
+    }
+
+    async fn track_channel_with_io<FFetch, FutFetch, FWarm, FutWarm>(
+        &self,
+        channel_id: ChannelId,
+        fetch_all_messages: FFetch,
+        warm_up_roster: FWarm,
+    ) where
+        FFetch: FnOnce() -> FutFetch,
+        FutFetch:
+            Future<Output = Result<IndexMap<MessageId, CachedMessage>, ServiceError>>,
+        FWarm: FnOnce() -> FutWarm,
+        FutWarm: Future<Output = Result<(), ServiceError>>,
+    {
         let Some(ChannelEvent::Tracked(tracked_id)) = self.channel_manager.track(channel_id) else {
             return;
         };
 
         let channel_id = tracked_id.get();
         tracing::info!("Tracking channel {}", channel_id);
-        match self
-            .channel_service
-            .fetch_all_messages(ctx, channel_id)
-            .await
-        {
-            Ok(messages) => {
+        match fetch_all_messages().await {
+            Ok(cached) => {
                 if self.channel_manager.mark_fetch_succeeded(channel_id) {
-                    let cached: IndexMap<MessageId, CachedMessage> = messages
-                        .into_iter()
-                        .map(|(id, msg)| (id, CachedMessage::from_message(msg)))
-                        .collect();
                     self.message_cache.insert(tracked_id, cached);
                 }
             }
@@ -111,7 +133,7 @@ where
             }
         }
 
-        if let Err(e) = self.roster_provider.warm_up(ctx, channel_id).await {
+        if let Err(e) = warm_up_roster().await {
             tracing::warn!(
                 "Failed to build member cache for channel {}: {:?}",
                 channel_id,
@@ -186,6 +208,29 @@ where
         ctx: &Context,
         channel_id: ChannelId,
     ) -> CacheLoadResult {
+        self.ensure_cache_loaded_with_fetch(channel_id, async || {
+            let messages = self
+                .channel_service
+                .fetch_all_messages(ctx, channel_id)
+                .await?;
+            let cached_messages = messages
+                .into_iter()
+                .map(|(id, msg)| (id, CachedMessage::from_message(msg)))
+                .collect();
+            Ok(cached_messages)
+        })
+        .await
+    }
+
+    async fn ensure_cache_loaded_with_fetch<F, Fut>(
+        &self,
+        channel_id: ChannelId,
+        fetch_all_messages: F,
+    ) -> CacheLoadResult
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<IndexMap<MessageId, CachedMessage>, ServiceError>>,
+    {
         let Some(tracked_id) = self.channel_manager.get_tracked(channel_id) else {
             return CacheLoadResult::NotTracked;
         };
@@ -201,20 +246,12 @@ where
             };
         }
 
-        match self
-            .channel_service
-            .fetch_all_messages(ctx, channel_id)
-            .await
-        {
-            Ok(messages) => {
+        match fetch_all_messages().await {
+            Ok(cached_messages) => {
                 let Some(tracked_id) = self.channel_manager.get_tracked(channel_id) else {
                     return CacheLoadResult::NotTracked;
                 };
                 let _ = self.channel_manager.mark_fetch_succeeded(channel_id);
-                let cached_messages: IndexMap<MessageId, CachedMessage> = messages
-                    .into_iter()
-                    .map(|(id, msg)| (id, CachedMessage::from_message(msg)))
-                    .collect();
                 let is_empty = cached_messages.is_empty();
                 self.message_cache.insert(tracked_id, cached_messages);
                 if is_empty {
@@ -860,6 +897,10 @@ mod tests {
     use indexmap::IndexMap;
     use rstest::{fixture, rstest};
     use serenity::model::id::UserId;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
     use walicord_infrastructure::{WalicordProgramParser, WalicordSettlementOptimizer};
 
     fn make_cached_message(id: u64, content: &str) -> CachedMessage {
@@ -983,6 +1024,101 @@ mod tests {
         assert!(handler.message_cache.contains(channel_b));
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn track_channel_with_io_fetches_and_warms_up_on_first_track() {
+        let handler = handler();
+        let channel_id = ChannelId::new(1);
+
+        let fetch_count = Arc::new(AtomicUsize::new(0));
+        let fetch_count_clone = Arc::clone(&fetch_count);
+        let warm_count = Arc::new(AtomicUsize::new(0));
+        let warm_count_clone = Arc::clone(&warm_count);
+        let mut fetched = IndexMap::new();
+        fetched.insert(MessageId::new(10), make_cached_message(10, "test"));
+
+        handler
+            .track_channel_with_io(
+                channel_id,
+                move || {
+                    fetch_count_clone.fetch_add(1, Ordering::SeqCst);
+                    std::future::ready(Ok(fetched))
+                },
+                move || {
+                    warm_count_clone.fetch_add(1, Ordering::SeqCst);
+                    std::future::ready(Ok(()))
+                },
+            )
+            .await;
+
+        assert!(handler.channel_manager.is_tracked(channel_id));
+        assert!(handler.message_cache.contains(channel_id));
+        assert_eq!(fetch_count.load(Ordering::SeqCst), 1);
+        assert_eq!(warm_count.load(Ordering::SeqCst), 1);
+        assert!(!handler.channel_manager.has_fetch_failed(channel_id));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn track_channel_with_io_is_noop_when_already_tracked() {
+        let handler = handler();
+        let channel_id = ChannelId::new(1);
+        let Some(_tracked_id) = handler.channel_manager.track(channel_id) else {
+            panic!("track should succeed");
+        };
+
+        let fetch_count = Arc::new(AtomicUsize::new(0));
+        let fetch_count_clone = Arc::clone(&fetch_count);
+        let warm_count = Arc::new(AtomicUsize::new(0));
+        let warm_count_clone = Arc::clone(&warm_count);
+
+        handler
+            .track_channel_with_io(
+                channel_id,
+                move || {
+                    fetch_count_clone.fetch_add(1, Ordering::SeqCst);
+                    std::future::ready(Ok(IndexMap::new()))
+                },
+                move || {
+                    warm_count_clone.fetch_add(1, Ordering::SeqCst);
+                    std::future::ready(Ok(()))
+                },
+            )
+            .await;
+
+        assert_eq!(fetch_count.load(Ordering::SeqCst), 0);
+        assert_eq!(warm_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn track_channel_with_io_marks_fetch_failed_and_still_warms_up() {
+        let handler = handler();
+        let channel_id = ChannelId::new(1);
+
+        let fetch_count = Arc::new(AtomicUsize::new(0));
+        let fetch_count_clone = Arc::clone(&fetch_count);
+        let warm_count = Arc::new(AtomicUsize::new(0));
+        let warm_count_clone = Arc::clone(&warm_count);
+
+        handler
+            .track_channel_with_io(
+                channel_id,
+                move || {
+                    fetch_count_clone.fetch_add(1, Ordering::SeqCst);
+                    std::future::ready(Err(ServiceError::Request("boom".into())))
+                },
+                move || {
+                    warm_count_clone.fetch_add(1, Ordering::SeqCst);
+                    std::future::ready(Err(ServiceError::Request("warm".into())))
+                },
+            )
+            .await;
+
+        assert!(handler.channel_manager.is_tracked(channel_id));
+        assert!(handler.channel_manager.has_fetch_failed(channel_id));
+        assert!(!handler.message_cache.contains(channel_id));
+        assert_eq!(fetch_count.load(Ordering::SeqCst), 1);
+        assert_eq!(warm_count.load(Ordering::SeqCst), 1);
+    }
+
     #[rstest]
     fn plan_cache_rebuild_orders_messages_by_id_and_sets_reactions(
         processor: MessageProcessor<'static>,
@@ -1026,6 +1162,120 @@ mod tests {
     ) {
         let actual = should_abort_rebuild_after_cache_load(load_result);
         assert_eq!(actual, expected);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ensure_cache_loaded_cache_hit_non_empty_does_not_fetch() {
+        let handler = handler();
+        let channel_id = ChannelId::new(1);
+        let Some(ChannelEvent::Tracked(tracked_id)) = handler.channel_manager.track(channel_id)
+        else {
+            panic!("track should succeed");
+        };
+        let mut messages = IndexMap::new();
+        messages.insert(MessageId::new(10), make_cached_message(10, "test"));
+        handler.message_cache.insert(tracked_id, messages);
+
+        let fetch_count = Arc::new(AtomicUsize::new(0));
+        let fetch_count_clone = Arc::clone(&fetch_count);
+        let result = handler
+            .ensure_cache_loaded_with_fetch(channel_id, move || {
+                fetch_count_clone.fetch_add(1, Ordering::SeqCst);
+                std::future::ready(Ok(IndexMap::new()))
+            })
+            .await;
+
+        assert_eq!(result, CacheLoadResult::LoadedNonEmpty);
+        assert_eq!(fetch_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ensure_cache_loaded_cache_hit_empty_does_not_fetch() {
+        let handler = handler();
+        let channel_id = ChannelId::new(1);
+        let Some(ChannelEvent::Tracked(tracked_id)) = handler.channel_manager.track(channel_id)
+        else {
+            panic!("track should succeed");
+        };
+        handler.message_cache.insert(tracked_id, IndexMap::new());
+
+        let fetch_count = Arc::new(AtomicUsize::new(0));
+        let fetch_count_clone = Arc::clone(&fetch_count);
+        let result = handler
+            .ensure_cache_loaded_with_fetch(channel_id, move || {
+                fetch_count_clone.fetch_add(1, Ordering::SeqCst);
+                std::future::ready(Ok(IndexMap::new()))
+            })
+            .await;
+
+        assert_eq!(result, CacheLoadResult::LoadedEmpty);
+        assert_eq!(fetch_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ensure_cache_loaded_not_tracked_does_not_fetch() {
+        let handler = handler();
+        let channel_id = ChannelId::new(1);
+
+        let fetch_count = Arc::new(AtomicUsize::new(0));
+        let fetch_count_clone = Arc::clone(&fetch_count);
+        let result = handler
+            .ensure_cache_loaded_with_fetch(channel_id, move || {
+                fetch_count_clone.fetch_add(1, Ordering::SeqCst);
+                std::future::ready(Ok(IndexMap::new()))
+            })
+            .await;
+
+        assert_eq!(result, CacheLoadResult::NotTracked);
+        assert_eq!(fetch_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ensure_cache_loaded_fetches_on_cache_miss_and_inserts_cache() {
+        let handler = handler();
+        let channel_id = ChannelId::new(1);
+        let Some(_tracked_id) = handler.channel_manager.track(channel_id) else {
+            panic!("track should succeed");
+        };
+
+        let fetch_count = Arc::new(AtomicUsize::new(0));
+        let fetch_count_clone = Arc::clone(&fetch_count);
+        let mut fetched = IndexMap::new();
+        fetched.insert(MessageId::new(10), make_cached_message(10, "test"));
+
+        let result = handler
+            .ensure_cache_loaded_with_fetch(channel_id, move || {
+                fetch_count_clone.fetch_add(1, Ordering::SeqCst);
+                std::future::ready(Ok(fetched))
+            })
+            .await;
+
+        assert_eq!(result, CacheLoadResult::LoadedNonEmpty);
+        assert_eq!(fetch_count.load(Ordering::SeqCst), 1);
+        assert!(handler.message_cache.contains(channel_id));
+        assert!(!handler.channel_manager.has_fetch_failed(channel_id));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ensure_cache_loaded_marks_failed_on_fetch_error() {
+        let handler = handler();
+        let channel_id = ChannelId::new(1);
+        let Some(_tracked_id) = handler.channel_manager.track(channel_id) else {
+            panic!("track should succeed");
+        };
+
+        let fetch_count = Arc::new(AtomicUsize::new(0));
+        let fetch_count_clone = Arc::clone(&fetch_count);
+        let result = handler
+            .ensure_cache_loaded_with_fetch(channel_id, move || {
+                fetch_count_clone.fetch_add(1, Ordering::SeqCst);
+                std::future::ready(Err(ServiceError::Request("boom".into())))
+            })
+            .await;
+
+        assert_eq!(result, CacheLoadResult::Failed);
+        assert_eq!(fetch_count.load(Ordering::SeqCst), 1);
+        assert!(handler.channel_manager.has_fetch_failed(channel_id));
     }
 
     #[rstest]

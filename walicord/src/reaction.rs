@@ -187,23 +187,55 @@ impl ReactionService {
         current: BotReactionState,
         desired: MessageValidity,
     ) {
+        Self::update_state_diff_with_io(
+            channel_id,
+            message_id,
+            current,
+            desired,
+            |channel_id, message_id, emoji| {
+                Self::delete_reaction_by_id(ctx, channel_id, message_id, emoji)
+            },
+            |channel_id, message_id, emoji| {
+                Self::create_reaction_by_id(ctx, channel_id, message_id, emoji)
+            },
+        )
+        .await;
+    }
+
+    async fn update_state_diff_with_io<FDelete, FutDelete, FCreate, FutCreate>(
+        channel_id: serenity::model::id::ChannelId,
+        message_id: serenity::all::MessageId,
+        current: BotReactionState,
+        desired: MessageValidity,
+        mut delete_reaction_by_id: FDelete,
+        mut create_reaction_by_id: FCreate,
+    ) where
+        FDelete: FnMut(
+            serenity::model::id::ChannelId,
+            serenity::all::MessageId,
+            &'static str,
+        ) -> FutDelete,
+        FutDelete: Future<Output = ()>,
+        FCreate: FnMut(
+            serenity::model::id::ChannelId,
+            serenity::all::MessageId,
+            &'static str,
+        ) -> FutCreate,
+        FutCreate: Future<Output = ()>,
+    {
         for op in reaction_ops(current, desired) {
             match op {
                 ReactionOp::DeleteCheck => {
-                    Self::delete_reaction_by_id(ctx, channel_id, message_id, BotReaction::CHECK)
-                        .await;
+                    delete_reaction_by_id(channel_id, message_id, BotReaction::CHECK).await;
                 }
                 ReactionOp::DeleteCross => {
-                    Self::delete_reaction_by_id(ctx, channel_id, message_id, BotReaction::CROSS)
-                        .await;
+                    delete_reaction_by_id(channel_id, message_id, BotReaction::CROSS).await;
                 }
                 ReactionOp::AddCheck => {
-                    Self::create_reaction_by_id(ctx, channel_id, message_id, BotReaction::CHECK)
-                        .await;
+                    create_reaction_by_id(channel_id, message_id, BotReaction::CHECK).await;
                 }
                 ReactionOp::AddCross => {
-                    Self::create_reaction_by_id(ctx, channel_id, message_id, BotReaction::CROSS)
-                        .await;
+                    create_reaction_by_id(channel_id, message_id, BotReaction::CROSS).await;
                 }
             }
         }
@@ -213,6 +245,22 @@ impl ReactionService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serenity::{all::MessageId, model::id::ChannelId};
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    enum RecordedReactionAction {
+        Delete {
+            channel_id: u64,
+            message_id: u64,
+            emoji: &'static str,
+        },
+        Add {
+            channel_id: u64,
+            message_id: u64,
+            emoji: &'static str,
+        },
+    }
 
     #[test]
     fn message_validity_equality() {
@@ -309,5 +357,105 @@ mod tests {
         #[case] expected_ops: &[ReactionOp],
     ) {
         assert_eq!(reaction_ops(current, desired).as_slice(), expected_ops);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn update_state_diff_with_io_executes_delete_then_add_with_message_coordinates() {
+        let channel_id = ChannelId::new(10);
+        let message_id = MessageId::new(20);
+        let recorded = Arc::new(Mutex::new(Vec::<RecordedReactionAction>::new()));
+
+        let delete_recorded = Arc::clone(&recorded);
+        let create_recorded = Arc::clone(&recorded);
+        ReactionService::update_state_diff_with_io(
+            channel_id,
+            message_id,
+            BotReactionState::HasCheck,
+            MessageValidity::Invalid,
+            async |channel_id, message_id, emoji| {
+                let delete_recorded = Arc::clone(&delete_recorded);
+                delete_recorded
+                    .lock()
+                    .expect("recorded actions mutex poisoned")
+                    .push(RecordedReactionAction::Delete {
+                        channel_id: channel_id.get(),
+                        message_id: message_id.get(),
+                        emoji,
+                    });
+            },
+            async |channel_id, message_id, emoji| {
+                let create_recorded = Arc::clone(&create_recorded);
+                create_recorded
+                    .lock()
+                    .expect("recorded actions mutex poisoned")
+                    .push(RecordedReactionAction::Add {
+                        channel_id: channel_id.get(),
+                        message_id: message_id.get(),
+                        emoji,
+                    });
+            },
+        )
+        .await;
+
+        let actual = recorded
+            .lock()
+            .expect("recorded actions mutex poisoned")
+            .clone();
+        let expected = vec![
+            RecordedReactionAction::Delete {
+                channel_id: 10,
+                message_id: 20,
+                emoji: BotReaction::CHECK,
+            },
+            RecordedReactionAction::Add {
+                channel_id: 10,
+                message_id: 20,
+                emoji: BotReaction::CROSS,
+            },
+        ];
+        assert_eq!(actual, expected);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn update_state_diff_with_io_skips_executor_when_no_diff() {
+        let channel_id = ChannelId::new(10);
+        let message_id = MessageId::new(20);
+        let delete_calls = Arc::new(Mutex::new(Vec::<&'static str>::new()));
+        let create_calls = Arc::new(Mutex::new(Vec::<&'static str>::new()));
+
+        let delete_calls_clone = Arc::clone(&delete_calls);
+        let create_calls_clone = Arc::clone(&create_calls);
+        ReactionService::update_state_diff_with_io(
+            channel_id,
+            message_id,
+            BotReactionState::HasCross,
+            MessageValidity::Invalid,
+            async |_, _, emoji| {
+                let delete_calls_clone = Arc::clone(&delete_calls_clone);
+                delete_calls_clone
+                    .lock()
+                    .expect("delete calls mutex poisoned")
+                    .push(emoji);
+            },
+            async |_, _, emoji| {
+                let create_calls_clone = Arc::clone(&create_calls_clone);
+                create_calls_clone
+                    .lock()
+                    .expect("create calls mutex poisoned")
+                    .push(emoji);
+            },
+        )
+        .await;
+
+        let actual_delete_calls = delete_calls
+            .lock()
+            .expect("delete calls mutex poisoned")
+            .clone();
+        let actual_create_calls = create_calls
+            .lock()
+            .expect("create calls mutex poisoned")
+            .clone();
+        assert_eq!(actual_delete_calls, Vec::<&'static str>::new());
+        assert_eq!(actual_create_calls, Vec::<&'static str>::new());
     }
 }

@@ -48,11 +48,12 @@ impl MockChannelService {
 
     /// Returns the number of times fetch_all_messages was called.
     ///
-    /// Future integration tests for `ensure_cache_loaded`:
+    /// Direct Context-wired integration tests for `ensure_cache_loaded`:
     /// - Cache exists (empty or not) → fetch_count == 0
     /// - Cache miss + tracked → fetch_count == 1
     /// - Cache miss + not tracked → fetch_count == 0
-    ///   Requires: Serenity Context construction in tests (currently difficult)
+    ///
+    /// Handler-level seam tests cover these branches without constructing `serenity::Context`.
     #[allow(dead_code)]
     pub fn fetch_count(&self) -> usize {
         self.fetch_count.load(Ordering::SeqCst)

@@ -14,7 +14,12 @@ use std::{
     sync::OnceLock,
 };
 
-use crate::services::MemberSetResolver;
+use crate::services::{MemberSetResolutionError, MemberSetResolver};
+
+mod balance_accumulator_impl;
+mod settlement_support;
+
+pub use settlement_support::{BalanceDeltaDirection, Settlement, Transfer, distribute_balances};
 
 pub struct Declaration<'a> {
     pub name: &'a str,
@@ -739,6 +744,281 @@ impl MemberInfo {
     }
 }
 
+impl<'a> MemberSetExpr<'a> {
+    pub fn new<I>(ops: I) -> Self
+    where
+        I: IntoIterator<Item = MemberSetOp<'a>>,
+        <I as IntoIterator>::IntoIter: ExactSizeIterator,
+    {
+        let iter = ops.into_iter();
+        let mut values = SmallVec::with_capacity(iter.len());
+        values.extend(iter);
+        Self { ops: values }
+    }
+
+    /// Evaluate the expression to produce a set of member IDs.
+    pub fn evaluate<'r, FG, FR>(
+        &self,
+        group_resolver: &FG,
+        role_resolver: &FR,
+    ) -> Option<Cow<'r, FxHashSet<MemberId>>>
+    where
+        FG: Fn(&str) -> Option<&'r FxHashSet<MemberId>>,
+        FR: Fn(RoleId) -> Option<&'r FxHashSet<MemberId>>,
+    {
+        if self.ops.len() == 1 {
+            return match self.ops[0] {
+                MemberSetOp::Push(id) => {
+                    let mut set = FxHashSet::with_capacity_and_hasher(1, Default::default());
+                    set.insert(id);
+                    Some(Cow::Owned(set))
+                }
+                MemberSetOp::PushRole(id) => Some(Cow::Borrowed(role_resolver(id)?)),
+                MemberSetOp::PushGroup(name) => Some(Cow::Borrowed(group_resolver(name)?)),
+                _ => None,
+            };
+        }
+
+        let mut referenced_groups = FxHashMap::default();
+        for name in self.referenced_groups() {
+            if let std::collections::hash_map::Entry::Vacant(entry) = referenced_groups.entry(name)
+            {
+                entry.insert(group_resolver(name)?);
+            }
+        }
+
+        let mut referenced_roles = FxHashMap::default();
+        for role_id in self.referenced_role_ids() {
+            if let std::collections::hash_map::Entry::Vacant(entry) =
+                referenced_roles.entry(role_id)
+            {
+                entry.insert(role_resolver(role_id)?);
+            }
+        }
+
+        if let Some(result) = self.evaluate_with_mask::<u32>(&referenced_groups, &referenced_roles)
+        {
+            return Some(Cow::Owned(result));
+        }
+        if let Some(result) = self.evaluate_with_mask::<u64>(&referenced_groups, &referenced_roles)
+        {
+            return Some(Cow::Owned(result));
+        }
+        if let Some(result) = self.evaluate_with_mask::<u128>(&referenced_groups, &referenced_roles)
+        {
+            return Some(Cow::Owned(result));
+        }
+
+        None
+    }
+
+    fn evaluate_with_mask<M>(
+        &self,
+        referenced_groups: &FxHashMap<&'a str, &'_ FxHashSet<MemberId>>,
+        referenced_roles: &FxHashMap<RoleId, &'_ FxHashSet<MemberId>>,
+    ) -> Option<FxHashSet<MemberId>>
+    where
+        M: MaskWord,
+    {
+        let index = MemberIndex::try_new::<M>(
+            self.referenced_ids()
+                .chain(
+                    referenced_groups
+                        .values()
+                        .flat_map(|set| set.iter().copied()),
+                )
+                .chain(
+                    referenced_roles
+                        .values()
+                        .flat_map(|set| set.iter().copied()),
+                ),
+        )?;
+
+        let mut group_masks =
+            FxHashMap::with_capacity_and_hasher(referenced_groups.len(), Default::default());
+        for (&name, members) in referenced_groups {
+            group_masks.insert(name, index.set_to_mask::<_, M>(members.iter().copied())?);
+        }
+
+        let mut role_masks =
+            FxHashMap::with_capacity_and_hasher(referenced_roles.len(), Default::default());
+        for (&role_id, members) in referenced_roles {
+            role_masks.insert(role_id, index.set_to_mask::<_, M>(members.iter().copied())?);
+        }
+
+        let mask = self.evaluate_mask::<M>(&index, &group_masks, &role_masks)?;
+        Some(index.mask_to_set(mask))
+    }
+
+    fn evaluate_mask<M>(
+        &self,
+        index: &MemberIndex,
+        group_masks: &FxHashMap<&'a str, M>,
+        role_masks: &FxHashMap<RoleId, M>,
+    ) -> Option<M>
+    where
+        M: MaskWord,
+    {
+        let mut stack: Vec<M> = Vec::with_capacity(self.ops.len());
+
+        for op in &self.ops {
+            match *op {
+                MemberSetOp::Push(id) => {
+                    let bit = index.bit_of::<M>(id)?;
+                    stack.push(bit);
+                }
+                MemberSetOp::PushRole(role_id) => {
+                    let mask = role_masks.get(&role_id).copied()?;
+                    stack.push(mask);
+                }
+                MemberSetOp::PushGroup(name) => {
+                    let mask = group_masks.get(name).copied()?;
+                    stack.push(mask);
+                }
+                MemberSetOp::Union => {
+                    let rhs = stack.pop()?;
+                    let lhs = stack.pop()?;
+                    stack.push(lhs | rhs);
+                }
+                MemberSetOp::Intersection => {
+                    let rhs = stack.pop()?;
+                    let lhs = stack.pop()?;
+                    stack.push(lhs & rhs);
+                }
+                MemberSetOp::Difference => {
+                    let rhs = stack.pop()?;
+                    let lhs = stack.pop()?;
+                    stack.push(lhs & !rhs);
+                }
+            }
+        }
+
+        if stack.len() == 1 { stack.pop() } else { None }
+    }
+
+    /// Returns all directly referenced member IDs
+    pub fn referenced_ids(&self) -> impl Iterator<Item = MemberId> + '_ {
+        self.ops.iter().filter_map(|op| match op {
+            MemberSetOp::Push(id) => Some(*id),
+            _ => None,
+        })
+    }
+
+    /// Returns all referenced group names
+    pub fn referenced_groups(&self) -> impl Iterator<Item = &'a str> + '_ {
+        self.ops.iter().filter_map(|op| match op {
+            MemberSetOp::PushGroup(name) => Some(*name),
+            _ => None,
+        })
+    }
+
+    /// Returns all referenced role IDs.
+    pub fn referenced_role_ids(&self) -> impl Iterator<Item = RoleId> + '_ {
+        self.ops.iter().filter_map(|op| match op {
+            MemberSetOp::PushRole(id) => Some(*id),
+            _ => None,
+        })
+    }
+}
+
+impl<'a> Program<'a> {
+    fn empty_roles() -> &'static RoleMembers {
+        static ROLES: OnceLock<RoleMembers> = OnceLock::new();
+        ROLES.get_or_init(RoleMembers::default)
+    }
+
+    pub fn try_new(
+        statements: Vec<StatementWithLine<'a>>,
+        member_ids: &[MemberId],
+    ) -> Result<Self, ProgramBuildError<'a>> {
+        Self::try_new_with_roles(statements, member_ids, Self::empty_roles())
+    }
+
+    pub fn try_new_with_roles(
+        statements: Vec<StatementWithLine<'a>>,
+        member_ids: &[MemberId],
+        role_members: &'a RoleMembers,
+    ) -> Result<Self, ProgramBuildError<'a>> {
+        let mut validated_statements = Vec::with_capacity(statements.len());
+        let mut resolver =
+            MemberSetResolver::new_with_context(member_ids.iter().copied(), role_members);
+
+        for StatementWithLine { line, statement } in statements {
+            match &statement {
+                Statement::Declaration(decl) => {
+                    // Check that all referenced groups are defined
+                    for group_name in decl.expression.referenced_groups() {
+                        if !resolver.is_defined(group_name) {
+                            return Err(ProgramBuildError::UndefinedGroup {
+                                name: group_name,
+                                line,
+                            });
+                        }
+                    }
+                    for role_id in decl.expression.referenced_role_ids() {
+                        if !resolver.is_role_defined(role_id) {
+                            return Err(ProgramBuildError::UndefinedRole { id: role_id, line });
+                        }
+                    }
+
+                    let members_vec =
+                        resolver
+                            .try_evaluate_members(&decl.expression)
+                            .map_err(|_| ProgramBuildError::FailedToEvaluateGroup {
+                                name: decl.name,
+                                line,
+                            })?;
+                    resolver.register_group_members(decl.name, members_vec.iter());
+                }
+                Statement::Payment(payment) => {
+                    // Check that all referenced groups in payment are defined
+                    for group_name in payment
+                        .payer
+                        .referenced_groups()
+                        .chain(payment.payee.referenced_groups())
+                    {
+                        if !resolver.is_defined(group_name) {
+                            return Err(ProgramBuildError::UndefinedGroup {
+                                name: group_name,
+                                line,
+                            });
+                        }
+                    }
+                    for role_id in payment
+                        .payer
+                        .referenced_role_ids()
+                        .chain(payment.payee.referenced_role_ids())
+                    {
+                        if !resolver.is_role_defined(role_id) {
+                            return Err(ProgramBuildError::UndefinedRole { id: role_id, line });
+                        }
+                    }
+                }
+            }
+
+            validated_statements.push(statement);
+        }
+
+        Ok(Self {
+            members: member_ids.to_vec(),
+            roles: role_members,
+            statements: validated_statements,
+        })
+    }
+
+    pub fn statements(&self) -> &[Statement<'a>] {
+        &self.statements
+    }
+
+    pub fn calculate_balances(&self) -> Result<MemberBalances, BalanceError> {
+        let mut accumulator = BalanceAccumulator::new_with_context(&self.members, self.roles);
+        for stmt in &self.statements {
+            accumulator.apply(stmt)?;
+        }
+        Ok(accumulator.into_balances())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1270,449 +1550,4 @@ mod tests {
         let result = program.calculate_balances();
         assert_eq!(result, Err(BalanceError::ZeroTotalWeight));
     }
-}
-
-impl<'a> MemberSetExpr<'a> {
-    pub fn new<I>(ops: I) -> Self
-    where
-        I: IntoIterator<Item = MemberSetOp<'a>>,
-        <I as IntoIterator>::IntoIter: ExactSizeIterator,
-    {
-        let iter = ops.into_iter();
-        let mut values = SmallVec::with_capacity(iter.len());
-        values.extend(iter);
-        Self { ops: values }
-    }
-
-    /// Evaluate the expression to produce a set of member IDs.
-    pub fn evaluate<'r, FG, FR>(
-        &self,
-        group_resolver: &FG,
-        role_resolver: &FR,
-    ) -> Option<Cow<'r, FxHashSet<MemberId>>>
-    where
-        FG: Fn(&str) -> Option<&'r FxHashSet<MemberId>>,
-        FR: Fn(RoleId) -> Option<&'r FxHashSet<MemberId>>,
-    {
-        if self.ops.len() == 1 {
-            return match self.ops[0] {
-                MemberSetOp::Push(id) => {
-                    let mut set = FxHashSet::with_capacity_and_hasher(1, Default::default());
-                    set.insert(id);
-                    Some(Cow::Owned(set))
-                }
-                MemberSetOp::PushRole(id) => Some(Cow::Borrowed(role_resolver(id)?)),
-                MemberSetOp::PushGroup(name) => Some(Cow::Borrowed(group_resolver(name)?)),
-                _ => None,
-            };
-        }
-
-        let mut referenced_groups = FxHashMap::default();
-        for name in self.referenced_groups() {
-            if let std::collections::hash_map::Entry::Vacant(entry) = referenced_groups.entry(name)
-            {
-                entry.insert(group_resolver(name)?);
-            }
-        }
-
-        let mut referenced_roles = FxHashMap::default();
-        for role_id in self.referenced_role_ids() {
-            if let std::collections::hash_map::Entry::Vacant(entry) =
-                referenced_roles.entry(role_id)
-            {
-                entry.insert(role_resolver(role_id)?);
-            }
-        }
-
-        if let Some(result) = self.evaluate_with_mask::<u32>(&referenced_groups, &referenced_roles)
-        {
-            return Some(Cow::Owned(result));
-        }
-        if let Some(result) = self.evaluate_with_mask::<u64>(&referenced_groups, &referenced_roles)
-        {
-            return Some(Cow::Owned(result));
-        }
-        if let Some(result) = self.evaluate_with_mask::<u128>(&referenced_groups, &referenced_roles)
-        {
-            return Some(Cow::Owned(result));
-        }
-
-        None
-    }
-
-    fn evaluate_with_mask<M>(
-        &self,
-        referenced_groups: &FxHashMap<&'a str, &'_ FxHashSet<MemberId>>,
-        referenced_roles: &FxHashMap<RoleId, &'_ FxHashSet<MemberId>>,
-    ) -> Option<FxHashSet<MemberId>>
-    where
-        M: MaskWord,
-    {
-        let index = MemberIndex::try_new::<M>(
-            self.referenced_ids()
-                .chain(
-                    referenced_groups
-                        .values()
-                        .flat_map(|set| set.iter().copied()),
-                )
-                .chain(
-                    referenced_roles
-                        .values()
-                        .flat_map(|set| set.iter().copied()),
-                ),
-        )?;
-
-        let mut group_masks =
-            FxHashMap::with_capacity_and_hasher(referenced_groups.len(), Default::default());
-        for (&name, members) in referenced_groups {
-            group_masks.insert(name, index.set_to_mask::<_, M>(members.iter().copied())?);
-        }
-
-        let mut role_masks =
-            FxHashMap::with_capacity_and_hasher(referenced_roles.len(), Default::default());
-        for (&role_id, members) in referenced_roles {
-            role_masks.insert(role_id, index.set_to_mask::<_, M>(members.iter().copied())?);
-        }
-
-        let mask = self.evaluate_mask::<M>(&index, &group_masks, &role_masks)?;
-        Some(index.mask_to_set(mask))
-    }
-
-    fn evaluate_mask<M>(
-        &self,
-        index: &MemberIndex,
-        group_masks: &FxHashMap<&'a str, M>,
-        role_masks: &FxHashMap<RoleId, M>,
-    ) -> Option<M>
-    where
-        M: MaskWord,
-    {
-        let mut stack: Vec<M> = Vec::with_capacity(self.ops.len());
-
-        for op in &self.ops {
-            match *op {
-                MemberSetOp::Push(id) => {
-                    let bit = index.bit_of::<M>(id)?;
-                    stack.push(bit);
-                }
-                MemberSetOp::PushRole(role_id) => {
-                    let mask = role_masks.get(&role_id).copied()?;
-                    stack.push(mask);
-                }
-                MemberSetOp::PushGroup(name) => {
-                    let mask = group_masks.get(name).copied()?;
-                    stack.push(mask);
-                }
-                MemberSetOp::Union => {
-                    let rhs = stack.pop()?;
-                    let lhs = stack.pop()?;
-                    stack.push(lhs | rhs);
-                }
-                MemberSetOp::Intersection => {
-                    let rhs = stack.pop()?;
-                    let lhs = stack.pop()?;
-                    stack.push(lhs & rhs);
-                }
-                MemberSetOp::Difference => {
-                    let rhs = stack.pop()?;
-                    let lhs = stack.pop()?;
-                    stack.push(lhs & !rhs);
-                }
-            }
-        }
-
-        if stack.len() == 1 { stack.pop() } else { None }
-    }
-
-    /// Returns all directly referenced member IDs
-    pub fn referenced_ids(&self) -> impl Iterator<Item = MemberId> + '_ {
-        self.ops.iter().filter_map(|op| match op {
-            MemberSetOp::Push(id) => Some(*id),
-            _ => None,
-        })
-    }
-
-    /// Returns all referenced group names
-    pub fn referenced_groups(&self) -> impl Iterator<Item = &'a str> + '_ {
-        self.ops.iter().filter_map(|op| match op {
-            MemberSetOp::PushGroup(name) => Some(*name),
-            _ => None,
-        })
-    }
-
-    /// Returns all referenced role IDs.
-    pub fn referenced_role_ids(&self) -> impl Iterator<Item = RoleId> + '_ {
-        self.ops.iter().filter_map(|op| match op {
-            MemberSetOp::PushRole(id) => Some(*id),
-            _ => None,
-        })
-    }
-}
-
-impl<'a> Program<'a> {
-    fn empty_roles() -> &'static RoleMembers {
-        static ROLES: OnceLock<RoleMembers> = OnceLock::new();
-        ROLES.get_or_init(RoleMembers::default)
-    }
-
-    pub fn try_new(
-        statements: Vec<StatementWithLine<'a>>,
-        member_ids: &[MemberId],
-    ) -> Result<Self, ProgramBuildError<'a>> {
-        Self::try_new_with_roles(statements, member_ids, Self::empty_roles())
-    }
-
-    pub fn try_new_with_roles(
-        statements: Vec<StatementWithLine<'a>>,
-        member_ids: &[MemberId],
-        role_members: &'a RoleMembers,
-    ) -> Result<Self, ProgramBuildError<'a>> {
-        let mut validated_statements = Vec::with_capacity(statements.len());
-        let mut resolver =
-            MemberSetResolver::new_with_context(member_ids.iter().copied(), role_members);
-
-        for StatementWithLine { line, statement } in statements {
-            match &statement {
-                Statement::Declaration(decl) => {
-                    // Check that all referenced groups are defined
-                    for group_name in decl.expression.referenced_groups() {
-                        if !resolver.is_defined(group_name) {
-                            return Err(ProgramBuildError::UndefinedGroup {
-                                name: group_name,
-                                line,
-                            });
-                        }
-                    }
-                    for role_id in decl.expression.referenced_role_ids() {
-                        if !resolver.is_role_defined(role_id) {
-                            return Err(ProgramBuildError::UndefinedRole { id: role_id, line });
-                        }
-                    }
-
-                    let members_vec = resolver.evaluate_members(&decl.expression).ok_or(
-                        ProgramBuildError::FailedToEvaluateGroup {
-                            name: decl.name,
-                            line,
-                        },
-                    )?;
-                    resolver.register_group_members(decl.name, members_vec.iter());
-                }
-                Statement::Payment(payment) => {
-                    // Check that all referenced groups in payment are defined
-                    for group_name in payment
-                        .payer
-                        .referenced_groups()
-                        .chain(payment.payee.referenced_groups())
-                    {
-                        if !resolver.is_defined(group_name) {
-                            return Err(ProgramBuildError::UndefinedGroup {
-                                name: group_name,
-                                line,
-                            });
-                        }
-                    }
-                    for role_id in payment
-                        .payer
-                        .referenced_role_ids()
-                        .chain(payment.payee.referenced_role_ids())
-                    {
-                        if !resolver.is_role_defined(role_id) {
-                            return Err(ProgramBuildError::UndefinedRole { id: role_id, line });
-                        }
-                    }
-                }
-            }
-
-            validated_statements.push(statement);
-        }
-
-        Ok(Self {
-            members: member_ids.to_vec(),
-            roles: role_members,
-            statements: validated_statements,
-        })
-    }
-
-    pub fn statements(&self) -> &[Statement<'a>] {
-        &self.statements
-    }
-
-    pub fn calculate_balances(&self) -> Result<MemberBalances, BalanceError> {
-        let mut accumulator = BalanceAccumulator::new_with_context(&self.members, self.roles);
-        for stmt in &self.statements {
-            accumulator.apply(stmt)?;
-        }
-        Ok(accumulator.into_balances())
-    }
-}
-
-impl<'a> Default for BalanceAccumulator<'a> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<'a> BalanceAccumulator<'a> {
-    fn empty_roles() -> &'static RoleMembers {
-        static ROLES: OnceLock<RoleMembers> = OnceLock::new();
-        ROLES.get_or_init(RoleMembers::default)
-    }
-
-    pub fn new() -> Self {
-        Self::new_with_members(&[])
-    }
-
-    pub fn new_with_members(member_ids: &[MemberId]) -> Self {
-        Self::new_with_context(member_ids, Self::empty_roles())
-    }
-
-    pub fn new_with_context(member_ids: &[MemberId], role_members: &'a RoleMembers) -> Self {
-        let balances: MemberBalances = MemberBalances::default();
-        let resolver =
-            MemberSetResolver::new_with_context(member_ids.iter().copied(), role_members);
-
-        Self { balances, resolver }
-    }
-
-    pub fn apply(&mut self, statement: &Statement<'a>) -> Result<(), BalanceError> {
-        match statement {
-            Statement::Declaration(decl) => {
-                for member_id in decl.expression.referenced_ids() {
-                    self.balances.entry(member_id).or_insert(Money::ZERO);
-                }
-                let Some(members_vec) = self.resolver.evaluate_members(&decl.expression) else {
-                    return Ok(());
-                };
-                for member in members_vec.iter() {
-                    self.balances.entry(member).or_insert(Money::ZERO);
-                }
-                self.resolver
-                    .register_group_members(decl.name, members_vec.iter());
-            }
-            Statement::Payment(payment) => {
-                for member_id in payment
-                    .payer
-                    .referenced_ids()
-                    .chain(payment.payee.referenced_ids())
-                {
-                    self.balances.entry(member_id).or_insert(Money::ZERO);
-                }
-                let Some(payer_members) = self.resolver.evaluate_members(&payment.payer) else {
-                    return Ok(());
-                };
-                let Some(payee_members) = self.resolver.evaluate_members(&payment.payee) else {
-                    return Ok(());
-                };
-
-                // Validate weighted distribution before mutating any balances
-                // to preserve zero-sum invariant
-                if let AllocationStrategy::Weighted(weights) = &payment.allocation {
-                    let total_weight: Option<Weight> =
-                        payee_members.iter().try_fold(Weight::ZERO, |acc, id| {
-                            let w = weights.get(&id).copied().unwrap_or(Weight(1));
-                            acc.checked_add(w)
-                        });
-                    match total_weight {
-                        None => return Err(BalanceError::WeightOverflow),
-                        Some(Weight::ZERO) => return Err(BalanceError::ZeroTotalWeight),
-                        Some(_) => {}
-                    }
-                }
-
-                distribute_balances(
-                    &mut self.balances,
-                    &payer_members,
-                    payment.amount,
-                    1,
-                    &AllocationStrategy::Even,
-                )
-                .expect("even distribution should never fail");
-
-                distribute_balances(
-                    &mut self.balances,
-                    &payee_members,
-                    payment.amount,
-                    -1,
-                    &payment.allocation,
-                )
-                .expect("weighted distribution validated above");
-            }
-        }
-        Ok(())
-    }
-
-    pub fn balances(&self) -> &MemberBalances {
-        &self.balances
-    }
-
-    pub fn into_balances(self) -> MemberBalances {
-        self.balances
-    }
-
-    pub fn set_balances(&mut self, balances: MemberBalances) {
-        self.balances = balances;
-    }
-
-    pub fn evaluate_members(&self, expr: &MemberSetExpr<'a>) -> Option<MemberSet> {
-        self.resolver.evaluate_members(expr)
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Transfer {
-    pub from: MemberId,
-    pub to: MemberId,
-    pub amount: Money,
-}
-
-#[derive(Debug, PartialEq)]
-pub struct Settlement {
-    pub new_balances: MemberBalances,
-    pub transfers: Vec<Transfer>,
-}
-
-/// Distributes an amount among members, updating their balances.
-///
-/// # Arguments
-/// * `balances` - Map of member balances to update
-/// * `members` - Set of members to distribute among
-/// * `amount` - Total amount to distribute
-/// * `direction` - +1 for debt/net-pay side (payer), -1 for credit/net-receive side (payee)
-/// * `allocation` - The strategy used to split the amount (even or weighted)
-///
-/// # Returns
-/// * `Ok(())` if distribution succeeded
-/// * `Err(SplitError::EmptyRatios)` if members set is empty (should not happen due to early return)
-/// * `Err(SplitError::ZeroTotalRatio)` if weighted distribution has zero total weight
-pub fn distribute_balances(
-    balances: &mut MemberBalances,
-    members: &MemberSet,
-    amount: Money,
-    direction: i64,
-    allocation: &AllocationStrategy,
-) -> Result<(), SplitError> {
-    if members.is_empty() {
-        return Ok(());
-    }
-
-    let shares: Vec<Money> = match allocation {
-        AllocationStrategy::Even => amount
-            .split_even(members.members().len(), RemainderPolicy::FrontLoad)
-            .collect(),
-        AllocationStrategy::Weighted(weights) => {
-            let weight_vec: Vec<Weight> = members
-                .iter()
-                .map(|id| weights.get(&id).copied().unwrap_or(Weight(1)))
-                .collect();
-            let ratios = Ratios::try_new(weight_vec)?;
-            amount.split_ratio(&ratios, RemainderPolicy::FrontLoad)
-        }
-    };
-
-    for (member, share) in members.iter().zip(shares) {
-        let signed = share * Decimal::from(direction);
-        *balances.entry(member).or_insert(Money::ZERO) += signed;
-    }
-
-    Ok(())
 }
