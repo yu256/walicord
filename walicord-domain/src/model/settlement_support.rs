@@ -43,8 +43,10 @@ impl BalanceDeltaDirection {
 ///
 /// # Returns
 /// * `Ok(())` if distribution succeeded
-/// * `Err(SplitError::EmptyRatios)` if members set is empty (should not happen due to early return)
-/// * `Err(SplitError::ZeroTotalRatio)` if weighted distribution has zero total weight
+///
+/// `allocation` is already validated and resolved, so the current implementation
+/// has no runtime error path. The `Result` return type is retained for API
+/// compatibility with earlier versions of this helper.
 pub fn distribute_balances(
     balances: &mut MemberBalances,
     members: &MemberSet,

@@ -219,17 +219,17 @@ impl AllocationStrategy {
         &self,
         members: &MemberSet,
         resolver: &MemberSetResolver<'a>,
-    ) -> Result<ResolvedAllocationStrategy, BalanceError> {
+    ) -> Result<Option<ResolvedAllocationStrategy>, BalanceError> {
         if members.is_empty() {
-            return Ok(ResolvedAllocationStrategy::Even);
+            return Ok(Some(ResolvedAllocationStrategy::Even));
         }
 
         match self {
-            Self::Even => Ok(ResolvedAllocationStrategy::Even),
+            Self::Even => Ok(Some(ResolvedAllocationStrategy::Even)),
             Self::Weighted(overrides) => {
-                let weight_vec = overrides
-                    .resolved_weight_vector(members, resolver)
-                    .expect("weight override targets must resolve after program validation");
+                let Some(weight_vec) = overrides.resolved_weight_vector(members, resolver) else {
+                    return Ok(None);
+                };
                 let ratios = Ratios::try_new(weight_vec).map_err(|err| match err {
                     SplitError::WeightOverflow => BalanceError::WeightOverflow,
                     SplitError::ZeroTotalRatio => BalanceError::ZeroTotalWeight,
@@ -237,7 +237,7 @@ impl AllocationStrategy {
                         unreachable!("non-empty payee members should produce non-empty ratios")
                     }
                 })?;
-                Ok(ResolvedAllocationStrategy::Weighted(ratios))
+                Ok(Some(ResolvedAllocationStrategy::Weighted(ratios)))
             }
         }
     }
@@ -1656,6 +1656,15 @@ mod tests {
         program.calculate_balances()
     }
 
+    fn apply_single_statement_with_roles<'a>(
+        statement: Statement<'a>,
+        roles: &'a RoleMembers,
+    ) -> Result<MemberBalances, BalanceError> {
+        let mut accumulator = BalanceAccumulator::new_with_context(&[], roles);
+        accumulator.apply(&statement)?;
+        Ok(accumulator.into_balances())
+    }
+
     fn empty_roles_ref() -> &'static RoleMembers {
         use std::sync::OnceLock;
         static ROLES: OnceLock<RoleMembers> = OnceLock::new();
@@ -1668,6 +1677,40 @@ mod tests {
         ROLES.get_or_init(|| {
             RoleMembers::from_iter([(RoleId(10), FxHashSet::from_iter([MemberId(1), MemberId(2)]))])
         })
+    }
+
+    #[rstest]
+    #[case::undefined_group_override(
+        Statement::Payment(make_weighted_payment_with_overrides(
+            100,
+            WeightOverrides::new([WeightOverride::group("vip", Weight(2))]),
+            vec![MemberSetOp::Push(MemberId(1))],
+        )),
+        empty_roles_ref(),
+        Ok(MemberBalances::from([
+            (MemberId(1), Money::ZERO),
+            (MemberId(10), Money::ZERO),
+        ]))
+    )]
+    #[case::undefined_role_override(
+        Statement::Payment(make_weighted_payment_with_overrides(
+            100,
+            WeightOverrides::new([WeightOverride::role(RoleId(10), Weight(2))]),
+            vec![MemberSetOp::Push(MemberId(1))],
+        )),
+        empty_roles_ref(),
+        Ok(MemberBalances::from([
+            (MemberId(1), Money::ZERO),
+            (MemberId(10), Money::ZERO),
+        ]))
+    )]
+    fn balance_accumulator_apply_skips_payments_with_unresolved_weight_overrides(
+        #[case] statement: Statement<'static>,
+        #[case] roles: &'static RoleMembers,
+        #[case] expected: Result<MemberBalances, BalanceError>,
+    ) {
+        let actual = apply_single_statement_with_roles(statement, roles);
+        assert_eq!(actual, expected);
     }
 
     #[rstest]

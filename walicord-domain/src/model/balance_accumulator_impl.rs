@@ -59,9 +59,12 @@ impl<'a> BalanceAccumulator<'a> {
                     return Ok(());
                 };
 
-                let resolved_payee_allocation = payment
+                let Some(resolved_payee_allocation) = payment
                     .allocation
-                    .resolve_for_payee_members(&payee_members, &self.resolver)?;
+                    .resolve_for_payee_members(&payee_members, &self.resolver)?
+                else {
+                    return Ok(());
+                };
 
                 distribute_balances(
                     &mut self.balances,
