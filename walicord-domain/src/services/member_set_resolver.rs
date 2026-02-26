@@ -93,6 +93,21 @@ impl<'a> MemberSetResolver<'a> {
         &self,
         expr: &MemberSetExpr<'a>,
     ) -> Result<MemberSet, MemberSetResolutionError<'a>> {
+        if let Some(set) = expr.evaluate(
+            &|name| {
+                if name == "MEMBERS" {
+                    self.default_members.as_ref()
+                } else {
+                    self.groups.get(name)
+                }
+            },
+            &|role_id| self.roles.get(&role_id),
+        ) {
+            let mut ordered: Vec<MemberId> = set.iter().copied().collect();
+            ordered.sort_unstable();
+            return Ok(MemberSet::new(ordered));
+        }
+
         let mut referenced_members: FxHashSet<MemberId> = FxHashSet::default();
 
         for member_id in expr.referenced_ids() {
@@ -309,8 +324,13 @@ mod tests {
     #[test]
     fn try_evaluate_members_returns_expression_too_large() {
         let mut resolver = MemberSetResolver::new();
-        resolver.register_group_members("all", (1..=129).map(MemberId));
-        let expr = MemberSetExpr::new([MemberSetOp::PushGroup("all")]);
+        resolver.register_group_members("A", (1..=64).map(MemberId));
+        resolver.register_group_members("B", (65..=129).map(MemberId));
+        let expr = MemberSetExpr::new([
+            MemberSetOp::PushGroup("A"),
+            MemberSetOp::PushGroup("B"),
+            MemberSetOp::Union,
+        ]);
 
         assert_eq!(
             resolver.try_evaluate_members(&expr),
@@ -319,5 +339,36 @@ mod tests {
                 max_supported: 128,
             })
         );
+    }
+
+    #[test]
+    fn try_evaluate_members_allows_large_single_group_reference() {
+        let mut resolver = MemberSetResolver::new();
+        resolver.register_group_members("all", (1..=129).map(MemberId));
+        let expr = MemberSetExpr::new([MemberSetOp::PushGroup("all")]);
+
+        let members = resolver
+            .try_evaluate_members(&expr)
+            .expect("single group reference should resolve even when large");
+
+        assert_eq!(members.members().len(), 129);
+        assert_eq!(members.members().first().copied(), Some(MemberId(1)));
+        assert_eq!(members.members().last().copied(), Some(MemberId(129)));
+    }
+
+    #[test]
+    fn try_evaluate_members_allows_large_single_role_reference() {
+        let roles =
+            RoleMembers::from_iter([(RoleId(10), FxHashSet::from_iter((1..=129).map(MemberId)))]);
+        let resolver = MemberSetResolver::new_with_context(std::iter::empty(), &roles);
+        let expr = MemberSetExpr::new([MemberSetOp::PushRole(RoleId(10))]);
+
+        let members = resolver
+            .try_evaluate_members(&expr)
+            .expect("single role reference should resolve even when large");
+
+        assert_eq!(members.members().len(), 129);
+        assert_eq!(members.members().first().copied(), Some(MemberId(1)));
+        assert_eq!(members.members().last().copied(), Some(MemberId(129)));
     }
 }

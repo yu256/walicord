@@ -942,17 +942,24 @@ mod tests {
     }
 
     fn script_with_command_cash() -> Script<'static> {
+        script_with_command_cash_with_roles(union_members(&[1]), empty_roles())
+    }
+
+    fn script_with_command_cash_with_roles(
+        cash_members: MemberSetExpr<'static>,
+        roles: &'static RoleMembers,
+    ) -> Script<'static> {
         let members = union_members(&[1, 2, 3, 4]);
         let mut command_statements = base_cash_sensitivity_payments();
         command_statements.push(ScriptStatementWithLine {
             line: 5,
             statement: ScriptStatement::Command(Command::SettleUp {
                 members,
-                cash_members: Some(union_members(&[1])),
+                cash_members: Some(cash_members),
             }),
         });
 
-        Script::new(&[], empty_roles(), command_statements)
+        Script::new(&[], roles, command_statements)
     }
 
     fn script_with_member_cash_on_with_roles(roles: &'static RoleMembers) -> Script<'static> {
@@ -1040,8 +1047,11 @@ mod tests {
         script_with_member_cash_on_with_roles(empty_roles())
     }
 
-    fn script_with_member_cash_on_with_large_roles() -> Script<'static> {
-        script_with_member_cash_on_with_roles(roles_with_large_cash_role())
+    fn script_with_command_cash_large_role() -> Script<'static> {
+        script_with_command_cash_with_roles(
+            MemberSetExpr::new([MemberSetOp::PushRole(RoleId(999))]),
+            roles_with_large_cash_role(),
+        )
     }
 
     async fn assert_settle_transfers_equal(
@@ -1083,9 +1093,9 @@ mod tests {
         script_with_invalid_member_cash_invalid_expression(),
         script_with_member_cash_on()
     )]
-    #[case::oversized_role_cash_expr_keeps_previous_state(
+    #[case::oversized_single_role_cash_expr_is_applied(
         script_with_invalid_member_cash_oversized_role_expr(),
-        script_with_member_cash_on_with_large_roles()
+        script_with_command_cash_large_role()
     )]
     #[tokio::test(flavor = "multi_thread")]
     async fn cash_configuration_equivalence(
