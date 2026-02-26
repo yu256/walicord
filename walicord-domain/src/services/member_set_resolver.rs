@@ -89,20 +89,25 @@ impl<'a> MemberSetResolver<'a> {
         self.try_evaluate_members(expr).ok()
     }
 
+    pub fn group_members(&self, name: &str) -> Option<&FxHashSet<MemberId>> {
+        if name == "MEMBERS" {
+            self.default_members.as_ref()
+        } else {
+            self.groups.get(name)
+        }
+    }
+
+    pub fn role_members(&self, role_id: RoleId) -> Option<&FxHashSet<MemberId>> {
+        self.roles.get(&role_id)
+    }
+
     pub fn try_evaluate_members(
         &self,
         expr: &MemberSetExpr<'a>,
     ) -> Result<MemberSet, MemberSetResolutionError<'a>> {
-        if let Some(set) = expr.evaluate(
-            &|name| {
-                if name == "MEMBERS" {
-                    self.default_members.as_ref()
-                } else {
-                    self.groups.get(name)
-                }
-            },
-            &|role_id| self.roles.get(&role_id),
-        ) {
+        if let Some(set) = expr.evaluate(&|name| self.group_members(name), &|role_id| {
+            self.role_members(role_id)
+        }) {
             let mut ordered: Vec<MemberId> = set.iter().copied().collect();
             ordered.sort_unstable();
             return Ok(MemberSet::new(ordered));
@@ -114,18 +119,14 @@ impl<'a> MemberSetResolver<'a> {
             referenced_members.insert(member_id);
         }
         for group_name in expr.referenced_groups() {
-            let members = if group_name == "MEMBERS" {
-                self.default_members.as_ref()
-            } else {
-                self.groups.get(group_name)
-            }
-            .ok_or(MemberSetResolutionError::UndefinedGroup { name: group_name })?;
+            let members = self
+                .group_members(group_name)
+                .ok_or(MemberSetResolutionError::UndefinedGroup { name: group_name })?;
             referenced_members.extend(members.iter().copied());
         }
         for role_id in expr.referenced_role_ids() {
             let members = self
-                .roles
-                .get(&role_id)
+                .role_members(role_id)
                 .ok_or(MemberSetResolutionError::UndefinedRole { id: role_id })?;
             referenced_members.extend(members.iter().copied());
         }
@@ -139,16 +140,9 @@ impl<'a> MemberSetResolver<'a> {
         }
 
         let set = expr
-            .evaluate(
-                &|name| {
-                    if name == "MEMBERS" {
-                        self.default_members.as_ref()
-                    } else {
-                        self.groups.get(name)
-                    }
-                },
-                &|role_id| self.roles.get(&role_id),
-            )
+            .evaluate(&|name| self.group_members(name), &|role_id| {
+                self.role_members(role_id)
+            })
             .ok_or(MemberSetResolutionError::InvalidExpression)?;
         let mut ordered: Vec<MemberId> = set.iter().copied().collect();
         ordered.sort_unstable();

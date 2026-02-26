@@ -64,6 +64,123 @@ impl From<Weight> for Decimal {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WeightOverrideTarget {
+    Member(MemberId),
+    Role(RoleId),
+    Group(SmolStr),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WeightOverride {
+    pub target: WeightOverrideTarget,
+    pub weight: Weight,
+}
+
+impl WeightOverride {
+    pub fn member(member_id: MemberId, weight: Weight) -> Self {
+        Self {
+            target: WeightOverrideTarget::Member(member_id),
+            weight,
+        }
+    }
+
+    pub fn role(role_id: RoleId, weight: Weight) -> Self {
+        Self {
+            target: WeightOverrideTarget::Role(role_id),
+            weight,
+        }
+    }
+
+    pub fn group(name: impl Into<SmolStr>, weight: Weight) -> Self {
+        Self {
+            target: WeightOverrideTarget::Group(name.into()),
+            weight,
+        }
+    }
+}
+
+/// Ordered explicit weights applied to a payment payee set.
+///
+/// Overrides are applied in insertion order and later entries win when they
+/// target the same resolved member.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct WeightOverrides {
+    entries: Vec<WeightOverride>,
+}
+
+impl WeightOverrides {
+    pub fn new<I>(entries: I) -> Self
+    where
+        I: IntoIterator<Item = WeightOverride>,
+    {
+        Self {
+            entries: entries.into_iter().collect(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub fn entries(&self) -> &[WeightOverride] {
+        &self.entries
+    }
+
+    pub fn from_member_weights(weights: BTreeMap<MemberId, Weight>) -> Self {
+        Self::new(
+            weights
+                .into_iter()
+                .map(|(member_id, weight)| WeightOverride::member(member_id, weight)),
+        )
+    }
+
+    fn resolved_weight_vector<'a>(
+        &self,
+        members: &MemberSet,
+        resolver: &MemberSetResolver<'a>,
+    ) -> Option<Vec<Weight>> {
+        let mut weights = vec![Weight(1); members.members().len()];
+        if self.entries.is_empty() {
+            return Some(weights);
+        }
+
+        let member_to_index: FxHashMap<MemberId, usize> = members
+            .iter()
+            .enumerate()
+            .map(|(idx, member_id)| (member_id, idx))
+            .collect();
+
+        for entry in &self.entries {
+            match &entry.target {
+                WeightOverrideTarget::Member(member_id) => {
+                    if let Some(&idx) = member_to_index.get(member_id) {
+                        weights[idx] = entry.weight;
+                    }
+                }
+                WeightOverrideTarget::Role(role_id) => {
+                    let role_members = resolver.role_members(*role_id)?;
+                    for member_id in role_members {
+                        if let Some(&idx) = member_to_index.get(member_id) {
+                            weights[idx] = entry.weight;
+                        }
+                    }
+                }
+                WeightOverrideTarget::Group(group_name) => {
+                    let group_members = resolver.group_members(group_name.as_str())?;
+                    for member_id in group_members {
+                        if let Some(&idx) = member_to_index.get(member_id) {
+                            weights[idx] = entry.weight;
+                        }
+                    }
+                }
+            }
+        }
+
+        Some(weights)
+    }
+}
+
 /// Strategy for distributing an amount among members.
 ///
 /// This value object encapsulates the allocation logic, providing
@@ -73,9 +190,15 @@ pub enum AllocationStrategy {
     /// Distribute the amount evenly (`split_even`).
     #[default]
     Even,
-    /// Distribute the amount proportionally by member specific weights (`split_ratio`).
-    /// Members not present in the map default to a weight of 1.
-    Weighted(BTreeMap<MemberId, Weight>),
+    /// Distribute the amount proportionally with ordered explicit weight overrides.
+    /// Members not matched by any override default to a weight of 1.
+    Weighted(WeightOverrides),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ResolvedAllocationStrategy {
+    Even,
+    Weighted(Ratios),
 }
 
 impl AllocationStrategy {
@@ -84,11 +207,38 @@ impl AllocationStrategy {
         matches!(self, Self::Even)
     }
 
-    /// Returns the weights map if this is a weighted strategy, otherwise None.
-    pub fn weights(&self) -> Option<&BTreeMap<MemberId, Weight>> {
+    /// Returns the explicit weight overrides if this is a weighted strategy.
+    pub fn weight_overrides(&self) -> Option<&WeightOverrides> {
         match self {
             Self::Even => None,
-            Self::Weighted(weights) => Some(weights),
+            Self::Weighted(overrides) => Some(overrides),
+        }
+    }
+
+    fn resolve_for_payee_members<'a>(
+        &self,
+        members: &MemberSet,
+        resolver: &MemberSetResolver<'a>,
+    ) -> Result<ResolvedAllocationStrategy, BalanceError> {
+        if members.is_empty() {
+            return Ok(ResolvedAllocationStrategy::Even);
+        }
+
+        match self {
+            Self::Even => Ok(ResolvedAllocationStrategy::Even),
+            Self::Weighted(overrides) => {
+                let weight_vec = overrides
+                    .resolved_weight_vector(members, resolver)
+                    .expect("weight override targets must resolve after program validation");
+                let ratios = Ratios::try_new(weight_vec).map_err(|err| match err {
+                    SplitError::WeightOverflow => BalanceError::WeightOverflow,
+                    SplitError::ZeroTotalRatio => BalanceError::ZeroTotalWeight,
+                    SplitError::EmptyRatios | SplitError::ZeroRecipients => {
+                        unreachable!("non-empty payee members should produce non-empty ratios")
+                    }
+                })?;
+                Ok(ResolvedAllocationStrategy::Weighted(ratios))
+            }
         }
     }
 }
@@ -118,11 +268,26 @@ impl<'a> Payment<'a> {
         payee: MemberSetExpr<'a>,
         weights: BTreeMap<MemberId, Weight>,
     ) -> Self {
+        Self::weighted_with_overrides(
+            amount,
+            payer,
+            payee,
+            WeightOverrides::from_member_weights(weights),
+        )
+    }
+
+    /// Constructs a Payment with weighted distribution using ordered overrides.
+    pub fn weighted_with_overrides(
+        amount: Money,
+        payer: MemberSetExpr<'a>,
+        payee: MemberSetExpr<'a>,
+        overrides: WeightOverrides,
+    ) -> Self {
         Self {
             amount,
             payer,
             payee,
-            allocation: AllocationStrategy::Weighted(weights),
+            allocation: AllocationStrategy::Weighted(overrides),
         }
     }
 }
@@ -1359,6 +1524,19 @@ mod tests {
         )
     }
 
+    fn make_weighted_payment_with_overrides(
+        amount: i64,
+        overrides: WeightOverrides,
+        payee_ops: Vec<MemberSetOp<'static>>,
+    ) -> Payment<'static> {
+        Payment::weighted_with_overrides(
+            Money::from_i64(amount),
+            MemberSetExpr::new([MemberSetOp::Push(MemberId(10))]),
+            MemberSetExpr::new(payee_ops),
+            overrides,
+        )
+    }
+
     fn calculate_payment_balances(payment: Payment<'static>) -> MemberBalances {
         let program = Program::try_new(
             vec![StatementWithLine {
@@ -1371,6 +1549,29 @@ mod tests {
         program
             .calculate_balances()
             .expect("balance calculation should succeed")
+    }
+
+    fn calculate_statement_balances_with_roles<'a>(
+        statements: Vec<StatementWithLine<'a>>,
+        roles: &'a RoleMembers,
+    ) -> Result<MemberBalances, BalanceError> {
+        let program =
+            Program::try_new_with_roles(statements, &[], roles).expect("program should build");
+        program.calculate_balances()
+    }
+
+    fn empty_roles_ref() -> &'static RoleMembers {
+        use std::sync::OnceLock;
+        static ROLES: OnceLock<RoleMembers> = OnceLock::new();
+        ROLES.get_or_init(RoleMembers::default)
+    }
+
+    fn roles_with_members_1_2() -> &'static RoleMembers {
+        use std::sync::OnceLock;
+        static ROLES: OnceLock<RoleMembers> = OnceLock::new();
+        ROLES.get_or_init(|| {
+            RoleMembers::from_iter([(RoleId(10), FxHashSet::from_iter([MemberId(1), MemberId(2)]))])
+        })
     }
 
     #[rstest]
@@ -1549,5 +1750,136 @@ mod tests {
         .expect("program should build");
         let result = program.calculate_balances();
         assert_eq!(result, Err(BalanceError::ZeroTotalWeight));
+    }
+
+    #[rstest]
+    #[case::group_override(
+        vec![
+            StatementWithLine {
+                line: 1,
+                statement: Statement::Declaration(Declaration {
+                    name: "vip",
+                    expression: MemberSetExpr::new([
+                        MemberSetOp::Push(MemberId(1)),
+                        MemberSetOp::Push(MemberId(2)),
+                        MemberSetOp::Union,
+                    ]),
+                }),
+            },
+            StatementWithLine {
+                line: 2,
+                statement: Statement::Payment(make_weighted_payment_with_overrides(
+                    5000,
+                    WeightOverrides::new([
+                        WeightOverride::group("vip", Weight(2)),
+                    ]),
+                    vec![
+                        MemberSetOp::Push(MemberId(1)),
+                        MemberSetOp::Push(MemberId(2)),
+                        MemberSetOp::Union,
+                        MemberSetOp::Push(MemberId(3)),
+                        MemberSetOp::Union,
+                    ],
+                )),
+            },
+        ],
+        empty_roles_ref(),
+        Ok(MemberBalances::from([
+            (MemberId(1), Money::from_i64(-2000)),
+            (MemberId(2), Money::from_i64(-2000)),
+            (MemberId(3), Money::from_i64(-1000)),
+            (MemberId(10), Money::from_i64(5000)),
+        ]))
+    )]
+    #[case::role_override(
+        vec![
+            StatementWithLine {
+                line: 1,
+                statement: Statement::Payment(make_weighted_payment_with_overrides(
+                    5000,
+                    WeightOverrides::new([
+                        WeightOverride::role(RoleId(10), Weight(2)),
+                    ]),
+                    vec![
+                        MemberSetOp::Push(MemberId(1)),
+                        MemberSetOp::Push(MemberId(2)),
+                        MemberSetOp::Union,
+                        MemberSetOp::Push(MemberId(3)),
+                        MemberSetOp::Union,
+                    ],
+                )),
+            },
+        ],
+        roles_with_members_1_2(),
+        Ok(MemberBalances::from([
+            (MemberId(1), Money::from_i64(-2000)),
+            (MemberId(2), Money::from_i64(-2000)),
+            (MemberId(3), Money::from_i64(-1000)),
+            (MemberId(10), Money::from_i64(5000)),
+        ]))
+    )]
+    #[case::later_member_override_wins_over_role(
+        vec![
+            StatementWithLine {
+                line: 1,
+                statement: Statement::Payment(make_weighted_payment_with_overrides(
+                    8000,
+                    WeightOverrides::new([
+                        WeightOverride::role(RoleId(10), Weight(2)),
+                        WeightOverride::member(MemberId(1), Weight(5)),
+                    ]),
+                    vec![
+                        MemberSetOp::Push(MemberId(1)),
+                        MemberSetOp::Push(MemberId(2)),
+                        MemberSetOp::Union,
+                        MemberSetOp::Push(MemberId(3)),
+                        MemberSetOp::Union,
+                    ],
+                )),
+            },
+        ],
+        roles_with_members_1_2(),
+        Ok(MemberBalances::from([
+            (MemberId(1), Money::from_i64(-5000)),
+            (MemberId(2), Money::from_i64(-2000)),
+            (MemberId(3), Money::from_i64(-1000)),
+            (MemberId(10), Money::from_i64(8000)),
+        ]))
+    )]
+    #[case::later_role_override_wins_over_member(
+        vec![
+            StatementWithLine {
+                line: 1,
+                statement: Statement::Payment(make_weighted_payment_with_overrides(
+                    5000,
+                    WeightOverrides::new([
+                        WeightOverride::member(MemberId(1), Weight(5)),
+                        WeightOverride::role(RoleId(10), Weight(2)),
+                    ]),
+                    vec![
+                        MemberSetOp::Push(MemberId(1)),
+                        MemberSetOp::Push(MemberId(2)),
+                        MemberSetOp::Union,
+                        MemberSetOp::Push(MemberId(3)),
+                        MemberSetOp::Union,
+                    ],
+                )),
+            },
+        ],
+        roles_with_members_1_2(),
+        Ok(MemberBalances::from([
+            (MemberId(1), Money::from_i64(-2000)),
+            (MemberId(2), Money::from_i64(-2000)),
+            (MemberId(3), Money::from_i64(-1000)),
+            (MemberId(10), Money::from_i64(5000)),
+        ]))
+    )]
+    fn weighted_distribution_supports_runtime_resolved_overrides(
+        #[case] statements: Vec<StatementWithLine<'static>>,
+        #[case] roles: &'static RoleMembers,
+        #[case] expected: Result<MemberBalances, BalanceError>,
+    ) {
+        let actual = calculate_statement_balances_with_roles(statements, roles);
+        assert_eq!(actual, expected);
     }
 }
