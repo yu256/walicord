@@ -1,5 +1,5 @@
 use crate::discord::{
-    ports::RosterSnapshot,
+    ports::{RoleVisibilityDiagnostic, RoleVisibilityDiagnostics, RosterSnapshot},
     service::{ChannelError, DiscordChannelService},
 };
 use dashmap::{DashMap, DashSet};
@@ -9,6 +9,42 @@ use serenity::{
 };
 use std::collections::{HashMap, HashSet};
 use walicord_domain::model::{MemberId, MemberInfo, RoleId, RoleMembers};
+
+fn filter_role_members_by_visibility(
+    guild_roles: &RoleMembers,
+    visible_members: &HashSet<MemberId>,
+) -> (RoleMembers, RoleVisibilityDiagnostics) {
+    let mut role_members = RoleMembers::default();
+    let mut diagnostics = RoleVisibilityDiagnostics::default();
+
+    for (&role_id, role_member_ids) in guild_roles.iter() {
+        let total_members = role_member_ids.len();
+        let mut visible_count = 0usize;
+
+        for member_id in role_member_ids
+            .iter()
+            .copied()
+            .filter(|member_id| visible_members.contains(member_id))
+        {
+            visible_count += 1;
+            role_members.entry(role_id).or_default().insert(member_id);
+        }
+
+        let excluded_members = total_members.saturating_sub(visible_count);
+        if excluded_members > 0 {
+            diagnostics.insert(
+                role_id,
+                RoleVisibilityDiagnostic {
+                    total_members,
+                    visible_members: visible_count,
+                    excluded_members,
+                },
+            );
+        }
+    }
+
+    (role_members, diagnostics)
+}
 
 /// Provides member roster information for channels
 #[derive(Clone)]
@@ -86,21 +122,16 @@ impl MemberRosterProvider {
 
         let visible_members: HashSet<MemberId> = member_ids.iter().copied().collect();
         let mut role_members = RoleMembers::default();
+        let mut role_visibility_diagnostics = RoleVisibilityDiagnostics::default();
         if let Some(guild_roles) = self.role_members.get(&guild_id) {
-            for (&role_id, role_member_ids) in guild_roles.iter() {
-                for member_id in role_member_ids
-                    .iter()
-                    .copied()
-                    .filter(|member_id| visible_members.contains(member_id))
-                {
-                    role_members.entry(role_id).or_default().insert(member_id);
-                }
-            }
+            (role_members, role_visibility_diagnostics) =
+                filter_role_members_by_visibility(&guild_roles, &visible_members);
         }
 
         Ok(RosterSnapshot {
             member_ids,
             role_members,
+            role_visibility_diagnostics,
         })
     }
 
@@ -434,6 +465,48 @@ mod tests {
             roles
                 .get(&RoleId(10))
                 .is_some_and(|members| members.len() == 1 && members.contains(&MemberId(2)))
+        );
+    }
+
+    #[test]
+    fn filter_role_members_by_visibility_records_excluded_counts() {
+        let guild_roles = RoleMembers::from_iter([
+            (
+                RoleId(10),
+                [MemberId(1), MemberId(2), MemberId(3)]
+                    .into_iter()
+                    .collect(),
+            ),
+            (RoleId(20), [MemberId(2)].into_iter().collect()),
+        ]);
+        let visible_members = HashSet::from([MemberId(1), MemberId(3)]);
+
+        let (filtered, diagnostics) =
+            filter_role_members_by_visibility(&guild_roles, &visible_members);
+
+        assert_eq!(
+            filtered
+                .get(&RoleId(10))
+                .map(|members| members.len())
+                .expect("role 10 should remain"),
+            2
+        );
+        assert!(!filtered.contains_key(&RoleId(20)));
+        assert_eq!(
+            diagnostics.get(&RoleId(10)),
+            Some(&RoleVisibilityDiagnostic {
+                total_members: 3,
+                visible_members: 2,
+                excluded_members: 1,
+            })
+        );
+        assert_eq!(
+            diagnostics.get(&RoleId(20)),
+            Some(&RoleVisibilityDiagnostic {
+                total_members: 1,
+                visible_members: 0,
+                excluded_members: 1,
+            })
         );
     }
 }

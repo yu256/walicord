@@ -3,6 +3,7 @@ use crate::{
     discord::ports::{ChannelService, RosterProvider, ServiceError},
     message_cache::{CachedMessage, MessageCache, next_line_offset},
     reaction::{BotReaction, BotReactionState, MessageValidity, ReactionService},
+    role_visibility_feedback,
     settlement::{SettlementService, evaluate_program},
 };
 use arcstr::ArcStr;
@@ -21,7 +22,10 @@ use serenity::{
     prelude::*,
 };
 use std::collections::HashMap;
-use walicord_application::{Command as ProgramCommand, MessageProcessor, ScriptStatement};
+use walicord_application::{
+    Command as ProgramCommand, MessageProcessor, ProgramParseError, RoleVisibilityDiagnostics,
+    Script, ScriptStatement, filtered_empty_role_parse_error, warnings_for_program_prefix,
+};
 use walicord_domain::model::{MemberId, RoleId, RoleMembers};
 use walicord_presentation::{VariablesPresenter, format_program_parse_error};
 
@@ -43,6 +47,77 @@ enum ProcessProgramMessageResult {
     Store,
     Skip,
     Deferred,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ProgramCommandEffect {
+    ReplyText(String),
+    RunSettlement { stmt_index: usize },
+}
+
+fn format_program_parse_error_reply(
+    error: ProgramParseError<'_>,
+    diagnostics: &RoleVisibilityDiagnostics,
+    mention: impl std::fmt::Display,
+) -> String {
+    if let Some(filtered_empty_role_error) = filtered_empty_role_parse_error(&error, diagnostics) {
+        role_visibility_feedback::format_filtered_empty_role_parse_error(
+            filtered_empty_role_error,
+            mention,
+        )
+    } else {
+        format_program_parse_error(error, mention)
+    }
+}
+
+fn command_warning_lines_for_prefix(
+    program: &Script<'_>,
+    stmt_index: usize,
+    diagnostics: &RoleVisibilityDiagnostics,
+) -> Vec<String> {
+    let warnings = warnings_for_program_prefix(program, stmt_index, diagnostics);
+    role_visibility_feedback::format_warning_lines(&warnings)
+}
+
+fn plan_program_command_effects(
+    program: &Script<'_>,
+    member_ids: &[MemberId],
+    diagnostics: &RoleVisibilityDiagnostics,
+    next_line_offset: usize,
+) -> Vec<ProgramCommandEffect> {
+    let mut effects = Vec::new();
+
+    for (stmt_index, stmt) in program.statements().iter().enumerate() {
+        if stmt.line <= next_line_offset {
+            continue;
+        }
+        let ScriptStatement::Command(command) = &stmt.statement else {
+            continue;
+        };
+
+        let warning_lines = command_warning_lines_for_prefix(program, stmt_index, diagnostics);
+        match command {
+            ProgramCommand::Variables => {
+                let mut reply = VariablesPresenter::render_for_prefix_with_members(
+                    program, stmt_index, member_ids,
+                );
+                if !warning_lines.is_empty() {
+                    reply.push_str("\n\n");
+                    reply.push_str(&warning_lines.join("\n"));
+                }
+                effects.push(ProgramCommandEffect::ReplyText(reply));
+            }
+            ProgramCommand::Review | ProgramCommand::SettleUp { .. } => {
+                if !warning_lines.is_empty() {
+                    effects.push(ProgramCommandEffect::ReplyText(warning_lines.join("\n")));
+                }
+                effects.push(ProgramCommandEffect::RunSettlement { stmt_index });
+            }
+            ProgramCommand::MemberAddCash { .. } => {}
+        }
+    }
+
+    effects
 }
 
 /// Discord bot event handler with generic service dependencies
@@ -407,7 +482,11 @@ where
             Ok(result) => result,
             Err(failure) => {
                 ReactionService::update_state(ctx, msg, MessageValidity::Invalid).await;
-                let content = format_program_parse_error(failure, msg.author.mention());
+                let content = format_program_parse_error_reply(
+                    failure,
+                    &roster.role_visibility_diagnostics,
+                    msg.author.mention(),
+                );
                 let _ = msg.reply(&ctx.http, content).await;
                 return ProcessProgramMessageResult::Skip;
             }
@@ -420,34 +499,29 @@ where
         if let Some(program) = result.program.as_ref() {
             let settlement_service = SettlementService::new(&self.processor, &self.roster_provider);
             let mut member_directory: Option<HashMap<MemberId, smol_str::SmolStr>> = None;
+            let effects = plan_program_command_effects(
+                program,
+                &roster.member_ids,
+                &roster.role_visibility_diagnostics,
+                next_line_offset,
+            );
 
-            for (stmt_index, stmt) in program.statements().iter().enumerate() {
-                if stmt.line <= next_line_offset {
-                    continue;
-                }
-                if let walicord_application::ScriptStatement::Command(command) = &stmt.statement {
-                    match command {
-                        ProgramCommand::Variables => {
-                            let reply = VariablesPresenter::render_for_prefix_with_members(
-                                program,
+            for effect in effects {
+                match effect {
+                    ProgramCommandEffect::ReplyText(content) => {
+                        let _ = msg.reply(&ctx.http, content).await;
+                    }
+                    ProgramCommandEffect::RunSettlement { stmt_index } => {
+                        settlement_service
+                            .handle_settlement_command(
+                                ctx,
+                                msg,
                                 stmt_index,
+                                program,
                                 &roster.member_ids,
-                            );
-                            let _ = msg.reply(&ctx.http, reply).await;
-                        }
-                        ProgramCommand::Review | ProgramCommand::SettleUp { .. } => {
-                            settlement_service
-                                .handle_settlement_command(
-                                    ctx,
-                                    msg,
-                                    stmt_index,
-                                    program,
-                                    &roster.member_ids,
-                                    &mut member_directory,
-                                )
-                                .await;
-                        }
-                        ProgramCommand::MemberAddCash { .. } => {}
+                                &mut member_directory,
+                            )
+                            .await;
                     }
                 }
             }
@@ -900,6 +974,14 @@ mod tests {
         Arc,
         atomic::{AtomicUsize, Ordering},
     };
+    use walicord_application::{
+        FilteredEmptyRoleParseError, ProgramParseError, RoleVisibilityDiagnostic,
+        RoleVisibilityDiagnostics, Script, ScriptStatementWithLine,
+    };
+    use walicord_domain::{
+        Declaration, Statement,
+        model::{MemberSetExpr, MemberSetOp},
+    };
     use walicord_infrastructure::{WalicordProgramParser, WalicordSettlementOptimizer};
 
     fn make_cached_message(id: u64, content: &str) -> CachedMessage {
@@ -915,6 +997,35 @@ mod tests {
 
     fn make_processor() -> MessageProcessor<'static> {
         MessageProcessor::new(&WalicordProgramParser, &WalicordSettlementOptimizer)
+    }
+
+    fn role_expr(role_id: u64) -> MemberSetExpr<'static> {
+        MemberSetExpr::new([MemberSetOp::PushRole(RoleId(role_id))])
+    }
+
+    fn make_script_with_role_reference_and_command(
+        role_id: u64,
+        command: ProgramCommand<'static>,
+    ) -> Script<'static> {
+        let members: &'static [MemberId] = &[];
+        let roles = Box::leak(Box::new(RoleMembers::default()));
+        Script::new(
+            members,
+            roles,
+            vec![
+                ScriptStatementWithLine {
+                    line: 1,
+                    statement: ScriptStatement::Domain(Statement::Declaration(Declaration {
+                        name: "team",
+                        expression: role_expr(role_id),
+                    })),
+                },
+                ScriptStatementWithLine {
+                    line: 2,
+                    statement: ScriptStatement::Command(command),
+                },
+            ],
+        )
     }
 
     #[fixture]
@@ -1440,5 +1551,128 @@ mod tests {
             reactions,
             [(1, MessageValidity::Invalid), (2, MessageValidity::Invalid),]
         );
+    }
+
+    #[test]
+    fn format_program_parse_error_reply_uses_filtered_empty_role_message_when_diagnostic_matches() {
+        let diagnostics = RoleVisibilityDiagnostics::from([(
+            RoleId(10),
+            RoleVisibilityDiagnostic {
+                total_members: 2,
+                visible_members: 0,
+                excluded_members: 2,
+            },
+        )]);
+        let mention = "@user";
+
+        let actual = format_program_parse_error_reply(
+            ProgramParseError::UndefinedRole { id: 10, line: 4 },
+            &diagnostics,
+            mention,
+        );
+
+        let expected = role_visibility_feedback::format_filtered_empty_role_parse_error(
+            FilteredEmptyRoleParseError {
+                role_id: RoleId(10),
+                line: 4,
+                excluded_members: 2,
+            },
+            mention,
+        );
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn format_program_parse_error_reply_falls_back_to_default_presenter_without_diagnostic() {
+        let diagnostics = RoleVisibilityDiagnostics::default();
+        let mention = "@user";
+
+        let actual = format_program_parse_error_reply(
+            ProgramParseError::UndefinedRole { id: 10, line: 4 },
+            &diagnostics,
+            mention,
+        );
+
+        let expected = format_program_parse_error(
+            ProgramParseError::UndefinedRole { id: 10, line: 4 },
+            mention,
+        );
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn command_warning_lines_for_prefix_formats_referenced_role_warnings() {
+        let script = make_script_with_role_reference_and_command(10, ProgramCommand::Review);
+        let diagnostics = RoleVisibilityDiagnostics::from([
+            (
+                RoleId(10),
+                RoleVisibilityDiagnostic {
+                    total_members: 3,
+                    visible_members: 2,
+                    excluded_members: 1,
+                },
+            ),
+            (
+                RoleId(20),
+                RoleVisibilityDiagnostic {
+                    total_members: 1,
+                    visible_members: 1,
+                    excluded_members: 0,
+                },
+            ),
+        ]);
+
+        let actual = command_warning_lines_for_prefix(&script, 1, &diagnostics);
+
+        let expected =
+            vec![walicord_i18n::role_members_filtered_by_channel_visibility(10, 2, 1).to_string()];
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn plan_program_command_effects_appends_warning_to_variables_reply() {
+        let script = make_script_with_role_reference_and_command(10, ProgramCommand::Variables);
+        let diagnostics = RoleVisibilityDiagnostics::from([(
+            RoleId(10),
+            RoleVisibilityDiagnostic {
+                total_members: 3,
+                visible_members: 2,
+                excluded_members: 1,
+            },
+        )]);
+
+        let actual = plan_program_command_effects(&script, &[], &diagnostics, 0);
+
+        let expected_variables =
+            VariablesPresenter::render_for_prefix_with_members(&script, 1, &[]);
+        let expected_warning =
+            walicord_i18n::role_members_filtered_by_channel_visibility(10, 2, 1).to_string();
+        let expected = vec![ProgramCommandEffect::ReplyText(format!(
+            "{expected_variables}\n\n{expected_warning}"
+        ))];
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn plan_program_command_effects_sends_warning_before_settlement_for_review() {
+        let script = make_script_with_role_reference_and_command(10, ProgramCommand::Review);
+        let diagnostics = RoleVisibilityDiagnostics::from([(
+            RoleId(10),
+            RoleVisibilityDiagnostic {
+                total_members: 3,
+                visible_members: 2,
+                excluded_members: 1,
+            },
+        )]);
+
+        let actual = plan_program_command_effects(&script, &[], &diagnostics, 0);
+
+        let expected = vec![
+            ProgramCommandEffect::ReplyText(
+                walicord_i18n::role_members_filtered_by_channel_visibility(10, 2, 1).to_string(),
+            ),
+            ProgramCommandEffect::RunSettlement { stmt_index: 1 },
+        ];
+        assert_eq!(actual, expected);
     }
 }

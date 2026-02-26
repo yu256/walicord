@@ -125,6 +125,7 @@ impl RosterProvider for MockRosterProvider {
                 .flat_map(|guild_members| guild_members.keys().copied())
                 .collect(),
             role_members: RoleMembers::default(),
+            role_visibility_diagnostics: Default::default(),
         })
     }
 
