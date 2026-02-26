@@ -82,8 +82,9 @@ impl<'a> SetExpr<'a> {
     }
 
     /// Returns true if there are any runtime-resolved references.
-    /// Group and role references resolve to members at runtime with default weight 1,
-    /// so they should be treated as potentially having unweighted members.
+    /// Group and role references (both weighted and unweighted) resolve to members at runtime.
+    /// Unweighted references may contribute default weight 1 members, so parser-side
+    /// all-zero checks must treat them as runtime-dependent.
     pub fn has_group_reference(&self) -> bool {
         self.ops.iter().any(|op| {
             matches!(
