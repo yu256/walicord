@@ -2051,17 +2051,21 @@ mod tests {
         let people = [
             PersonBalance {
                 id: 1_u64,
-                balance: 100,
+                balance: 70,
             },
             PersonBalance {
                 id: 2_u64,
+                balance: 30,
+            },
+            PersonBalance {
+                id: 3_u64,
                 balance: -100,
             },
         ];
 
         let result = construct_settlement_transfers_with_options_and_solver(
             people,
-            &[1, 2],
+            &[1, 2, 3],
             &[],
             1000,
             100,
@@ -2077,11 +2081,11 @@ mod tests {
         let people = [
             PersonBalance {
                 id: 1_u64,
-                balance: 100,
+                balance: 150,
             },
             PersonBalance {
                 id: 2_u64,
-                balance: -100,
+                balance: -150,
             },
         ];
 
@@ -2092,7 +2096,7 @@ mod tests {
             1000,
             100,
             SettlementTransferOptions::default(),
-            |_, _, _, _| Ok(vec![99.0]),
+            |_, _, _, _| Ok(vec![149.0]),
         );
 
         assert!(matches!(result, Err(SettlementError::RoundingMismatch)));

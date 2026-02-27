@@ -1376,11 +1376,7 @@ mod tests {
     #[test]
     fn settlement_epsilon_uses_max_of_baseline_and_minimum_budget() {
         assert_eq!(settlement_epsilon(0), Decimal::new(1, 6));
-        assert_eq!(
-            settlement_epsilon(22),
-            Decimal::from(EPSILON_SAFETY_FACTOR * EPSILON_OP_COUNT_BUDGET)
-                * Decimal::from_i128_with_scale(1, 28)
-        );
+        assert_eq!(settlement_epsilon(22), Decimal::new(1, 20));
     }
 
     #[test]
