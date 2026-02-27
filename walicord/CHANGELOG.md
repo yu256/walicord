@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.3.0](https://github.com/yu256/walicord/compare/walicord-v2.2.0...walicord-v2.3.0) (2026-02-27)
+
+
+### Features
+
+* Group/Role の重み付き計算に対応 ([#71](https://github.com/yu256/walicord/issues/71)) ([b82e3c2](https://github.com/yu256/walicord/commit/b82e3c291e8a592edd08a44fec2e5823bd03d46f))
+
 ## [2.2.0](https://github.com/yu256/walicord/compare/walicord-v2.1.0...walicord-v2.2.0) (2026-02-25)
 
 
