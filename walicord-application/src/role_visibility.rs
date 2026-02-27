@@ -128,10 +128,16 @@ fn collect_expr_roles(expr: &MemberSetExpr<'_>, out: &mut BTreeSet<RoleId>) {
 mod tests {
     use super::*;
     use crate::{Command, ScriptStatementWithLine};
+    use std::sync::OnceLock;
     use walicord_domain::{
         Declaration, Payment, Statement,
         model::{MemberId, MemberSetExpr, MemberSetOp, RoleMembers},
     };
+
+    fn empty_roles() -> &'static RoleMembers {
+        static ROLES: OnceLock<RoleMembers> = OnceLock::new();
+        ROLES.get_or_init(RoleMembers::default)
+    }
 
     fn role_expr(role_id: u64) -> MemberSetExpr<'static> {
         MemberSetExpr::new([MemberSetOp::PushRole(RoleId(role_id))])
@@ -139,7 +145,7 @@ mod tests {
 
     fn make_script(statements: Vec<ScriptStatementWithLine<'static>>) -> Script<'static> {
         let members: &'static [MemberId] = &[];
-        let roles = Box::leak(Box::new(RoleMembers::default()));
+        let roles = empty_roles();
         Script::new(members, roles, statements)
     }
 

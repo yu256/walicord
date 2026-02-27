@@ -971,7 +971,7 @@ mod tests {
     use rstest::{fixture, rstest};
     use serenity::model::id::UserId;
     use std::sync::{
-        Arc,
+        Arc, OnceLock,
         atomic::{AtomicUsize, Ordering},
     };
     use walicord_application::{
@@ -999,6 +999,11 @@ mod tests {
         MessageProcessor::new(&WalicordProgramParser, &WalicordSettlementOptimizer)
     }
 
+    fn empty_roles() -> &'static RoleMembers {
+        static ROLES: OnceLock<RoleMembers> = OnceLock::new();
+        ROLES.get_or_init(RoleMembers::default)
+    }
+
     fn role_expr(role_id: u64) -> MemberSetExpr<'static> {
         MemberSetExpr::new([MemberSetOp::PushRole(RoleId(role_id))])
     }
@@ -1008,7 +1013,7 @@ mod tests {
         command: ProgramCommand<'static>,
     ) -> Script<'static> {
         let members: &'static [MemberId] = &[];
-        let roles = Box::leak(Box::new(RoleMembers::default()));
+        let roles = empty_roles();
         Script::new(
             members,
             roles,

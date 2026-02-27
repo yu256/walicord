@@ -167,7 +167,14 @@ pub fn role_members_filtered_by_channel_visibility(
             "警告: ロール <@&{id}> はこのチャンネルで見えないメンバー {excluded_members} 人を除外しました（対象 {visible_members} 人）"
         )
     });
-    #[cfg(not(feature = "ja"))]
+    #[cfg(feature = "en")]
+    return std::fmt::from_fn(move |f| {
+        write!(
+            f,
+            "Warning: Excluded {excluded_members} members from role <@&{id}> due to channel visibility ({visible_members} members remain)"
+        )
+    });
+    #[cfg(not(any(feature = "ja", feature = "en")))]
     return std::fmt::from_fn(move |f| {
         write!(
             f,
@@ -187,7 +194,14 @@ pub fn role_has_no_visible_members_in_channel(
             "ロール <@&{id}> は存在しますが、このチャンネルで見えるメンバーがいません（{excluded_members} 人を除外）"
         )
     });
-    #[cfg(not(feature = "ja"))]
+    #[cfg(feature = "en")]
+    return std::fmt::from_fn(move |f| {
+        write!(
+            f,
+            "Role <@&{id}> exists, but no members are visible in this channel ({excluded_members} excluded)"
+        )
+    });
+    #[cfg(not(any(feature = "ja", feature = "en")))]
     return std::fmt::from_fn(move |f| {
         write!(
             f,
