@@ -55,6 +55,46 @@ enum ProgramCommandEffect {
     RunSettlement { stmt_index: usize },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ChannelFlagAction {
+    Track,
+    Untrack,
+    Keep,
+}
+
+fn startup_channel_is_track_target(
+    kind: serenity::model::channel::ChannelType,
+    topic: Option<&str>,
+) -> bool {
+    kind == serenity::model::channel::ChannelType::Text && ChannelManager::topic_has_flag(topic)
+}
+
+fn startup_track_targets<'a, I>(channels: I) -> Vec<ChannelId>
+where
+    I: IntoIterator<
+        Item = (
+            ChannelId,
+            serenity::model::channel::ChannelType,
+            Option<&'a str>,
+        ),
+    >,
+{
+    channels
+        .into_iter()
+        .filter_map(|(id, kind, topic)| startup_channel_is_track_target(kind, topic).then_some(id))
+        .collect()
+}
+
+fn channel_flag_action(old_topic: Option<&str>, new_topic: Option<&str>) -> ChannelFlagAction {
+    let old_has_flag = ChannelManager::topic_has_flag(old_topic);
+    let new_has_flag = ChannelManager::topic_has_flag(new_topic);
+    match (old_has_flag, new_has_flag) {
+        (false, true) => ChannelFlagAction::Track,
+        (true, false) => ChannelFlagAction::Untrack,
+        _ => ChannelFlagAction::Keep,
+    }
+}
+
 fn format_program_parse_error_reply(
     error: ProgramParseError<'_>,
     diagnostics: &RoleVisibilityDiagnostics,
@@ -226,21 +266,18 @@ where
     }
 
     async fn initialize_enabled_channels(&self, ctx: &Context, ready: &Ready) {
-        use serenity::model::channel::ChannelType;
-
         tracing::info!("Scanning guild channels for #walicord flag");
         for guild in &ready.guilds {
             let guild_id = guild.id;
             match guild_id.channels(&ctx.http).await {
                 Ok(channels) => {
-                    for channel in channels.values() {
-                        // Only scan text-based channels (not voice, category, etc.)
-                        if channel.kind != ChannelType::Text {
-                            continue;
-                        }
-                        if ChannelManager::topic_has_flag(channel.topic.as_deref()) {
-                            self.track_channel(ctx, channel.id).await;
-                        }
+                    let targets = startup_track_targets(
+                        channels
+                            .values()
+                            .map(|channel| (channel.id, channel.kind, channel.topic.as_deref())),
+                    );
+                    for channel_id in targets {
+                        self.track_channel(ctx, channel_id).await;
                     }
                 }
                 Err(e) => {
@@ -712,16 +749,11 @@ where
     }
 
     async fn channel_update(&self, ctx: Context, old: Option<GuildChannel>, new: GuildChannel) {
-        let new_has_flag = ChannelManager::topic_has_flag(new.topic.as_deref());
-        let old_has_flag = old
-            .as_ref()
-            .is_some_and(|o| ChannelManager::topic_has_flag(o.topic.as_deref()));
-
-        // Process only when the flag presence actually changes
-        if new_has_flag && !old_has_flag {
-            self.track_channel(&ctx, new.id).await;
-        } else if !new_has_flag && old_has_flag {
-            self.untrack_channel(new.id);
+        let old_topic = old.as_ref().and_then(|channel| channel.topic.as_deref());
+        match channel_flag_action(old_topic, new.topic.as_deref()) {
+            ChannelFlagAction::Track => self.track_channel(&ctx, new.id).await,
+            ChannelFlagAction::Untrack => self.untrack_channel(new.id),
+            ChannelFlagAction::Keep => {}
         }
     }
 
@@ -969,7 +1001,7 @@ mod tests {
     };
     use indexmap::IndexMap;
     use rstest::{fixture, rstest};
-    use serenity::model::id::UserId;
+    use serenity::model::{channel::ChannelType, id::UserId};
     use std::sync::{
         Arc, OnceLock,
         atomic::{AtomicUsize, Ordering},
@@ -1052,6 +1084,54 @@ mod tests {
     #[fixture]
     fn processor() -> MessageProcessor<'static> {
         make_processor()
+    }
+
+    #[rstest]
+    #[case::text_channel_with_flag(ChannelType::Text, Some("ops #walicord"), true)]
+    #[case::text_channel_without_flag(ChannelType::Text, Some("ops"), false)]
+    #[case::text_channel_without_topic(ChannelType::Text, None, false)]
+    #[case::voice_channel_with_flag(ChannelType::Voice, Some("#walicord"), false)]
+    fn startup_channel_is_track_target_cases(
+        #[case] kind: ChannelType,
+        #[case] topic: Option<&str>,
+        #[case] expected: bool,
+    ) {
+        assert_eq!(startup_channel_is_track_target(kind, topic), expected);
+    }
+
+    #[test]
+    fn startup_track_targets_collects_all_matching_channels() {
+        let targets = startup_track_targets([
+            (ChannelId::new(1), ChannelType::Text, Some("#walicord")),
+            (ChannelId::new(2), ChannelType::Voice, Some("#walicord")),
+            (ChannelId::new(3), ChannelType::Text, Some("ops")),
+            (
+                ChannelId::new(4),
+                ChannelType::Text,
+                Some("finance #walicord"),
+            ),
+        ]);
+
+        assert_eq!(targets, vec![ChannelId::new(1), ChannelId::new(4)]);
+    }
+
+    #[rstest]
+    #[case::enable_from_none(None, Some("#walicord"), ChannelFlagAction::Track)]
+    #[case::enable_from_unflagged(Some("ops"), Some("ops #walicord"), ChannelFlagAction::Track)]
+    #[case::disable_to_unflagged(Some("ops #walicord"), Some("ops"), ChannelFlagAction::Untrack)]
+    #[case::disable_to_none(Some("ops #walicord"), None, ChannelFlagAction::Untrack)]
+    #[case::keep_when_both_flagged(
+        Some("ops #walicord"),
+        Some("finance #walicord"),
+        ChannelFlagAction::Keep
+    )]
+    #[case::keep_when_both_unflagged(Some("ops"), Some("finance"), ChannelFlagAction::Keep)]
+    fn channel_flag_action_cases(
+        #[case] old_topic: Option<&str>,
+        #[case] new_topic: Option<&str>,
+        #[case] expected: ChannelFlagAction,
+    ) {
+        assert_eq!(channel_flag_action(old_topic, new_topic), expected);
     }
 
     #[rstest]
