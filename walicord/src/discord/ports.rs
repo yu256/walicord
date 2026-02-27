@@ -4,6 +4,7 @@ use serenity::{
     model::{channel::Message, id::ChannelId},
     prelude::*,
 };
+pub use walicord_application::{RoleVisibilityDiagnostic, RoleVisibilityDiagnostics};
 use walicord_domain::model::{MemberId, MemberInfo, RoleId, RoleMembers};
 
 /// Error type for Discord service operations
@@ -76,4 +77,5 @@ pub trait RosterProvider: Clone + Send + Sync + 'static {
 pub struct RosterSnapshot {
     pub member_ids: Vec<MemberId>,
     pub role_members: RoleMembers,
+    pub role_visibility_diagnostics: RoleVisibilityDiagnostics,
 }

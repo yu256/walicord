@@ -6,6 +6,7 @@ mod discord;
 mod handler;
 mod message_cache;
 mod reaction;
+mod role_visibility_feedback;
 mod settlement;
 #[cfg(test)]
 mod test_utils;
