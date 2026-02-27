@@ -296,7 +296,7 @@ pub fn quantize_balances_with_preferred_members(
 
         // Defensive safety guard: if this trips, the quantization pipeline is inconsistent
         // (for example, corrupted intermediate values or integer-state anomalies).
-        if adjustment_count > balances.len() {
+        if validate_adjustment_count(adjustment_count, balances.len()).is_err() {
             tracing::error!(
                 reject_reason = "k_gt_n",
                 failure_reason = "adjustment_count_exceeds_member_count",
@@ -551,6 +551,17 @@ fn bound_diagnostics(
         adjustment_count > theoretical_upper_bound,
         adjustment_count > operational_upper_bound,
     )
+}
+
+fn validate_adjustment_count(
+    adjustment_count: usize,
+    member_count: usize,
+) -> Result<(), SettlementRoundingError> {
+    if adjustment_count <= member_count {
+        Ok(())
+    } else {
+        Err(SettlementRoundingError::InvalidAdjustmentCount)
+    }
 }
 
 #[cfg(test)]
@@ -1350,6 +1361,26 @@ mod tests {
         let (_, _, theo_both, op_both) = bound_diagnostics(4, 5, 1);
         assert!(theo_both);
         assert!(op_both);
+    }
+
+    #[test]
+    fn validate_adjustment_count_rejects_only_when_count_exceeds_members() {
+        assert_eq!(validate_adjustment_count(0, 0), Ok(()));
+        assert_eq!(validate_adjustment_count(3, 3), Ok(()));
+        assert_eq!(
+            validate_adjustment_count(4, 3),
+            Err(SettlementRoundingError::InvalidAdjustmentCount)
+        );
+    }
+
+    #[test]
+    fn settlement_epsilon_uses_max_of_baseline_and_minimum_budget() {
+        assert_eq!(settlement_epsilon(0), Decimal::new(1, 6));
+        assert_eq!(
+            settlement_epsilon(22),
+            Decimal::from(EPSILON_SAFETY_FACTOR * EPSILON_OP_COUNT_BUDGET)
+                * Decimal::from_i128_with_scale(1, 28)
+        );
     }
 
     #[test]

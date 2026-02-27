@@ -397,6 +397,35 @@ pub fn construct_settlement_transfers_with_options<MemberId: MemberIdTrait>(
     g2: i64,
     options: SettlementTransferOptions,
 ) -> Result<Vec<Payment<MemberId>>, SettlementError> {
+    construct_settlement_transfers_with_options_and_solver(
+        people,
+        settle_members,
+        cash_members,
+        g1,
+        g2,
+        options,
+        solve_transfers_highs,
+    )
+}
+
+fn construct_settlement_transfers_with_options_and_solver<MemberId, FSolve>(
+    people: impl IntoIterator<Item = PersonBalance<MemberId>>,
+    settle_members: &[MemberId],
+    cash_members: &[MemberId],
+    g1: i64,
+    g2: i64,
+    options: SettlementTransferOptions,
+    mut solve: FSolve,
+) -> Result<Vec<Payment<MemberId>>, SettlementError>
+where
+    MemberId: MemberIdTrait,
+    FSolve: FnMut(
+        &TransferModel<MemberId>,
+        i64,
+        i64,
+        &TransferSolveOptions,
+    ) -> Result<Vec<f64>, SolveTransfersError>,
+{
     let mut people: Vec<PersonBalance<MemberId>> = people.into_iter().collect();
     people.sort_unstable_by_key(|person| person.id);
     let total: i64 = people.iter().map(|p| p.balance).sum();
@@ -451,7 +480,7 @@ pub fn construct_settlement_transfers_with_options<MemberId: MemberIdTrait>(
 
     let attempted_pruned = options.build.non_settle_topk.is_some();
     let mut attempted_unpruned = !attempted_pruned;
-    let mut lex_fixed = solve_transfers_highs(&model, solver_g1, solver_g2, &options.solve);
+    let mut lex_fixed = solve(&model, solver_g1, solver_g2, &options.solve);
     if let Err(SolveTransfersError::Infeasible) = lex_fixed
         && options.build.non_settle_topk.is_some()
     {
@@ -471,14 +500,14 @@ pub fn construct_settlement_transfers_with_options<MemberId: MemberIdTrait>(
             });
         }
         attempted_unpruned = true;
-        lex_fixed = solve_transfers_highs(&model, solver_g1, solver_g2, &options.solve);
+        lex_fixed = solve(&model, solver_g1, solver_g2, &options.solve);
     }
 
     if let Err(SolveTransfersError::LimitReached) = lex_fixed
         && let Some(strict) = strict_retry_solve_options(&options.solve.highs)
     {
         let strict_transfer_options = options.solve.clone().with_highs(strict);
-        lex_fixed = solve_transfers_highs(&model, solver_g1, solver_g2, &strict_transfer_options);
+        lex_fixed = solve(&model, solver_g1, solver_g2, &strict_transfer_options);
     }
 
     let lex_fixed = match lex_fixed {
@@ -1291,8 +1320,10 @@ fn round_binary_checked(value: f64) -> Result<i32, SettlementError> {
 mod tests {
     use super::{
         HighsCommonSolveOptions, MemberIdTrait, Payment, PersonBalance, SettlementError,
-        TransferBuildOptions, TransferModel, construct_settlement_transfers, minimize_transactions,
-        minimize_transactions_with_options_and_outcome, round_bankers_checked,
+        SettlementTransferOptions, SolveTransfersError, TransferBuildOptions, TransferModel,
+        construct_settlement_transfers, construct_settlement_transfers_with_options_and_solver,
+        minimize_transactions, minimize_transactions_with_options_and_outcome,
+        round_bankers_checked,
     };
     use proptest::prelude::*;
     use rstest::rstest;
@@ -1834,5 +1865,236 @@ mod tests {
                 amount: 100,
             }]
         );
+    }
+
+    #[test]
+    fn cash_obj1_prioritizes_1000_divisibility_before_transfer_count() {
+        let people = [
+            PersonBalance {
+                id: 1_u64,
+                balance: 1000,
+            },
+            PersonBalance {
+                id: 2_u64,
+                balance: 100,
+            },
+            PersonBalance {
+                id: 3_u64,
+                balance: -100,
+            },
+            PersonBalance {
+                id: 4_u64,
+                balance: -1000,
+            },
+        ];
+
+        let payments = construct_settlement_transfers(people, &[1, 2, 3, 4], &[1], 1000, 100)
+            .expect("solution");
+
+        assert_eq!(
+            payments,
+            vec![
+                Payment {
+                    from: 1,
+                    to: 4,
+                    amount: 1000,
+                },
+                Payment {
+                    from: 2,
+                    to: 3,
+                    amount: 100,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn cash_obj2_is_prioritized_over_transfer_count() {
+        let people = [
+            PersonBalance {
+                id: 1_u64,
+                balance: 200,
+            },
+            PersonBalance {
+                id: 2_u64,
+                balance: 100,
+            },
+            PersonBalance {
+                id: 3_u64,
+                balance: -150,
+            },
+            PersonBalance {
+                id: 4_u64,
+                balance: -150,
+            },
+        ];
+
+        let payments = construct_settlement_transfers(people, &[1, 2, 3, 4], &[1], 1000, 100)
+            .expect("solution");
+
+        assert_eq!(
+            payments,
+            vec![
+                Payment {
+                    from: 1,
+                    to: 3,
+                    amount: 100,
+                },
+                Payment {
+                    from: 1,
+                    to: 4,
+                    amount: 100,
+                },
+                Payment {
+                    from: 2,
+                    to: 3,
+                    amount: 50,
+                },
+                Payment {
+                    from: 2,
+                    to: 4,
+                    amount: 50,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn obj4_minimizes_max_transfer_amount_after_other_objectives() {
+        let people = [
+            PersonBalance {
+                id: 1_u64,
+                balance: 12,
+            },
+            PersonBalance {
+                id: 2_u64,
+                balance: 4,
+            },
+            PersonBalance {
+                id: 3_u64,
+                balance: -10,
+            },
+            PersonBalance {
+                id: 4_u64,
+                balance: -6,
+            },
+        ];
+
+        let payments = construct_settlement_transfers(people, &[1, 2, 3, 4], &[], 1000, 100)
+            .expect("solution");
+
+        assert_eq!(
+            payments,
+            vec![
+                Payment {
+                    from: 1,
+                    to: 3,
+                    amount: 6,
+                },
+                Payment {
+                    from: 1,
+                    to: 4,
+                    amount: 6,
+                },
+                Payment {
+                    from: 2,
+                    to: 3,
+                    amount: 4,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn objw_prefers_settle_counterparts_before_non_settle() {
+        let people = [
+            PersonBalance {
+                id: 1_u64,
+                balance: 1,
+            },
+            PersonBalance {
+                id: 2_u64,
+                balance: 2,
+            },
+            PersonBalance {
+                id: 3_u64,
+                balance: -2,
+            },
+            PersonBalance {
+                id: 4_u64,
+                balance: -1,
+            },
+        ];
+
+        let payments =
+            construct_settlement_transfers(people, &[1, 3], &[], 1000, 100).expect("solution");
+
+        assert_eq!(
+            payments,
+            vec![
+                Payment {
+                    from: 1,
+                    to: 3,
+                    amount: 1,
+                },
+                Payment {
+                    from: 2,
+                    to: 3,
+                    amount: 1,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn transfer_construction_returns_no_solution_when_solver_fails() {
+        let people = [
+            PersonBalance {
+                id: 1_u64,
+                balance: 100,
+            },
+            PersonBalance {
+                id: 2_u64,
+                balance: -100,
+            },
+        ];
+
+        let result = construct_settlement_transfers_with_options_and_solver(
+            people,
+            &[1, 2],
+            &[],
+            1000,
+            100,
+            SettlementTransferOptions::default(),
+            |_, _, _, _| Err(SolveTransfersError::SolverStatus),
+        );
+
+        assert!(matches!(result, Err(SettlementError::NoSolution)));
+    }
+
+    #[test]
+    fn transfer_construction_returns_rounding_mismatch_on_inconsistent_solver_amounts() {
+        let people = [
+            PersonBalance {
+                id: 1_u64,
+                balance: 100,
+            },
+            PersonBalance {
+                id: 2_u64,
+                balance: -100,
+            },
+        ];
+
+        let result = construct_settlement_transfers_with_options_and_solver(
+            people,
+            &[1, 2],
+            &[],
+            1000,
+            100,
+            SettlementTransferOptions::default(),
+            |_, _, _, _| Ok(vec![99.0]),
+        );
+
+        assert!(matches!(result, Err(SettlementError::RoundingMismatch)));
     }
 }
