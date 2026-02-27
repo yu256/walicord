@@ -36,6 +36,7 @@ pub fn warnings_for_program_prefix(
     diagnostics: &RoleVisibilityDiagnostics,
 ) -> Vec<RoleVisibilityWarning> {
     let mut referenced_role_ids = BTreeSet::new();
+    let mut command_referenced_role_ids = BTreeSet::new();
 
     for stmt in script
         .statements()
@@ -43,19 +44,23 @@ pub fn warnings_for_program_prefix(
         .take(stmt_index_inclusive.saturating_add(1))
     {
         collect_referenced_role_ids(stmt, &mut referenced_role_ids);
+        if let ScriptStatement::Command(command) = &stmt.statement {
+            collect_command_roles(command, &mut command_referenced_role_ids);
+        }
     }
 
     referenced_role_ids
         .into_iter()
         .filter_map(|role_id| {
             let diagnostic = diagnostics.get(&role_id)?;
-            (diagnostic.excluded_members > 0 && diagnostic.visible_members > 0).then_some(
-                RoleVisibilityWarning {
+            let is_command_reference = command_referenced_role_ids.contains(&role_id);
+            (diagnostic.excluded_members > 0
+                && (diagnostic.visible_members > 0 || is_command_reference))
+                .then_some(RoleVisibilityWarning {
                     role_id,
                     visible_members: diagnostic.visible_members,
                     excluded_members: diagnostic.excluded_members,
-                },
-            )
+                })
         })
         .collect()
 }
@@ -199,6 +204,36 @@ mod tests {
                 role_id: RoleId(10),
                 visible_members: 2,
                 excluded_members: 1,
+            }]
+        );
+    }
+
+    #[test]
+    fn warnings_for_program_prefix_includes_filtered_empty_roles_referenced_by_commands() {
+        let script = make_script(vec![ScriptStatementWithLine {
+            line: 1,
+            statement: ScriptStatement::Command(Command::SettleUp {
+                members: role_expr(20),
+                cash_members: None,
+            }),
+        }]);
+        let diagnostics = RoleVisibilityDiagnostics::from([(
+            RoleId(20),
+            RoleVisibilityDiagnostic {
+                total_members: 2,
+                visible_members: 0,
+                excluded_members: 2,
+            },
+        )]);
+
+        let warnings = warnings_for_program_prefix(&script, 0, &diagnostics);
+
+        assert_eq!(
+            warnings,
+            vec![RoleVisibilityWarning {
+                role_id: RoleId(20),
+                visible_members: 0,
+                excluded_members: 2,
             }]
         );
     }

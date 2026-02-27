@@ -1635,6 +1635,41 @@ mod tests {
     }
 
     #[test]
+    fn command_warning_lines_for_prefix_warns_for_command_only_filtered_empty_roles() {
+        let script = make_script_with_role_reference_and_command(
+            10,
+            ProgramCommand::SettleUp {
+                members: role_expr(20),
+                cash_members: None,
+            },
+        );
+        let diagnostics = RoleVisibilityDiagnostics::from([
+            (
+                RoleId(10),
+                RoleVisibilityDiagnostic {
+                    total_members: 3,
+                    visible_members: 3,
+                    excluded_members: 0,
+                },
+            ),
+            (
+                RoleId(20),
+                RoleVisibilityDiagnostic {
+                    total_members: 2,
+                    visible_members: 0,
+                    excluded_members: 2,
+                },
+            ),
+        ]);
+
+        let actual = command_warning_lines_for_prefix(&script, 1, &diagnostics);
+
+        let expected =
+            vec![walicord_i18n::role_members_filtered_by_channel_visibility(20, 0, 2).to_string()];
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
     fn plan_program_command_effects_appends_warning_to_variables_reply() {
         let script = make_script_with_role_reference_and_command(10, ProgramCommand::Variables);
         let diagnostics = RoleVisibilityDiagnostics::from([(
