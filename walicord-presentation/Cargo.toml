@@ -4,9 +4,15 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+tracing = "0.1"
 walicord-application = { path = "../walicord-application" }
 walicord-domain = { path = "../walicord-domain" }
 walicord-i18n = { path = "../walicord-i18n" }
 
+[features]
+test-fixtures = []
+
 [dev-dependencies]
+walicord-presentation = { path = ".", features = ["test-fixtures"] }
+insta = "1"
 rstest = "0.26.1"

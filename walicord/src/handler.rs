@@ -1795,4 +1795,33 @@ mod tests {
         ];
         assert_eq!(actual, expected);
     }
+
+    #[test]
+    fn plan_program_command_effects_sends_warning_before_settlement_for_settleup() {
+        let script = make_script_with_role_reference_and_command(
+            10,
+            ProgramCommand::SettleUp {
+                members: role_expr(10),
+                cash_members: None,
+            },
+        );
+        let diagnostics = RoleVisibilityDiagnostics::from([(
+            RoleId(10),
+            RoleVisibilityDiagnostic {
+                total_members: 3,
+                visible_members: 2,
+                excluded_members: 1,
+            },
+        )]);
+
+        let actual = plan_program_command_effects(&script, &[], &diagnostics, 0);
+
+        let expected = vec![
+            ProgramCommandEffect::ReplyText(
+                walicord_i18n::role_members_filtered_by_channel_visibility(10, 2, 1).to_string(),
+            ),
+            ProgramCommandEffect::RunSettlement { stmt_index: 1 },
+        ];
+        assert_eq!(actual, expected);
+    }
 }

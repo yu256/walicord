@@ -8,7 +8,7 @@ use serenity::{
 use std::{collections::HashMap, fmt::Debug};
 use walicord_application::{
     Command as ProgramCommand, FailureKind, MessageProcessor, ProgramParseError, ScriptStatement,
-    SettlementOptimizationError, SettlementResult,
+    SettlementOptimizationError,
 };
 use walicord_domain::model::{MemberId, RoleMembers};
 use walicord_presentation::{SettlementPresenter, SettlementView};
@@ -82,8 +82,9 @@ where
         }
     }
 
-    /// Extract member IDs from settlement result
-    fn member_ids(result: &SettlementResult) -> impl Iterator<Item = MemberId> + '_ {
+    fn member_ids(
+        result: &walicord_application::SettlementResult,
+    ) -> impl Iterator<Item = MemberId> + '_ {
         let balances = result.balances.iter().map(|balance| balance.id);
         let transfers = result
             .optimized_transfers
@@ -188,42 +189,35 @@ where
 
     /// Send a settlement result with image attachment
     async fn reply_with_settlement(&self, ctx: &Context, msg: &Message, response: SettlementView) {
-        self.reply_with_settlement_with_io(
-            msg,
-            response,
-            svg_to_png,
-            async move |attachment_png| {
-                let message_builder = CreateMessage::new().reference_message(msg);
-                let message_builder = if let Some(png) = attachment_png {
-                    message_builder.add_file(CreateAttachment::bytes(png, "settlement.png"))
-                } else {
-                    message_builder
-                };
+        self.reply_with_settlement_with_io(response, svg_to_png, async move |png| {
+            let create_message = CreateMessage::new()
+                .reference_message(msg)
+                .add_file(CreateAttachment::bytes(png, "settlement.png"));
 
-                msg.channel_id
-                    .send_message(&ctx.http, message_builder)
-                    .await
-                    .map(|_| ())
-            },
-        )
+            msg.channel_id
+                .send_message(&ctx.http, create_message)
+                .await
+                .map(|_| ())
+        })
         .await;
     }
 
     async fn reply_with_settlement_with_io<FRender, FSend, FutSend, E>(
         &self,
-        msg: &Message,
         response: SettlementView,
         render_png: FRender,
         send_message: FSend,
     ) where
         FRender: FnOnce(&str) -> Option<Vec<u8>>,
-        FSend: FnOnce(Option<Vec<u8>>) -> FutSend,
+        FSend: FnOnce(Vec<u8>) -> FutSend,
         FutSend: Future<Output = Result<(), E>>,
         E: Debug,
     {
-        let attachment_png = render_png(&response.combined_svg);
-        let _ = msg;
-        if let Err(e) = send_message(attachment_png).await {
+        let Some(png) = render_png(&response.combined_svg) else {
+            tracing::error!("Failed to render settlement SVG to PNG");
+            return;
+        };
+        if let Err(e) = send_message(png).await {
             tracing::error!("Failed to send message with attachments: {:?}", e);
         }
     }
@@ -243,8 +237,8 @@ where
             .build_settlement_result_for_prefix(program, stmt_index)
             .await
         {
-            Ok(response) => {
-                let ids: Vec<MemberId> = Self::member_ids(&response).collect();
+            Ok(result) => {
+                let ids: Vec<MemberId> = Self::member_ids(&result).collect();
                 let directory = match self
                     .ensure_member_directory(
                         ctx,
@@ -265,7 +259,7 @@ where
                         member_directory.get_or_insert_with(HashMap::new)
                     }
                 };
-                let view = SettlementPresenter::render_with_members(&response, directory);
+                let view = SettlementPresenter::render_with_members(&result, directory);
                 self.reply_with_settlement(ctx, msg, view).await;
             }
             Err(err) => {
@@ -359,16 +353,30 @@ pub fn evaluate_program<'b>(
 mod tests {
     use super::*;
     use crate::test_utils::{MockRosterProvider, member_info};
+    use insta::assert_snapshot;
     use rstest::rstest;
     use serenity::model::{
         channel::Message,
         id::{ChannelId, GuildId, UserId},
     };
     use std::sync::{
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicUsize, Ordering},
     };
+    use walicord_application::{Command, Script, ScriptStatementWithLine};
+    use walicord_domain::{
+        AllocationStrategy, MemberSetExpr, Statement, WeightOverrideTarget, model::RoleId,
+    };
     use walicord_infrastructure::{WalicordProgramParser, WalicordSettlementOptimizer};
+
+    const TEST_MEMBER_IDS: [MemberId; 6] = [
+        MemberId(1),
+        MemberId(2),
+        MemberId(3),
+        MemberId(4),
+        MemberId(5),
+        MemberId(6),
+    ];
 
     fn make_message(content: &str, author_id: u64, channel_id: u64) -> Message {
         let mut message = Message::default();
@@ -388,6 +396,176 @@ mod tests {
         roster_provider: &'a MockRosterProvider,
     ) -> SettlementService<'a, MockRosterProvider> {
         SettlementService::new(processor, roster_provider)
+    }
+
+    fn role_members() -> &'static RoleMembers {
+        static ROLE_MEMBERS: OnceLock<RoleMembers> = OnceLock::new();
+        ROLE_MEMBERS.get_or_init(|| {
+            RoleMembers::from_iter([
+                (
+                    RoleId(10),
+                    [MemberId(2), MemberId(3), MemberId(4)]
+                        .into_iter()
+                        .collect(),
+                ),
+                (RoleId(20), [MemberId(4), MemberId(5)].into_iter().collect()),
+            ])
+        })
+    }
+
+    fn snapshot_member_directory() -> HashMap<MemberId, smol_str::SmolStr> {
+        HashMap::from([
+            (MemberId(1), "Alice".into()),
+            (MemberId(2), "Bob".into()),
+            (MemberId(3), "Carol".into()),
+            (MemberId(4), "Dave".into()),
+            (MemberId(5), "Eve".into()),
+            (MemberId(6), "Frank".into()),
+        ])
+    }
+
+    fn format_role_resolver_input() -> String {
+        let mut entries: Vec<String> = role_members()
+            .iter()
+            .map(|(role_id, members)| {
+                let mut member_ids: Vec<u64> =
+                    members.iter().map(|member_id| member_id.0).collect();
+                member_ids.sort_unstable();
+                format!("<@&{}> => {member_ids:?}", role_id.0)
+            })
+            .collect();
+        entries.sort_unstable();
+        entries.join("\n")
+    }
+
+    fn format_set_expr(expr: &MemberSetExpr<'_>) -> String {
+        let mut members: Vec<String> = expr
+            .referenced_ids()
+            .map(|member_id| format!("<@{}>", member_id.0))
+            .collect();
+        members.sort_unstable();
+        members.dedup();
+
+        let mut roles: Vec<String> = expr
+            .referenced_role_ids()
+            .map(|role_id| format!("<@&{}>", role_id.0))
+            .collect();
+        roles.sort_unstable();
+        roles.dedup();
+
+        let mut groups: Vec<&str> = expr.referenced_groups().collect();
+        groups.sort_unstable();
+        groups.dedup();
+
+        format!(
+            "members=[{}] roles=[{}] groups=[{}]",
+            members.join(", "),
+            roles.join(", "),
+            groups.join(", ")
+        )
+    }
+
+    fn format_allocation(allocation: &AllocationStrategy) -> std::borrow::Cow<'static, str> {
+        match allocation {
+            AllocationStrategy::Even => std::borrow::Cow::Borrowed("even"),
+            AllocationStrategy::Weighted(overrides) => {
+                let entries = overrides
+                    .entries()
+                    .iter()
+                    .map(|entry| {
+                        let target = match &entry.target {
+                            WeightOverrideTarget::Member(member_id) => {
+                                format!("<@{}>", member_id.0)
+                            }
+                            WeightOverrideTarget::Role(role_id) => format!("<@&{}>", role_id.0),
+                            WeightOverrideTarget::Group(group_name) => group_name.to_string(),
+                        };
+                        format!("{target}*{}", entry.weight.0)
+                    })
+                    .collect::<Vec<_>>();
+                std::borrow::Cow::Owned(format!("weighted[{}]", entries.join(", ")))
+            }
+        }
+    }
+
+    fn format_ast_line(statement: &ScriptStatementWithLine<'_>) -> String {
+        match &statement.statement {
+            ScriptStatement::Domain(Statement::Declaration(declaration)) => {
+                format!(
+                    "L{} declaration {} {}",
+                    statement.line,
+                    declaration.name,
+                    format_set_expr(&declaration.expression)
+                )
+            }
+            ScriptStatement::Domain(Statement::Payment(payment)) => {
+                format!(
+                    "L{} payment amount={} payer=({}) payee=({}) allocation={}",
+                    statement.line,
+                    payment.amount,
+                    format_set_expr(&payment.payer),
+                    format_set_expr(&payment.payee),
+                    format_allocation(&payment.allocation)
+                )
+            }
+            ScriptStatement::Command(Command::Variables) => {
+                format!("L{} command !variables", statement.line)
+            }
+            ScriptStatement::Command(Command::Review) => {
+                format!("L{} command !review", statement.line)
+            }
+            ScriptStatement::Command(Command::MemberAddCash { members }) => {
+                format!(
+                    "L{} command !member set cash members=({})",
+                    statement.line,
+                    format_set_expr(members)
+                )
+            }
+            ScriptStatement::Command(Command::SettleUp {
+                members,
+                cash_members,
+            }) => {
+                let cash = cash_members
+                    .as_ref()
+                    .map_or(std::borrow::Cow::Borrowed("none"), |expr| {
+                        std::borrow::Cow::Owned(format_set_expr(expr))
+                    });
+                format!(
+                    "L{} command !settleup members=({}) cash=({cash})",
+                    statement.line,
+                    format_set_expr(members),
+                )
+            }
+        }
+    }
+
+    fn format_script_ast(script: &Script<'_>) -> String {
+        script
+            .statements()
+            .iter()
+            .map(format_ast_line)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    async fn render_pipeline_snapshot_body(content: &str, author_id: Option<MemberId>) -> String {
+        let processor = make_processor();
+        let script = processor
+            .parse_program(&TEST_MEMBER_IDS, role_members(), content, author_id)
+            .into_result()
+            .expect("program should parse");
+        let result = processor
+            .build_settlement_result(&script)
+            .await
+            .expect("result generation failed");
+        let directory = snapshot_member_directory();
+        let view = SettlementPresenter::render_with_members(&result, &directory);
+        format!(
+            "### resolver_input\n{}\n### source\n{content}\n### ast\n{}\n### combined_svg\n{}\n",
+            format_role_resolver_input(),
+            format_script_ast(&script),
+            view.combined_svg
+        )
     }
 
     #[rstest]
@@ -444,25 +622,24 @@ mod tests {
     }
 
     #[rstest]
-    #[case::png_and_send_success(Some(vec![1, 2, 3]), Ok(()), Some(Some(vec![1, 2, 3])))]
-    #[case::png_render_fails(None, Ok(()), Some(None))]
-    #[case::send_error_is_ignored(Some(vec![1]), Err(()), Some(Some(vec![1])))]
+    #[case::render_success(Some(vec![1, 2, 3]), Ok(()), Some(vec![1, 2, 3]))]
+    #[case::render_fails(None, Ok(()), None)]
+    #[case::send_error_is_ignored(Some(vec![7]), Err(()), Some(vec![7]))]
     #[tokio::test(flavor = "current_thread")]
     async fn reply_with_settlement_with_io_cases(
         #[case] rendered_png: Option<Vec<u8>>,
         #[case] send_result: Result<(), ()>,
-        #[case] expected_sent_attachment: Option<Option<Vec<u8>>>,
+        #[case] expected_sent_png: Option<Vec<u8>>,
     ) {
         let processor = make_processor();
         let roster_provider = MockRosterProvider::new();
         let service = make_settlement_service(&processor, &roster_provider);
-        let msg = make_message("!settleup <@1>", 1, 10);
         let response = SettlementView {
             combined_svg: "<svg/>".to_string(),
         };
 
-        let sent_attachment = Arc::new(Mutex::new(None::<Option<Vec<u8>>>));
-        let sent_attachment_clone = Arc::clone(&sent_attachment);
+        let sent_png = Arc::new(Mutex::new(None::<Vec<u8>>));
+        let sent_png_clone = Arc::clone(&sent_png);
         let send_count = Arc::new(AtomicUsize::new(0));
         let send_count_clone = Arc::clone(&send_count);
         let rendered_png_for_render = rendered_png.clone();
@@ -470,26 +647,22 @@ mod tests {
 
         service
             .reply_with_settlement_with_io(
-                &msg,
                 response,
-                move |_svg| rendered_png_for_render,
-                async move |attachment_png| {
+                move |_svg| rendered_png_for_render.clone(),
+                async move |png| {
                     send_count_clone.fetch_add(1, Ordering::SeqCst);
-                    let sent_attachment_clone = Arc::clone(&sent_attachment_clone);
-                    *sent_attachment_clone
-                        .lock()
-                        .expect("sent attachment mutex poisoned") = Some(attachment_png);
+                    *sent_png_clone.lock().expect("sent png mutex poisoned") = Some(png);
                     send_result_for_send
                 },
             )
             .await;
 
-        assert_eq!(send_count.load(Ordering::SeqCst), 1);
-        let actual = sent_attachment
-            .lock()
-            .expect("sent attachment mutex poisoned")
-            .clone();
-        assert_eq!(actual, expected_sent_attachment);
+        let actual = sent_png.lock().expect("sent png mutex poisoned").clone();
+
+        if expected_sent_png.is_some() {
+            assert_eq!(send_count.load(Ordering::SeqCst), 1);
+        }
+        assert_eq!(actual, expected_sent_png);
     }
 
     #[rstest]
@@ -683,5 +856,23 @@ mod tests {
     ) {
         let message = format_settlement_error(error);
         assert_eq!(message, expected);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn snapshot_integration_review_view_from_resolver_and_ast() {
+        let content = "trip := <@&10> <@5>\n12000 to trip\n5250 to <@&20>*2 <@3> <@5>\n!review";
+        assert_snapshot!(
+            "integration_review_view_from_resolver_and_ast",
+            render_pipeline_snapshot_body(content, Some(MemberId(1))).await
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn snapshot_integration_settleup_view_from_resolver_and_ast() {
+        let content = "core := <@&10> <@5>\n<@1> paid 8400 to core\n<@6> paid 3600 to <@2> <@3> <@4>\n!member set <@5> cash\n!settleup core --cash <@5> <@6>";
+        assert_snapshot!(
+            "integration_settleup_view_from_resolver_and_ast",
+            render_pipeline_snapshot_body(content, None).await
+        );
     }
 }

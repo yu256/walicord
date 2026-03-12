@@ -3,6 +3,8 @@
 pub mod error_presenter;
 pub mod settlement_presenter;
 pub mod svg_table;
+#[cfg(any(test, feature = "test-fixtures"))]
+pub mod test_fixtures;
 pub mod variables_presenter;
 
 pub use error_presenter::format_program_parse_error;

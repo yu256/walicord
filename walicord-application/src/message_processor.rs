@@ -8,16 +8,21 @@ use crate::{
 };
 use std::{borrow::Cow, collections::HashSet};
 use walicord_domain::{
-    BalanceAccumulator, MemberBalances, MemberSet, SettleUpPolicy, SettlementContext, Transfer,
+    BalanceAccumulator, MemberBalances, MemberSet, Money, SettleUpPolicy, SettlementContext,
+    Transfer,
     model::{MemberId, MemberSetExpr, RoleMembers},
     quantize_balances,
 };
 
 pub struct SettlementResult {
+    // Post-command balances. For settle-up results, confirmed transfers are already applied.
     pub balances: Vec<PersonBalance>,
     pub optimized_transfers: Vec<Transfer>,
     pub settle_up: Option<SettleUpContext>,
     pub quantization_scale: u32,
+    pub effective_cash_members: Vec<MemberId>,
+    // Captured before quantize_balances so the flow presenter can verify C-Q1 (|sum| <= epsilon).
+    pub pre_quantization_sum: Money,
 }
 
 #[derive(Clone, Copy)]
@@ -81,6 +86,7 @@ struct ApplyResult {
     settle_up_cash_members: Vec<MemberId>,
     review_cash_members: Vec<MemberId>,
     quantization_scale: u32,
+    pre_quantization_sum: Money,
 }
 
 #[derive(Default)]
@@ -255,54 +261,64 @@ impl<'a> MessageProcessor<'a> {
         &self,
         apply_result: ApplyResult,
     ) -> Result<SettlementResult, SettlementOptimizationError> {
-        let mut person_balances: Vec<PersonBalance> = apply_result
-            .balances
-            .iter()
-            .map(|(id, balance)| PersonBalance {
-                id: *id,
-                balance: *balance,
-            })
+        let ApplyResult {
+            balances,
+            settle_up,
+            settle_up_cash_members,
+            review_cash_members,
+            quantization_scale,
+            pre_quantization_sum,
+        } = apply_result;
+
+        let mut person_balances: Vec<PersonBalance> = balances
+            .into_iter()
+            .map(|(id, balance)| PersonBalance { id, balance })
             .collect();
         person_balances.sort_by_key(|p| p.id);
 
         let context = SettlementContext {
-            scale: apply_result.quantization_scale,
+            scale: quantization_scale,
             ..Self::settlement_context()
         };
 
         let optimizer = self.optimizer;
-        let person_balances_clone = person_balances.clone();
 
-        let optimized_transfers = match apply_result.settle_up.as_ref() {
-            Some(settle_up) => {
-                let settle_members = settle_up.settle_members.clone();
-                let cash_members = apply_result.settle_up_cash_members.clone();
-                tokio::task::block_in_place(move || {
+        let optimized_transfers = match settle_up.as_ref() {
+            Some(settle_up) => tokio::task::block_in_place(|| {
+                optimizer.optimize(
+                    &person_balances,
+                    &settle_up.settle_members,
+                    &settle_up_cash_members,
+                    context,
+                )
+            })?,
+            None => {
+                let all_members: Vec<MemberId> =
+                    person_balances.iter().map(|balance| balance.id).collect();
+                tokio::task::block_in_place(|| {
                     optimizer.optimize(
-                        &person_balances_clone,
-                        &settle_members,
-                        &cash_members,
+                        &person_balances,
+                        &all_members,
+                        &review_cash_members,
                         context,
                     )
                 })?
             }
-            None => {
-                let all_members: Vec<MemberId> = person_balances_clone
-                    .iter()
-                    .map(|balance| balance.id)
-                    .collect();
-                let cash_members = apply_result.review_cash_members.clone();
-                tokio::task::block_in_place(move || {
-                    optimizer.optimize(&person_balances_clone, &all_members, &cash_members, context)
-                })?
-            }
+        };
+
+        let effective_cash_members = if settle_up.is_some() {
+            settle_up_cash_members
+        } else {
+            review_cash_members
         };
 
         Ok(SettlementResult {
             balances: person_balances,
             optimized_transfers,
-            settle_up: apply_result.settle_up,
-            quantization_scale: apply_result.quantization_scale,
+            settle_up,
+            quantization_scale,
+            effective_cash_members,
+            pre_quantization_sum,
         })
     }
 
@@ -383,6 +399,7 @@ impl<'a> MessageProcessor<'a> {
 
         let context = Self::settlement_context();
         let balances = accumulator.into_balances();
+        let pre_quantization_sum: Money = balances.values().sum();
         let balances = if apply_settle {
             quantize_balances(&balances, context).map_err(SettlementOptimizationError::from)?
         } else {
@@ -397,6 +414,7 @@ impl<'a> MessageProcessor<'a> {
             settle_up_cash_members: last_settle_cash_members,
             review_cash_members,
             quantization_scale: context.scale,
+            pre_quantization_sum,
         })
     }
 
@@ -432,15 +450,13 @@ impl<'a> MessageProcessor<'a> {
         let effective_cash_members =
             cash_preference_state.effective_with(command_cash_members.as_ref());
 
-        let balances = accumulator.balances().clone();
-        let settle_members_vec: Vec<_> = settle_members.members().to_vec();
-        let effective_cash_vec = effective_cash_members.clone();
+        let balances = accumulator.balances();
         let context = Self::settlement_context();
-        let result = tokio::task::block_in_place(move || {
+        let result = tokio::task::block_in_place(|| {
             SettleUpPolicy::settle(
-                &balances,
-                &settle_members_vec,
-                effective_cash_vec.iter().copied(),
+                balances,
+                settle_members.members(),
+                effective_cash_members.iter().copied(),
                 context,
             )
         })
@@ -717,7 +733,50 @@ mod tests {
             .expect("result generation failed");
 
         let settle_up = result.settle_up.expect("expected settle up context");
-        assert!(!settle_up.immediate_transfers.is_empty());
+        assert_eq!(
+            settle_up.immediate_transfers,
+            vec![Transfer {
+                from: MemberId(1),
+                to: MemberId(3),
+                amount: Money::from_i64(60),
+            }]
+        );
+    }
+
+    #[rstest]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn settle_up_result_balances_include_confirmed_transfers(
+        processor: MessageProcessor<'_>,
+    ) {
+        let members: [MemberId; 0] = [];
+        let program = processor
+            .parse_program(&members, empty_roles(), "unused", None)
+            .into_result()
+            .expect("program should parse");
+
+        let last_index = program.statements().len().saturating_sub(1);
+        let result = processor
+            .build_settlement_result_for_prefix(&program, last_index)
+            .await
+            .expect("result generation failed");
+
+        assert_eq!(
+            result.balances,
+            vec![
+                PersonBalance {
+                    id: MemberId(1),
+                    balance: Money::ZERO,
+                },
+                PersonBalance {
+                    id: MemberId(2),
+                    balance: Money::from_i64(40),
+                },
+                PersonBalance {
+                    id: MemberId(3),
+                    balance: Money::from_i64(-40),
+                },
+            ]
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -860,7 +919,7 @@ mod tests {
     }
 
     fn union_members(ids: &[u64]) -> MemberSetExpr<'static> {
-        let mut ops = Vec::new();
+        let mut ops = Vec::with_capacity(ids.len().saturating_mul(2).saturating_sub(1));
         for (idx, id) in ids.iter().copied().enumerate() {
             ops.push(MemberSetOp::Push(MemberId(id)));
             if idx > 0 {
@@ -920,7 +979,6 @@ mod tests {
     }
 
     fn script_with_persisted_cash() -> Script<'static> {
-        let members = union_members(&[1, 2, 3, 4]);
         let mut persisted_statements = base_cash_sensitivity_payments();
         persisted_statements.extend([
             ScriptStatementWithLine {
@@ -932,7 +990,7 @@ mod tests {
             ScriptStatementWithLine {
                 line: 6,
                 statement: ScriptStatement::Command(Command::SettleUp {
-                    members: members.clone(),
+                    members: union_members(&[1, 2, 3, 4]),
                     cash_members: None,
                 }),
             },
@@ -1109,6 +1167,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn script_local_cash_persists_across_multiple_settleup_commands() {
         let processor = MessageProcessor::new(&StubParser, &NoopOptimizer);
+
         let members = union_members(&[1, 2, 3, 4]);
 
         let mut statements = base_cash_sensitivity_payments();
