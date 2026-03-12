@@ -860,8 +860,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn snapshot_integration_review_view_from_resolver_and_ast() {
-        let content =
-            "trip := <@&10> <@5>\n12000 to trip\n<@6> paid 5250 to <@&20>*2 <@3> <@5>\n!review";
+        let content = "trip := <@&10> <@5>\n12000 to trip\n5250 to <@&20>*2 <@3> <@5>\n!review";
         assert_snapshot!(
             "integration_review_view_from_resolver_and_ast",
             render_pipeline_snapshot_body(content, Some(MemberId(1))).await
