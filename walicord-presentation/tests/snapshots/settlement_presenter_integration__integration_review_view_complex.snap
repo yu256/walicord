@@ -1,0 +1,61 @@
+---
+source: walicord-presentation/tests/settlement_presenter_integration.rs
+expression: "render_snapshot_body(&complex_review_result(), &member_directory())"
+---
+### combined_svg
+<svg xmlns="http://www.w3.org/2000/svg" width="360" height="398" viewBox="0 0 360 398">
+<style>text { font-family: Noto Sans CJK JP; font-size: 14px; }</style>
+<g transform="translate(81, 0)">
+
+
+<rect width="198" height="206" fill="#cbd5e0" rx="4" />
+<rect x="1" y="1" width="196" height="34" fill="#4a5568" rx="3" />
+<text x="10" y="22" fill="#ffffff" text-anchor="start">メンバー</text>
+<text x="188" y="22" fill="#ffffff" text-anchor="end">収支</text>
+<rect x="1" y="35" width="196" height="34" fill="#f7fafc" />
+<text x="10" y="57" fill="#1a202c" text-anchor="start">Alice</text>
+<text x="188" y="57" fill="#1a202c" text-anchor="end">+123.45</text>
+<rect x="1" y="69" width="196" height="34" fill="#edf2f7" />
+<text x="10" y="91" fill="#1a202c" text-anchor="start">Bob</text>
+<text x="188" y="91" fill="#1a202c" text-anchor="end">-50</text>
+<rect x="1" y="103" width="196" height="34" fill="#f7fafc" />
+<text x="10" y="125" fill="#1a202c" text-anchor="start">Carol</text>
+<text x="188" y="125" fill="#1a202c" text-anchor="end">-30.25</text>
+<rect x="1" y="137" width="196" height="34" fill="#edf2f7" />
+<text x="10" y="159" fill="#1a202c" text-anchor="start">Dave</text>
+<text x="188" y="159" fill="#1a202c" text-anchor="end">-20.2</text>
+<rect x="1" y="171" width="196" height="34" fill="#f7fafc" />
+<text x="10" y="193" fill="#1a202c" text-anchor="start">&lt;@5&gt;</text>
+<text x="188" y="193" fill="#1a202c" text-anchor="end">-23</text>
+</g>
+<g transform="translate(0, 226)">
+
+
+<rect width="360" height="172" fill="#cbd5e0" rx="4" />
+<rect x="1" y="1" width="358" height="34" fill="#4a5568" rx="3" />
+<text x="10" y="22" fill="#ffffff" text-anchor="start">支払人</text>
+<text x="91" y="22" fill="#ffffff" text-anchor="start">受取人</text>
+<text x="235" y="22" fill="#ffffff" text-anchor="end">金額</text>
+<text x="350" y="22" fill="#ffffff" text-anchor="end">受取後残高</text>
+<rect x="1" y="35" width="358" height="34" fill="#f7fafc" />
+<text x="10" y="57" fill="#1a202c" text-anchor="start">Alice</text>
+<text x="91" y="57" fill="#1a202c" text-anchor="start">Bob</text>
+<text x="235" y="57" fill="#1a202c" text-anchor="end">50</text>
+<text x="350" y="57" fill="#1a202c" text-anchor="end">+0 ✓</text>
+<rect x="1" y="69" width="358" height="34" fill="#edf2f7" />
+<text x="10" y="91" fill="#1a202c" text-anchor="start">Alice</text>
+<text x="91" y="91" fill="#1a202c" text-anchor="start">Carol</text>
+<text x="235" y="91" fill="#1a202c" text-anchor="end">30.25</text>
+<text x="350" y="91" fill="#1a202c" text-anchor="end">+0 ✓</text>
+<rect x="1" y="103" width="358" height="34" fill="#f7fafc" />
+<text x="10" y="125" fill="#1a202c" text-anchor="start">Alice</text>
+<text x="91" y="125" fill="#1a202c" text-anchor="start">Dave</text>
+<text x="235" y="125" fill="#1a202c" text-anchor="end">20.2</text>
+<text x="350" y="125" fill="#1a202c" text-anchor="end">+0 ✓</text>
+<rect x="1" y="137" width="358" height="34" fill="#edf2f7" />
+<text x="10" y="159" fill="#1a202c" text-anchor="start">Alice</text>
+<text x="91" y="159" fill="#1a202c" text-anchor="start">&lt;@5&gt;</text>
+<text x="235" y="159" fill="#1a202c" text-anchor="end">23</text>
+<text x="350" y="159" fill="#1a202c" text-anchor="end">+0 ✓</text>
+</g>
+</svg>

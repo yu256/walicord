@@ -1,0 +1,82 @@
+---
+source: walicord/src/settlement.rs
+expression: "render_pipeline_snapshot_body(content, Some(MemberId(1))).await"
+---
+### resolver_input
+<@&10> => [2, 3, 4]
+<@&20> => [4, 5]
+### source
+trip := <@&10> <@5>
+12000 to trip
+<@6> paid 5250 to <@&20>*2 <@3> <@5>
+!review
+### ast
+L1 declaration trip members=[<@5>] roles=[<@&10>] groups=[]
+L2 payment amount=12000 payer=(members=[<@1>] roles=[] groups=[]) payee=(members=[] roles=[] groups=[trip]) allocation=even
+L3 payment amount=5250 payer=(members=[<@6>] roles=[] groups=[]) payee=(members=[<@3>, <@5>] roles=[<@&20>] groups=[]) allocation=weighted[<@&20>*2]
+L4 command !review
+### combined_svg
+<svg xmlns="http://www.w3.org/2000/svg" width="351" height="466" viewBox="0 0 351 466">
+<style>text { font-family: Noto Sans CJK JP; font-size: 14px; }</style>
+<g transform="translate(81, 0)">
+
+
+<rect width="189" height="240" fill="#cbd5e0" rx="4" />
+<rect x="1" y="1" width="187" height="34" fill="#4a5568" rx="3" />
+<text x="10" y="22" fill="#ffffff" text-anchor="start">メンバー</text>
+<text x="179" y="22" fill="#ffffff" text-anchor="end">収支</text>
+<rect x="1" y="35" width="187" height="34" fill="#f7fafc" />
+<text x="10" y="57" fill="#1a202c" text-anchor="start">Alice</text>
+<text x="179" y="57" fill="#1a202c" text-anchor="end">+12000</text>
+<rect x="1" y="69" width="187" height="34" fill="#edf2f7" />
+<text x="10" y="91" fill="#1a202c" text-anchor="start">Bob</text>
+<text x="179" y="91" fill="#1a202c" text-anchor="end">-3000</text>
+<rect x="1" y="103" width="187" height="34" fill="#f7fafc" />
+<text x="10" y="125" fill="#1a202c" text-anchor="start">Carol</text>
+<text x="179" y="125" fill="#1a202c" text-anchor="end">-4050</text>
+<rect x="1" y="137" width="187" height="34" fill="#edf2f7" />
+<text x="10" y="159" fill="#1a202c" text-anchor="start">Dave</text>
+<text x="179" y="159" fill="#1a202c" text-anchor="end">-5100</text>
+<rect x="1" y="171" width="187" height="34" fill="#f7fafc" />
+<text x="10" y="193" fill="#1a202c" text-anchor="start">Eve</text>
+<text x="179" y="193" fill="#1a202c" text-anchor="end">-5100</text>
+<rect x="1" y="205" width="187" height="34" fill="#edf2f7" />
+<text x="10" y="227" fill="#1a202c" text-anchor="start">Frank</text>
+<text x="179" y="227" fill="#1a202c" text-anchor="end">+5250</text>
+</g>
+<g transform="translate(0, 260)">
+
+
+<rect width="351" height="206" fill="#cbd5e0" rx="4" />
+<rect x="1" y="1" width="349" height="34" fill="#4a5568" rx="3" />
+<text x="10" y="22" fill="#ffffff" text-anchor="start">支払人</text>
+<text x="91" y="22" fill="#ffffff" text-anchor="start">受取人</text>
+<text x="226" y="22" fill="#ffffff" text-anchor="end">金額</text>
+<text x="341" y="22" fill="#ffffff" text-anchor="end">受取後残高</text>
+<rect x="1" y="35" width="349" height="34" fill="#f7fafc" />
+<text x="10" y="57" fill="#1a202c" text-anchor="start">Alice</text>
+<text x="91" y="57" fill="#1a202c" text-anchor="start">Bob</text>
+<text x="226" y="57" fill="#1a202c" text-anchor="end">2850</text>
+<text x="341" y="57" fill="#1a202c" text-anchor="end">-150</text>
+<rect x="1" y="69" width="349" height="34" fill="#edf2f7" />
+<text x="10" y="91" fill="#1a202c" text-anchor="start">Alice</text>
+<text x="91" y="91" fill="#1a202c" text-anchor="start">Carol</text>
+<text x="226" y="91" fill="#1a202c" text-anchor="end">4050</text>
+<text x="341" y="91" fill="#1a202c" text-anchor="end">+0 ✓</text>
+<rect x="1" y="103" width="349" height="34" fill="#f7fafc" />
+<text x="10" y="125" fill="#1a202c" text-anchor="start">Alice</text>
+<text x="91" y="125" fill="#1a202c" text-anchor="start">Dave</text>
+<text x="226" y="125" fill="#1a202c" text-anchor="end">5100</text>
+<text x="341" y="125" fill="#1a202c" text-anchor="end">+0 ✓</text>
+<rect x="1" y="137" width="349" height="34" fill="#edf2f7" />
+<text x="10" y="159" fill="#1a202c" text-anchor="start">Frank</text>
+<text x="91" y="159" fill="#1a202c" text-anchor="start">Bob</text>
+<text x="226" y="159" fill="#1a202c" text-anchor="end">150</text>
+<text x="341" y="159" fill="#1a202c" text-anchor="end">+0 ✓</text>
+<rect x="1" y="171" width="349" height="34" fill="#f7fafc" />
+<text x="10" y="193" fill="#1a202c" text-anchor="start">Frank</text>
+<text x="91" y="193" fill="#1a202c" text-anchor="start">Eve</text>
+<text x="226" y="193" fill="#1a202c" text-anchor="end">5100</text>
+<text x="341" y="193" fill="#1a202c" text-anchor="end">+0 ✓</text>
+</g>
+</svg>

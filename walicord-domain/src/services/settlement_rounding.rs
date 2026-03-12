@@ -470,7 +470,7 @@ pub fn quantize_balances_with_preferred_members(
     Ok(rounded_balances)
 }
 
-fn settlement_epsilon(scale: u32) -> Decimal {
+pub fn settlement_epsilon(scale: u32) -> Decimal {
     let baseline = Decimal::new(1, scale + 6);
     let epsilon_min = Decimal::from(EPSILON_SAFETY_FACTOR * EPSILON_OP_COUNT_BUDGET)
         * Decimal::from_i128_with_scale(1, 28);

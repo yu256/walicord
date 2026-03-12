@@ -1,0 +1,97 @@
+---
+source: walicord/src/settlement.rs
+expression: "render_pipeline_snapshot_body(content, None).await"
+---
+### resolver_input
+<@&10> => [2, 3, 4]
+<@&20> => [4, 5]
+### source
+core := <@&10> <@5>
+<@1> paid 8400 to core
+<@6> paid 3600 to <@2> <@3> <@4>
+!member set <@5> cash
+!settleup core --cash <@5> <@6>
+### ast
+L1 declaration core members=[<@5>] roles=[<@&10>] groups=[]
+L2 payment amount=8400 payer=(members=[<@1>] roles=[] groups=[]) payee=(members=[] roles=[] groups=[core]) allocation=even
+L3 payment amount=3600 payer=(members=[<@6>] roles=[] groups=[]) payee=(members=[<@2>, <@3>, <@4>] roles=[] groups=[]) allocation=even
+L4 command !member set cash members=(members=[<@5>] roles=[] groups=[])
+L5 command !settleup members=(members=[] roles=[] groups=[core]) cash=(members=[<@5>, <@6>] roles=[] groups=[])
+### combined_svg
+<svg xmlns="http://www.w3.org/2000/svg" width="449" height="466" viewBox="0 0 449 466">
+<style>text { font-family: Noto Sans CJK JP; font-size: 14px; }</style>
+<g transform="translate(89, 0)">
+
+
+<rect width="270" height="240" fill="#cbd5e0" rx="4" />
+<rect x="1" y="1" width="268" height="34" fill="#4a5568" rx="3" />
+<text x="10" y="22" fill="#ffffff" text-anchor="start">メンバー</text>
+<text x="162" y="22" fill="#ffffff" text-anchor="end">収支</text>
+<text x="172" y="22" fill="#ffffff" text-anchor="start">状態</text>
+<rect x="1" y="35" width="268" height="34" fill="#f7fafc" />
+<text x="10" y="57" fill="#1a202c" text-anchor="start">Alice</text>
+<text x="162" y="57" fill="#1a202c" text-anchor="end">+0</text>
+<text x="172" y="57" fill="#1a202c" text-anchor="start">未確定</text>
+<rect x="1" y="69" width="268" height="34" fill="#edf2f7" />
+<text x="10" y="91" fill="#1a202c" text-anchor="start">Bob</text>
+<text x="162" y="91" fill="#1a202c" text-anchor="end">+0</text>
+<text x="172" y="91" fill="#1a202c" text-anchor="start">確定対象</text>
+<rect x="1" y="103" width="268" height="34" fill="#f7fafc" />
+<text x="10" y="125" fill="#1a202c" text-anchor="start">Carol</text>
+<text x="162" y="125" fill="#1a202c" text-anchor="end">+0</text>
+<text x="172" y="125" fill="#1a202c" text-anchor="start">確定対象</text>
+<rect x="1" y="137" width="268" height="34" fill="#edf2f7" />
+<text x="10" y="159" fill="#1a202c" text-anchor="start">Dave</text>
+<text x="162" y="159" fill="#1a202c" text-anchor="end">+0</text>
+<text x="172" y="159" fill="#1a202c" text-anchor="start">確定対象</text>
+<rect x="1" y="171" width="268" height="34" fill="#f7fafc" />
+<text x="10" y="193" fill="#1a202c" text-anchor="start">Eve</text>
+<text x="162" y="193" fill="#1a202c" text-anchor="end">+0</text>
+<text x="172" y="193" fill="#1a202c" text-anchor="start">確定対象</text>
+<rect x="1" y="205" width="268" height="34" fill="#edf2f7" />
+<text x="10" y="227" fill="#1a202c" text-anchor="start">Frank</text>
+<text x="162" y="227" fill="#1a202c" text-anchor="end">+0</text>
+<text x="172" y="227" fill="#1a202c" text-anchor="start">未確定</text>
+</g>
+<g transform="translate(0, 260)">
+
+
+<rect width="449" height="206" fill="#cbd5e0" rx="4" />
+<rect x="1" y="1" width="447" height="34" fill="#4a5568" rx="3" />
+<text x="10" y="22" fill="#ffffff" text-anchor="start">状態</text>
+<text x="108" y="22" fill="#ffffff" text-anchor="start">支払人</text>
+<text x="189" y="22" fill="#ffffff" text-anchor="start">受取人</text>
+<text x="324" y="22" fill="#ffffff" text-anchor="end">金額</text>
+<text x="439" y="22" fill="#ffffff" text-anchor="end">受取後残高</text>
+<rect x="1" y="35" width="447" height="34" fill="#f7fafc" />
+<text x="10" y="57" fill="#1a202c" text-anchor="start">確定済み</text>
+<text x="108" y="57" fill="#1a202c" text-anchor="start">Alice</text>
+<text x="189" y="57" fill="#1a202c" text-anchor="start">Bob</text>
+<text x="324" y="57" fill="#1a202c" text-anchor="end">1800</text>
+<text x="439" y="57" fill="#1a202c" text-anchor="end">+0 ✓</text>
+<rect x="1" y="69" width="447" height="34" fill="#edf2f7" />
+<text x="10" y="91" fill="#1a202c" text-anchor="start">確定済み</text>
+<text x="108" y="91" fill="#1a202c" text-anchor="start">Alice</text>
+<text x="189" y="91" fill="#1a202c" text-anchor="start">Carol</text>
+<text x="324" y="91" fill="#1a202c" text-anchor="end">3300</text>
+<text x="439" y="91" fill="#1a202c" text-anchor="end">+0 ✓</text>
+<rect x="1" y="103" width="447" height="34" fill="#f7fafc" />
+<text x="10" y="125" fill="#1a202c" text-anchor="start">確定済み</text>
+<text x="108" y="125" fill="#1a202c" text-anchor="start">Alice</text>
+<text x="189" y="125" fill="#1a202c" text-anchor="start">Dave</text>
+<text x="324" y="125" fill="#1a202c" text-anchor="end">3300</text>
+<text x="439" y="125" fill="#1a202c" text-anchor="end">+0 ✓</text>
+<rect x="1" y="137" width="447" height="34" fill="#edf2f7" />
+<text x="10" y="159" fill="#1a202c" text-anchor="start">確定済み</text>
+<text x="108" y="159" fill="#1a202c" text-anchor="start">Frank</text>
+<text x="189" y="159" fill="#1a202c" text-anchor="start">Bob</text>
+<text x="324" y="159" fill="#1a202c" text-anchor="end">1500</text>
+<text x="439" y="159" fill="#1a202c" text-anchor="end">+0 ✓</text>
+<rect x="1" y="171" width="447" height="34" fill="#f7fafc" />
+<text x="10" y="193" fill="#1a202c" text-anchor="start">確定済み</text>
+<text x="108" y="193" fill="#1a202c" text-anchor="start">Frank</text>
+<text x="189" y="193" fill="#1a202c" text-anchor="start">Eve</text>
+<text x="324" y="193" fill="#1a202c" text-anchor="end">2100</text>
+<text x="439" y="193" fill="#1a202c" text-anchor="end">+0 ✓</text>
+</g>
+</svg>
