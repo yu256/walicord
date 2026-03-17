@@ -139,7 +139,7 @@ impl SettlementPresenter {
         member_directory: &dyn MemberDirectory,
         quantization_scale: u32,
     ) -> String {
-        let running = balances_map(balances);
+        let mut running = balances_map(balances);
 
         let mut builder = SvgTableBuilder::new()
             .alignments(&[
@@ -162,8 +162,16 @@ impl SettlementPresenter {
         sort_transfers(&mut confirmed);
         sort_transfers(&mut planned);
 
-        // `SettlementResult::balances` already reflects confirmed settle-up transfers.
+        // `balances` already reflects confirmed transfers — reverse them to
+        // obtain the pre-confirmed state, then re-apply one by one so each
+        // row shows the correct intermediate receiver balance.
         for transfer in &confirmed {
+            *running.entry(transfer.from).or_insert(Money::ZERO) += transfer.amount;
+            *running.entry(transfer.to).or_insert(Money::ZERO) -= transfer.amount;
+        }
+
+        for transfer in &confirmed {
+            apply_transfer(&mut running, transfer);
             let to_balance = running.get(&transfer.to).copied().unwrap_or(Money::ZERO);
             builder = builder.row([
                 Cow::Borrowed(i18n::SETTLED_TRANSFER),
@@ -176,7 +184,6 @@ impl SettlementPresenter {
             ]);
         }
 
-        let mut running = running;
         for transfer in &planned {
             apply_transfer(&mut running, transfer);
             let to_balance = running.get(&transfer.to).copied().unwrap_or(Money::ZERO);
@@ -469,5 +476,54 @@ mod tests {
         assert!(svg.contains("Bob"));
         assert!(svg.contains("+0 ✓"));
         assert!(!svg.contains("+100"));
+    }
+
+    #[test]
+    fn settle_up_confirmed_rows_show_intermediate_receiver_balances() {
+        let directory = HashMap::from([
+            (MemberId(1), "Alice".into()),
+            (MemberId(2), "Bob".into()),
+            (MemberId(3), "Charlie".into()),
+        ]);
+
+        // Pre-confirmed: Alice=+50, Charlie=+50, Bob=-100
+        // After confirmed: Alice=0, Charlie=0, Bob=0
+        // balances already reflects confirmed transfers
+        let svg = SettlementPresenter::build_settle_up_transfer_svg(
+            &[
+                Transfer {
+                    from: MemberId(1),
+                    to: MemberId(2),
+                    amount: Money::from_i64(50),
+                },
+                Transfer {
+                    from: MemberId(3),
+                    to: MemberId(2),
+                    amount: Money::from_i64(50),
+                },
+            ],
+            &[],
+            &[
+                PersonBalance {
+                    id: MemberId(1),
+                    balance: Money::ZERO,
+                },
+                PersonBalance {
+                    id: MemberId(2),
+                    balance: Money::ZERO,
+                },
+                PersonBalance {
+                    id: MemberId(3),
+                    balance: Money::ZERO,
+                },
+            ],
+            &directory,
+            0,
+        );
+
+        // First confirmed row (Alice→Bob 50): Bob's intermediate balance should be -50
+        assert!(svg.contains("-50"));
+        // Second confirmed row (Charlie→Bob 50): Bob's final balance should be 0
+        assert!(svg.contains("+0 ✓"));
     }
 }
