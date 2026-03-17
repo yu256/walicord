@@ -14,5 +14,5 @@ pub use model::{
 pub use services::{
     AtomicUnitConversionError, FairnessPolicy, MemberSetResolutionError, MemberSetResolver,
     RoundingMode, SettleUpPolicy, SettlementContext, SettlementRoundingError, TransferConstructor,
-    quantize_balances,
+    quantize_balances, settlement_epsilon,
 };

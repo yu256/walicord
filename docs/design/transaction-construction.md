@@ -165,3 +165,4 @@ Settlement mathematics and transaction construction intentionally separate respo
 - transaction construction guarantees transfer realization under cash/settle objectives.
 
 For quantization and repair details, see `docs/design/settlement-mathematics.md`.
+

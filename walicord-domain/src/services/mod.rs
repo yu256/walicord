@@ -8,5 +8,6 @@ pub use settle_up_policy::SettleUpPolicy;
 pub use settlement_rounding::{
     AtomicUnitConversionError, FairnessPolicy, RoundingMode, SettlementContext,
     SettlementRoundingError, quantize_balances, quantize_balances_with_preferred_members,
+    settlement_epsilon,
 };
 pub use transfer_constructor::TransferConstructor;

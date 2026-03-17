@@ -1,5 +1,8 @@
 use crate::svg_table::{Alignment, SvgTableBuilder};
-use std::{borrow::Cow, collections::HashSet};
+use std::{
+    borrow::Cow,
+    collections::{HashMap, HashSet},
+};
 use walicord_application::{MemberDirectory, PersonBalance, SettlementResult};
 use walicord_domain::{Money, Transfer, model::MemberId};
 use walicord_i18n as i18n;
@@ -11,18 +14,13 @@ pub struct SettlementView {
 }
 
 impl SettlementPresenter {
-    pub fn render(result: &SettlementResult) -> SettlementView {
-        let empty_directory = EmptyMemberDirectory;
-        Self::render_with_members(result, &empty_directory)
-    }
-
     pub fn render_with_members(
         result: &SettlementResult,
         member_directory: &dyn MemberDirectory,
     ) -> SettlementView {
         use crate::svg_table::combine_svgs_vertically;
 
-        if let Some(settle_up) = &result.settle_up {
+        let combined_svg = if let Some(settle_up) = &result.settle_up {
             let balance_table_svg = Self::build_settle_up_balance_table_svg(
                 &result.balances,
                 &settle_up.settle_members,
@@ -33,44 +31,40 @@ impl SettlementPresenter {
                 !settle_up.immediate_transfers.is_empty() || !result.optimized_transfers.is_empty();
 
             if !has_any_transfers {
-                return SettlementView {
-                    combined_svg: balance_table_svg,
-                };
-            }
+                balance_table_svg
+            } else {
+                let transfer_table_svg = Self::build_settle_up_transfer_svg(
+                    &settle_up.immediate_transfers,
+                    &result.optimized_transfers,
+                    &result.balances,
+                    member_directory,
+                    result.quantization_scale,
+                );
 
-            let transfer_table_svg = Self::build_settle_up_transfer_svg(
-                &settle_up.immediate_transfers,
-                &result.optimized_transfers,
-                member_directory,
-                result.quantization_scale,
-            );
-
-            let combined_svg = combine_svgs_vertically(&[&balance_table_svg, &transfer_table_svg])
-                .unwrap_or(balance_table_svg);
-
-            return SettlementView { combined_svg };
-        }
-
-        let balance_table_svg = Self::build_balance_table_svg(
-            &result.balances,
-            member_directory,
-            result.quantization_scale,
-        );
-
-        if result.optimized_transfers.is_empty() {
-            SettlementView {
-                combined_svg: balance_table_svg,
+                combine_svgs_vertically(&[&balance_table_svg, &transfer_table_svg])
+                    .unwrap_or(balance_table_svg)
             }
         } else {
-            let transfer_table_svg = Self::build_transfer_table_svg(
-                &result.optimized_transfers,
+            let balance_table_svg = Self::build_balance_table_svg(
+                &result.balances,
                 member_directory,
                 result.quantization_scale,
             );
-            let combined_svg = combine_svgs_vertically(&[&balance_table_svg, &transfer_table_svg])
-                .unwrap_or(balance_table_svg);
-            SettlementView { combined_svg }
-        }
+            if result.optimized_transfers.is_empty() {
+                balance_table_svg
+            } else {
+                let transfer_table_svg = Self::build_transfer_table_svg(
+                    &result.optimized_transfers,
+                    &result.balances,
+                    member_directory,
+                    result.quantization_scale,
+                );
+                combine_svgs_vertically(&[&balance_table_svg, &transfer_table_svg])
+                    .unwrap_or(balance_table_svg)
+            }
+        };
+
+        SettlementView { combined_svg }
     }
 
     pub fn build_balance_table_svg(
@@ -102,24 +96,36 @@ impl SettlementPresenter {
 
     pub fn build_transfer_table_svg(
         transfers: &[Transfer],
+        balances: &[PersonBalance],
         member_directory: &dyn MemberDirectory,
         quantization_scale: u32,
     ) -> String {
+        let mut running = balances_map(balances);
+
         let mut builder = SvgTableBuilder::new()
-            .alignments(&[Alignment::Left, Alignment::Left, Alignment::Right])
+            .alignments(&[
+                Alignment::Left,
+                Alignment::Left,
+                Alignment::Right,
+                Alignment::Right,
+            ])
             .headers(&[
                 Cow::Borrowed(i18n::FROM),
                 Cow::Borrowed(i18n::TO),
                 Cow::Borrowed(i18n::AMOUNT),
+                Cow::Borrowed(i18n::RECEIVER_BALANCE),
             ]);
 
         for transfer in transfers {
+            apply_transfer(&mut running, transfer);
+            let to_balance = running.get(&transfer.to).copied().unwrap_or(Money::ZERO);
             builder = builder.row([
                 format_member_label(transfer.from, member_directory),
                 format_member_label(transfer.to, member_directory),
                 Cow::Owned(
                     format_money_for_display(transfer.amount, quantization_scale).to_string(),
                 ),
+                Cow::Owned(format_balance_after(to_balance, quantization_scale)),
             ]);
         }
 
@@ -129,14 +135,18 @@ impl SettlementPresenter {
     pub fn build_settle_up_transfer_svg(
         confirmed_transfers: &[Transfer],
         planned_transfers: &[Transfer],
+        balances: &[PersonBalance],
         member_directory: &dyn MemberDirectory,
         quantization_scale: u32,
     ) -> String {
+        let mut running = balances_map(balances);
+
         let mut builder = SvgTableBuilder::new()
             .alignments(&[
                 Alignment::Left,
                 Alignment::Left,
                 Alignment::Left,
+                Alignment::Right,
                 Alignment::Right,
             ])
             .headers(&[
@@ -144,6 +154,7 @@ impl SettlementPresenter {
                 Cow::Borrowed(i18n::FROM),
                 Cow::Borrowed(i18n::TO),
                 Cow::Borrowed(i18n::AMOUNT),
+                Cow::Borrowed(i18n::RECEIVER_BALANCE),
             ]);
 
         let mut confirmed = confirmed_transfers.to_vec();
@@ -151,7 +162,17 @@ impl SettlementPresenter {
         sort_transfers(&mut confirmed);
         sort_transfers(&mut planned);
 
-        for transfer in confirmed {
+        // `balances` already reflects confirmed transfers — reverse them to
+        // obtain the pre-confirmed state, then re-apply one by one so each
+        // row shows the correct intermediate receiver balance.
+        for transfer in &confirmed {
+            *running.entry(transfer.from).or_insert(Money::ZERO) += transfer.amount;
+            *running.entry(transfer.to).or_insert(Money::ZERO) -= transfer.amount;
+        }
+
+        for transfer in &confirmed {
+            apply_transfer(&mut running, transfer);
+            let to_balance = running.get(&transfer.to).copied().unwrap_or(Money::ZERO);
             builder = builder.row([
                 Cow::Borrowed(i18n::SETTLED_TRANSFER),
                 format_member_label(transfer.from, member_directory),
@@ -159,10 +180,13 @@ impl SettlementPresenter {
                 Cow::Owned(
                     format_money_for_display(transfer.amount, quantization_scale).to_string(),
                 ),
+                Cow::Owned(format_balance_after(to_balance, quantization_scale)),
             ]);
         }
 
-        for transfer in planned {
+        for transfer in &planned {
+            apply_transfer(&mut running, transfer);
+            let to_balance = running.get(&transfer.to).copied().unwrap_or(Money::ZERO);
             builder = builder.row([
                 Cow::Borrowed(i18n::PLANNED_TRANSFER),
                 format_member_label(transfer.from, member_directory),
@@ -170,6 +194,7 @@ impl SettlementPresenter {
                 Cow::Owned(
                     format_money_for_display(transfer.amount, quantization_scale).to_string(),
                 ),
+                Cow::Owned(format_balance_after(to_balance, quantization_scale)),
             ]);
         }
 
@@ -216,14 +241,6 @@ impl SettlementPresenter {
     }
 }
 
-struct EmptyMemberDirectory;
-
-impl MemberDirectory for EmptyMemberDirectory {
-    fn display_name(&self, _member_id: MemberId) -> Option<&str> {
-        None
-    }
-}
-
 fn format_member_label<'a>(
     member_id: MemberId,
     member_directory: &'a dyn MemberDirectory,
@@ -265,27 +282,61 @@ fn format_money_for_display(amount: Money, quantization_scale: u32) -> impl std:
     }
 }
 
+fn balances_map(balances: &[PersonBalance]) -> HashMap<MemberId, Money> {
+    balances.iter().map(|b| (b.id, b.balance)).collect()
+}
+
+fn apply_transfer(balances: &mut HashMap<MemberId, Money>, transfer: &Transfer) {
+    *balances.entry(transfer.from).or_insert(Money::ZERO) -= transfer.amount;
+    *balances.entry(transfer.to).or_insert(Money::ZERO) += transfer.amount;
+}
+
+fn format_balance_after(balance: Money, quantization_scale: u32) -> String {
+    let sign = if balance.signum() >= 0 { "+" } else { "" };
+    let check = if balance.is_zero() { " ✓" } else { "" };
+    format!(
+        "{sign}{}{check}",
+        format_money_for_display(balance, quantization_scale)
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use rstest::rstest;
     use std::collections::HashMap;
-    use walicord_application::{PersonBalance, SettleUpContext};
+    use walicord_application::{MemberDirectory, PersonBalance, SettleUpContext};
     use walicord_domain::{Money, Transfer, model::MemberId};
+
+    struct EmptyMemberDirectory;
+
+    impl MemberDirectory for EmptyMemberDirectory {
+        fn display_name(&self, _member_id: MemberId) -> Option<&str> {
+            None
+        }
+    }
 
     fn sample_result() -> SettlementResult {
         SettlementResult {
-            balances: vec![PersonBalance {
-                id: MemberId(1),
-                balance: Money::from_i64(120),
-            }],
+            balances: vec![
+                PersonBalance {
+                    id: MemberId(1),
+                    balance: Money::from_i64(120),
+                },
+                PersonBalance {
+                    id: MemberId(2),
+                    balance: Money::from_i64(-120),
+                },
+            ],
             optimized_transfers: vec![Transfer {
                 from: MemberId(1),
                 to: MemberId(2),
-                amount: Money::from_i64(50),
+                amount: Money::from_i64(120),
             }],
             settle_up: None,
             quantization_scale: 0,
+            effective_cash_members: vec![],
+            pre_quantization_sum: Money::ZERO,
         }
     }
 
@@ -313,6 +364,15 @@ mod tests {
     }
 
     #[test]
+    fn transfer_table_shows_receiver_balance_column() {
+        let directory = HashMap::from([(MemberId(1), "Alice".into()), (MemberId(2), "Bob".into())]);
+        let view = SettlementPresenter::render_with_members(&sample_result(), &directory);
+        assert!(view.combined_svg.contains(i18n::RECEIVER_BALANCE));
+        // After transfer of 120 from Alice(+120) to Bob(-120), Bob's balance becomes 0
+        assert!(view.combined_svg.contains("+0 ✓"));
+    }
+
+    #[test]
     fn formats_decimal_balance_with_quantization_scale() {
         let result = SettlementResult {
             balances: vec![PersonBalance {
@@ -322,9 +382,11 @@ mod tests {
             optimized_transfers: vec![],
             settle_up: None,
             quantization_scale: 6,
+            effective_cash_members: vec![],
+            pre_quantization_sum: Money::ZERO,
         };
 
-        let view = SettlementPresenter::render(&result);
+        let view = SettlementPresenter::render_with_members(&result, &EmptyMemberDirectory);
         assert!(view.combined_svg.contains("+1.123457"));
     }
 
@@ -338,9 +400,11 @@ mod tests {
             optimized_transfers: vec![],
             settle_up: None,
             quantization_scale: 0,
+            effective_cash_members: vec![],
+            pre_quantization_sum: Money::ZERO,
         };
 
-        let view = SettlementPresenter::render(&result);
+        let view = SettlementPresenter::render_with_members(&result, &EmptyMemberDirectory);
         assert!(view.combined_svg.contains("+2"));
     }
 
@@ -350,11 +414,11 @@ mod tests {
             balances: vec![
                 PersonBalance {
                     id: MemberId(1),
-                    balance: Money::from_i64(100),
+                    balance: Money::ZERO,
                 },
                 PersonBalance {
                     id: MemberId(2),
-                    balance: Money::from_i64(-100),
+                    balance: Money::ZERO,
                 },
             ],
             optimized_transfers: vec![Transfer {
@@ -371,13 +435,95 @@ mod tests {
                 }],
             }),
             quantization_scale: 0,
+            effective_cash_members: vec![],
+            pre_quantization_sum: Money::ZERO,
         };
 
-        let view = SettlementPresenter::render(&result);
+        let view = SettlementPresenter::render_with_members(&result, &EmptyMemberDirectory);
         assert!(view.combined_svg.contains(i18n::STATUS));
         assert!(view.combined_svg.contains(i18n::SETTLED_MEMBER));
         assert!(view.combined_svg.contains(i18n::UNSETTLED_MEMBER));
         assert!(view.combined_svg.contains(i18n::SETTLED_TRANSFER));
         assert!(view.combined_svg.contains(i18n::PLANNED_TRANSFER));
+        assert!(view.combined_svg.contains(i18n::RECEIVER_BALANCE));
+    }
+
+    #[test]
+    fn settle_up_transfer_table_uses_post_settlement_balance_for_confirmed_rows() {
+        let directory = HashMap::from([(MemberId(1), "Alice".into()), (MemberId(2), "Bob".into())]);
+
+        let svg = SettlementPresenter::build_settle_up_transfer_svg(
+            &[Transfer {
+                from: MemberId(1),
+                to: MemberId(2),
+                amount: Money::from_i64(100),
+            }],
+            &[],
+            &[
+                PersonBalance {
+                    id: MemberId(1),
+                    balance: Money::ZERO,
+                },
+                PersonBalance {
+                    id: MemberId(2),
+                    balance: Money::ZERO,
+                },
+            ],
+            &directory,
+            0,
+        );
+
+        assert!(svg.contains("Bob"));
+        assert!(svg.contains("+0 ✓"));
+        assert!(!svg.contains("+100"));
+    }
+
+    #[test]
+    fn settle_up_confirmed_rows_show_intermediate_receiver_balances() {
+        let directory = HashMap::from([
+            (MemberId(1), "Alice".into()),
+            (MemberId(2), "Bob".into()),
+            (MemberId(3), "Charlie".into()),
+        ]);
+
+        // Pre-confirmed: Alice=+50, Charlie=+50, Bob=-100
+        // After confirmed: Alice=0, Charlie=0, Bob=0
+        // balances already reflects confirmed transfers
+        let svg = SettlementPresenter::build_settle_up_transfer_svg(
+            &[
+                Transfer {
+                    from: MemberId(1),
+                    to: MemberId(2),
+                    amount: Money::from_i64(50),
+                },
+                Transfer {
+                    from: MemberId(3),
+                    to: MemberId(2),
+                    amount: Money::from_i64(50),
+                },
+            ],
+            &[],
+            &[
+                PersonBalance {
+                    id: MemberId(1),
+                    balance: Money::ZERO,
+                },
+                PersonBalance {
+                    id: MemberId(2),
+                    balance: Money::ZERO,
+                },
+                PersonBalance {
+                    id: MemberId(3),
+                    balance: Money::ZERO,
+                },
+            ],
+            &directory,
+            0,
+        );
+
+        // First confirmed row (Alice→Bob 50): Bob's intermediate balance should be -50
+        assert!(svg.contains("-50"));
+        // Second confirmed row (Charlie→Bob 50): Bob's final balance should be 0
+        assert!(svg.contains("+0 ✓"));
     }
 }

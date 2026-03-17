@@ -31,6 +31,7 @@ pub mod strings {
         "清算の丸めに失敗しました (整数化できません)";
     pub const WEIGHT_OVERFLOW: &str = "重みの合計がオーバーフローしました";
     pub const ZERO_TOTAL_WEIGHT: &str = "重みの合計が0です";
+    pub const RECEIVER_BALANCE: &str = "受取後残高";
 }
 
 #[cfg(feature = "en")]
@@ -61,6 +62,7 @@ pub mod strings {
         "Settlement quantization failed (non-integral amount)";
     pub const WEIGHT_OVERFLOW: &str = "Weight sum overflow";
     pub const ZERO_TOTAL_WEIGHT: &str = "Total weight is zero";
+    pub const RECEIVER_BALANCE: &str = "Balance After";
 }
 
 #[cfg(not(any(feature = "ja", feature = "en")))]
@@ -91,6 +93,7 @@ pub mod strings {
         "Settlement quantization failed (non-integral amount)";
     pub const WEIGHT_OVERFLOW: &str = "Weight sum overflow";
     pub const ZERO_TOTAL_WEIGHT: &str = "Total weight is zero";
+    pub const RECEIVER_BALANCE: &str = "Balance After";
 }
 
 pub use strings::*;
