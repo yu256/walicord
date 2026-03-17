@@ -240,12 +240,27 @@ fn role_mention_with_weight(input: &str) -> IResult<&str, SetOp<'_>> {
     Ok((input, op))
 }
 
+fn everyone_mention(input: &str) -> IResult<&str, SetOp<'_>> {
+    let (input, _) = tag_no_case("@everyone")(input)?;
+    Ok((input, SetOp::PushGroup("MEMBERS")))
+}
+
+fn everyone_mention_with_weight(input: &str) -> IResult<&str, SetOp<'_>> {
+    let (input, _) = tag_no_case("@everyone")(input)?;
+    let (input, weight) = opt((char('*'), u64).map(|(_, w)| w)).parse(input)?;
+    let op = match weight {
+        Some(w) => SetOp::PushWeightedGroup("MEMBERS", w),
+        None => SetOp::PushGroup("MEMBERS"),
+    };
+    Ok((input, op))
+}
+
 fn mention_or_role(input: &str) -> IResult<&str, SetOp<'_>> {
-    alt((mention.map(SetOp::Push), role_mention.map(SetOp::PushRole))).parse(input)
+    alt((mention.map(SetOp::Push), role_mention.map(SetOp::PushRole), everyone_mention)).parse(input)
 }
 
 fn mention_or_role_weighted(input: &str) -> IResult<&str, SetOp<'_>> {
-    alt((mention_with_weight, role_mention_with_weight)).parse(input)
+    alt((mention_with_weight, role_mention_with_weight, everyone_mention_with_weight)).parse(input)
 }
 
 fn mention_sequence_generic<'a, P>(parser: P, input: &'a str) -> IResult<&'a str, SetExpr<'a>>
@@ -1170,5 +1185,148 @@ mod tests {
     fn test_accept_weighted_group_reference_in_payee() {
         let result = parse_program("3000 to team*2");
         assert!(result.is_ok());
+    }
+
+    // --- @everyone mention tests ---
+
+    #[rstest]
+    #[case::lowercase("@everyone", &[SetOp::PushGroup("MEMBERS")])]
+    #[case::uppercase("@Everyone", &[SetOp::PushGroup("MEMBERS")])]
+    #[case::allcaps("@EVERYONE", &[SetOp::PushGroup("MEMBERS")])]
+    fn test_everyone_in_set_expr(#[case] input: &str, #[case] expected: &[SetOp]) {
+        let (_, expr) = set_expr(input).expect("@everyone should parse as set expression");
+        assert_eq!(expr.ops(), expected);
+    }
+
+    #[test]
+    fn test_everyone_with_weight() {
+        let (_, expr) =
+            set_expr_weighted("@everyone*2").expect("@everyone with weight should parse");
+        assert_eq!(
+            expr.ops(),
+            &[SetOp::PushWeightedGroup("MEMBERS", 2)]
+        );
+    }
+
+    #[test]
+    fn test_everyone_in_difference() {
+        let (_, expr) =
+            set_expr("@everyone - <@123>").expect("@everyone - mention should parse");
+        assert_eq!(
+            expr.ops(),
+            &[
+                SetOp::PushGroup("MEMBERS"),
+                SetOp::Push(123),
+                SetOp::Difference,
+            ]
+        );
+    }
+
+    #[test]
+    fn test_everyone_as_payee() {
+        let program = parse_program("1000 <@10> @everyone").expect("payment to @everyone");
+        assert_eq!(program.statements.len(), 1);
+        match &program.statements[0].statement {
+            Statement::Payment(p) => {
+                let groups: Vec<_> = p.payee.referenced_groups().collect();
+                assert_eq!(groups, vec!["MEMBERS"]);
+            }
+            _ => panic!("expected payment statement"),
+        }
+    }
+
+    #[test]
+    fn test_everyone_as_explicit_payer_ja() {
+        let program = parse_program("@everyone が <@20> に 1000 立て替えた")
+            .expect("payment from @everyone (ja)");
+        assert_eq!(program.statements.len(), 1);
+        match &program.statements[0].statement {
+            Statement::Payment(p) => {
+                match &p.payer {
+                    PayerSpec::Explicit(expr) => {
+                        let groups: Vec<_> = expr.referenced_groups().collect();
+                        assert_eq!(groups, vec!["MEMBERS"]);
+                    }
+                    PayerSpec::Implicit => panic!("expected explicit payer"),
+                }
+            }
+            _ => panic!("expected payment statement"),
+        }
+    }
+
+    #[test]
+    fn test_everyone_as_explicit_payer_en() {
+        let program =
+            parse_program("@everyone paid 1000 to <@20>").expect("payment from @everyone (en)");
+        assert_eq!(program.statements.len(), 1);
+        match &program.statements[0].statement {
+            Statement::Payment(p) => {
+                match &p.payer {
+                    PayerSpec::Explicit(expr) => {
+                        let groups: Vec<_> = expr.referenced_groups().collect();
+                        assert_eq!(groups, vec!["MEMBERS"]);
+                    }
+                    PayerSpec::Implicit => panic!("expected explicit payer"),
+                }
+            }
+            _ => panic!("expected payment statement"),
+        }
+    }
+
+    #[test]
+    fn test_everyone_in_declaration() {
+        let program =
+            parse_program("team := @everyone - <@99>").expect("declaration with @everyone");
+        assert_eq!(program.statements.len(), 1);
+        match &program.statements[0].statement {
+            Statement::Declaration(d) => {
+                assert_eq!(d.name, "team");
+                assert_eq!(
+                    d.expression.ops(),
+                    &[
+                        SetOp::PushGroup("MEMBERS"),
+                        SetOp::Push(99),
+                        SetOp::Difference,
+                    ]
+                );
+            }
+            _ => panic!("expected declaration statement"),
+        }
+    }
+
+    #[test]
+    fn test_everyone_in_settleup() {
+        let (_, stmt) =
+            statement("!settleup @everyone").expect("settleup with @everyone should parse");
+        assert_eq!(
+            stmt,
+            Statement::Command(Command::SettleUp {
+                members: {
+                    let mut e = SetExpr::new();
+                    e.push(SetOp::PushGroup("MEMBERS"));
+                    e
+                },
+                cash_members: None,
+            })
+        );
+    }
+
+    #[test]
+    fn test_everyone_mixed_with_mentions() {
+        let (_, expr) = set_expr("<@1> @everyone").expect("mention + @everyone should parse");
+        assert_eq!(
+            expr.ops(),
+            &[
+                SetOp::Push(1),
+                SetOp::PushGroup("MEMBERS"),
+                SetOp::Union,
+            ]
+        );
+    }
+
+    #[test]
+    fn test_reject_weighted_everyone_outside_payee() {
+        let result = parse_program("!settleup @everyone*2");
+        assert!(matches!(result, Err(ParseError::SyntaxError { .. })));
     }
 }
