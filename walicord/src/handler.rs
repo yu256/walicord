@@ -59,7 +59,10 @@ enum ProgramCommandEffect {
 enum SlashQueryOutcome {
     Error(String),
     Text(String),
-    Settlement(walicord_application::SettlementResult),
+    Settlement {
+        result: walicord_application::SettlementResult,
+        warning: String,
+    },
 }
 
 struct SlashQueryInput<'a> {
@@ -67,6 +70,7 @@ struct SlashQueryInput<'a> {
     cached_contents: &'a [(ArcStr, Option<MemberId>)],
     member_ids: &'a [MemberId],
     role_members: &'a RoleMembers,
+    role_visibility_diagnostics: &'a RoleVisibilityDiagnostics,
     command_name: &'a str,
     members_expr: &'a str,
     cash_expr: &'a str,
@@ -607,7 +611,7 @@ where
                 .into_result()
             {
                 Ok(s) => s,
-                Err(e) => return SlashQueryOutcome::Error(format!("{e:?}")),
+                Err(e) => return SlashQueryOutcome::Error(format_program_parse_error(e, "")),
             };
 
             let text = VariablesPresenter::render_with_members(&script, input.member_ids);
@@ -650,11 +654,26 @@ where
             .into_result()
         {
             Ok(s) => s,
-            Err(e) => return SlashQueryOutcome::Error(format!("{e:?}")),
+            Err(e) => return SlashQueryOutcome::Error(format_program_parse_error(e, "")),
+        };
+
+        // Append role visibility warnings (same as message-based flow).
+        let warnings = warnings_for_program_prefix(
+            &script,
+            script.statements().len() - 1,
+            input.role_visibility_diagnostics,
+        );
+        let warning_text = if warnings.is_empty() {
+            String::new()
+        } else {
+            role_visibility_feedback::format_warning_lines(&warnings).join("\n")
         };
 
         match self.processor.build_settlement_result(&script).await {
-            Ok(result) => SlashQueryOutcome::Settlement(result),
+            Ok(result) => SlashQueryOutcome::Settlement {
+                result,
+                warning: warning_text,
+            },
             Err(e) => SlashQueryOutcome::Error(crate::settlement::format_settlement_error(e)),
         }
     }
@@ -752,6 +771,7 @@ where
                 cached_contents: &cached_contents,
                 member_ids: &roster.member_ids,
                 role_members: &roster.role_members,
+                role_visibility_diagnostics: &roster.role_visibility_diagnostics,
                 command_name,
                 members_expr,
                 cash_expr,
@@ -775,7 +795,16 @@ where
                     )
                     .await;
             }
-            SlashQueryOutcome::Settlement(result) => {
+            SlashQueryOutcome::Settlement { result, warning } => {
+                if !warning.is_empty() {
+                    let _ = command
+                        .create_followup(
+                            &ctx.http,
+                            CreateInteractionResponseFollowup::new().content(warning),
+                        )
+                        .await;
+                }
+
                 let settlement_service: SettlementService<'_, RP> =
                     SettlementService::new(&self.processor, &self.roster_provider);
                 let mut member_directory: Option<HashMap<MemberId, smol_str::SmolStr>> = None;
@@ -802,6 +831,13 @@ where
                                 .await;
                         } else {
                             tracing::error!("Failed to render settlement SVG to PNG");
+                            let _ = command
+                                .create_followup(
+                                    &ctx.http,
+                                    CreateInteractionResponseFollowup::new()
+                                        .content("Failed to render settlement image."),
+                                )
+                                .await;
                         }
                     }
                     Err(error_content) => {
@@ -2139,11 +2175,15 @@ mod tests {
             members_expr: &'a str,
             cash_expr: &'a str,
         ) -> SlashQueryInput<'a> {
+            static EMPTY_DIAGNOSTICS: std::sync::OnceLock<RoleVisibilityDiagnostics> =
+                std::sync::OnceLock::new();
             SlashQueryInput {
                 cache_load_result,
                 cached_contents,
                 member_ids,
                 role_members: empty_roles(),
+                role_visibility_diagnostics: EMPTY_DIAGNOSTICS
+                    .get_or_init(RoleVisibilityDiagnostics::default),
                 command_name,
                 members_expr,
                 cash_expr,
@@ -2234,7 +2274,7 @@ mod tests {
             );
             let outcome = handler.process_slash_query(&input).await;
             match outcome {
-                SlashQueryOutcome::Settlement(result) => {
+                SlashQueryOutcome::Settlement { result, .. } => {
                     assert!(result.settle_up.is_none(), "review has no settle_up");
                 }
                 other => panic!("expected Settlement, got {other:?}"),
@@ -2256,7 +2296,7 @@ mod tests {
             );
             let outcome = handler.process_slash_query(&input).await;
             match outcome {
-                SlashQueryOutcome::Settlement(result) => {
+                SlashQueryOutcome::Settlement { result, .. } => {
                     assert!(result.settle_up.is_some(), "settleup should have context");
                 }
                 other => panic!("expected Settlement, got {other:?}"),
@@ -2305,7 +2345,7 @@ mod tests {
             );
             let outcome = handler.process_slash_query(&input).await;
             match outcome {
-                SlashQueryOutcome::Settlement(result) => {
+                SlashQueryOutcome::Settlement { result, .. } => {
                     assert!(result.effective_cash_members.contains(&MemberId(2)));
                 }
                 other => panic!("expected Settlement, got {other:?}"),

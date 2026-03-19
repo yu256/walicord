@@ -438,6 +438,44 @@ async fn slash_settle_up_via_synthetic_command(
     );
 }
 
+/// Group names from cached messages ARE resolvable in synthetic commands:
+/// command member expressions are stored as raw AST at parse time, then
+/// resolved at evaluation time after prior declarations are registered.
+#[tokio::test(flavor = "multi_thread")]
+async fn slash_settle_up_resolves_groups_from_cached_messages() {
+    let processor = MessageProcessor::new(&TEST_PARSER, &TEST_OPTIMIZER);
+
+    let program = processor
+        .parse_program_sequence(
+            &EMPTY_MEMBERS,
+            empty_roles(),
+            [
+                (
+                    "team := <@1> <@2> <@3>\n<@1> paid 90 to team",
+                    Some(TestMember::Alice.id()),
+                ),
+                ("!settleup team", None),
+            ],
+        )
+        .into_result()
+        .expect("group from cached message should resolve in command");
+
+    let result = processor
+        .build_settlement_result(&program)
+        .await
+        .expect("settle-up should succeed");
+
+    assert!(result.settle_up.is_some());
+    assert_balances(
+        &balances_from_result(&result.balances),
+        &[
+            (TestMember::Alice, 0),
+            (TestMember::Bob, 0),
+            (TestMember::Carol, 0),
+        ],
+    );
+}
+
 /// Empty cache with synthetic `!settleup` produces no transfers.
 #[tokio::test(flavor = "multi_thread")]
 async fn slash_settle_up_with_empty_cache() {
