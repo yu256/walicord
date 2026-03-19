@@ -570,6 +570,212 @@ where
             ProcessProgramMessageResult::Skip
         }
     }
+
+    async fn handle_slash_command(
+        &self,
+        ctx: &Context,
+        command: &serenity::model::application::CommandInteraction,
+    ) {
+        use serenity::builder::{
+            CreateAttachment, CreateInteractionResponse, CreateInteractionResponseFollowup,
+            CreateInteractionResponseMessage,
+        };
+
+        let Some(tracked_id) = self.channel_manager.get_tracked(command.channel_id) else {
+            let _ = command
+                .create_response(
+                    &ctx.http,
+                    CreateInteractionResponse::Message(
+                        CreateInteractionResponseMessage::new()
+                            .content(walicord_i18n::CHANNEL_NOT_TRACKED)
+                            .ephemeral(true),
+                    ),
+                )
+                .await;
+            return;
+        };
+
+        self.ensure_cache_loaded(ctx, command.channel_id).await;
+
+        let roster = match self
+            .roster_provider
+            .roster_for_channel(ctx, command.channel_id)
+            .await
+        {
+            Ok(snapshot) => snapshot,
+            Err(e) => {
+                tracing::warn!(
+                    "Slash command: failed to fetch roster for {}: {:?}",
+                    command.channel_id,
+                    e
+                );
+                let _ = command
+                    .create_response(
+                        &ctx.http,
+                        CreateInteractionResponse::Message(
+                            CreateInteractionResponseMessage::new()
+                                .content("Failed to load member roster.")
+                                .ephemeral(true),
+                        ),
+                    )
+                    .await;
+                return;
+            }
+        };
+
+        let cached_contents: Vec<(ArcStr, Option<MemberId>)> = self
+            .message_cache
+            .with_messages(tracked_id, |messages| {
+                messages
+                    .iter()
+                    .filter(|(_, m)| {
+                        !m.is_bot && !m.is_marked_invalid() && !m.is_pending_evaluation()
+                    })
+                    .map(|(_, m)| (m.content.clone(), Some(MemberId(m.author_id.get()))))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let script = match self
+            .processor
+            .parse_program_sequence(
+                &roster.member_ids,
+                &roster.role_members,
+                cached_contents.iter().map(|(c, a)| (c.as_ref(), *a)),
+            )
+            .into_result()
+        {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("Slash command: failed to parse cached messages: {:?}", e);
+                let _ = command
+                    .create_response(
+                        &ctx.http,
+                        CreateInteractionResponse::Message(
+                            CreateInteractionResponseMessage::new()
+                                .content("Failed to parse channel history.")
+                                .ephemeral(true),
+                        ),
+                    )
+                    .await;
+                return;
+            }
+        };
+
+        let _ = command
+            .create_response(
+                &ctx.http,
+                CreateInteractionResponse::Defer(CreateInteractionResponseMessage::new()),
+            )
+            .await;
+
+        let command_name = command.data.name.as_str();
+
+        if command_name == "variables" {
+            let text = VariablesPresenter::render_with_members(&script, &roster.member_ids);
+            let content = if text.is_empty() {
+                "No variables defined.".to_string()
+            } else {
+                text
+            };
+            let _ = command
+                .create_followup(
+                    &ctx.http,
+                    CreateInteractionResponseFollowup::new().content(content),
+                )
+                .await;
+            return;
+        }
+
+        // Synthesize a message-style command so it goes through the same
+        // parser → SettleUpPolicy::settle() pipeline as message-based commands.
+        let synthetic_command = match command_name {
+            "review" => "!review".to_string(),
+            "settleup" => {
+                let members_str = command
+                    .data
+                    .options
+                    .iter()
+                    .find(|o| o.name == "members")
+                    .and_then(|o| o.value.as_str())
+                    .unwrap_or("");
+                let cash_str = command
+                    .data
+                    .options
+                    .iter()
+                    .find(|o| o.name == "cash")
+                    .and_then(|o| o.value.as_str())
+                    .unwrap_or("");
+
+                if cash_str.is_empty() {
+                    format!("!settleup {members_str}")
+                } else {
+                    format!("!settleup {members_str} --cash {cash_str}")
+                }
+            }
+            _ => return,
+        };
+
+        let synthetic_content = ArcStr::from(synthetic_command);
+        let script = match self
+            .processor
+            .parse_program_sequence(
+                &roster.member_ids,
+                &roster.role_members,
+                cached_contents
+                    .iter()
+                    .map(|(c, a)| (c.as_ref(), *a))
+                    .chain(std::iter::once((synthetic_content.as_ref(), None))),
+            )
+            .into_result()
+        {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("Slash command: failed to parse synthetic command: {:?}", e);
+                let _ = command
+                    .create_followup(
+                        &ctx.http,
+                        CreateInteractionResponseFollowup::new()
+                            .content(format!("{e:?}"))
+                            .ephemeral(true),
+                    )
+                    .await;
+                return;
+            }
+        };
+
+        let settlement_service: SettlementService<'_, RP> =
+            SettlementService::new(&self.processor, &self.roster_provider);
+        let mut member_directory: Option<HashMap<MemberId, smol_str::SmolStr>> = None;
+        let result = self.processor.build_settlement_result(&script).await;
+
+        match settlement_service
+            .render_settlement_view(ctx, command.channel_id, result, &mut member_directory)
+            .await
+        {
+            Ok(view) => {
+                if let Some(png) = crate::discord::svg_renderer::svg_to_png(&view.combined_svg) {
+                    let _ = command
+                        .create_followup(
+                            &ctx.http,
+                            CreateInteractionResponseFollowup::new()
+                                .add_file(CreateAttachment::bytes(png, "settlement.png")),
+                        )
+                        .await;
+                } else {
+                    tracing::error!("Failed to render settlement SVG to PNG");
+                }
+            }
+            Err(error_content) => {
+                let _ = command
+                    .create_followup(
+                        &ctx.http,
+                        CreateInteractionResponseFollowup::new().content(error_content),
+                    )
+                    .await;
+            }
+        }
+    }
 }
 
 /// Plan for rebuilding channel cache
@@ -746,6 +952,48 @@ where
     async fn ready(&self, ctx: Context, ready: Ready) {
         tracing::info!("Connected as {}", ready.user.name);
         self.initialize_enabled_channels(&ctx, &ready).await;
+
+        use serenity::{
+            builder::{CreateCommand, CreateCommandOption},
+            model::application::{Command, CommandOptionType},
+        };
+
+        let commands = vec![
+            CreateCommand::new("review").description(walicord_i18n::SLASH_REVIEW_DESCRIPTION),
+            CreateCommand::new("variables").description(walicord_i18n::SLASH_VARIABLES_DESCRIPTION),
+            CreateCommand::new("settleup")
+                .description(walicord_i18n::SLASH_SETTLEUP_DESCRIPTION)
+                .add_option(
+                    CreateCommandOption::new(
+                        CommandOptionType::String,
+                        "members",
+                        walicord_i18n::SLASH_SETTLEUP_MEMBERS_DESCRIPTION,
+                    )
+                    .required(true),
+                )
+                .add_option(
+                    CreateCommandOption::new(
+                        CommandOptionType::String,
+                        "cash",
+                        walicord_i18n::SLASH_SETTLEUP_CASH_DESCRIPTION,
+                    )
+                    .required(false),
+                ),
+        ];
+
+        if let Err(e) = Command::set_global_commands(&ctx.http, commands).await {
+            tracing::error!("Failed to register slash commands: {:?}", e);
+        }
+    }
+
+    async fn interaction_create(
+        &self,
+        ctx: Context,
+        interaction: serenity::model::application::Interaction,
+    ) {
+        if let serenity::model::application::Interaction::Command(ref command) = interaction {
+            self.handle_slash_command(&ctx, command).await;
+        }
     }
 
     async fn channel_update(&self, ctx: Context, old: Option<GuildChannel>, new: GuildChannel) {

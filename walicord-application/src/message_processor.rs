@@ -1432,6 +1432,30 @@ mod tests {
         assert_eq!(outcome.into_result().map(|_| ()), expected);
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn build_settlement_result_without_command_behaves_as_review() {
+        let optimizer = AssertSettleMembersOptimizer {
+            expected: vec![MemberId(1), MemberId(2), MemberId(3)],
+        };
+        let processor = MessageProcessor::new(&StubParser, &optimizer);
+        let script = Script::new(
+            &[],
+            empty_roles(),
+            vec![payment_stmt(1, 1, 3, 600), payment_stmt(2, 2, 3, 400)],
+        );
+
+        let result = processor
+            .build_settlement_result(&script)
+            .await
+            .expect("review result should succeed");
+
+        assert!(
+            result.settle_up.is_none(),
+            "review mode should have no settle_up"
+        );
+        assert_eq!(result.balances.len(), 3);
+    }
+
     proptest! {
         #[test]
         fn line_count_increment_matches_concat(prev in any_string(), current in any_string()) {
