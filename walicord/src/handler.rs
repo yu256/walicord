@@ -595,7 +595,26 @@ where
             return;
         };
 
-        self.ensure_cache_loaded(ctx, command.channel_id).await;
+        // Defer immediately: Discord invalidates the interaction token after 3 seconds,
+        // and cache/roster loading below can exceed that on cold starts.
+        let _ = command
+            .create_response(
+                &ctx.http,
+                CreateInteractionResponse::Defer(CreateInteractionResponseMessage::new()),
+            )
+            .await;
+
+        let cache_result = self.ensure_cache_loaded(ctx, command.channel_id).await;
+        if should_abort_rebuild_after_cache_load(cache_result) {
+            let _ = command
+                .create_followup(
+                    &ctx.http,
+                    CreateInteractionResponseFollowup::new()
+                        .content("Failed to load channel history."),
+                )
+                .await;
+            return;
+        }
 
         let roster = match self
             .roster_provider
@@ -610,13 +629,10 @@ where
                     e
                 );
                 let _ = command
-                    .create_response(
+                    .create_followup(
                         &ctx.http,
-                        CreateInteractionResponse::Message(
-                            CreateInteractionResponseMessage::new()
-                                .content("Failed to load member roster.")
-                                .ephemeral(true),
-                        ),
+                        CreateInteractionResponseFollowup::new()
+                            .content("Failed to load member roster."),
                     )
                     .await;
                 return;
@@ -649,25 +665,14 @@ where
             Err(e) => {
                 tracing::warn!("Slash command: failed to parse cached messages: {:?}", e);
                 let _ = command
-                    .create_response(
+                    .create_followup(
                         &ctx.http,
-                        CreateInteractionResponse::Message(
-                            CreateInteractionResponseMessage::new()
-                                .content("Failed to parse channel history.")
-                                .ephemeral(true),
-                        ),
+                        CreateInteractionResponseFollowup::new().content(format!("{e:?}")),
                     )
                     .await;
                 return;
             }
         };
-
-        let _ = command
-            .create_response(
-                &ctx.http,
-                CreateInteractionResponse::Defer(CreateInteractionResponseMessage::new()),
-            )
-            .await;
 
         let command_name = command.data.name.as_str();
 
