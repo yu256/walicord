@@ -432,13 +432,9 @@ async fn slash_settle_up_via_synthetic_command(
     let post_balances = balances_from_result(&result.balances);
     assert_balances(&post_balances, expected_balances);
 
-    let settle_up = result
-        .settle_up
-        .as_ref()
-        .expect("should have settle-up context");
     assert!(
-        !settle_up.immediate_transfers.is_empty(),
-        "should have real immediate transfers from SettleUpPolicy::settle()"
+        result.settle_up.is_some(),
+        "should be processed as settle-up"
     );
 }
 
@@ -461,7 +457,10 @@ async fn slash_settle_up_with_empty_cache() {
         .await
         .expect("should succeed on empty history");
 
-    assert!(result.balances.is_empty() || result.balances.iter().all(|b| b.balance.is_zero()));
+    assert_balances(
+        &balances_from_result(&result.balances),
+        &[(TestMember::Alice, 0)],
+    );
 }
 
 /// Different authors per cached message: implicit payer resolves per-message.

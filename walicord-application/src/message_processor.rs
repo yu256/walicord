@@ -14,6 +14,7 @@ use walicord_domain::{
     quantize_balances,
 };
 
+#[derive(Debug)]
 pub struct SettlementResult {
     // Post-command balances. For settle-up results, confirmed transfers are already applied.
     pub balances: Vec<PersonBalance>,

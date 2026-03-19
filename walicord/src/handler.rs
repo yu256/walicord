@@ -55,6 +55,23 @@ enum ProgramCommandEffect {
     RunSettlement { stmt_index: usize },
 }
 
+#[derive(Debug)]
+enum SlashQueryOutcome {
+    Error(String),
+    Text(String),
+    Settlement(walicord_application::SettlementResult),
+}
+
+struct SlashQueryInput<'a> {
+    cache_load_result: CacheLoadResult,
+    cached_contents: &'a [(ArcStr, Option<MemberId>)],
+    member_ids: &'a [MemberId],
+    role_members: &'a RoleMembers,
+    command_name: &'a str,
+    members_expr: &'a str,
+    cash_expr: &'a str,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ChannelFlagAction {
     Track,
@@ -571,6 +588,77 @@ where
         }
     }
 
+    /// Process a slash command query. Separated from Discord IO for testability.
+    /// Takes already-loaded cached contents so all parsing and computation
+    /// happens here, making error paths testable.
+    async fn process_slash_query(&self, input: &SlashQueryInput<'_>) -> SlashQueryOutcome {
+        if should_abort_rebuild_after_cache_load(input.cache_load_result) {
+            return SlashQueryOutcome::Error("Failed to load channel history.".into());
+        }
+
+        if input.command_name == "variables" {
+            let script = match self
+                .processor
+                .parse_program_sequence(
+                    input.member_ids,
+                    input.role_members,
+                    input.cached_contents.iter().map(|(c, a)| (c.as_ref(), *a)),
+                )
+                .into_result()
+            {
+                Ok(s) => s,
+                Err(e) => return SlashQueryOutcome::Error(format!("{e:?}")),
+            };
+
+            let text = VariablesPresenter::render_with_members(&script, input.member_ids);
+            return SlashQueryOutcome::Text(if text.is_empty() {
+                "No variables defined.".into()
+            } else {
+                text
+            });
+        }
+
+        // Synthesize a message-style command so it goes through the same
+        // parser → SettleUpPolicy::settle() pipeline as message-based commands.
+        let synthetic_command = match input.command_name {
+            "review" => "!review".to_string(),
+            "settleup" => {
+                if input.cash_expr.is_empty() {
+                    format!("!settleup {}", input.members_expr)
+                } else {
+                    format!(
+                        "!settleup {} --cash {}",
+                        input.members_expr, input.cash_expr
+                    )
+                }
+            }
+            _ => return SlashQueryOutcome::Error("Unknown command.".into()),
+        };
+
+        let synthetic_content = ArcStr::from(synthetic_command);
+        let script = match self
+            .processor
+            .parse_program_sequence(
+                input.member_ids,
+                input.role_members,
+                input
+                    .cached_contents
+                    .iter()
+                    .map(|(c, a)| (c.as_ref(), *a))
+                    .chain(std::iter::once((synthetic_content.as_ref(), None))),
+            )
+            .into_result()
+        {
+            Ok(s) => s,
+            Err(e) => return SlashQueryOutcome::Error(format!("{e:?}")),
+        };
+
+        match self.processor.build_settlement_result(&script).await {
+            Ok(result) => SlashQueryOutcome::Settlement(result),
+            Err(e) => SlashQueryOutcome::Error(crate::settlement::format_settlement_error(e)),
+        }
+    }
+
     async fn handle_slash_command(
         &self,
         ctx: &Context,
@@ -604,17 +692,7 @@ where
             )
             .await;
 
-        let cache_result = self.ensure_cache_loaded(ctx, command.channel_id).await;
-        if should_abort_rebuild_after_cache_load(cache_result) {
-            let _ = command
-                .create_followup(
-                    &ctx.http,
-                    CreateInteractionResponseFollowup::new()
-                        .content("Failed to load channel history."),
-                )
-                .await;
-            return;
-        }
+        let cache_load_result = self.ensure_cache_loaded(ctx, command.channel_id).await;
 
         let roster = match self
             .roster_provider
@@ -652,132 +730,89 @@ where
             })
             .unwrap_or_default();
 
-        let script = match self
-            .processor
-            .parse_program_sequence(
-                &roster.member_ids,
-                &roster.role_members,
-                cached_contents.iter().map(|(c, a)| (c.as_ref(), *a)),
-            )
-            .into_result()
-        {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!("Slash command: failed to parse cached messages: {:?}", e);
-                let _ = command
-                    .create_followup(
-                        &ctx.http,
-                        CreateInteractionResponseFollowup::new().content(format!("{e:?}")),
-                    )
-                    .await;
-                return;
-            }
-        };
-
         let command_name = command.data.name.as_str();
+        let members_expr = command
+            .data
+            .options
+            .iter()
+            .find(|o| o.name == "members")
+            .and_then(|o| o.value.as_str())
+            .unwrap_or("");
+        let cash_expr = command
+            .data
+            .options
+            .iter()
+            .find(|o| o.name == "cash")
+            .and_then(|o| o.value.as_str())
+            .unwrap_or("");
 
-        if command_name == "variables" {
-            let text = VariablesPresenter::render_with_members(&script, &roster.member_ids);
-            let content = if text.is_empty() {
-                "No variables defined.".to_string()
-            } else {
-                text
-            };
-            let _ = command
-                .create_followup(
-                    &ctx.http,
-                    CreateInteractionResponseFollowup::new().content(content),
-                )
-                .await;
-            return;
-        }
+        let outcome = self
+            .process_slash_query(&SlashQueryInput {
+                cache_load_result,
+                cached_contents: &cached_contents,
+                member_ids: &roster.member_ids,
+                role_members: &roster.role_members,
+                command_name,
+                members_expr,
+                cash_expr,
+            })
+            .await;
 
-        // Synthesize a message-style command so it goes through the same
-        // parser → SettleUpPolicy::settle() pipeline as message-based commands.
-        let synthetic_command = match command_name {
-            "review" => "!review".to_string(),
-            "settleup" => {
-                let members_str = command
-                    .data
-                    .options
-                    .iter()
-                    .find(|o| o.name == "members")
-                    .and_then(|o| o.value.as_str())
-                    .unwrap_or("");
-                let cash_str = command
-                    .data
-                    .options
-                    .iter()
-                    .find(|o| o.name == "cash")
-                    .and_then(|o| o.value.as_str())
-                    .unwrap_or("");
-
-                if cash_str.is_empty() {
-                    format!("!settleup {members_str}")
-                } else {
-                    format!("!settleup {members_str} --cash {cash_str}")
-                }
-            }
-            _ => return,
-        };
-
-        let synthetic_content = ArcStr::from(synthetic_command);
-        let script = match self
-            .processor
-            .parse_program_sequence(
-                &roster.member_ids,
-                &roster.role_members,
-                cached_contents
-                    .iter()
-                    .map(|(c, a)| (c.as_ref(), *a))
-                    .chain(std::iter::once((synthetic_content.as_ref(), None))),
-            )
-            .into_result()
-        {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!("Slash command: failed to parse synthetic command: {:?}", e);
+        match outcome {
+            SlashQueryOutcome::Error(msg) => {
                 let _ = command
                     .create_followup(
                         &ctx.http,
-                        CreateInteractionResponseFollowup::new()
-                            .content(format!("{e:?}"))
-                            .ephemeral(true),
+                        CreateInteractionResponseFollowup::new().content(msg),
                     )
                     .await;
-                return;
             }
-        };
-
-        let settlement_service: SettlementService<'_, RP> =
-            SettlementService::new(&self.processor, &self.roster_provider);
-        let mut member_directory: Option<HashMap<MemberId, smol_str::SmolStr>> = None;
-        let result = self.processor.build_settlement_result(&script).await;
-
-        match settlement_service
-            .render_settlement_view(ctx, command.channel_id, result, &mut member_directory)
-            .await
-        {
-            Ok(view) => {
-                if let Some(png) = crate::discord::svg_renderer::svg_to_png(&view.combined_svg) {
-                    let _ = command
-                        .create_followup(
-                            &ctx.http,
-                            CreateInteractionResponseFollowup::new()
-                                .add_file(CreateAttachment::bytes(png, "settlement.png")),
-                        )
-                        .await;
-                } else {
-                    tracing::error!("Failed to render settlement SVG to PNG");
-                }
-            }
-            Err(error_content) => {
+            SlashQueryOutcome::Text(content) => {
                 let _ = command
                     .create_followup(
                         &ctx.http,
-                        CreateInteractionResponseFollowup::new().content(error_content),
+                        CreateInteractionResponseFollowup::new().content(content),
                     )
                     .await;
+            }
+            SlashQueryOutcome::Settlement(result) => {
+                let settlement_service: SettlementService<'_, RP> =
+                    SettlementService::new(&self.processor, &self.roster_provider);
+                let mut member_directory: Option<HashMap<MemberId, smol_str::SmolStr>> = None;
+
+                match settlement_service
+                    .render_settlement_view(
+                        ctx,
+                        command.channel_id,
+                        Ok(result),
+                        &mut member_directory,
+                    )
+                    .await
+                {
+                    Ok(view) => {
+                        if let Some(png) =
+                            crate::discord::svg_renderer::svg_to_png(&view.combined_svg)
+                        {
+                            let _ = command
+                                .create_followup(
+                                    &ctx.http,
+                                    CreateInteractionResponseFollowup::new()
+                                        .add_file(CreateAttachment::bytes(png, "settlement.png")),
+                                )
+                                .await;
+                        } else {
+                            tracing::error!("Failed to render settlement SVG to PNG");
+                        }
+                    }
+                    Err(error_content) => {
+                        let _ = command
+                            .create_followup(
+                                &ctx.http,
+                                CreateInteractionResponseFollowup::new().content(error_content),
+                            )
+                            .await;
+                    }
+                }
             }
         }
     }
@@ -2076,5 +2111,205 @@ mod tests {
             ProgramCommandEffect::RunSettlement { stmt_index: 1 },
         ];
         assert_eq!(actual, expected);
+    }
+
+    mod process_slash_query_tests {
+        use super::*;
+
+        fn make_handler() -> BotHandler<'static, MockChannelService, MockRosterProvider> {
+            let message_cache = MessageCache::new();
+            let channel_service = MockChannelService::new();
+            let roster_provider = MockRosterProvider::new();
+            let processor = make_processor();
+            let channel_manager = ChannelManager::new();
+            BotHandler::new(
+                message_cache,
+                channel_service,
+                roster_provider,
+                processor,
+                channel_manager,
+            )
+        }
+
+        fn query<'a>(
+            cache_load_result: CacheLoadResult,
+            cached_contents: &'a [(ArcStr, Option<MemberId>)],
+            member_ids: &'a [MemberId],
+            command_name: &'a str,
+            members_expr: &'a str,
+            cash_expr: &'a str,
+        ) -> SlashQueryInput<'a> {
+            SlashQueryInput {
+                cache_load_result,
+                cached_contents,
+                member_ids,
+                role_members: empty_roles(),
+                command_name,
+                members_expr,
+                cash_expr,
+            }
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn cache_load_failure_returns_error() {
+            let handler = make_handler();
+            let input = query(CacheLoadResult::Failed, &[], &[], "review", "", "");
+            let outcome = handler.process_slash_query(&input).await;
+            assert!(matches!(outcome, SlashQueryOutcome::Error(_)));
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn variables_with_empty_cache_returns_no_variables_text() {
+            let handler = make_handler();
+            let input = query(CacheLoadResult::LoadedEmpty, &[], &[], "variables", "", "");
+            let outcome = handler.process_slash_query(&input).await;
+            match outcome {
+                SlashQueryOutcome::Text(text) => {
+                    assert_eq!(text, "No variables defined.");
+                }
+                other => panic!("expected Text, got {other:?}"),
+            }
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn variables_with_declarations_returns_rendered_text() {
+            let handler = make_handler();
+            let cached: Vec<(ArcStr, Option<MemberId>)> =
+                vec![(ArcStr::from("team := <@1> <@2>"), Some(MemberId(1)))];
+            let members = [MemberId(1), MemberId(2)];
+            let input = query(
+                CacheLoadResult::LoadedNonEmpty,
+                &cached,
+                &members,
+                "variables",
+                "",
+                "",
+            );
+            let outcome = handler.process_slash_query(&input).await;
+            match outcome {
+                SlashQueryOutcome::Text(text) => {
+                    assert!(text.contains("team"), "should contain group name");
+                }
+                other => panic!("expected Text, got {other:?}"),
+            }
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn cached_parse_failure_returns_error() {
+            let handler = make_handler();
+            let cached: Vec<(ArcStr, Option<MemberId>)> =
+                vec![(ArcStr::from("!!! invalid syntax @@@"), Some(MemberId(1)))];
+            let input = query(
+                CacheLoadResult::LoadedNonEmpty,
+                &cached,
+                &[],
+                "variables",
+                "",
+                "",
+            );
+            let outcome = handler.process_slash_query(&input).await;
+            assert!(matches!(outcome, SlashQueryOutcome::Error(_)));
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn synthetic_parse_failure_returns_error() {
+            let handler = make_handler();
+            let input = query(CacheLoadResult::LoadedEmpty, &[], &[], "settleup", "", "");
+            let outcome = handler.process_slash_query(&input).await;
+            assert!(matches!(outcome, SlashQueryOutcome::Error(_)));
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn review_returns_settlement() {
+            let handler = make_handler();
+            let cached: Vec<(ArcStr, Option<MemberId>)> =
+                vec![(ArcStr::from("<@1> paid 100 to <@2>"), Some(MemberId(1)))];
+            let input = query(
+                CacheLoadResult::LoadedNonEmpty,
+                &cached,
+                &[],
+                "review",
+                "",
+                "",
+            );
+            let outcome = handler.process_slash_query(&input).await;
+            match outcome {
+                SlashQueryOutcome::Settlement(result) => {
+                    assert!(result.settle_up.is_none(), "review has no settle_up");
+                }
+                other => panic!("expected Settlement, got {other:?}"),
+            }
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn settleup_returns_settlement_with_context() {
+            let handler = make_handler();
+            let cached: Vec<(ArcStr, Option<MemberId>)> =
+                vec![(ArcStr::from("<@1> paid 100 to <@2>"), Some(MemberId(1)))];
+            let input = query(
+                CacheLoadResult::LoadedNonEmpty,
+                &cached,
+                &[],
+                "settleup",
+                "<@1>",
+                "",
+            );
+            let outcome = handler.process_slash_query(&input).await;
+            match outcome {
+                SlashQueryOutcome::Settlement(result) => {
+                    assert!(result.settle_up.is_some(), "settleup should have context");
+                }
+                other => panic!("expected Settlement, got {other:?}"),
+            }
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn unknown_command_returns_error() {
+            let handler = make_handler();
+            let input = query(CacheLoadResult::LoadedEmpty, &[], &[], "unknown", "", "");
+            let outcome = handler.process_slash_query(&input).await;
+            assert!(matches!(outcome, SlashQueryOutcome::Error(_)));
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn cached_parse_failure_on_settlement_path_returns_error() {
+            let handler = make_handler();
+            let cached: Vec<(ArcStr, Option<MemberId>)> =
+                vec![(ArcStr::from("!!! invalid syntax @@@"), Some(MemberId(1)))];
+            let input = query(
+                CacheLoadResult::LoadedNonEmpty,
+                &cached,
+                &[],
+                "review",
+                "",
+                "",
+            );
+            let outcome = handler.process_slash_query(&input).await;
+            assert!(matches!(outcome, SlashQueryOutcome::Error(_)));
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn settleup_with_cash_expr_propagates_to_settlement() {
+            let handler = make_handler();
+            let cached: Vec<(ArcStr, Option<MemberId>)> = vec![
+                (ArcStr::from("<@1> paid 100 to <@3>"), Some(MemberId(1))),
+                (ArcStr::from("<@2> paid 50 to <@3>"), Some(MemberId(2))),
+            ];
+            let input = query(
+                CacheLoadResult::LoadedNonEmpty,
+                &cached,
+                &[],
+                "settleup",
+                "<@1> <@2> <@3>",
+                "<@2>",
+            );
+            let outcome = handler.process_slash_query(&input).await;
+            match outcome {
+                SlashQueryOutcome::Settlement(result) => {
+                    assert!(result.effective_cash_members.contains(&MemberId(2)));
+                }
+                other => panic!("expected Settlement, got {other:?}"),
+            }
+        }
     }
 }
