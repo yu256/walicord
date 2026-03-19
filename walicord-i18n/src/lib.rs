@@ -38,6 +38,10 @@ pub mod strings {
     pub const SLASH_SETTLEUP_DESCRIPTION: &str = "精算実行 - 指定メンバーの精算を実行";
     pub const SLASH_SETTLEUP_MEMBERS_DESCRIPTION: &str = "精算対象メンバー (例: @user1 @user2)";
     pub const SLASH_SETTLEUP_CASH_DESCRIPTION: &str = "現金優先メンバー (任意)";
+    pub const SLASH_CACHE_LOAD_FAILED: &str = "チャンネル履歴の読み込みに失敗しました。";
+    pub const SLASH_ROSTER_LOAD_FAILED: &str = "メンバー情報の読み込みに失敗しました。";
+    pub const SLASH_NO_VARIABLES: &str = "変数は定義されていません。";
+    pub const SLASH_RENDER_FAILED: &str = "精算画像の生成に失敗しました。";
 }
 
 #[cfg(feature = "en")]
@@ -76,6 +80,10 @@ pub mod strings {
     pub const SLASH_SETTLEUP_DESCRIPTION: &str = "Execute settlement for specified members";
     pub const SLASH_SETTLEUP_MEMBERS_DESCRIPTION: &str = "Members to settle (e.g. @user1 @user2)";
     pub const SLASH_SETTLEUP_CASH_DESCRIPTION: &str = "Cash-preferred members (optional)";
+    pub const SLASH_CACHE_LOAD_FAILED: &str = "Failed to load channel history.";
+    pub const SLASH_ROSTER_LOAD_FAILED: &str = "Failed to load member roster.";
+    pub const SLASH_NO_VARIABLES: &str = "No variables defined.";
+    pub const SLASH_RENDER_FAILED: &str = "Failed to render settlement image.";
 }
 
 #[cfg(not(any(feature = "ja", feature = "en")))]
@@ -114,6 +122,10 @@ pub mod strings {
     pub const SLASH_SETTLEUP_DESCRIPTION: &str = "Execute settlement for specified members";
     pub const SLASH_SETTLEUP_MEMBERS_DESCRIPTION: &str = "Members to settle (e.g. @user1 @user2)";
     pub const SLASH_SETTLEUP_CASH_DESCRIPTION: &str = "Cash-preferred members (optional)";
+    pub const SLASH_CACHE_LOAD_FAILED: &str = "Failed to load channel history.";
+    pub const SLASH_ROSTER_LOAD_FAILED: &str = "Failed to load member roster.";
+    pub const SLASH_NO_VARIABLES: &str = "No variables defined.";
+    pub const SLASH_RENDER_FAILED: &str = "Failed to render settlement image.";
 }
 
 pub use strings::*;

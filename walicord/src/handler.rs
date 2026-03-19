@@ -597,7 +597,7 @@ where
     /// happens here, making error paths testable.
     async fn process_slash_query(&self, input: &SlashQueryInput<'_>) -> SlashQueryOutcome {
         if should_abort_rebuild_after_cache_load(input.cache_load_result) {
-            return SlashQueryOutcome::Error("Failed to load channel history.".into());
+            return SlashQueryOutcome::Error(walicord_i18n::SLASH_CACHE_LOAD_FAILED.into());
         }
 
         if input.command_name == "variables" {
@@ -616,7 +616,7 @@ where
 
             let text = VariablesPresenter::render_with_members(&script, input.member_ids);
             return SlashQueryOutcome::Text(if text.is_empty() {
-                "No variables defined.".into()
+                walicord_i18n::SLASH_NO_VARIABLES.into()
             } else {
                 text
             });
@@ -729,7 +729,7 @@ where
                     .create_followup(
                         &ctx.http,
                         CreateInteractionResponseFollowup::new()
-                            .content("Failed to load member roster."),
+                            .content(walicord_i18n::SLASH_ROSTER_LOAD_FAILED),
                     )
                     .await;
                 return;
@@ -835,7 +835,7 @@ where
                                 .create_followup(
                                     &ctx.http,
                                     CreateInteractionResponseFollowup::new()
-                                        .content("Failed to render settlement image."),
+                                        .content(walicord_i18n::SLASH_RENDER_FAILED),
                                 )
                                 .await;
                         }
@@ -2205,7 +2205,7 @@ mod tests {
             let outcome = handler.process_slash_query(&input).await;
             match outcome {
                 SlashQueryOutcome::Text(text) => {
-                    assert_eq!(text, "No variables defined.");
+                    assert_eq!(text, walicord_i18n::SLASH_NO_VARIABLES);
                 }
                 other => panic!("expected Text, got {other:?}"),
             }
@@ -2347,6 +2347,53 @@ mod tests {
             match outcome {
                 SlashQueryOutcome::Settlement { result, .. } => {
                     assert!(result.effective_cash_members.contains(&MemberId(2)));
+                }
+                other => panic!("expected Settlement, got {other:?}"),
+            }
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn settlement_includes_role_visibility_warning() {
+            use walicord_application::RoleVisibilityDiagnostic;
+
+            let handler = make_handler();
+            let role_id = RoleId(10);
+            let role_members_map = RoleMembers::from_iter([(
+                role_id,
+                [MemberId(1), MemberId(2)].into_iter().collect(),
+            )]);
+            let diagnostics = RoleVisibilityDiagnostics::from([(
+                role_id,
+                RoleVisibilityDiagnostic {
+                    total_members: 3,
+                    visible_members: 2,
+                    excluded_members: 1,
+                },
+            )]);
+            let cached: Vec<(ArcStr, Option<MemberId>)> =
+                vec![(ArcStr::from("<@1> paid 100 to <@2>"), Some(MemberId(1)))];
+            let members = [MemberId(1), MemberId(2)];
+            let input = SlashQueryInput {
+                cache_load_result: CacheLoadResult::LoadedNonEmpty,
+                cached_contents: &cached,
+                member_ids: &members,
+                role_members: &role_members_map,
+                role_visibility_diagnostics: &diagnostics,
+                command_name: "settleup",
+                members_expr: "<@&10>",
+                cash_expr: "",
+            };
+            let outcome = handler.process_slash_query(&input).await;
+            match outcome {
+                SlashQueryOutcome::Settlement { warning, .. } => {
+                    assert!(
+                        !warning.is_empty(),
+                        "should include role visibility warning"
+                    );
+                    assert!(
+                        warning.contains("<@&10>"),
+                        "warning should reference the role"
+                    );
                 }
                 other => panic!("expected Settlement, got {other:?}"),
             }

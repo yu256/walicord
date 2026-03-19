@@ -364,11 +364,19 @@ async fn payment_distribution_balances(
 
 /// Synthetic `!settleup` appended to cached payments goes through
 /// `SettleUpPolicy::settle()`, producing real `immediate_transfers`.
+/// Test mentions use `<@id>` / `<@!id>` format — the actual payload
+/// Discord sends when users pick mentions in String-type slash options.
 #[rstest]
 #[case::settle_one_member(
     &EMPTY_MEMBERS,
     &["<@1> paid 100 to <@2>"],
     "!settleup <@1>",
+    &[(TestMember::Alice, 0), (TestMember::Bob, 0)],
+)]
+#[case::settle_with_nickname_mention_format(
+    &EMPTY_MEMBERS,
+    &["<@1> paid 100 to <@2>"],
+    "!settleup <@!1> <@!2>",
     &[(TestMember::Alice, 0), (TestMember::Bob, 0)],
 )]
 #[case::settle_subset(
