@@ -49,12 +49,14 @@ impl TransferConstructor {
                             max_supported,
                         },
                     })
-                    .map(|atomic| PersonBalance {
-                        id: *member,
+                    .and_then(|atomic| {
                         // Domain convention: positive = creditor (should receive).
                         // Library convention: positive = debtor (must pay).
                         // Negate to convert at the boundary.
-                        balance: -atomic,
+                        atomic.checked_neg().map(|balance| PersonBalance {
+                            id: *member,
+                            balance,
+                        }).ok_or(SettlementRoundingError::NonIntegral)
                     })
             })
             .collect::<Result<Vec<_>, _>>()?;
