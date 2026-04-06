@@ -65,32 +65,32 @@ L5 command !settleup members=(members=[] roles=[] groups=[core]) cash=(members=[
 <text x="439" y="22" fill="#ffffff" text-anchor="end">受取後残高</text>
 <rect x="1" y="35" width="447" height="34" fill="#f7fafc" />
 <text x="10" y="57" fill="#1a202c" text-anchor="start">確定済み</text>
-<text x="108" y="57" fill="#1a202c" text-anchor="start">Alice</text>
-<text x="189" y="57" fill="#1a202c" text-anchor="start">Bob</text>
-<text x="324" y="57" fill="#1a202c" text-anchor="end">1800</text>
-<text x="439" y="57" fill="#1a202c" text-anchor="end">-1500</text>
+<text x="108" y="57" fill="#1a202c" text-anchor="start">Bob</text>
+<text x="189" y="57" fill="#1a202c" text-anchor="start">Alice</text>
+<text x="324" y="57" fill="#1a202c" text-anchor="end">3300</text>
+<text x="439" y="57" fill="#1a202c" text-anchor="end">+5100</text>
 <rect x="1" y="69" width="447" height="34" fill="#edf2f7" />
 <text x="10" y="91" fill="#1a202c" text-anchor="start">確定済み</text>
-<text x="108" y="91" fill="#1a202c" text-anchor="start">Alice</text>
-<text x="189" y="91" fill="#1a202c" text-anchor="start">Carol</text>
-<text x="324" y="91" fill="#1a202c" text-anchor="end">3300</text>
-<text x="439" y="91" fill="#1a202c" text-anchor="end">+0 ✓</text>
+<text x="108" y="91" fill="#1a202c" text-anchor="start">Carol</text>
+<text x="189" y="91" fill="#1a202c" text-anchor="start">Alice</text>
+<text x="324" y="91" fill="#1a202c" text-anchor="end">1800</text>
+<text x="439" y="91" fill="#1a202c" text-anchor="end">+3300</text>
 <rect x="1" y="103" width="447" height="34" fill="#f7fafc" />
 <text x="10" y="125" fill="#1a202c" text-anchor="start">確定済み</text>
-<text x="108" y="125" fill="#1a202c" text-anchor="start">Alice</text>
-<text x="189" y="125" fill="#1a202c" text-anchor="start">Dave</text>
-<text x="324" y="125" fill="#1a202c" text-anchor="end">3300</text>
-<text x="439" y="125" fill="#1a202c" text-anchor="end">+0 ✓</text>
+<text x="108" y="125" fill="#1a202c" text-anchor="start">Carol</text>
+<text x="189" y="125" fill="#1a202c" text-anchor="start">Frank</text>
+<text x="324" y="125" fill="#1a202c" text-anchor="end">1500</text>
+<text x="439" y="125" fill="#1a202c" text-anchor="end">+2100</text>
 <rect x="1" y="137" width="447" height="34" fill="#edf2f7" />
 <text x="10" y="159" fill="#1a202c" text-anchor="start">確定済み</text>
-<text x="108" y="159" fill="#1a202c" text-anchor="start">Frank</text>
-<text x="189" y="159" fill="#1a202c" text-anchor="start">Bob</text>
-<text x="324" y="159" fill="#1a202c" text-anchor="end">1500</text>
+<text x="108" y="159" fill="#1a202c" text-anchor="start">Dave</text>
+<text x="189" y="159" fill="#1a202c" text-anchor="start">Alice</text>
+<text x="324" y="159" fill="#1a202c" text-anchor="end">3300</text>
 <text x="439" y="159" fill="#1a202c" text-anchor="end">+0 ✓</text>
 <rect x="1" y="171" width="447" height="34" fill="#f7fafc" />
 <text x="10" y="193" fill="#1a202c" text-anchor="start">確定済み</text>
-<text x="108" y="193" fill="#1a202c" text-anchor="start">Frank</text>
-<text x="189" y="193" fill="#1a202c" text-anchor="start">Eve</text>
+<text x="108" y="193" fill="#1a202c" text-anchor="start">Eve</text>
+<text x="189" y="193" fill="#1a202c" text-anchor="start">Frank</text>
 <text x="324" y="193" fill="#1a202c" text-anchor="end">2100</text>
 <text x="439" y="193" fill="#1a202c" text-anchor="end">+0 ✓</text>
 </g>

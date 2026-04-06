@@ -46,21 +46,21 @@ expression: "render_snapshot_body(&complex_settleup_result(), &member_directory(
 <text x="439" y="22" fill="#ffffff" text-anchor="end">受取後残高</text>
 <rect x="1" y="35" width="447" height="34" fill="#f7fafc" />
 <text x="10" y="57" fill="#1a202c" text-anchor="start">確定済み</text>
-<text x="108" y="57" fill="#1a202c" text-anchor="start">Alice</text>
-<text x="189" y="57" fill="#1a202c" text-anchor="start">Bob</text>
+<text x="108" y="57" fill="#1a202c" text-anchor="start">Bob</text>
+<text x="189" y="57" fill="#1a202c" text-anchor="start">Alice</text>
 <text x="324" y="57" fill="#1a202c" text-anchor="end">5</text>
-<text x="439" y="57" fill="#1a202c" text-anchor="end">-10</text>
+<text x="439" y="57" fill="#1a202c" text-anchor="end">+25</text>
 <rect x="1" y="69" width="447" height="34" fill="#edf2f7" />
 <text x="10" y="91" fill="#1a202c" text-anchor="start">参考</text>
-<text x="108" y="91" fill="#1a202c" text-anchor="start">Alice</text>
-<text x="189" y="91" fill="#1a202c" text-anchor="start">&lt;@5&gt;</text>
-<text x="324" y="91" fill="#1a202c" text-anchor="end">5</text>
+<text x="108" y="91" fill="#1a202c" text-anchor="start">Dave</text>
+<text x="189" y="91" fill="#1a202c" text-anchor="start">Carol</text>
+<text x="324" y="91" fill="#1a202c" text-anchor="end">10</text>
 <text x="439" y="91" fill="#1a202c" text-anchor="end">+0 ✓</text>
 <rect x="1" y="103" width="447" height="34" fill="#f7fafc" />
 <text x="10" y="125" fill="#1a202c" text-anchor="start">参考</text>
-<text x="108" y="125" fill="#1a202c" text-anchor="start">Carol</text>
-<text x="189" y="125" fill="#1a202c" text-anchor="start">Dave</text>
-<text x="324" y="125" fill="#1a202c" text-anchor="end">10</text>
-<text x="439" y="125" fill="#1a202c" text-anchor="end">-10</text>
+<text x="108" y="125" fill="#1a202c" text-anchor="start">&lt;@5&gt;</text>
+<text x="189" y="125" fill="#1a202c" text-anchor="start">Alice</text>
+<text x="324" y="125" fill="#1a202c" text-anchor="end">5</text>
+<text x="439" y="125" fill="#1a202c" text-anchor="end">+20</text>
 </g>
 </svg>
