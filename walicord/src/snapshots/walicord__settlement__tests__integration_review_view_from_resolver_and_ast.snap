@@ -54,21 +54,21 @@ L4 command !review
 <text x="10" y="57" fill="#1a202c" text-anchor="start">Alice</text>
 <text x="91" y="57" fill="#1a202c" text-anchor="start">Bob</text>
 <text x="226" y="57" fill="#1a202c" text-anchor="end">3000</text>
-<text x="341" y="57" fill="#1a202c" text-anchor="end">+0 ✓</text>
+<text x="341" y="57" fill="#1a202c" text-anchor="end">-6000</text>
 <rect x="1" y="69" width="349" height="34" fill="#edf2f7" />
 <text x="10" y="91" fill="#1a202c" text-anchor="start">Alice</text>
 <text x="91" y="91" fill="#1a202c" text-anchor="start">Carol</text>
 <text x="226" y="91" fill="#1a202c" text-anchor="end">4050</text>
-<text x="341" y="91" fill="#1a202c" text-anchor="end">+0 ✓</text>
+<text x="341" y="91" fill="#1a202c" text-anchor="end">-8100</text>
 <rect x="1" y="103" width="349" height="34" fill="#f7fafc" />
 <text x="10" y="125" fill="#1a202c" text-anchor="start">Alice</text>
 <text x="91" y="125" fill="#1a202c" text-anchor="start">Dave</text>
 <text x="226" y="125" fill="#1a202c" text-anchor="end">5100</text>
-<text x="341" y="125" fill="#1a202c" text-anchor="end">+0 ✓</text>
+<text x="341" y="125" fill="#1a202c" text-anchor="end">-10200</text>
 <rect x="1" y="137" width="349" height="34" fill="#edf2f7" />
 <text x="10" y="159" fill="#1a202c" text-anchor="start">Alice</text>
 <text x="91" y="159" fill="#1a202c" text-anchor="start">Eve</text>
 <text x="226" y="159" fill="#1a202c" text-anchor="end">5100</text>
-<text x="341" y="159" fill="#1a202c" text-anchor="end">+0 ✓</text>
+<text x="341" y="159" fill="#1a202c" text-anchor="end">-10200</text>
 </g>
 </svg>

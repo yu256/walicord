@@ -736,8 +736,8 @@ mod tests {
         assert_eq!(
             settle_up.immediate_transfers,
             vec![Transfer {
-                from: MemberId(1),
-                to: MemberId(3),
+                from: MemberId(3), // debtor pays
+                to: MemberId(1),   // creditor receives
                 amount: Money::from_i64(60),
             }]
         );

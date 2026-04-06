@@ -166,8 +166,8 @@ impl SettlementPresenter {
         // obtain the pre-confirmed state, then re-apply one by one so each
         // row shows the correct intermediate receiver balance.
         for transfer in &confirmed {
-            *running.entry(transfer.from).or_insert(Money::ZERO) += transfer.amount;
-            *running.entry(transfer.to).or_insert(Money::ZERO) -= transfer.amount;
+            *running.entry(transfer.from).or_insert(Money::ZERO) -= transfer.amount;
+            *running.entry(transfer.to).or_insert(Money::ZERO) += transfer.amount;
         }
 
         for transfer in &confirmed {
@@ -287,8 +287,8 @@ fn balances_map(balances: &[PersonBalance]) -> HashMap<MemberId, Money> {
 }
 
 fn apply_transfer(balances: &mut HashMap<MemberId, Money>, transfer: &Transfer) {
-    *balances.entry(transfer.from).or_insert(Money::ZERO) -= transfer.amount;
-    *balances.entry(transfer.to).or_insert(Money::ZERO) += transfer.amount;
+    *balances.entry(transfer.from).or_insert(Money::ZERO) += transfer.amount; // debtor clears debt
+    *balances.entry(transfer.to).or_insert(Money::ZERO) -= transfer.amount; // creditor clears credit
 }
 
 fn format_balance_after(balance: Money, quantization_scale: u32) -> String {
@@ -329,8 +329,8 @@ mod tests {
                 },
             ],
             optimized_transfers: vec![Transfer {
-                from: MemberId(1),
-                to: MemberId(2),
+                from: MemberId(2), // debtor (-120) pays
+                to: MemberId(1),   // creditor (+120) receives
                 amount: Money::from_i64(120),
             }],
             settle_up: None,
@@ -368,7 +368,7 @@ mod tests {
         let directory = HashMap::from([(MemberId(1), "Alice".into()), (MemberId(2), "Bob".into())]);
         let view = SettlementPresenter::render_with_members(&sample_result(), &directory);
         assert!(view.combined_svg.contains(i18n::RECEIVER_BALANCE));
-        // After transfer of 120 from Alice(+120) to Bob(-120), Bob's balance becomes 0
+        // After transfer of 120 from Bob(-120) to Alice(+120), Alice's (creditor) balance becomes 0
         assert!(view.combined_svg.contains("+0 ✓"));
     }
 
@@ -486,19 +486,20 @@ mod tests {
             (MemberId(3), "Charlie".into()),
         ]);
 
-        // Pre-confirmed: Alice=+50, Charlie=+50, Bob=-100
-        // After confirmed: Alice=0, Charlie=0, Bob=0
+        // Pre-confirmed: Alice=-50, Bob=+100, Charlie=-50
+        // (Bob is creditor +100; Alice and Charlie are debtors -50 each)
+        // After confirmed: Alice=0, Bob=0, Charlie=0
         // balances already reflects confirmed transfers
         let svg = SettlementPresenter::build_settle_up_transfer_svg(
             &[
                 Transfer {
-                    from: MemberId(1),
-                    to: MemberId(2),
+                    from: MemberId(1), // Alice (debtor) pays
+                    to: MemberId(2),   // Bob (creditor) receives
                     amount: Money::from_i64(50),
                 },
                 Transfer {
-                    from: MemberId(3),
-                    to: MemberId(2),
+                    from: MemberId(3), // Charlie (debtor) pays
+                    to: MemberId(2),   // Bob (creditor) receives
                     amount: Money::from_i64(50),
                 },
             ],
@@ -521,8 +522,8 @@ mod tests {
             0,
         );
 
-        // First confirmed row (Alice→Bob 50): Bob's intermediate balance should be -50
-        assert!(svg.contains("-50"));
+        // First confirmed row (Alice→Bob 50): Bob's intermediate balance should be +50
+        assert!(svg.contains("+50"));
         // Second confirmed row (Charlie→Bob 50): Bob's final balance should be 0
         assert!(svg.contains("+0 ✓"));
     }
