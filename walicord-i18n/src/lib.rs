@@ -35,9 +35,7 @@ pub mod strings {
     pub const CHANNEL_NOT_TRACKED: &str = "このチャンネルは walicord で追跡されていません。チャンネルトピックに `#walicord` を追加してください。";
     pub const SLASH_REVIEW_DESCRIPTION: &str = "清算確認 - 現在の残高と提案送金を表示";
     pub const SLASH_VARIABLES_DESCRIPTION: &str = "変数一覧 - 定義されたグループ変数を表示";
-    pub const SLASH_SETTLEUP_DESCRIPTION: &str = "精算実行 - 指定メンバーの精算を実行";
-    pub const SLASH_SETTLEUP_MEMBERS_DESCRIPTION: &str = "精算対象メンバー (例: @user1 @user2)";
-    pub const SLASH_SETTLEUP_CASH_DESCRIPTION: &str = "現金優先メンバー (任意)";
+
     pub const SLASH_CACHE_LOAD_FAILED: &str = "チャンネル履歴の読み込みに失敗しました。";
     pub const SLASH_ROSTER_LOAD_FAILED: &str = "メンバー情報の読み込みに失敗しました。";
     pub const SLASH_NO_VARIABLES: &str = "変数は定義されていません。";
@@ -77,9 +75,7 @@ pub mod strings {
         "This channel is not tracked by walicord. Add `#walicord` to the channel topic.";
     pub const SLASH_REVIEW_DESCRIPTION: &str = "Show current balances and proposed settlements";
     pub const SLASH_VARIABLES_DESCRIPTION: &str = "Show defined group variables";
-    pub const SLASH_SETTLEUP_DESCRIPTION: &str = "Execute settlement for specified members";
-    pub const SLASH_SETTLEUP_MEMBERS_DESCRIPTION: &str = "Members to settle (e.g. @user1 @user2)";
-    pub const SLASH_SETTLEUP_CASH_DESCRIPTION: &str = "Cash-preferred members (optional)";
+
     pub const SLASH_CACHE_LOAD_FAILED: &str = "Failed to load channel history.";
     pub const SLASH_ROSTER_LOAD_FAILED: &str = "Failed to load member roster.";
     pub const SLASH_NO_VARIABLES: &str = "No variables defined.";
@@ -119,9 +115,7 @@ pub mod strings {
         "This channel is not tracked by walicord. Add `#walicord` to the channel topic.";
     pub const SLASH_REVIEW_DESCRIPTION: &str = "Show current balances and proposed settlements";
     pub const SLASH_VARIABLES_DESCRIPTION: &str = "Show defined group variables";
-    pub const SLASH_SETTLEUP_DESCRIPTION: &str = "Execute settlement for specified members";
-    pub const SLASH_SETTLEUP_MEMBERS_DESCRIPTION: &str = "Members to settle (e.g. @user1 @user2)";
-    pub const SLASH_SETTLEUP_CASH_DESCRIPTION: &str = "Cash-preferred members (optional)";
+
     pub const SLASH_CACHE_LOAD_FAILED: &str = "Failed to load channel history.";
     pub const SLASH_ROSTER_LOAD_FAILED: &str = "Failed to load member roster.";
     pub const SLASH_NO_VARIABLES: &str = "No variables defined.";

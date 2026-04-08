@@ -72,8 +72,6 @@ struct SlashQueryInput<'a> {
     role_members: &'a RoleMembers,
     role_visibility_diagnostics: &'a RoleVisibilityDiagnostics,
     command_name: &'a str,
-    members_expr: &'a str,
-    cash_expr: &'a str,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -626,16 +624,6 @@ where
         // parser → SettleUpPolicy::settle() pipeline as message-based commands.
         let synthetic_command = match input.command_name {
             "review" => "!review".to_string(),
-            "settleup" => {
-                if input.cash_expr.is_empty() {
-                    format!("!settleup {}", input.members_expr)
-                } else {
-                    format!(
-                        "!settleup {} --cash {}",
-                        input.members_expr, input.cash_expr
-                    )
-                }
-            }
             _ => return SlashQueryOutcome::Error("Unknown command.".into()),
         };
 
@@ -750,20 +738,6 @@ where
             .unwrap_or_default();
 
         let command_name = command.data.name.as_str();
-        let members_expr = command
-            .data
-            .options
-            .iter()
-            .find(|o| o.name == "members")
-            .and_then(|o| o.value.as_str())
-            .unwrap_or("");
-        let cash_expr = command
-            .data
-            .options
-            .iter()
-            .find(|o| o.name == "cash")
-            .and_then(|o| o.value.as_str())
-            .unwrap_or("");
 
         let outcome = self
             .process_slash_query(&SlashQueryInput {
@@ -773,8 +747,6 @@ where
                 role_members: &roster.role_members,
                 role_visibility_diagnostics: &roster.role_visibility_diagnostics,
                 command_name,
-                members_expr,
-                cash_expr,
             })
             .await;
 
@@ -1030,31 +1002,13 @@ where
         self.initialize_enabled_channels(&ctx, &ready).await;
 
         use serenity::{
-            builder::{CreateCommand, CreateCommandOption},
-            model::application::{Command, CommandOptionType},
+            builder::CreateCommand,
+            model::application::Command,
         };
 
         let commands = vec![
             CreateCommand::new("review").description(walicord_i18n::SLASH_REVIEW_DESCRIPTION),
             CreateCommand::new("variables").description(walicord_i18n::SLASH_VARIABLES_DESCRIPTION),
-            CreateCommand::new("settleup")
-                .description(walicord_i18n::SLASH_SETTLEUP_DESCRIPTION)
-                .add_option(
-                    CreateCommandOption::new(
-                        CommandOptionType::String,
-                        "members",
-                        walicord_i18n::SLASH_SETTLEUP_MEMBERS_DESCRIPTION,
-                    )
-                    .required(true),
-                )
-                .add_option(
-                    CreateCommandOption::new(
-                        CommandOptionType::String,
-                        "cash",
-                        walicord_i18n::SLASH_SETTLEUP_CASH_DESCRIPTION,
-                    )
-                    .required(false),
-                ),
         ];
 
         if let Err(e) = Command::set_global_commands(&ctx.http, commands).await {
@@ -2172,8 +2126,6 @@ mod tests {
             cached_contents: &'a [(ArcStr, Option<MemberId>)],
             member_ids: &'a [MemberId],
             command_name: &'a str,
-            members_expr: &'a str,
-            cash_expr: &'a str,
         ) -> SlashQueryInput<'a> {
             static EMPTY_DIAGNOSTICS: std::sync::OnceLock<RoleVisibilityDiagnostics> =
                 std::sync::OnceLock::new();
@@ -2185,15 +2137,13 @@ mod tests {
                 role_visibility_diagnostics: EMPTY_DIAGNOSTICS
                     .get_or_init(RoleVisibilityDiagnostics::default),
                 command_name,
-                members_expr,
-                cash_expr,
             }
         }
 
         #[tokio::test(flavor = "multi_thread")]
         async fn cache_load_failure_returns_error() {
             let handler = make_handler();
-            let input = query(CacheLoadResult::Failed, &[], &[], "review", "", "");
+            let input = query(CacheLoadResult::Failed, &[], &[], "review");
             let outcome = handler.process_slash_query(&input).await;
             assert!(matches!(outcome, SlashQueryOutcome::Error(_)));
         }
@@ -2201,7 +2151,7 @@ mod tests {
         #[tokio::test(flavor = "multi_thread")]
         async fn variables_with_empty_cache_returns_no_variables_text() {
             let handler = make_handler();
-            let input = query(CacheLoadResult::LoadedEmpty, &[], &[], "variables", "", "");
+            let input = query(CacheLoadResult::LoadedEmpty, &[], &[], "variables");
             let outcome = handler.process_slash_query(&input).await;
             match outcome {
                 SlashQueryOutcome::Text(text) => {
@@ -2222,8 +2172,6 @@ mod tests {
                 &cached,
                 &members,
                 "variables",
-                "",
-                "",
             );
             let outcome = handler.process_slash_query(&input).await;
             match outcome {
@@ -2244,17 +2192,7 @@ mod tests {
                 &cached,
                 &[],
                 "variables",
-                "",
-                "",
             );
-            let outcome = handler.process_slash_query(&input).await;
-            assert!(matches!(outcome, SlashQueryOutcome::Error(_)));
-        }
-
-        #[tokio::test(flavor = "multi_thread")]
-        async fn synthetic_parse_failure_returns_error() {
-            let handler = make_handler();
-            let input = query(CacheLoadResult::LoadedEmpty, &[], &[], "settleup", "", "");
             let outcome = handler.process_slash_query(&input).await;
             assert!(matches!(outcome, SlashQueryOutcome::Error(_)));
         }
@@ -2269,8 +2207,6 @@ mod tests {
                 &cached,
                 &[],
                 "review",
-                "",
-                "",
             );
             let outcome = handler.process_slash_query(&input).await;
             match outcome {
@@ -2282,31 +2218,9 @@ mod tests {
         }
 
         #[tokio::test(flavor = "multi_thread")]
-        async fn settleup_returns_settlement_with_context() {
-            let handler = make_handler();
-            let cached: Vec<(ArcStr, Option<MemberId>)> =
-                vec![(ArcStr::from("<@1> paid 100 to <@2>"), Some(MemberId(1)))];
-            let input = query(
-                CacheLoadResult::LoadedNonEmpty,
-                &cached,
-                &[],
-                "settleup",
-                "<@1>",
-                "",
-            );
-            let outcome = handler.process_slash_query(&input).await;
-            match outcome {
-                SlashQueryOutcome::Settlement { result, .. } => {
-                    assert!(result.settle_up.is_some(), "settleup should have context");
-                }
-                other => panic!("expected Settlement, got {other:?}"),
-            }
-        }
-
-        #[tokio::test(flavor = "multi_thread")]
         async fn unknown_command_returns_error() {
             let handler = make_handler();
-            let input = query(CacheLoadResult::LoadedEmpty, &[], &[], "unknown", "", "");
+            let input = query(CacheLoadResult::LoadedEmpty, &[], &[], "unknown");
             let outcome = handler.process_slash_query(&input).await;
             assert!(matches!(outcome, SlashQueryOutcome::Error(_)));
         }
@@ -2321,82 +2235,9 @@ mod tests {
                 &cached,
                 &[],
                 "review",
-                "",
-                "",
             );
             let outcome = handler.process_slash_query(&input).await;
             assert!(matches!(outcome, SlashQueryOutcome::Error(_)));
-        }
-
-        #[tokio::test(flavor = "multi_thread")]
-        async fn settleup_with_cash_expr_propagates_to_settlement() {
-            let handler = make_handler();
-            let cached: Vec<(ArcStr, Option<MemberId>)> = vec![
-                (ArcStr::from("<@1> paid 100 to <@3>"), Some(MemberId(1))),
-                (ArcStr::from("<@2> paid 50 to <@3>"), Some(MemberId(2))),
-            ];
-            let input = query(
-                CacheLoadResult::LoadedNonEmpty,
-                &cached,
-                &[],
-                "settleup",
-                "<@1> <@2> <@3>",
-                "<@2>",
-            );
-            let outcome = handler.process_slash_query(&input).await;
-            match outcome {
-                SlashQueryOutcome::Settlement { result, .. } => {
-                    assert!(result.effective_cash_members.contains(&MemberId(2)));
-                }
-                other => panic!("expected Settlement, got {other:?}"),
-            }
-        }
-
-        #[tokio::test(flavor = "multi_thread")]
-        async fn settlement_includes_role_visibility_warning() {
-            use walicord_application::RoleVisibilityDiagnostic;
-
-            let handler = make_handler();
-            let role_id = RoleId(10);
-            let role_members_map = RoleMembers::from_iter([(
-                role_id,
-                [MemberId(1), MemberId(2)].into_iter().collect(),
-            )]);
-            let diagnostics = RoleVisibilityDiagnostics::from([(
-                role_id,
-                RoleVisibilityDiagnostic {
-                    total_members: 3,
-                    visible_members: 2,
-                    excluded_members: 1,
-                },
-            )]);
-            let cached: Vec<(ArcStr, Option<MemberId>)> =
-                vec![(ArcStr::from("<@1> paid 100 to <@2>"), Some(MemberId(1)))];
-            let members = [MemberId(1), MemberId(2)];
-            let input = SlashQueryInput {
-                cache_load_result: CacheLoadResult::LoadedNonEmpty,
-                cached_contents: &cached,
-                member_ids: &members,
-                role_members: &role_members_map,
-                role_visibility_diagnostics: &diagnostics,
-                command_name: "settleup",
-                members_expr: "<@&10>",
-                cash_expr: "",
-            };
-            let outcome = handler.process_slash_query(&input).await;
-            match outcome {
-                SlashQueryOutcome::Settlement { warning, .. } => {
-                    assert!(
-                        !warning.is_empty(),
-                        "should include role visibility warning"
-                    );
-                    assert!(
-                        warning.contains("<@&10>"),
-                        "warning should reference the role"
-                    );
-                }
-                other => panic!("expected Settlement, got {other:?}"),
-            }
         }
     }
 }
