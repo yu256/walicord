@@ -37,6 +37,8 @@ pub mod strings {
     pub const SLASH_VARIABLES_DESCRIPTION: &str = "変数一覧 - 定義されたグループ変数を表示";
 
     pub const SLASH_CACHE_LOAD_FAILED: &str = "チャンネル履歴の読み込みに失敗しました。";
+    pub const SLASH_PENDING_NOT_CLEARED: &str =
+        "メッセージの処理が完了していません。しばらく待ってから再度お試しください。";
     pub const SLASH_ROSTER_LOAD_FAILED: &str = "メンバー情報の読み込みに失敗しました。";
     pub const SLASH_NO_VARIABLES: &str = "変数は定義されていません。";
     pub const SLASH_RENDER_FAILED: &str = "精算画像の生成に失敗しました。";
@@ -77,6 +79,8 @@ pub mod strings {
     pub const SLASH_VARIABLES_DESCRIPTION: &str = "Show defined group variables";
 
     pub const SLASH_CACHE_LOAD_FAILED: &str = "Failed to load channel history.";
+    pub const SLASH_PENDING_NOT_CLEARED: &str =
+        "Messages are still being processed. Please try again shortly.";
     pub const SLASH_ROSTER_LOAD_FAILED: &str = "Failed to load member roster.";
     pub const SLASH_NO_VARIABLES: &str = "No variables defined.";
     pub const SLASH_RENDER_FAILED: &str = "Failed to render settlement image.";
@@ -117,6 +121,8 @@ pub mod strings {
     pub const SLASH_VARIABLES_DESCRIPTION: &str = "Show defined group variables";
 
     pub const SLASH_CACHE_LOAD_FAILED: &str = "Failed to load channel history.";
+    pub const SLASH_PENDING_NOT_CLEARED: &str =
+        "Messages are still being processed. Please try again shortly.";
     pub const SLASH_ROSTER_LOAD_FAILED: &str = "Failed to load member roster.";
     pub const SLASH_NO_VARIABLES: &str = "No variables defined.";
     pub const SLASH_RENDER_FAILED: &str = "Failed to render settlement image.";

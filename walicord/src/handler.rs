@@ -67,6 +67,7 @@ enum SlashQueryOutcome {
 
 struct SlashQueryInput<'a> {
     cache_load_result: CacheLoadResult,
+    pending_after_rebuild: bool,
     cached_contents: &'a [(ArcStr, Option<MemberId>)],
     member_ids: &'a [MemberId],
     role_members: &'a RoleMembers,
@@ -598,6 +599,10 @@ where
             return SlashQueryOutcome::Error(walicord_i18n::SLASH_CACHE_LOAD_FAILED.into());
         }
 
+        if input.pending_after_rebuild {
+            return SlashQueryOutcome::Error(walicord_i18n::SLASH_PENDING_NOT_CLEARED.into());
+        }
+
         if input.command_name == "variables" {
             let script = match self
                 .processor
@@ -618,12 +623,20 @@ where
                 }
             };
 
-            let text = VariablesPresenter::render_with_members(&script, input.member_ids);
-            return SlashQueryOutcome::Text(if text.is_empty() {
-                walicord_i18n::SLASH_NO_VARIABLES.into()
-            } else {
-                text
-            });
+            let mut text = VariablesPresenter::render_with_members(&script, input.member_ids);
+            if text.is_empty() {
+                return SlashQueryOutcome::Text(walicord_i18n::SLASH_NO_VARIABLES.into());
+            }
+            let warning_lines = command_warning_lines_for_prefix(
+                &script,
+                script.statements().len() - 1,
+                input.role_visibility_diagnostics,
+            );
+            if !warning_lines.is_empty() {
+                text.push_str("\n\n");
+                text.push_str(&warning_lines.join("\n"));
+            }
+            return SlashQueryOutcome::Text(text);
         }
 
         // Synthesize a message-style command so it goes through the same
@@ -713,9 +726,11 @@ where
 
         // Flush pending messages before serving the query, mirroring the
         // message-path guard so we never compute against stale history.
+        let mut pending_after_rebuild = false;
         if self.has_pending_messages(tracked_id) {
             self.rebuild_channel_cache(ctx, command.channel_id, None)
                 .await;
+            pending_after_rebuild = self.has_pending_messages(tracked_id);
         }
 
         let cache_load_result = self.ensure_cache_loaded(ctx, command.channel_id).await;
@@ -761,6 +776,7 @@ where
         let outcome = self
             .process_slash_query(&SlashQueryInput {
                 cache_load_result,
+                pending_after_rebuild,
                 cached_contents: &cached_contents,
                 member_ids: &roster.member_ids,
                 role_members: &roster.role_members,
@@ -2150,6 +2166,7 @@ mod tests {
                 std::sync::OnceLock::new();
             SlashQueryInput {
                 cache_load_result,
+                pending_after_rebuild: false,
                 cached_contents,
                 member_ids,
                 role_members: empty_roles(),
