@@ -609,7 +609,13 @@ where
                 .into_result()
             {
                 Ok(s) => s,
-                Err(e) => return SlashQueryOutcome::Error(format_program_parse_error(e, "")),
+                Err(e) => {
+                    return SlashQueryOutcome::Error(format_program_parse_error_reply(
+                        e,
+                        input.role_visibility_diagnostics,
+                        "",
+                    ))
+                }
             };
 
             let text = VariablesPresenter::render_with_members(&script, input.member_ids);
@@ -642,7 +648,13 @@ where
             .into_result()
         {
             Ok(s) => s,
-            Err(e) => return SlashQueryOutcome::Error(format_program_parse_error(e, "")),
+            Err(e) => {
+                return SlashQueryOutcome::Error(format_program_parse_error_reply(
+                    e,
+                    input.role_visibility_diagnostics,
+                    "",
+                ))
+            }
         };
 
         // Append role visibility warnings (same as message-based flow).
@@ -698,6 +710,13 @@ where
                 CreateInteractionResponse::Defer(CreateInteractionResponseMessage::new()),
             )
             .await;
+
+        // Flush pending messages before serving the query, mirroring the
+        // message-path guard so we never compute against stale history.
+        if self.has_pending_messages(tracked_id) {
+            self.rebuild_channel_cache(&ctx, command.channel_id, None)
+                .await;
+        }
 
         let cache_load_result = self.ensure_cache_loaded(ctx, command.channel_id).await;
 
