@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.3.1](https://github.com/yu256/walicord/compare/walicord-v2.3.0...walicord-v2.3.1) (2026-04-06)
+
+
+### Bug Fixes
+
+* correct settlement transfer direction by negating balance at library boundary ([#84](https://github.com/yu256/walicord/issues/84)) ([41764c7](https://github.com/yu256/walicord/commit/41764c7cdfdd729770a2138d13793dcf687adaba))
+
 ## [2.3.0](https://github.com/yu256/walicord/compare/walicord-v2.2.0...walicord-v2.3.0) (2026-02-27)
 
 

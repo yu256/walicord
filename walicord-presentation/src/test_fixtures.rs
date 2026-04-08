@@ -42,8 +42,8 @@ pub fn review_result() -> SettlementResult {
             },
         ],
         optimized_transfers: vec![Transfer {
-            from: MemberId(1),
-            to: MemberId(2),
+            from: MemberId(2), // debtor pays
+            to: MemberId(1),   // creditor receives
             amount: Money::from_i64(100),
         }],
         settle_up: None,
@@ -97,25 +97,26 @@ pub fn complex_review_result() -> SettlementResult {
                 balance: Money::new(-2300, 2),
             },
         ],
+        // Debtors (2,3,4,5) pay creditor (1)
         optimized_transfers: vec![
             Transfer {
-                from: MemberId(1),
-                to: MemberId(2),
+                from: MemberId(2),
+                to: MemberId(1),
                 amount: Money::new(5000, 2),
             },
             Transfer {
-                from: MemberId(1),
-                to: MemberId(3),
+                from: MemberId(3),
+                to: MemberId(1),
                 amount: Money::new(3025, 2),
             },
             Transfer {
-                from: MemberId(1),
-                to: MemberId(4),
+                from: MemberId(4),
+                to: MemberId(1),
                 amount: Money::new(2020, 2),
             },
             Transfer {
-                from: MemberId(1),
-                to: MemberId(5),
+                from: MemberId(5),
+                to: MemberId(1),
                 amount: Money::new(2300, 2),
             },
         ],
@@ -152,21 +153,21 @@ pub fn complex_settleup_result() -> SettlementResult {
         ],
         optimized_transfers: vec![
             Transfer {
-                from: MemberId(1),
-                to: MemberId(5),
+                from: MemberId(5), // debtor pays creditor
+                to: MemberId(1),
                 amount: Money::new(500, 2),
             },
             Transfer {
-                from: MemberId(3),
-                to: MemberId(4),
+                from: MemberId(4), // debtor pays creditor
+                to: MemberId(3),
                 amount: Money::new(1000, 2),
             },
         ],
         settle_up: Some(SettleUpContext {
             settle_members: vec![MemberId(3), MemberId(5)],
             immediate_transfers: vec![Transfer {
-                from: MemberId(1),
-                to: MemberId(2),
+                from: MemberId(2), // debtor pays creditor
+                to: MemberId(1),
                 amount: Money::new(500, 2),
             }],
         }),

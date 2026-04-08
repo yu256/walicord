@@ -67,7 +67,12 @@ impl SettlementOptimizer for WalicordSettlementOptimizer {
                 |balance| match context.to_atomic_units_i64(balance.balance) {
                     Ok(value) => Ok(CalcBalance {
                         id: balance.id,
-                        balance: value,
+                        // Domain convention: positive = creditor (should receive).
+                        // Library convention: positive = debtor (must pay).
+                        // Negate to convert at the boundary.
+                        balance: value.checked_neg().ok_or(
+                            SettlementOptimizationError::QuantizationOutOfRange,
+                        )?,
                     }),
                     Err(err) => Err(map_atomic_unit_error(err)),
                 },
@@ -178,9 +183,11 @@ mod tests {
         let all_result = optimizer
             .optimize(&balances, &all, &[], context)
             .expect("full optimization should succeed");
+        // MemberId(1) is creditor (+100): receives in settlement (to).
+        // MemberId(2) is debtor (-100): pays in settlement (from).
         assert_eq!(all_result.len(), 1);
-        assert_eq!(all_result[0].from, MemberId(1));
-        assert_eq!(all_result[0].to, MemberId(2));
+        assert_eq!(all_result[0].from, MemberId(2));
+        assert_eq!(all_result[0].to, MemberId(1));
         assert_eq!(all_result[0].amount, Money::from_i64(100));
     }
 }

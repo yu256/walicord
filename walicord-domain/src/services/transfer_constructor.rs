@@ -49,9 +49,14 @@ impl TransferConstructor {
                             max_supported,
                         },
                     })
-                    .map(|atomic| PersonBalance {
-                        id: *member,
-                        balance: atomic,
+                    .and_then(|atomic| {
+                        // Domain convention: positive = creditor (should receive).
+                        // Library convention: positive = debtor (must pay).
+                        // Negate to convert at the boundary.
+                        atomic.checked_neg().map(|balance| PersonBalance {
+                            id: *member,
+                            balance,
+                        }).ok_or(SettlementRoundingError::NonIntegral)
                     })
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -83,8 +88,9 @@ impl TransferConstructor {
         let mut transfers: Vec<Transfer> = payments
             .into_iter()
             .map(|payment| Transfer {
-                from: payment.from,
-                to: payment.to,
+                // After the boundary negation above, library.from = debtor, library.to = creditor.
+                from: payment.from, // debtor (pays in settlement)
+                to: payment.to,     // creditor (receives in settlement)
                 amount: Money::new(payment.amount, context.scale),
             })
             .collect();
@@ -93,10 +99,10 @@ impl TransferConstructor {
         let mut new_balances = balances;
         for transfer in &transfers {
             if let Some(balance) = new_balances.get_mut(&transfer.from) {
-                *balance -= transfer.amount;
+                *balance += transfer.amount; // debtor clears debt: -X + X = 0
             }
             if let Some(balance) = new_balances.get_mut(&transfer.to) {
-                *balance += transfer.amount;
+                *balance -= transfer.amount; // creditor clears credit: +X - X = 0
             }
         }
 
@@ -169,7 +175,7 @@ mod tests {
         &[MemberId(1)],
         &[],
         MemberBalances::from_iter([(MemberId(1), Money::ZERO), (MemberId(2), Money::ZERO)]),
-        vec![(MemberId(1), MemberId(2), 100)]
+        vec![(MemberId(2), MemberId(1), 100)] // debtor(2) pays creditor(1)
     )]
     #[case::simple_negative_balance(
         MemberBalances::from_iter([
@@ -179,7 +185,7 @@ mod tests {
         &[MemberId(1)],
         &[],
         MemberBalances::from_iter([(MemberId(1), Money::ZERO), (MemberId(2), Money::ZERO)]),
-        vec![(MemberId(2), MemberId(1), 100)]
+        vec![(MemberId(1), MemberId(2), 100)] // debtor(1) pays creditor(2)
     )]
     #[case::zero_balance(
         MemberBalances::from_iter([(MemberId(1), Money::ZERO), (MemberId(2), Money::ZERO)]),
@@ -201,7 +207,7 @@ mod tests {
             (MemberId(2), Money::ZERO),
             (MemberId(3), Money::ZERO),
         ]),
-        vec![(MemberId(1), MemberId(3), 100), (MemberId(2), MemberId(3), 100)]
+        vec![(MemberId(3), MemberId(1), 100), (MemberId(3), MemberId(2), 100)] // debtor(3) pays creditors
     )]
     #[case::cross_group_transfer(
         MemberBalances::from_iter([
@@ -216,7 +222,7 @@ mod tests {
             (MemberId(2), Money::ZERO),
             (MemberId(3), Money::ZERO),
         ]),
-        vec![(MemberId(1), MemberId(2), 50), (MemberId(1), MemberId(3), 50)]
+        vec![(MemberId(2), MemberId(1), 50), (MemberId(3), MemberId(1), 50)] // debtors(2,3) pay creditor(1)
     )]
     #[case::empty_settle_members(
         MemberBalances::from_iter([
@@ -244,7 +250,7 @@ mod tests {
             (MemberId(2), Money::ZERO),
             (MemberId(3), Money::ZERO),
         ]),
-        vec![(MemberId(1), MemberId(2), 100)]
+        vec![(MemberId(2), MemberId(1), 100)] // debtor(2) pays creditor(1)
     )]
     fn transfer_constructor_cases(
         constructor: TransferConstructor,
@@ -295,17 +301,19 @@ mod tests {
             )
             .expect("cash-aware transfer construction should succeed");
 
+        // MemberId(1) is the creditor (+1200): receives in settlement (to).
+        // MemberId(2) and MemberId(3) are debtors: pay in settlement (from).
         assert_eq!(
             result.transfers,
             vec![
                 Transfer {
-                    from: MemberId(1),
-                    to: MemberId(2),
+                    from: MemberId(2),
+                    to: MemberId(1),
                     amount: Money::from_i64(1000),
                 },
                 Transfer {
-                    from: MemberId(1),
-                    to: MemberId(3),
+                    from: MemberId(3),
+                    to: MemberId(1),
                     amount: Money::from_i64(200),
                 },
             ]
@@ -336,9 +344,11 @@ mod tests {
             )
             .expect("transfer construction should succeed");
 
+        // MemberId(1) is the creditor (+100): receives in settlement (to).
+        // MemberId(2) is the debtor (-100): pays in settlement (from).
         assert_eq!(result.transfers.len(), 1);
-        assert_eq!(result.transfers[0].from, MemberId(1));
-        assert_eq!(result.transfers[0].to, MemberId(2));
+        assert_eq!(result.transfers[0].from, MemberId(2));
+        assert_eq!(result.transfers[0].to, MemberId(1));
         assert_eq!(result.transfers[0].amount, Money::from_i64(100));
     }
 
@@ -387,11 +397,13 @@ mod tests {
             .calculate(balances, &[MemberId(1), MemberId(2)], &[], context)
             .expect("scale-aware transfer construction should succeed");
 
+        // MemberId(1) is the creditor (+123): receives in settlement (to).
+        // MemberId(2) is the debtor (-123): pays in settlement (from).
         assert_eq!(
             result.transfers,
             vec![Transfer {
-                from: MemberId(1),
-                to: MemberId(2),
+                from: MemberId(2),
+                to: MemberId(1),
                 amount: Money::new(123, 2),
             }]
         );
