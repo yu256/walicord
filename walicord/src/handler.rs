@@ -714,7 +714,7 @@ where
         // Flush pending messages before serving the query, mirroring the
         // message-path guard so we never compute against stale history.
         if self.has_pending_messages(tracked_id) {
-            self.rebuild_channel_cache(&ctx, command.channel_id, None)
+            self.rebuild_channel_cache(ctx, command.channel_id, None)
                 .await;
         }
 
