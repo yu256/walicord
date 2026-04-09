@@ -758,6 +758,20 @@ where
             }
         };
 
+        // Re-check for pending messages right before snapshotting the cache.
+        // A concurrent message handler may have inserted new pending entries
+        // during the cache/roster loading window above.
+        if self.has_pending_messages(tracked_id) {
+            let _ = command
+                .create_followup(
+                    &ctx.http,
+                    CreateInteractionResponseFollowup::new()
+                        .content(walicord_i18n::SLASH_PENDING_NOT_CLEARED),
+                )
+                .await;
+            return;
+        }
+
         let cached_contents: Vec<(ArcStr, Option<MemberId>)> = self
             .message_cache
             .with_messages(tracked_id, |messages| {
