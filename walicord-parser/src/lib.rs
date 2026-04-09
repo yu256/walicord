@@ -256,11 +256,21 @@ fn everyone_mention_with_weight(input: &str) -> IResult<&str, SetOp<'_>> {
 }
 
 fn mention_or_role(input: &str) -> IResult<&str, SetOp<'_>> {
-    alt((mention.map(SetOp::Push), role_mention.map(SetOp::PushRole), everyone_mention)).parse(input)
+    alt((
+        mention.map(SetOp::Push),
+        role_mention.map(SetOp::PushRole),
+        everyone_mention,
+    ))
+    .parse(input)
 }
 
 fn mention_or_role_weighted(input: &str) -> IResult<&str, SetOp<'_>> {
-    alt((mention_with_weight, role_mention_with_weight, everyone_mention_with_weight)).parse(input)
+    alt((
+        mention_with_weight,
+        role_mention_with_weight,
+        everyone_mention_with_weight,
+    ))
+    .parse(input)
 }
 
 fn mention_sequence_generic<'a, P>(parser: P, input: &'a str) -> IResult<&'a str, SetExpr<'a>>
@@ -1202,16 +1212,12 @@ mod tests {
     fn test_everyone_with_weight() {
         let (_, expr) =
             set_expr_weighted("@everyone*2").expect("@everyone with weight should parse");
-        assert_eq!(
-            expr.ops(),
-            &[SetOp::PushWeightedGroup("MEMBERS", 2)]
-        );
+        assert_eq!(expr.ops(), &[SetOp::PushWeightedGroup("MEMBERS", 2)]);
     }
 
     #[test]
     fn test_everyone_in_difference() {
-        let (_, expr) =
-            set_expr("@everyone - <@123>").expect("@everyone - mention should parse");
+        let (_, expr) = set_expr("@everyone - <@123>").expect("@everyone - mention should parse");
         assert_eq!(
             expr.ops(),
             &[
@@ -1241,15 +1247,13 @@ mod tests {
             .expect("payment from @everyone (ja)");
         assert_eq!(program.statements.len(), 1);
         match &program.statements[0].statement {
-            Statement::Payment(p) => {
-                match &p.payer {
-                    PayerSpec::Explicit(expr) => {
-                        let groups: Vec<_> = expr.referenced_groups().collect();
-                        assert_eq!(groups, vec!["MEMBERS"]);
-                    }
-                    PayerSpec::Implicit => panic!("expected explicit payer"),
+            Statement::Payment(p) => match &p.payer {
+                PayerSpec::Explicit(expr) => {
+                    let groups: Vec<_> = expr.referenced_groups().collect();
+                    assert_eq!(groups, vec!["MEMBERS"]);
                 }
-            }
+                PayerSpec::Implicit => panic!("expected explicit payer"),
+            },
             _ => panic!("expected payment statement"),
         }
     }
@@ -1260,15 +1264,13 @@ mod tests {
             parse_program("@everyone paid 1000 to <@20>").expect("payment from @everyone (en)");
         assert_eq!(program.statements.len(), 1);
         match &program.statements[0].statement {
-            Statement::Payment(p) => {
-                match &p.payer {
-                    PayerSpec::Explicit(expr) => {
-                        let groups: Vec<_> = expr.referenced_groups().collect();
-                        assert_eq!(groups, vec!["MEMBERS"]);
-                    }
-                    PayerSpec::Implicit => panic!("expected explicit payer"),
+            Statement::Payment(p) => match &p.payer {
+                PayerSpec::Explicit(expr) => {
+                    let groups: Vec<_> = expr.referenced_groups().collect();
+                    assert_eq!(groups, vec!["MEMBERS"]);
                 }
-            }
+                PayerSpec::Implicit => panic!("expected explicit payer"),
+            },
             _ => panic!("expected payment statement"),
         }
     }
@@ -1316,11 +1318,7 @@ mod tests {
         let (_, expr) = set_expr("<@1> @everyone").expect("mention + @everyone should parse");
         assert_eq!(
             expr.ops(),
-            &[
-                SetOp::Push(1),
-                SetOp::PushGroup("MEMBERS"),
-                SetOp::Union,
-            ]
+            &[SetOp::Push(1), SetOp::PushGroup("MEMBERS"), SetOp::Union,]
         );
     }
 

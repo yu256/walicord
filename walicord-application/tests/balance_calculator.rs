@@ -362,6 +362,272 @@ async fn payment_distribution_balances(
     assert_balances(&post_balances, expected_post);
 }
 
+/// Synthetic `!settleup` appended to cached payments goes through
+/// `SettleUpPolicy::settle()`, producing real `immediate_transfers`.
+/// Test mentions use `<@id>` / `<@!id>` format — the actual payload
+/// Discord sends when users pick mentions in String-type slash options.
+#[rstest]
+#[case::settle_one_member(
+    &EMPTY_MEMBERS,
+    &["<@1> paid 100 to <@2>"],
+    "!settleup <@1>",
+    &[(TestMember::Alice, 0), (TestMember::Bob, 0)],
+)]
+#[case::settle_with_nickname_mention_format(
+    &EMPTY_MEMBERS,
+    &["<@1> paid 100 to <@2>"],
+    "!settleup <@!1> <@!2>",
+    &[(TestMember::Alice, 0), (TestMember::Bob, 0)],
+)]
+#[case::settle_subset(
+    &EMPTY_MEMBERS,
+    &["<@1> paid 60 to <@3>", "<@2> paid 100 to <@3>"],
+    "!settleup <@1>",
+    &[
+        (TestMember::Alice, 0),
+        (TestMember::Bob, 100),
+        (TestMember::Carol, -100),
+    ],
+)]
+#[case::settle_all_via_mentions(
+    &EMPTY_MEMBERS,
+    &["<@1> paid 100 to <@2>", "<@3> paid 50 to <@4>"],
+    "!settleup <@1> <@2> <@3> <@4>",
+    &[
+        (TestMember::Alice, 0),
+        (TestMember::Bob, 0),
+        (TestMember::Carol, 0),
+        (TestMember::Dave, 0),
+    ],
+)]
+#[case::settle_partial_single_member(
+    &EMPTY_MEMBERS,
+    &["<@1> paid 100 to <@2>", "<@3> paid 50 to <@4>"],
+    "!settleup <@2>",
+    &[
+        (TestMember::Alice, 0),
+        (TestMember::Bob, 0),
+        (TestMember::Carol, 50),
+        (TestMember::Dave, -50),
+    ],
+)]
+#[tokio::test(flavor = "multi_thread")]
+async fn slash_settle_up_via_synthetic_command(
+    #[case] members: &'static [MemberId],
+    #[case] cached_messages: &'static [&'static str],
+    #[case] synthetic_command: &'static str,
+    #[case] expected_balances: &'static [(TestMember, i64)],
+) {
+    let processor = MessageProcessor::new(&TEST_PARSER, &TEST_OPTIMIZER);
+
+    let program = processor
+        .parse_program_sequence(
+            members,
+            empty_roles(),
+            cached_messages
+                .iter()
+                .map(|c| (*c, Some(TestMember::Alice.id())))
+                .chain(std::iter::once((synthetic_command, None))),
+        )
+        .into_result()
+        .expect("program should parse");
+
+    let result = processor
+        .build_settlement_result(&program)
+        .await
+        .expect("settle-up result should succeed");
+
+    let post_balances = balances_from_result(&result.balances);
+    assert_balances(&post_balances, expected_balances);
+
+    assert!(
+        result.settle_up.is_some(),
+        "should be processed as settle-up"
+    );
+}
+
+/// Group names from cached messages ARE resolvable in synthetic commands:
+/// command member expressions are stored as raw AST at parse time, then
+/// resolved at evaluation time after prior declarations are registered.
+#[tokio::test(flavor = "multi_thread")]
+async fn slash_settle_up_resolves_groups_from_cached_messages() {
+    let processor = MessageProcessor::new(&TEST_PARSER, &TEST_OPTIMIZER);
+
+    let program = processor
+        .parse_program_sequence(
+            &EMPTY_MEMBERS,
+            empty_roles(),
+            [
+                (
+                    "team := <@1> <@2> <@3>\n<@1> paid 90 to team",
+                    Some(TestMember::Alice.id()),
+                ),
+                ("!settleup team", None),
+            ],
+        )
+        .into_result()
+        .expect("group from cached message should resolve in command");
+
+    let result = processor
+        .build_settlement_result(&program)
+        .await
+        .expect("settle-up should succeed");
+
+    assert!(result.settle_up.is_some());
+    assert_balances(
+        &balances_from_result(&result.balances),
+        &[
+            (TestMember::Alice, 0),
+            (TestMember::Bob, 0),
+            (TestMember::Carol, 0),
+        ],
+    );
+}
+
+/// Empty cache with synthetic `!settleup` produces no transfers.
+#[tokio::test(flavor = "multi_thread")]
+async fn slash_settle_up_with_empty_cache() {
+    let processor = MessageProcessor::new(&TEST_PARSER, &TEST_OPTIMIZER);
+
+    let program = processor
+        .parse_program_sequence(
+            &EMPTY_MEMBERS,
+            empty_roles(),
+            std::iter::once(("!settleup <@1>", None)),
+        )
+        .into_result()
+        .expect("program should parse");
+
+    let result = processor
+        .build_settlement_result(&program)
+        .await
+        .expect("should succeed on empty history");
+
+    assert_balances(
+        &balances_from_result(&result.balances),
+        &[(TestMember::Alice, 0)],
+    );
+}
+
+/// Different authors per cached message: implicit payer resolves per-message.
+#[tokio::test(flavor = "multi_thread")]
+async fn slash_settle_up_with_different_message_authors() {
+    let processor = MessageProcessor::new(&TEST_PARSER, &TEST_OPTIMIZER);
+
+    // Message 1: Alice writes "100 to <@2>" → implicit payer is Alice
+    // Message 2: Bob writes "50 to <@3>" → implicit payer is Bob
+    let program = processor
+        .parse_program_sequence(
+            &EMPTY_MEMBERS,
+            empty_roles(),
+            [
+                ("100 to <@2>", Some(TestMember::Alice.id())),
+                ("50 to <@3>", Some(TestMember::Bob.id())),
+                ("!settleup <@1> <@2> <@3>", None),
+            ],
+        )
+        .into_result()
+        .expect("program should parse");
+
+    let result = processor
+        .build_settlement_result(&program)
+        .await
+        .expect("settle-up result should succeed");
+
+    let post_balances = balances_from_result(&result.balances);
+    assert_balances(
+        &post_balances,
+        &[
+            (TestMember::Alice, 0),
+            (TestMember::Bob, 0),
+            (TestMember::Carol, 0),
+        ],
+    );
+}
+
+/// Synthetic `!settleup ... --cash ...` propagates cash members to optimizer.
+#[tokio::test(flavor = "multi_thread")]
+async fn slash_settle_up_synthetic_command_with_cash_option() {
+    let processor = MessageProcessor::new(&TEST_PARSER, &TEST_OPTIMIZER);
+
+    let program = processor
+        .parse_program_sequence(
+            &EMPTY_MEMBERS,
+            empty_roles(),
+            [
+                ("<@1> paid 700 to <@3>", Some(TestMember::Alice.id())),
+                ("<@1> paid 600 to <@4>", Some(TestMember::Alice.id())),
+                ("<@2> paid 50 to <@3>", Some(TestMember::Bob.id())),
+                ("<@2> paid 50 to <@4>", Some(TestMember::Bob.id())),
+                ("!settleup <@1> <@2> <@3> <@4> --cash <@2>", None),
+            ],
+        )
+        .into_result()
+        .expect("program with --cash should parse");
+
+    let result = processor
+        .build_settlement_result(&program)
+        .await
+        .expect("settle-up result should succeed");
+
+    assert!(result.settle_up.is_some());
+    assert!(
+        result
+            .effective_cash_members
+            .contains(&TestMember::Bob.id())
+    );
+}
+
+/// Synthetic `!review` appended to cached messages produces review mode.
+#[rstest]
+#[case::review_single_payment(
+    &EMPTY_MEMBERS,
+    &["<@1> paid 100 to <@2>"],
+    &[(TestMember::Alice, 100), (TestMember::Bob, -100)],
+)]
+#[case::review_multiple_cached_messages(
+    &EMPTY_MEMBERS,
+    &["<@1> paid 60 to <@3>", "<@2> paid 100 to <@3>"],
+    &[
+        (TestMember::Alice, 60),
+        (TestMember::Bob, 100),
+        (TestMember::Carol, -160),
+    ],
+)]
+#[tokio::test(flavor = "multi_thread")]
+async fn slash_review_via_synthetic_command(
+    #[case] members: &'static [MemberId],
+    #[case] cached_messages: &'static [&'static str],
+    #[case] expected_balances: &'static [(TestMember, i64)],
+) {
+    let processor = MessageProcessor::new(&TEST_PARSER, &TEST_OPTIMIZER);
+
+    let program = processor
+        .parse_program_sequence(
+            members,
+            empty_roles(),
+            cached_messages
+                .iter()
+                .map(|c| (*c, Some(TestMember::Alice.id())))
+                .chain(std::iter::once(("!review", None))),
+        )
+        .into_result()
+        .expect("program should parse");
+
+    let result = processor
+        .build_settlement_result(&program)
+        .await
+        .expect("review result should succeed");
+
+    let post_balances = balances_from_result(&result.balances);
+    assert_balances(&post_balances, expected_balances);
+
+    assert!(
+        result.settle_up.is_none(),
+        "review mode should have no settle_up"
+    );
+}
+
 #[test]
 fn members_reference_requires_roster() {
     assert_eq!(

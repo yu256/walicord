@@ -32,6 +32,16 @@ pub mod strings {
     pub const WEIGHT_OVERFLOW: &str = "重みの合計がオーバーフローしました";
     pub const ZERO_TOTAL_WEIGHT: &str = "重みの合計が0です";
     pub const RECEIVER_BALANCE: &str = "受取後残高";
+    pub const CHANNEL_NOT_TRACKED: &str = "このチャンネルは walicord で追跡されていません。チャンネルトピックに `#walicord` を追加してください。";
+    pub const SLASH_REVIEW_DESCRIPTION: &str = "清算確認 - 現在の残高と提案送金を表示";
+    pub const SLASH_VARIABLES_DESCRIPTION: &str = "変数一覧 - 定義されたグループ変数を表示";
+
+    pub const SLASH_CACHE_LOAD_FAILED: &str = "チャンネル履歴の読み込みに失敗しました。";
+    pub const SLASH_PENDING_NOT_CLEARED: &str =
+        "メッセージの処理が完了していません。しばらく待ってから再度お試しください。";
+    pub const SLASH_ROSTER_LOAD_FAILED: &str = "メンバー情報の読み込みに失敗しました。";
+    pub const SLASH_NO_VARIABLES: &str = "変数は定義されていません。";
+    pub const SLASH_RENDER_FAILED: &str = "精算画像の生成に失敗しました。";
 }
 
 #[cfg(feature = "en")]
@@ -63,6 +73,17 @@ pub mod strings {
     pub const WEIGHT_OVERFLOW: &str = "Weight sum overflow";
     pub const ZERO_TOTAL_WEIGHT: &str = "Total weight is zero";
     pub const RECEIVER_BALANCE: &str = "Balance After";
+    pub const CHANNEL_NOT_TRACKED: &str =
+        "This channel is not tracked by walicord. Add `#walicord` to the channel topic.";
+    pub const SLASH_REVIEW_DESCRIPTION: &str = "Show current balances and proposed settlements";
+    pub const SLASH_VARIABLES_DESCRIPTION: &str = "Show defined group variables";
+
+    pub const SLASH_CACHE_LOAD_FAILED: &str = "Failed to load channel history.";
+    pub const SLASH_PENDING_NOT_CLEARED: &str =
+        "Messages are still being processed. Please try again shortly.";
+    pub const SLASH_ROSTER_LOAD_FAILED: &str = "Failed to load member roster.";
+    pub const SLASH_NO_VARIABLES: &str = "No variables defined.";
+    pub const SLASH_RENDER_FAILED: &str = "Failed to render settlement image.";
 }
 
 #[cfg(not(any(feature = "ja", feature = "en")))]
@@ -94,6 +115,17 @@ pub mod strings {
     pub const WEIGHT_OVERFLOW: &str = "Weight sum overflow";
     pub const ZERO_TOTAL_WEIGHT: &str = "Total weight is zero";
     pub const RECEIVER_BALANCE: &str = "Balance After";
+    pub const CHANNEL_NOT_TRACKED: &str =
+        "This channel is not tracked by walicord. Add `#walicord` to the channel topic.";
+    pub const SLASH_REVIEW_DESCRIPTION: &str = "Show current balances and proposed settlements";
+    pub const SLASH_VARIABLES_DESCRIPTION: &str = "Show defined group variables";
+
+    pub const SLASH_CACHE_LOAD_FAILED: &str = "Failed to load channel history.";
+    pub const SLASH_PENDING_NOT_CLEARED: &str =
+        "Messages are still being processed. Please try again shortly.";
+    pub const SLASH_ROSTER_LOAD_FAILED: &str = "Failed to load member roster.";
+    pub const SLASH_NO_VARIABLES: &str = "No variables defined.";
+    pub const SLASH_RENDER_FAILED: &str = "Failed to render settlement image.";
 }
 
 pub use strings::*;
