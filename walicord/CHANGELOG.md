@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.4.0](https://github.com/yu256/walicord/compare/walicord-v2.3.1...walicord-v2.4.0) (2026-04-09)
+
+
+### Features
+
+* add slash command support for /review, /variables ([#82](https://github.com/yu256/walicord/issues/82)) ([ad9fa63](https://github.com/yu256/walicord/commit/ad9fa635de97da7a44e523626e21789581741b95))
+
 ## [2.3.1](https://github.com/yu256/walicord/compare/walicord-v2.3.0...walicord-v2.3.1) (2026-04-06)
 
 
