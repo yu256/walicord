@@ -275,33 +275,33 @@ pub fn syntax_error_with_form<'a>(
     near: &'a str,
 ) -> impl std::fmt::Display + use<'a> {
     #[cfg(feature = "ja")]
-    {
-        let near_display = if near.is_empty() {
-            "入力の末尾".to_string()
-        } else {
-            format!("\"{near}\" 付近")
-        };
-        std::fmt::from_fn(move |f| {
+    return std::fmt::from_fn(move |f| {
+        if near.is_empty() {
             write!(
                 f,
-                "「{form}」として解析中にエラー (行 {line}): {near_display} に{expected}が必要です"
+                "「{form}」として解析中にエラー (行 {line}): 入力の末尾に{expected}が必要です"
             )
-        })
-    }
+        } else {
+            write!(
+                f,
+                "「{form}」として解析中にエラー (行 {line}): \"{near}\" 付近に{expected}が必要です"
+            )
+        }
+    });
     #[cfg(not(feature = "ja"))]
-    {
-        let near_display = if near.is_empty() {
-            "end of input".to_string()
-        } else {
-            format!("near \"{near}\"")
-        };
-        std::fmt::from_fn(move |f| {
+    return std::fmt::from_fn(move |f| {
+        if near.is_empty() {
             write!(
                 f,
-                "Expected {expected} while parsing \"{form}\" at line {line}, {near_display}"
+                "Expected {expected} while parsing \"{form}\" at line {line}, end of input"
             )
-        })
-    }
+        } else {
+            write!(
+                f,
+                "Expected {expected} while parsing \"{form}\" at line {line}, near \"{near}\""
+            )
+        }
+    });
 }
 
 pub fn syntax_error_unknown<'a>(line: usize, near: &'a str) -> impl std::fmt::Display + use<'a> {
