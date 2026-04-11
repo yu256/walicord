@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use walicord_application::{
     Command, ProgramParseError, ProgramParser, Script, ScriptStatement, ScriptStatementWithLine,
+    SyntaxErrorKind,
 };
 use walicord_domain::{
     AmountExpr, AmountOp, Declaration, Payment, Program as DomainProgram,
@@ -18,9 +19,41 @@ use walicord_parser::{
 #[derive(Default)]
 pub struct WalicordProgramParser;
 
+fn map_expected_element(
+    t: walicord_parser::ExpectedElement,
+) -> walicord_application::ExpectedElement {
+    match t {
+        walicord_parser::ExpectedElement::Amount => walicord_application::ExpectedElement::Amount,
+        walicord_parser::ExpectedElement::MemberOrGroup => {
+            walicord_application::ExpectedElement::MemberOrGroup
+        }
+        walicord_parser::ExpectedElement::Unknown => walicord_application::ExpectedElement::Unknown,
+    }
+}
+
+fn map_syntax_error_kind(kind: walicord_parser::SyntaxErrorKind) -> SyntaxErrorKind {
+    match kind {
+        walicord_parser::SyntaxErrorKind::ParseFailure {
+            attempted_form,
+            expected,
+            near,
+        } => SyntaxErrorKind::ParseFailure {
+            attempted_form,
+            expected: map_expected_element(expected),
+            near,
+        },
+        walicord_parser::SyntaxErrorKind::TrailingInput { text } => {
+            SyntaxErrorKind::TrailingInput { text }
+        }
+    }
+}
+
 fn map_parse_error<'a>(err: ParseError) -> ProgramParseError<'a> {
     match err {
-        ParseError::SyntaxError { line, detail } => ProgramParseError::SyntaxError { line, detail },
+        ParseError::SyntaxError { line, kind } => ProgramParseError::SyntaxError {
+            line,
+            kind: map_syntax_error_kind(kind),
+        },
         ParseError::UndefinedGroup { name, line } => ProgramParseError::UndefinedGroup {
             name: Cow::Owned(name),
             line,
@@ -219,10 +252,7 @@ fn to_member_set_expr_no_weight<'a>(
                 | SetOp::PushWeightedGroup(_, _)
         )
     }) {
-        return Err(ProgramParseError::SyntaxError {
-            line,
-            detail: "weighted references are only allowed in payment payee".to_string(),
-        });
+        return Err(ProgramParseError::WeightedReferenceOutsidePayee { line });
     }
 
     Ok(to_member_set_expr_allow_weighted(expr))

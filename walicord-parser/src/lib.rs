@@ -1,13 +1,12 @@
 #![warn(clippy::uninlined_format_args)]
 
-mod i18n;
-
 use nom::{
     IResult, Parser,
     branch::alt,
     bytes::complete::{tag, tag_no_case, take_till, take_until, take_while, take_while1},
     character::complete::{char, digit1, multispace1, u64},
-    combinator::{map_res, opt, recognize},
+    combinator::{cut, map_res, opt, recognize},
+    error::{ContextError, ErrorKind, ParseError as NomParseError, context},
     multi::many0,
     sequence::delimited,
 };
@@ -195,17 +194,112 @@ pub struct Program<'a> {
     pub statements: Vec<StatementWithLine<'a>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExpectedElement {
+    Amount,
+    MemberOrGroup,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SyntaxErrorKind {
+    ParseFailure {
+        attempted_form: Option<&'static str>,
+        expected: ExpectedElement,
+        near: String,
+    },
+    TrailingInput {
+        text: String,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum ParseError {
     #[error("Undefined member ID '<@{id}>' at line {line}.")]
     UndefinedMember { id: u64, line: usize },
     #[error("Undefined group '{name}' at line {line}.")]
     UndefinedGroup { name: String, line: usize },
-    #[error("Syntax error at line {line}: {detail}")]
-    SyntaxError { line: usize, detail: String },
+    #[error("Syntax error at line {line}: {kind:?}")]
+    SyntaxError { line: usize, kind: SyntaxErrorKind },
 }
 
-fn mention(input: &str) -> IResult<&str, u64> {
+// `context` sets the outermost "form" label.
+// `with_expected` sets the innermost "expected element" label.
+#[derive(Debug)]
+struct NomSyntaxError<'a> {
+    input: &'a str,
+    expected: Option<&'static str>,
+    form: Option<&'static str>,
+}
+
+impl<'a> NomParseError<&'a str> for NomSyntaxError<'a> {
+    fn from_error_kind(input: &'a str, _kind: ErrorKind) -> Self {
+        NomSyntaxError {
+            input,
+            expected: None,
+            form: None,
+        }
+    }
+
+    fn append(_input: &'a str, _kind: ErrorKind, other: Self) -> Self {
+        other
+    }
+
+    fn or(self, other: Self) -> Self {
+        if self.input.len() <= other.input.len() {
+            self
+        } else {
+            other
+        }
+    }
+}
+
+impl<'a> ContextError<&'a str> for NomSyntaxError<'a> {
+    fn add_context(_input: &'a str, ctx: &'static str, mut other: Self) -> Self {
+        other.form = Some(ctx);
+        other
+    }
+}
+
+impl<'a, E> nom::error::FromExternalError<&'a str, E> for NomSyntaxError<'a> {
+    fn from_external_error(input: &'a str, _kind: ErrorKind, _e: E) -> Self {
+        NomSyntaxError {
+            input,
+            expected: None,
+            form: None,
+        }
+    }
+}
+
+fn with_expected<'a, O, P>(
+    label: &'static str,
+    mut parser: P,
+) -> impl FnMut(&'a str) -> PResult<'a, O>
+where
+    P: FnMut(&'a str) -> PResult<'a, O>,
+{
+    move |input| {
+        parser(input).map_err(|e| match e {
+            nom::Err::Error(mut err) => {
+                if err.expected.is_none() {
+                    err.expected = Some(label);
+                }
+                nom::Err::Error(err)
+            }
+            nom::Err::Failure(mut err) => {
+                if err.expected.is_none() {
+                    err.expected = Some(label);
+                }
+                nom::Err::Failure(err)
+            }
+            other => other,
+        })
+    }
+}
+
+type PResult<'a, T> = IResult<&'a str, T, NomSyntaxError<'a>>;
+
+fn mention(input: &str) -> PResult<'_, u64> {
     let (input, _) = tag("<@")(input)?;
     let (input, _) = opt(char('!')).parse(input)?;
     let (input, id) = u64(input)?;
@@ -213,14 +307,14 @@ fn mention(input: &str) -> IResult<&str, u64> {
     Ok((input, id))
 }
 
-fn role_mention(input: &str) -> IResult<&str, u64> {
+fn role_mention(input: &str) -> PResult<'_, u64> {
     let (input, _) = tag("<@&")(input)?;
     let (input, id) = u64(input)?;
     let (input, _) = char('>')(input)?;
     Ok((input, id))
 }
 
-fn mention_with_weight(input: &str) -> IResult<&str, SetOp<'_>> {
+fn mention_with_weight(input: &str) -> PResult<'_, SetOp<'_>> {
     let (input, id) = mention(input)?;
     let (input, weight) = opt((char('*'), u64).map(|(_, w)| w)).parse(input)?;
     let op = match weight {
@@ -230,7 +324,7 @@ fn mention_with_weight(input: &str) -> IResult<&str, SetOp<'_>> {
     Ok((input, op))
 }
 
-fn role_mention_with_weight(input: &str) -> IResult<&str, SetOp<'_>> {
+fn role_mention_with_weight(input: &str) -> PResult<'_, SetOp<'_>> {
     let (input, id) = role_mention(input)?;
     let (input, weight) = opt((char('*'), u64).map(|(_, w)| w)).parse(input)?;
     let op = match weight {
@@ -240,12 +334,12 @@ fn role_mention_with_weight(input: &str) -> IResult<&str, SetOp<'_>> {
     Ok((input, op))
 }
 
-fn everyone_mention(input: &str) -> IResult<&str, SetOp<'_>> {
+fn everyone_mention(input: &str) -> PResult<'_, SetOp<'_>> {
     let (input, _) = tag_no_case("@everyone")(input)?;
     Ok((input, SetOp::PushGroup("MEMBERS")))
 }
 
-fn everyone_mention_with_weight(input: &str) -> IResult<&str, SetOp<'_>> {
+fn everyone_mention_with_weight(input: &str) -> PResult<'_, SetOp<'_>> {
     let (input, _) = tag_no_case("@everyone")(input)?;
     let (input, weight) = opt((char('*'), u64).map(|(_, w)| w)).parse(input)?;
     let op = match weight {
@@ -255,7 +349,7 @@ fn everyone_mention_with_weight(input: &str) -> IResult<&str, SetOp<'_>> {
     Ok((input, op))
 }
 
-fn mention_or_role(input: &str) -> IResult<&str, SetOp<'_>> {
+fn mention_or_role(input: &str) -> PResult<'_, SetOp<'_>> {
     alt((
         mention.map(SetOp::Push),
         role_mention.map(SetOp::PushRole),
@@ -264,7 +358,7 @@ fn mention_or_role(input: &str) -> IResult<&str, SetOp<'_>> {
     .parse(input)
 }
 
-fn mention_or_role_weighted(input: &str) -> IResult<&str, SetOp<'_>> {
+fn mention_or_role_weighted(input: &str) -> PResult<'_, SetOp<'_>> {
     alt((
         mention_with_weight,
         role_mention_with_weight,
@@ -273,9 +367,9 @@ fn mention_or_role_weighted(input: &str) -> IResult<&str, SetOp<'_>> {
     .parse(input)
 }
 
-fn mention_sequence_generic<'a, P>(parser: P, input: &'a str) -> IResult<&'a str, SetExpr<'a>>
+fn mention_sequence_generic<'a, P>(parser: P, input: &'a str) -> PResult<'a, SetExpr<'a>>
 where
-    P: Fn(&'a str) -> IResult<&'a str, SetOp<'a>>,
+    P: Fn(&'a str) -> PResult<'a, SetOp<'a>>,
 {
     use nom::multi::many1;
 
@@ -288,15 +382,15 @@ where
     Ok((input, expr))
 }
 
-fn mention_sequence(input: &str) -> IResult<&str, SetExpr<'_>> {
+fn mention_sequence(input: &str) -> PResult<'_, SetExpr<'_>> {
     mention_sequence_generic(mention_or_role, input)
 }
 
-fn mention_sequence_weighted(input: &str) -> IResult<&str, SetExpr<'_>> {
+fn mention_sequence_weighted(input: &str) -> PResult<'_, SetExpr<'_>> {
     mention_sequence_generic(mention_or_role_weighted, input)
 }
 
-fn identifier(input: &str) -> IResult<&str, &str> {
+fn identifier(input: &str) -> PResult<'_, &str> {
     recognize((
         take_while1(|c: char| c.is_alphanumeric() || c == '_' || is_japanese_char(c)),
         take_while(|c: char| c.is_alphanumeric() || c == '_' || c == '-' || is_japanese_char(c)),
@@ -313,16 +407,16 @@ fn is_japanese_char(c: char) -> bool {
     )
 }
 
-fn sp(input: &str) -> IResult<&str, &str> {
-    fn fullwidth_space(input: &str) -> IResult<&str, &str> {
+fn sp(input: &str) -> PResult<'_, &str> {
+    fn fullwidth_space(input: &str) -> PResult<'_, &str> {
         take_while1(|c: char| c == '\u{3000}')(input)
     }
 
-    fn comment(input: &str) -> IResult<&str, &str> {
+    fn comment(input: &str) -> PResult<'_, &str> {
         delimited(tag("/*"), take_until("*/"), tag("*/")).parse(input)
     }
 
-    fn line_comment(input: &str) -> IResult<&str, &str> {
+    fn line_comment(input: &str) -> PResult<'_, &str> {
         recognize((tag("//"), take_till(|c| c == '\n'))).parse(input)
     }
 
@@ -335,7 +429,7 @@ fn sp(input: &str) -> IResult<&str, &str> {
     .parse(input)
 }
 
-fn set_primary(input: &str) -> IResult<&str, SetExpr<'_>> {
+fn set_primary(input: &str) -> PResult<'_, SetExpr<'_>> {
     alt((
         (char('('), sp, set_expr, sp, char(')')).map(|(_, _, expr, _, _)| expr),
         mention_sequence,
@@ -348,8 +442,8 @@ fn set_primary(input: &str) -> IResult<&str, SetExpr<'_>> {
     .parse(input)
 }
 
-fn set_primary_weighted(input: &str) -> IResult<&str, SetExpr<'_>> {
-    fn identifier_with_weight(input: &str) -> IResult<&str, SetExpr<'_>> {
+fn set_primary_weighted(input: &str) -> PResult<'_, SetExpr<'_>> {
+    fn identifier_with_weight(input: &str) -> PResult<'_, SetExpr<'_>> {
         let (input, name) = identifier(input)?;
         let (input, weight) = opt((char('*'), u64).map(|(_, w)| w)).parse(input)?;
         let mut expr = SetExpr::new();
@@ -368,24 +462,24 @@ fn set_primary_weighted(input: &str) -> IResult<&str, SetExpr<'_>> {
     .parse(input)
 }
 
-fn diff_token(input: &str) -> IResult<&str, &str> {
+fn diff_token(input: &str) -> PResult<'_, &str> {
     tag("-")(input)
 }
 
-fn intersect_token(input: &str) -> IResult<&str, &str> {
+fn intersect_token(input: &str) -> PResult<'_, &str> {
     tag("∩")(input)
 }
 
-fn union_token(input: &str) -> IResult<&str, &str> {
+fn union_token(input: &str) -> PResult<'_, &str> {
     alt((tag("∪"), tag(","), tag("，"))).parse(input)
 }
 
 fn set_op_expr<'a>(
-    primary: fn(&'a str) -> IResult<&'a str, SetExpr<'a>>,
-    op_token: fn(&'a str) -> IResult<&'a str, &'a str>,
+    primary: fn(&'a str) -> PResult<'a, SetExpr<'a>>,
+    op_token: fn(&'a str) -> PResult<'a, &'a str>,
     set_op: SetOp<'a>,
     input: &'a str,
-) -> IResult<&'a str, SetExpr<'a>> {
+) -> PResult<'a, SetExpr<'a>> {
     (primary, nom::multi::many0((sp, op_token, sp, primary)))
         .map(|(first, ops)| {
             ops.into_iter().fold(first, |mut acc, (_, _, _, right)| {
@@ -397,19 +491,19 @@ fn set_op_expr<'a>(
         .parse(input)
 }
 
-fn set_difference(input: &str) -> IResult<&str, SetExpr<'_>> {
+fn set_difference(input: &str) -> PResult<'_, SetExpr<'_>> {
     set_op_expr(set_primary, diff_token, SetOp::Difference, input)
 }
 
-fn set_difference_weighted(input: &str) -> IResult<&str, SetExpr<'_>> {
+fn set_difference_weighted(input: &str) -> PResult<'_, SetExpr<'_>> {
     set_op_expr(set_primary_weighted, diff_token, SetOp::Difference, input)
 }
 
-fn set_intersection(input: &str) -> IResult<&str, SetExpr<'_>> {
+fn set_intersection(input: &str) -> PResult<'_, SetExpr<'_>> {
     set_op_expr(set_difference, intersect_token, SetOp::Intersection, input)
 }
 
-fn set_intersection_weighted(input: &str) -> IResult<&str, SetExpr<'_>> {
+fn set_intersection_weighted(input: &str) -> PResult<'_, SetExpr<'_>> {
     set_op_expr(
         set_difference_weighted,
         intersect_token,
@@ -418,26 +512,56 @@ fn set_intersection_weighted(input: &str) -> IResult<&str, SetExpr<'_>> {
     )
 }
 
-fn set_expr(input: &str) -> IResult<&str, SetExpr<'_>> {
+fn set_expr(input: &str) -> PResult<'_, SetExpr<'_>> {
     set_op_expr(set_intersection, union_token, SetOp::Union, input)
 }
 
-fn set_expr_weighted(input: &str) -> IResult<&str, SetExpr<'_>> {
+fn set_expr_weighted(input: &str) -> PResult<'_, SetExpr<'_>> {
     set_op_expr(set_intersection_weighted, union_token, SetOp::Union, input)
 }
 
 // name := expression (e.g., name := (A ∪ B) ∩ C)
-fn declaration(input: &str) -> IResult<&str, Declaration<'_>> {
-    (identifier, sp, tag(":="), sp, set_expr)
-        .map(|(name, _, _, _, expression)| Declaration { name, expression })
-        .parse(input)
+fn declaration(input: &str) -> PResult<'_, Declaration<'_>> {
+    let (input, name) = identifier(input)?;
+    let (input, _) = sp(input)?;
+    let (input, _) = tag(":=")(input)?;
+    let (input, _) = sp(input)?;
+    let (input, expression) = cut(context(
+        "<NAME> := <SET>",
+        with_expected("member/group", set_expr),
+    ))
+    .parse(input)?;
+    Ok((input, Declaration { name, expression }))
 }
 
-fn paid(input: &str) -> IResult<&str, &str> {
-    alt((tag("立て替えた"), tag("たてかえた"), tag_no_case("paid"))).parse(input)
+fn is_word_boundary_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_' || c == '-' || is_japanese_char(c)
 }
 
-fn decimal_literal(input: &str) -> IResult<&str, Decimal> {
+fn paid_keyword(input: &str) -> PResult<'_, &str> {
+    let (rest, matched) =
+        alt((tag("立て替えた"), tag("たてかえた"), tag_no_case("paid"))).parse(input)?;
+    if rest.starts_with(is_word_boundary_char) {
+        return Err(nom::Err::Error(NomSyntaxError::from_error_kind(
+            input,
+            ErrorKind::Tag,
+        )));
+    }
+    Ok((rest, matched))
+}
+
+fn to_keyword(input: &str) -> PResult<'_, &str> {
+    let (rest, matched) = tag_no_case("to")(input)?;
+    if rest.starts_with(is_word_boundary_char) {
+        return Err(nom::Err::Error(NomSyntaxError::from_error_kind(
+            input,
+            ErrorKind::Tag,
+        )));
+    }
+    Ok((rest, matched))
+}
+
+fn decimal_literal(input: &str) -> PResult<'_, Decimal> {
     map_res(
         recognize((digit1, opt((char('.'), digit1)))),
         Decimal::from_str,
@@ -445,7 +569,7 @@ fn decimal_literal(input: &str) -> IResult<&str, Decimal> {
     .parse(input)
 }
 
-fn amount_literal(input: &str) -> IResult<&str, AmountExpr> {
+fn amount_literal(input: &str) -> PResult<'_, AmountExpr> {
     (
         opt(char('¥')),
         decimal_literal,
@@ -455,7 +579,7 @@ fn amount_literal(input: &str) -> IResult<&str, AmountExpr> {
         .parse(input)
 }
 
-fn amount_primary(input: &str) -> IResult<&str, AmountExpr> {
+fn amount_primary(input: &str) -> PResult<'_, AmountExpr> {
     alt((
         (char('('), sp, amount_expr, sp, char(')')).map(|(_, _, value, _, _)| value),
         amount_literal,
@@ -463,7 +587,7 @@ fn amount_primary(input: &str) -> IResult<&str, AmountExpr> {
     .parse(input)
 }
 
-fn amount_term(input: &str) -> IResult<&str, AmountExpr> {
+fn amount_term(input: &str) -> PResult<'_, AmountExpr> {
     (
         amount_primary,
         many0((sp, alt((char('*'), char('/'))), sp, amount_primary)),
@@ -482,7 +606,7 @@ fn amount_term(input: &str) -> IResult<&str, AmountExpr> {
         .parse(input)
 }
 
-fn amount_expr(input: &str) -> IResult<&str, AmountExpr> {
+fn amount_expr(input: &str) -> PResult<'_, AmountExpr> {
     (
         amount_term,
         many0((sp, alt((char('+'), char('-'))), sp, amount_term)),
@@ -503,64 +627,72 @@ fn amount_expr(input: &str) -> IResult<&str, AmountExpr> {
         .parse(input)
 }
 
-fn ga(input: &str) -> IResult<&str, &str> {
+fn ga(input: &str) -> PResult<'_, &str> {
     tag("が").parse(input)
 }
 
-fn ni(input: &str) -> IResult<&str, &str> {
+fn ni(input: &str) -> PResult<'_, &str> {
     tag("に").parse(input)
 }
 
-fn to(input: &str) -> IResult<&str, &str> {
-    tag_no_case("to").parse(input)
-}
-
 // {payer} ga {payee} ni {amount} paid (Japanese grammar pattern)
-fn payment_lender_subject_ja(input: &str) -> IResult<&str, Payment<'_>> {
-    (
-        set_expr, // payer
-        sp,
-        ga,
-        sp,
-        set_expr_weighted, // payee
-        sp,
-        ni,
-        sp,
-        amount_expr, // amount
-        sp,
-        paid,
-    )
-        .map(|(payer, _, _, _, payee, _, _, _, amount, _, _)| Payment {
+fn payment_lender_subject_ja(input: &str) -> PResult<'_, Payment<'_>> {
+    let (input, payer) = set_expr(input)?;
+    let (input, _) = sp(input)?;
+    let (input, _) = ga(input)?;
+    let (input, _) = sp(input)?;
+    let (input, (payee, _, _, _, amount, _, _)) = cut(context(
+        "<PAYER> が <PAYEE> に <AMOUNT> 立て替えた",
+        (
+            with_expected("member/group", set_expr_weighted),
+            sp,
+            ni,
+            sp,
+            with_expected("amount", amount_expr),
+            sp,
+            paid_keyword,
+        ),
+    ))
+    .parse(input)?;
+    Ok((
+        input,
+        Payment {
             amount,
             payer: PayerSpec::Explicit(payer),
             payee,
-        })
-        .parse(input)
+        },
+    ))
 }
 
 // {payer} paid {amount} to {payee}
-fn payment_lender_subject_en(input: &str) -> IResult<&str, Payment<'_>> {
-    (
-        set_expr, // payer
-        sp,
-        paid,
-        sp,
-        amount_expr, // amount
-        sp,
-        to,
-        sp,
-        set_expr_weighted, // payee
-    )
-        .map(|(payer, _, _, _, amount, _, _, _, payee)| Payment {
+fn payment_lender_subject_en(input: &str) -> PResult<'_, Payment<'_>> {
+    let (input, payer) = set_expr(input)?;
+    let (input, _) = sp(input)?;
+    let (input, _) = paid_keyword(input)?;
+    let (input, _) = sp(input)?;
+    let (input, (amount, _, _, _, payee)) = cut(context(
+        "<PAYER> paid <AMOUNT> to <PAYEE>",
+        (
+            with_expected("amount", amount_expr),
+            sp,
+            to_keyword,
+            sp,
+            with_expected("member/group", set_expr_weighted),
+        ),
+    ))
+    .parse(input)?;
+    Ok((
+        input,
+        Payment {
             amount,
             payer: PayerSpec::Explicit(payer),
             payee,
-        })
-        .parse(input)
+        },
+    ))
 }
 
 // {amount} {payee}
-fn payment_implicit_simple(input: &str) -> IResult<&str, Payment<'_>> {
+fn payment_implicit_simple(input: &str) -> PResult<'_, Payment<'_>> {
     (amount_expr, sp, set_expr_weighted)
         .map(|(amount, _, payee)| Payment {
             amount,
@@ -571,17 +703,27 @@ fn payment_implicit_simple(input: &str) -> IResult<&str, Payment<'_>> {
 }
 
 // {amount} to {payee}
-fn payment_implicit_with_to(input: &str) -> IResult<&str, Payment<'_>> {
-    (amount_expr, sp, to, sp, set_expr_weighted)
-        .map(|(amount, _, _, _, payee)| Payment {
+fn payment_implicit_with_to(input: &str) -> PResult<'_, Payment<'_>> {
+    let (input, amount) = amount_expr(input)?;
+    let (input, _) = sp(input)?;
+    let (input, _) = to_keyword(input)?;
+    let (input, _) = sp(input)?;
+    let (input, payee) = cut(context(
+        "<AMOUNT> to <PAYEE>",
+        with_expected("member/group", set_expr_weighted),
+    ))
+    .parse(input)?;
+    Ok((
+        input,
+        Payment {
             amount,
             payer: PayerSpec::Implicit,
             payee,
-        })
-        .parse(input)
+        },
+    ))
 }
 
-fn payment(input: &str) -> IResult<&str, Payment<'_>> {
+fn payment(input: &str) -> PResult<'_, Payment<'_>> {
     alt((
         payment_lender_subject_ja,
         payment_lender_subject_en,
@@ -591,37 +733,57 @@ fn payment(input: &str) -> IResult<&str, Payment<'_>> {
     .parse(input)
 }
 
-fn command(input: &str) -> IResult<&str, Command<'_>> {
+fn command(input: &str) -> PResult<'_, Command<'_>> {
     alt((
         tag_no_case("!variables").map(|_| Command::Variables),
         tag_no_case("!review").map(|_| Command::Review),
         tag("!清算確認").map(|_| Command::Review),
         tag_no_case("!cash").map(|_| Command::CashSelf),
-        (
-            tag_no_case("!member"),
-            sp,
-            tag_no_case("set"),
-            sp,
-            set_expr,
-            sp,
-            tag_no_case("cash"),
-        )
-            .map(|(_, _, _, _, members, _, _)| Command::MemberAddCash { members }),
-        (
-            alt((tag_no_case("!settleup"), tag_no_case("!確定"))),
-            sp,
-            set_expr,
-            opt((sp, tag_no_case("--cash"), sp, set_expr)),
-        )
-            .map(|(_, _, members, cash)| Command::SettleUp {
-                members,
-                cash_members: cash.map(|(_, _, _, set)| set),
-            }),
+        |input| {
+            let (input, _) = tag_no_case("!member")(input)?;
+            let (input, _) = sp(input)?;
+            let (input, (_, _, members, _, _)) = cut(context(
+                "!command",
+                (
+                    tag_no_case("set"),
+                    sp,
+                    with_expected("member/group", set_expr),
+                    sp,
+                    tag_no_case("cash"),
+                ),
+            ))
+            .parse(input)?;
+            Ok((input, Command::MemberAddCash { members }))
+        },
+        |input| {
+            let (input, _) = alt((tag_no_case("!settleup"), tag_no_case("!確定"))).parse(input)?;
+            let (input, _) = sp(input)?;
+            let (input, (members, cash)) = cut(context(
+                "!command",
+                (
+                    with_expected("member/group", set_expr),
+                    opt((
+                        sp,
+                        tag_no_case("--cash"),
+                        sp,
+                        with_expected("member/group", set_expr),
+                    )),
+                ),
+            ))
+            .parse(input)?;
+            Ok((
+                input,
+                Command::SettleUp {
+                    members,
+                    cash_members: cash.map(|(_, _, _, set)| set),
+                },
+            ))
+        },
     ))
     .parse(input)
 }
 
-fn statement(input: &str) -> IResult<&str, Statement<'_>> {
+fn statement(input: &str) -> PResult<'_, Statement<'_>> {
     alt((
         declaration.map(Statement::Declaration),
         payment.map(Statement::Payment),
@@ -630,8 +792,49 @@ fn statement(input: &str) -> IResult<&str, Statement<'_>> {
     .parse(input)
 }
 
-fn statement_with_sp(input: &str) -> IResult<&str, Statement<'_>> {
+fn statement_with_sp(input: &str) -> PResult<'_, Statement<'_>> {
     (sp, statement, sp).map(|(_, stmt, _)| stmt).parse(input)
+}
+
+fn truncate_str(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+fn expected_label_to_element(label: Option<&str>) -> ExpectedElement {
+    match label {
+        Some("amount") => ExpectedElement::Amount,
+        Some("member/group") => ExpectedElement::MemberOrGroup,
+        _ => ExpectedElement::Unknown,
+    }
+}
+
+fn extract_syntax_error(err: nom::Err<NomSyntaxError<'_>>) -> SyntaxErrorKind {
+    const NEAR_MAX_BYTES: usize = 30;
+
+    fn extract(e: NomSyntaxError<'_>) -> SyntaxErrorKind {
+        SyntaxErrorKind::ParseFailure {
+            attempted_form: e.form,
+            expected: expected_label_to_element(e.expected),
+            near: truncate_str(e.input.trim(), NEAR_MAX_BYTES).to_string(),
+        }
+    }
+
+    match err {
+        nom::Err::Failure(e) => extract(e),
+        nom::Err::Error(e) => extract(e),
+        nom::Err::Incomplete(_) => SyntaxErrorKind::ParseFailure {
+            attempted_form: None,
+            expected: ExpectedElement::Unknown,
+            near: String::new(),
+        },
+    }
 }
 
 // Parse the entire program
@@ -642,7 +845,7 @@ pub fn parse_program<'a>(input: &'a str) -> Result<Program<'a>, ParseError> {
     for (idx, line) in input.lines().enumerate() {
         let (rest, _) = sp(line).map_err(|e| ParseError::SyntaxError {
             line: idx + 1,
-            detail: i18n::syntax_error_detail(e),
+            kind: extract_syntax_error(e),
         })?;
         if rest.trim().is_empty() {
             continue;
@@ -652,7 +855,9 @@ pub fn parse_program<'a>(input: &'a str) -> Result<Program<'a>, ParseError> {
                 if !rest.trim().is_empty() {
                     return Err(ParseError::SyntaxError {
                         line: idx + 1,
-                        detail: i18n::syntax_error_unparsed_detail(rest.trim()),
+                        kind: SyntaxErrorKind::TrailingInput {
+                            text: truncate_str(rest.trim(), 30).to_string(),
+                        },
                     });
                 }
                 statements.push(StatementWithLine {
@@ -663,7 +868,7 @@ pub fn parse_program<'a>(input: &'a str) -> Result<Program<'a>, ParseError> {
             Err(e) => {
                 return Err(ParseError::SyntaxError {
                     line: idx + 1,
-                    detail: i18n::syntax_error_detail(e),
+                    kind: extract_syntax_error(e),
                 });
             }
         }
@@ -1326,5 +1531,113 @@ mod tests {
     fn test_reject_weighted_everyone_outside_payee() {
         let result = parse_program("!settleup @everyone*2");
         assert!(matches!(result, Err(ParseError::SyntaxError { .. })));
+    }
+
+    // `to`, `paid`, and Japanese payment keywords are effectively reserved.
+    #[rstest]
+    #[case::to("1000 to")]
+    #[case::paid("1000 paid")]
+    fn test_grammar_keywords_are_reserved_in_implicit_payment(#[case] input: &str) {
+        let result = parse_program(input);
+        assert!(matches!(result, Err(ParseError::SyntaxError { .. })));
+    }
+
+    #[rstest]
+    #[case::ja_payment_missing_amount(
+        "<@123> が <@456> に 立て替えた",
+        Err(ParseError::SyntaxError {
+            line: 1,
+            kind: SyntaxErrorKind::ParseFailure {
+                attempted_form: Some("<PAYER> が <PAYEE> に <AMOUNT> 立て替えた"),
+                expected: ExpectedElement::Amount,
+                near: "立て替えた".to_string(),
+            },
+        })
+    )]
+    #[case::en_payment_missing_amount(
+        "<@123> paid to <@456>",
+        Err(ParseError::SyntaxError {
+            line: 1,
+            kind: SyntaxErrorKind::ParseFailure {
+                attempted_form: Some("<PAYER> paid <AMOUNT> to <PAYEE>"),
+                expected: ExpectedElement::Amount,
+                near: "to <@456>".to_string(),
+            },
+        })
+    )]
+    #[case::implicit_to_missing_payee(
+        "1000 to",
+        Err(ParseError::SyntaxError {
+            line: 1,
+            kind: SyntaxErrorKind::ParseFailure {
+                attempted_form: Some("<AMOUNT> to <PAYEE>"),
+                expected: ExpectedElement::MemberOrGroup,
+                near: String::new(),
+            },
+        })
+    )]
+    #[case::settleup_missing_members(
+        "!settleup",
+        Err(ParseError::SyntaxError {
+            line: 1,
+            kind: SyntaxErrorKind::ParseFailure {
+                attempted_form: Some("!command"),
+                expected: ExpectedElement::MemberOrGroup,
+                near: String::new(),
+            },
+        })
+    )]
+    #[case::trailing_text(
+        "1000 <@123> xyz",
+        Err(ParseError::SyntaxError {
+            line: 1,
+            kind: SyntaxErrorKind::TrailingInput {
+                text: "xyz".to_string(),
+            },
+        })
+    )]
+    #[case::unrecognized_input(
+        "hello world",
+        Err(ParseError::SyntaxError {
+            line: 1,
+            kind: SyntaxErrorKind::ParseFailure {
+                attempted_form: None,
+                expected: ExpectedElement::Unknown,
+                near: "world".to_string(),
+            },
+        })
+    )]
+    #[case::error_on_second_line(
+        "<@1> が <@2> に 1000 立て替えた\nbad line",
+        Err(ParseError::SyntaxError {
+            line: 2,
+            kind: SyntaxErrorKind::ParseFailure {
+                attempted_form: None,
+                expected: ExpectedElement::Unknown,
+                near: "line".to_string(),
+            },
+        })
+    )]
+    fn test_syntax_error_diagnostics(
+        #[case] input: &str,
+        #[case] expected: Result<(), ParseError>,
+    ) {
+        let actual = parse_program(input).map(|_| ());
+        assert_eq!(actual, expected);
+    }
+
+    #[rstest]
+    #[case::to_prefix_in_group_name("1000 tokyo", "tokyo")]
+    #[case::to_hyphenated_group("1000 to-team", "to-team")]
+    fn test_to_prefix_group_names_parse_as_implicit_payment(
+        #[case] input: &str,
+        #[case] expected_group: &str,
+    ) {
+        let program = parse_program(input).expect("should parse as implicit payment");
+        let Statement::Payment(p) = &program.statements[0].statement else {
+            panic!("expected payment");
+        };
+        assert!(p.is_payer_implicit());
+        assert_eq!(p.payee.ops(), &[SetOp::PushGroup(expected_group)]);
     }
 }

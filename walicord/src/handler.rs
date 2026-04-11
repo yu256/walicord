@@ -619,7 +619,7 @@ where
                         e,
                         input.role_visibility_diagnostics,
                         "",
-                    ))
+                    ));
                 }
             };
 
@@ -666,7 +666,7 @@ where
                     e,
                     input.role_visibility_diagnostics,
                     "",
-                ))
+                ));
             }
         };
 
@@ -1050,10 +1050,7 @@ where
         tracing::info!("Connected as {}", ready.user.name);
         self.initialize_enabled_channels(&ctx, &ready).await;
 
-        use serenity::{
-            builder::CreateCommand,
-            model::application::Command,
-        };
+        use serenity::{builder::CreateCommand, model::application::Command};
 
         let commands = vec![
             CreateCommand::new("review").description(walicord_i18n::SLASH_REVIEW_DESCRIPTION),
@@ -2237,12 +2234,7 @@ mod tests {
             let handler = make_handler();
             let cached: Vec<(ArcStr, Option<MemberId>)> =
                 vec![(ArcStr::from("!!! invalid syntax @@@"), Some(MemberId(1)))];
-            let input = query(
-                CacheLoadResult::LoadedNonEmpty,
-                &cached,
-                &[],
-                "variables",
-            );
+            let input = query(CacheLoadResult::LoadedNonEmpty, &cached, &[], "variables");
             let outcome = handler.process_slash_query(&input).await;
             assert!(matches!(outcome, SlashQueryOutcome::Error(_)));
         }
@@ -2252,12 +2244,7 @@ mod tests {
             let handler = make_handler();
             let cached: Vec<(ArcStr, Option<MemberId>)> =
                 vec![(ArcStr::from("<@1> paid 100 to <@2>"), Some(MemberId(1)))];
-            let input = query(
-                CacheLoadResult::LoadedNonEmpty,
-                &cached,
-                &[],
-                "review",
-            );
+            let input = query(CacheLoadResult::LoadedNonEmpty, &cached, &[], "review");
             let outcome = handler.process_slash_query(&input).await;
             match outcome {
                 SlashQueryOutcome::Settlement { result, .. } => {
@@ -2280,12 +2267,7 @@ mod tests {
             let handler = make_handler();
             let cached: Vec<(ArcStr, Option<MemberId>)> =
                 vec![(ArcStr::from("!!! invalid syntax @@@"), Some(MemberId(1)))];
-            let input = query(
-                CacheLoadResult::LoadedNonEmpty,
-                &cached,
-                &[],
-                "review",
-            );
+            let input = query(CacheLoadResult::LoadedNonEmpty, &cached, &[], "review");
             let outcome = handler.process_slash_query(&input).await;
             assert!(matches!(outcome, SlashQueryOutcome::Error(_)));
         }

@@ -32,10 +32,12 @@ pub mod strings {
     pub const WEIGHT_OVERFLOW: &str = "重みの合計がオーバーフローしました";
     pub const ZERO_TOTAL_WEIGHT: &str = "重みの合計が0です";
     pub const RECEIVER_BALANCE: &str = "受取後残高";
+    pub const EXPECTED_AMOUNT: &str = "金額";
+    pub const EXPECTED_MEMBER_OR_GROUP: &str = "メンバーまたはグループ";
+    pub const EXPECTED_INPUT: &str = "入力";
     pub const CHANNEL_NOT_TRACKED: &str = "このチャンネルは walicord で追跡されていません。チャンネルトピックに `#walicord` を追加してください。";
     pub const SLASH_REVIEW_DESCRIPTION: &str = "清算確認 - 現在の残高と提案送金を表示";
     pub const SLASH_VARIABLES_DESCRIPTION: &str = "変数一覧 - 定義されたグループ変数を表示";
-
     pub const SLASH_CACHE_LOAD_FAILED: &str = "チャンネル履歴の読み込みに失敗しました。";
     pub const SLASH_PENDING_NOT_CLEARED: &str =
         "メッセージの処理が完了していません。しばらく待ってから再度お試しください。";
@@ -73,11 +75,13 @@ pub mod strings {
     pub const WEIGHT_OVERFLOW: &str = "Weight sum overflow";
     pub const ZERO_TOTAL_WEIGHT: &str = "Total weight is zero";
     pub const RECEIVER_BALANCE: &str = "Balance After";
+    pub const EXPECTED_AMOUNT: &str = "amount";
+    pub const EXPECTED_MEMBER_OR_GROUP: &str = "member or group";
+    pub const EXPECTED_INPUT: &str = "input";
     pub const CHANNEL_NOT_TRACKED: &str =
         "This channel is not tracked by walicord. Add `#walicord` to the channel topic.";
     pub const SLASH_REVIEW_DESCRIPTION: &str = "Show current balances and proposed settlements";
     pub const SLASH_VARIABLES_DESCRIPTION: &str = "Show defined group variables";
-
     pub const SLASH_CACHE_LOAD_FAILED: &str = "Failed to load channel history.";
     pub const SLASH_PENDING_NOT_CLEARED: &str =
         "Messages are still being processed. Please try again shortly.";
@@ -115,11 +119,13 @@ pub mod strings {
     pub const WEIGHT_OVERFLOW: &str = "Weight sum overflow";
     pub const ZERO_TOTAL_WEIGHT: &str = "Total weight is zero";
     pub const RECEIVER_BALANCE: &str = "Balance After";
+    pub const EXPECTED_AMOUNT: &str = "amount";
+    pub const EXPECTED_MEMBER_OR_GROUP: &str = "member or group";
+    pub const EXPECTED_INPUT: &str = "input";
     pub const CHANNEL_NOT_TRACKED: &str =
         "This channel is not tracked by walicord. Add `#walicord` to the channel topic.";
     pub const SLASH_REVIEW_DESCRIPTION: &str = "Show current balances and proposed settlements";
     pub const SLASH_VARIABLES_DESCRIPTION: &str = "Show defined group variables";
-
     pub const SLASH_CACHE_LOAD_FAILED: &str = "Failed to load channel history.";
     pub const SLASH_PENDING_NOT_CLEARED: &str =
         "Messages are still being processed. Please try again shortly.";
@@ -245,11 +251,6 @@ pub fn role_has_no_visible_members_in_channel(
     });
 }
 
-pub struct SyntaxErrorMessage {
-    line: usize,
-    detail: String,
-}
-
 pub struct ImplicitPayerMissingMessage {
     line: usize,
 }
@@ -257,10 +258,6 @@ pub struct ImplicitPayerMissingMessage {
 pub struct AmountExpressionErrorMessage {
     line: usize,
     detail: String,
-}
-
-pub fn syntax_error(line: usize, detail: String) -> SyntaxErrorMessage {
-    SyntaxErrorMessage { line, detail }
 }
 
 pub fn implicit_payer_missing(line: usize) -> ImplicitPayerMissingMessage {
@@ -271,11 +268,90 @@ pub fn invalid_amount_expression(line: usize, detail: String) -> AmountExpressio
     AmountExpressionErrorMessage { line, detail }
 }
 
-#[cfg(feature = "ja")]
-impl std::fmt::Display for SyntaxErrorMessage {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "構文エラー (行 {}): {}", self.line, self.detail)
-    }
+pub fn syntax_error_with_form<'a>(
+    line: usize,
+    form: &'a str,
+    expected: &'a str,
+    near: &'a str,
+) -> impl std::fmt::Display + use<'a> {
+    #[cfg(feature = "ja")]
+    return std::fmt::from_fn(move |f| {
+        if near.is_empty() {
+            write!(
+                f,
+                "「{form}」として解析中にエラー (行 {line}): {expected}が必要ですが、文が途中で終わっています"
+            )
+        } else {
+            write!(
+                f,
+                "「{form}」として解析中にエラー (行 {line}): {expected}が必要ですが `{near}` が見つかりました"
+            )
+        }
+    });
+    #[cfg(not(feature = "ja"))]
+    return std::fmt::from_fn(move |f| {
+        if near.is_empty() {
+            write!(
+                f,
+                "Expected {expected} while parsing \"{form}\" at line {line}, but the line ended before {expected} was provided"
+            )
+        } else {
+            write!(
+                f,
+                "Expected {expected} while parsing \"{form}\" at line {line}, but found `{near}`"
+            )
+        }
+    });
+}
+
+pub fn syntax_error_unknown<'a>(line: usize, near: &'a str) -> impl std::fmt::Display + use<'a> {
+    #[cfg(feature = "ja")]
+    return std::fmt::from_fn(move |f| {
+        if near.is_empty() {
+            write!(f, "入力を認識できません (行 {line})")
+        } else {
+            write!(f, "`{near}` を認識できません (行 {line})")
+        }
+    });
+    #[cfg(not(feature = "ja"))]
+    return std::fmt::from_fn(move |f| {
+        if near.is_empty() {
+            write!(f, "Unrecognized input at line {line}")
+        } else {
+            write!(f, "Unrecognized input `{near}` at line {line}")
+        }
+    });
+}
+
+pub fn syntax_error_trailing<'a>(line: usize, text: &'a str) -> impl std::fmt::Display + use<'a> {
+    #[cfg(feature = "ja")]
+    return std::fmt::from_fn(move |f| {
+        write!(
+            f,
+            "文の末尾に不要なテキストがあります (行 {line}): `{text}`"
+        )
+    });
+    #[cfg(not(feature = "ja"))]
+    return std::fmt::from_fn(move |f| {
+        write!(
+            f,
+            "Unexpected text after end of statement at line {line}: `{text}`"
+        )
+    });
+}
+
+pub fn weighted_reference_outside_payee(line: usize) -> impl std::fmt::Display {
+    #[cfg(feature = "ja")]
+    return std::fmt::from_fn(move |f| {
+        write!(f, "重み付き参照は支払先でのみ使用できます (行 {line})")
+    });
+    #[cfg(not(feature = "ja"))]
+    return std::fmt::from_fn(move |f| {
+        write!(
+            f,
+            "Weighted references are only allowed in payment payee (line {line})"
+        )
+    });
 }
 
 #[cfg(feature = "ja")]
@@ -293,13 +369,6 @@ impl std::fmt::Display for ImplicitPayerMissingMessage {
 impl std::fmt::Display for AmountExpressionErrorMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "金額の式が不正です (行 {}): {}", self.line, self.detail)
-    }
-}
-
-#[cfg(feature = "en")]
-impl std::fmt::Display for SyntaxErrorMessage {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Syntax error at line {}: {}", self.line, self.detail)
     }
 }
 
@@ -322,13 +391,6 @@ impl std::fmt::Display for ImplicitPayerMissingMessage {
             "Payer is missing at line {}. Use explicit payer syntax, for example `Alice paid 1000 to Bob`.",
             self.line
         )
-    }
-}
-
-#[cfg(not(any(feature = "ja", feature = "en")))]
-impl std::fmt::Display for SyntaxErrorMessage {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Syntax error at line {}: {}", self.line, self.detail)
     }
 }
 

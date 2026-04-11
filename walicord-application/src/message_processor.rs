@@ -1,5 +1,5 @@
 use crate::{
-    BalanceCalculationError, SettlementOptimizationError,
+    BalanceCalculationError, SettlementOptimizationError, SyntaxErrorKind,
     error::ProgramParseError,
     model::{
         Command, PersonBalance, Script, ScriptStatement, ScriptStatementWithLine, SettleUpContext,
@@ -38,10 +38,11 @@ pub enum ProcessingOutcome<'a> {
     UndefinedGroup { name: Cow<'a, str>, line: usize },
     UndefinedRole { id: u64, line: usize },
     UndefinedMember { id: u64, line: usize },
-    SyntaxError { line: usize, detail: String },
+    SyntaxError { line: usize, kind: SyntaxErrorKind },
     MissingContextForImplicitAuthor { line: usize },
     InvalidAmountExpression { line: usize, detail: String },
     AllZeroWeights { line: usize },
+    WeightedReferenceOutsidePayee { line: usize },
 }
 
 impl<'a> ProcessingOutcome<'a> {
@@ -61,8 +62,8 @@ impl<'a> ProcessingOutcome<'a> {
             ProcessingOutcome::UndefinedMember { id, line } => {
                 Err(ProgramParseError::UndefinedMember { id, line })
             }
-            ProcessingOutcome::SyntaxError { line, detail } => {
-                Err(ProgramParseError::SyntaxError { line, detail })
+            ProcessingOutcome::SyntaxError { line, kind } => {
+                Err(ProgramParseError::SyntaxError { line, kind })
             }
             ProcessingOutcome::MissingContextForImplicitAuthor { line } => {
                 Err(ProgramParseError::MissingContextForImplicitAuthor { line })
@@ -72,6 +73,9 @@ impl<'a> ProcessingOutcome<'a> {
             }
             ProcessingOutcome::AllZeroWeights { line } => {
                 Err(ProgramParseError::AllZeroWeights { line })
+            }
+            ProcessingOutcome::WeightedReferenceOutsidePayee { line } => {
+                Err(ProgramParseError::WeightedReferenceOutsidePayee { line })
             }
         }
     }
@@ -535,9 +539,9 @@ impl<'a> MessageProcessor<'a> {
                 id,
                 line: line + offset,
             },
-            ProgramParseError::SyntaxError { line, detail } => ProcessingOutcome::SyntaxError {
+            ProgramParseError::SyntaxError { line, kind } => ProcessingOutcome::SyntaxError {
                 line: line + offset,
-                detail,
+                kind,
             },
             ProgramParseError::MissingContextForImplicitAuthor { line } => {
                 ProcessingOutcome::MissingContextForImplicitAuthor {
@@ -553,6 +557,11 @@ impl<'a> MessageProcessor<'a> {
             ProgramParseError::AllZeroWeights { line } => ProcessingOutcome::AllZeroWeights {
                 line: line + offset,
             },
+            ProgramParseError::WeightedReferenceOutsidePayee { line } => {
+                ProcessingOutcome::WeightedReferenceOutsidePayee {
+                    line: line + offset,
+                }
+            }
         }
     }
 }
@@ -561,6 +570,7 @@ impl<'a> MessageProcessor<'a> {
 mod tests {
     use super::*;
     use crate::{
+        ExpectedElement, SyntaxErrorKind,
         error::{BalanceCalculationError, SettlementOptimizationError},
         ports::{ProgramParser, SettlementOptimizer},
     };
@@ -700,7 +710,11 @@ mod tests {
             if content.contains("SYNTAX") {
                 return Err(ProgramParseError::SyntaxError {
                     line: 1,
-                    detail: "Syntax error - stub".to_string(),
+                    kind: SyntaxErrorKind::ParseFailure {
+                        attempted_form: None,
+                        expected: ExpectedElement::Unknown,
+                        near: "stub".to_string(),
+                    },
                 });
             }
             if content.contains("IMPLICIT") {
@@ -1396,7 +1410,7 @@ mod tests {
         "SYNTAX",
         Err(ProgramParseError::SyntaxError {
             line: 3,
-            detail: "Syntax error - stub".to_string(),
+            kind: SyntaxErrorKind::ParseFailure { attempted_form: None, expected: ExpectedElement::Unknown, near: "stub".to_string() },
         })
     )]
     #[case::syntax_with_trailing_newline(
@@ -1404,7 +1418,7 @@ mod tests {
         "SYNTAX",
         Err(ProgramParseError::SyntaxError {
             line: 4,
-            detail: "Syntax error - stub".to_string(),
+            kind: SyntaxErrorKind::ParseFailure { attempted_form: None, expected: ExpectedElement::Unknown, near: "stub".to_string() },
         })
     )]
     #[case::implicit_without_trailing_newline(

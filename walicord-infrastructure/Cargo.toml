@@ -15,5 +15,5 @@ rstest = "0.26.1"
 
 [features]
 default = ["ja"]
-ja = ["walicord-parser/ja"]
-en = ["walicord-parser/en"]
+ja = []
+en = []
