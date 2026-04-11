@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.5.0](https://github.com/yu256/walicord/compare/walicord-v2.4.0...walicord-v2.5.0) (2026-04-11)
+
+
+### Features
+
+* add structured syntax error diagnostics with context-aware parsing ([#87](https://github.com/yu256/walicord/issues/87)) ([2adb830](https://github.com/yu256/walicord/commit/2adb8307774e5aca5d216dcd83212fed59e4687d))
+
 ## [2.4.0](https://github.com/yu256/walicord/compare/walicord-v2.3.1...walicord-v2.4.0) (2026-04-09)
 
 
