@@ -65,6 +65,9 @@ impl<'a> Script<'a> {
 #[derive(Debug)]
 pub struct SettleUpContext {
     pub settle_members: Vec<MemberId>,
+    /// Confirmed transfers already applied to `SettlementResult::balances` via
+    /// `SettleUpPolicy::settle()`. The presentation layer assumes balances
+    /// reflect these transfers (e.g. settle members have zero balance).
     pub immediate_transfers: Vec<Transfer>,
 }
 

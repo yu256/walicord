@@ -55,6 +55,26 @@ enum ProgramCommandEffect {
     RunSettlement { stmt_index: usize },
 }
 
+#[derive(Debug)]
+enum SlashQueryOutcome {
+    Error(String),
+    Text(String),
+    Settlement {
+        result: walicord_application::SettlementResult,
+        warning: String,
+    },
+}
+
+struct SlashQueryInput<'a> {
+    cache_load_result: CacheLoadResult,
+    pending_after_rebuild: bool,
+    cached_contents: &'a [(ArcStr, Option<MemberId>)],
+    member_ids: &'a [MemberId],
+    role_members: &'a RoleMembers,
+    role_visibility_diagnostics: &'a RoleVisibilityDiagnostics,
+    command_name: &'a str,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ChannelFlagAction {
     Track,
@@ -570,6 +590,289 @@ where
             ProcessProgramMessageResult::Skip
         }
     }
+
+    /// Process a slash command query. Separated from Discord IO for testability.
+    /// Takes already-loaded cached contents so all parsing and computation
+    /// happens here, making error paths testable.
+    async fn process_slash_query(&self, input: &SlashQueryInput<'_>) -> SlashQueryOutcome {
+        if should_abort_rebuild_after_cache_load(input.cache_load_result) {
+            return SlashQueryOutcome::Error(walicord_i18n::SLASH_CACHE_LOAD_FAILED.into());
+        }
+
+        if input.pending_after_rebuild {
+            return SlashQueryOutcome::Error(walicord_i18n::SLASH_PENDING_NOT_CLEARED.into());
+        }
+
+        if input.command_name == "variables" {
+            let script = match self
+                .processor
+                .parse_program_sequence(
+                    input.member_ids,
+                    input.role_members,
+                    input.cached_contents.iter().map(|(c, a)| (c.as_ref(), *a)),
+                )
+                .into_result()
+            {
+                Ok(s) => s,
+                Err(e) => {
+                    return SlashQueryOutcome::Error(format_program_parse_error_reply(
+                        e,
+                        input.role_visibility_diagnostics,
+                        "",
+                    ));
+                }
+            };
+
+            let mut text = VariablesPresenter::render_with_members(&script, input.member_ids);
+            if text.is_empty() {
+                return SlashQueryOutcome::Text(walicord_i18n::SLASH_NO_VARIABLES.into());
+            }
+            let warning_lines = command_warning_lines_for_prefix(
+                &script,
+                script.statements().len() - 1,
+                input.role_visibility_diagnostics,
+            );
+            if !warning_lines.is_empty() {
+                text.push_str("\n\n");
+                text.push_str(&warning_lines.join("\n"));
+            }
+            return SlashQueryOutcome::Text(text);
+        }
+
+        // Synthesize a message-style command so it goes through the same
+        // parser → SettleUpPolicy::settle() pipeline as message-based commands.
+        let synthetic_command = match input.command_name {
+            "review" => "!review".to_string(),
+            _ => return SlashQueryOutcome::Error("Unknown command.".into()),
+        };
+
+        let synthetic_content = ArcStr::from(synthetic_command);
+        let script = match self
+            .processor
+            .parse_program_sequence(
+                input.member_ids,
+                input.role_members,
+                input
+                    .cached_contents
+                    .iter()
+                    .map(|(c, a)| (c.as_ref(), *a))
+                    .chain(std::iter::once((synthetic_content.as_ref(), None))),
+            )
+            .into_result()
+        {
+            Ok(s) => s,
+            Err(e) => {
+                return SlashQueryOutcome::Error(format_program_parse_error_reply(
+                    e,
+                    input.role_visibility_diagnostics,
+                    "",
+                ));
+            }
+        };
+
+        // Append role visibility warnings (same as message-based flow).
+        let warnings = warnings_for_program_prefix(
+            &script,
+            script.statements().len() - 1,
+            input.role_visibility_diagnostics,
+        );
+        let warning_text = if warnings.is_empty() {
+            String::new()
+        } else {
+            role_visibility_feedback::format_warning_lines(&warnings).join("\n")
+        };
+
+        match self.processor.build_settlement_result(&script).await {
+            Ok(result) => SlashQueryOutcome::Settlement {
+                result,
+                warning: warning_text,
+            },
+            Err(e) => SlashQueryOutcome::Error(crate::settlement::format_settlement_error(e)),
+        }
+    }
+
+    async fn handle_slash_command(
+        &self,
+        ctx: &Context,
+        command: &serenity::model::application::CommandInteraction,
+    ) {
+        use serenity::builder::{
+            CreateAttachment, CreateInteractionResponse, CreateInteractionResponseFollowup,
+            CreateInteractionResponseMessage,
+        };
+
+        let Some(tracked_id) = self.channel_manager.get_tracked(command.channel_id) else {
+            let _ = command
+                .create_response(
+                    &ctx.http,
+                    CreateInteractionResponse::Message(
+                        CreateInteractionResponseMessage::new()
+                            .content(walicord_i18n::CHANNEL_NOT_TRACKED)
+                            .ephemeral(true),
+                    ),
+                )
+                .await;
+            return;
+        };
+
+        // Defer immediately: Discord invalidates the interaction token after 3 seconds,
+        // and cache/roster loading below can exceed that on cold starts.
+        let _ = command
+            .create_response(
+                &ctx.http,
+                CreateInteractionResponse::Defer(CreateInteractionResponseMessage::new()),
+            )
+            .await;
+
+        // Flush pending messages before serving the query, mirroring the
+        // message-path guard so we never compute against stale history.
+        let mut pending_after_rebuild = false;
+        if self.has_pending_messages(tracked_id) {
+            self.rebuild_channel_cache(ctx, command.channel_id, None)
+                .await;
+            pending_after_rebuild = self.has_pending_messages(tracked_id);
+        }
+
+        let cache_load_result = self.ensure_cache_loaded(ctx, command.channel_id).await;
+
+        let roster = match self
+            .roster_provider
+            .roster_for_channel(ctx, command.channel_id)
+            .await
+        {
+            Ok(snapshot) => snapshot,
+            Err(e) => {
+                tracing::warn!(
+                    "Slash command: failed to fetch roster for {}: {:?}",
+                    command.channel_id,
+                    e
+                );
+                let _ = command
+                    .create_followup(
+                        &ctx.http,
+                        CreateInteractionResponseFollowup::new()
+                            .content(walicord_i18n::SLASH_ROSTER_LOAD_FAILED),
+                    )
+                    .await;
+                return;
+            }
+        };
+
+        // Re-check for pending messages right before snapshotting the cache.
+        // A concurrent message handler may have inserted new pending entries
+        // during the cache/roster loading window above.
+        if self.has_pending_messages(tracked_id) {
+            let _ = command
+                .create_followup(
+                    &ctx.http,
+                    CreateInteractionResponseFollowup::new()
+                        .content(walicord_i18n::SLASH_PENDING_NOT_CLEARED),
+                )
+                .await;
+            return;
+        }
+
+        let cached_contents: Vec<(ArcStr, Option<MemberId>)> = self
+            .message_cache
+            .with_messages(tracked_id, |messages| {
+                messages
+                    .iter()
+                    .filter(|(_, m)| {
+                        !m.is_bot && !m.is_marked_invalid() && !m.is_pending_evaluation()
+                    })
+                    .map(|(_, m)| (m.content.clone(), Some(MemberId(m.author_id.get()))))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let command_name = command.data.name.as_str();
+
+        let outcome = self
+            .process_slash_query(&SlashQueryInput {
+                cache_load_result,
+                pending_after_rebuild,
+                cached_contents: &cached_contents,
+                member_ids: &roster.member_ids,
+                role_members: &roster.role_members,
+                role_visibility_diagnostics: &roster.role_visibility_diagnostics,
+                command_name,
+            })
+            .await;
+
+        match outcome {
+            SlashQueryOutcome::Error(msg) => {
+                let _ = command
+                    .create_followup(
+                        &ctx.http,
+                        CreateInteractionResponseFollowup::new().content(msg),
+                    )
+                    .await;
+            }
+            SlashQueryOutcome::Text(content) => {
+                let _ = command
+                    .create_followup(
+                        &ctx.http,
+                        CreateInteractionResponseFollowup::new().content(content),
+                    )
+                    .await;
+            }
+            SlashQueryOutcome::Settlement { result, warning } => {
+                if !warning.is_empty() {
+                    let _ = command
+                        .create_followup(
+                            &ctx.http,
+                            CreateInteractionResponseFollowup::new().content(warning),
+                        )
+                        .await;
+                }
+
+                let settlement_service: SettlementService<'_, RP> =
+                    SettlementService::new(&self.processor, &self.roster_provider);
+                let mut member_directory: Option<HashMap<MemberId, smol_str::SmolStr>> = None;
+
+                match settlement_service
+                    .render_settlement_view(
+                        ctx,
+                        command.channel_id,
+                        Ok(result),
+                        &mut member_directory,
+                    )
+                    .await
+                {
+                    Ok(view) => {
+                        if let Some(png) =
+                            crate::discord::svg_renderer::svg_to_png(&view.combined_svg)
+                        {
+                            let _ = command
+                                .create_followup(
+                                    &ctx.http,
+                                    CreateInteractionResponseFollowup::new()
+                                        .add_file(CreateAttachment::bytes(png, "settlement.png")),
+                                )
+                                .await;
+                        } else {
+                            tracing::error!("Failed to render settlement SVG to PNG");
+                            let _ = command
+                                .create_followup(
+                                    &ctx.http,
+                                    CreateInteractionResponseFollowup::new()
+                                        .content(walicord_i18n::SLASH_RENDER_FAILED),
+                                )
+                                .await;
+                        }
+                    }
+                    Err(error_content) => {
+                        let _ = command
+                            .create_followup(
+                                &ctx.http,
+                                CreateInteractionResponseFollowup::new().content(error_content),
+                            )
+                            .await;
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Plan for rebuilding channel cache
@@ -746,6 +1049,27 @@ where
     async fn ready(&self, ctx: Context, ready: Ready) {
         tracing::info!("Connected as {}", ready.user.name);
         self.initialize_enabled_channels(&ctx, &ready).await;
+
+        use serenity::{builder::CreateCommand, model::application::Command};
+
+        let commands = vec![
+            CreateCommand::new("review").description(walicord_i18n::SLASH_REVIEW_DESCRIPTION),
+            CreateCommand::new("variables").description(walicord_i18n::SLASH_VARIABLES_DESCRIPTION),
+        ];
+
+        if let Err(e) = Command::set_global_commands(&ctx.http, commands).await {
+            tracing::error!("Failed to register slash commands: {:?}", e);
+        }
+    }
+
+    async fn interaction_create(
+        &self,
+        ctx: Context,
+        interaction: serenity::model::application::Interaction,
+    ) {
+        if let serenity::model::application::Interaction::Command(ref command) = interaction {
+            self.handle_slash_command(&ctx, command).await;
+        }
     }
 
     async fn channel_update(&self, ctx: Context, old: Option<GuildChannel>, new: GuildChannel) {
@@ -1823,5 +2147,129 @@ mod tests {
             ProgramCommandEffect::RunSettlement { stmt_index: 1 },
         ];
         assert_eq!(actual, expected);
+    }
+
+    mod process_slash_query_tests {
+        use super::*;
+
+        fn make_handler() -> BotHandler<'static, MockChannelService, MockRosterProvider> {
+            let message_cache = MessageCache::new();
+            let channel_service = MockChannelService::new();
+            let roster_provider = MockRosterProvider::new();
+            let processor = make_processor();
+            let channel_manager = ChannelManager::new();
+            BotHandler::new(
+                message_cache,
+                channel_service,
+                roster_provider,
+                processor,
+                channel_manager,
+            )
+        }
+
+        fn query<'a>(
+            cache_load_result: CacheLoadResult,
+            cached_contents: &'a [(ArcStr, Option<MemberId>)],
+            member_ids: &'a [MemberId],
+            command_name: &'a str,
+        ) -> SlashQueryInput<'a> {
+            static EMPTY_DIAGNOSTICS: std::sync::OnceLock<RoleVisibilityDiagnostics> =
+                std::sync::OnceLock::new();
+            SlashQueryInput {
+                cache_load_result,
+                pending_after_rebuild: false,
+                cached_contents,
+                member_ids,
+                role_members: empty_roles(),
+                role_visibility_diagnostics: EMPTY_DIAGNOSTICS
+                    .get_or_init(RoleVisibilityDiagnostics::default),
+                command_name,
+            }
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn cache_load_failure_returns_error() {
+            let handler = make_handler();
+            let input = query(CacheLoadResult::Failed, &[], &[], "review");
+            let outcome = handler.process_slash_query(&input).await;
+            assert!(matches!(outcome, SlashQueryOutcome::Error(_)));
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn variables_with_empty_cache_returns_no_variables_text() {
+            let handler = make_handler();
+            let input = query(CacheLoadResult::LoadedEmpty, &[], &[], "variables");
+            let outcome = handler.process_slash_query(&input).await;
+            match outcome {
+                SlashQueryOutcome::Text(text) => {
+                    assert_eq!(text, walicord_i18n::SLASH_NO_VARIABLES);
+                }
+                other => panic!("expected Text, got {other:?}"),
+            }
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn variables_with_declarations_returns_rendered_text() {
+            let handler = make_handler();
+            let cached: Vec<(ArcStr, Option<MemberId>)> =
+                vec![(ArcStr::from("team := <@1> <@2>"), Some(MemberId(1)))];
+            let members = [MemberId(1), MemberId(2)];
+            let input = query(
+                CacheLoadResult::LoadedNonEmpty,
+                &cached,
+                &members,
+                "variables",
+            );
+            let outcome = handler.process_slash_query(&input).await;
+            match outcome {
+                SlashQueryOutcome::Text(text) => {
+                    assert!(text.contains("team"), "should contain group name");
+                }
+                other => panic!("expected Text, got {other:?}"),
+            }
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn cached_parse_failure_returns_error() {
+            let handler = make_handler();
+            let cached: Vec<(ArcStr, Option<MemberId>)> =
+                vec![(ArcStr::from("!!! invalid syntax @@@"), Some(MemberId(1)))];
+            let input = query(CacheLoadResult::LoadedNonEmpty, &cached, &[], "variables");
+            let outcome = handler.process_slash_query(&input).await;
+            assert!(matches!(outcome, SlashQueryOutcome::Error(_)));
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn review_returns_settlement() {
+            let handler = make_handler();
+            let cached: Vec<(ArcStr, Option<MemberId>)> =
+                vec![(ArcStr::from("<@1> paid 100 to <@2>"), Some(MemberId(1)))];
+            let input = query(CacheLoadResult::LoadedNonEmpty, &cached, &[], "review");
+            let outcome = handler.process_slash_query(&input).await;
+            match outcome {
+                SlashQueryOutcome::Settlement { result, .. } => {
+                    assert!(result.settle_up.is_none(), "review has no settle_up");
+                }
+                other => panic!("expected Settlement, got {other:?}"),
+            }
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn unknown_command_returns_error() {
+            let handler = make_handler();
+            let input = query(CacheLoadResult::LoadedEmpty, &[], &[], "unknown");
+            let outcome = handler.process_slash_query(&input).await;
+            assert!(matches!(outcome, SlashQueryOutcome::Error(_)));
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn cached_parse_failure_on_settlement_path_returns_error() {
+            let handler = make_handler();
+            let cached: Vec<(ArcStr, Option<MemberId>)> =
+                vec![(ArcStr::from("!!! invalid syntax @@@"), Some(MemberId(1)))];
+            let input = query(CacheLoadResult::LoadedNonEmpty, &cached, &[], "review");
+            let outcome = handler.process_slash_query(&input).await;
+            assert!(matches!(outcome, SlashQueryOutcome::Error(_)));
+        }
     }
 }

@@ -54,13 +54,15 @@ Rustの開発環境がある場合の手順です。
 ### ボットの招待
 
 1. 左メニューの**OAuth2 > URL Generator**を選択します。
-2. **Scopes**で`bot`にチェックを入れます。
+2. **Scopes**で`bot`と`applications.commands`にチェックを入れます。
 3. **Bot Permissions**で以下の権限にチェックを入れます：
    - `Read Message History`
    - `Send Messages`
    - `Add Reactions`
    - `Attach Files` (画像送信に必要)
 4. 生成されたURLをブラウザで開き、ボットをあなたのサーバーに招待します。
+
+> **注意**: 既にボットを招待済みの場合でも、スラッシュコマンドを使用するには `applications.commands` スコープを含む新しいURLで再招待が必要です。サーバーから追放する必要はなく、上書きで追加されます。
 
 ## 環境設定
 

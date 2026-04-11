@@ -8,7 +8,7 @@ use serenity::{
 use std::{collections::HashMap, fmt::Debug};
 use walicord_application::{
     Command as ProgramCommand, FailureKind, MessageProcessor, ProgramParseError, ScriptStatement,
-    SettlementOptimizationError,
+    SettlementOptimizationError, SettlementResult,
 };
 use walicord_domain::model::{MemberId, RoleMembers};
 use walicord_presentation::{SettlementPresenter, SettlementView};
@@ -82,7 +82,7 @@ where
         }
     }
 
-    fn member_ids(
+    pub fn member_ids(
         result: &walicord_application::SettlementResult,
     ) -> impl Iterator<Item = MemberId> + '_ {
         let balances = result.balances.iter().map(|balance| balance.id);
@@ -232,39 +232,50 @@ where
         _member_ids: &[MemberId],
         member_directory: &mut Option<HashMap<MemberId, smol_str::SmolStr>>,
     ) {
-        match self
+        let result = self
             .processor
             .build_settlement_result_for_prefix(program, stmt_index)
+            .await;
+        match self
+            .render_settlement_view(ctx, msg.channel_id, result, member_directory)
             .await
         {
+            Ok(view) => self.reply_with_settlement(ctx, msg, view).await,
+            Err(content) => self.reply(ctx, msg, content).await,
+        }
+    }
+
+    /// Resolve member names and render a settlement result to SVG.
+    pub async fn render_settlement_view(
+        &self,
+        ctx: &Context,
+        channel_id: serenity::model::id::ChannelId,
+        result: Result<SettlementResult, SettlementOptimizationError>,
+        member_directory: &mut Option<HashMap<MemberId, smol_str::SmolStr>>,
+    ) -> Result<SettlementView, String> {
+        match result {
             Ok(result) => {
                 let ids: Vec<MemberId> = Self::member_ids(&result).collect();
                 let directory = match self
-                    .ensure_member_directory(
-                        ctx,
-                        msg.channel_id,
-                        ids.iter().copied(),
-                        member_directory,
-                    )
+                    .ensure_member_directory(ctx, channel_id, ids.iter().copied(), member_directory)
                     .await
                 {
                     Ok(directory) => directory,
                     Err(e) => {
                         tracing::warn!(
                             "Failed to fetch member directory for channel {} ({} member IDs): {:?}",
-                            msg.channel_id,
+                            channel_id,
                             ids.len(),
                             e
                         );
                         member_directory.get_or_insert_with(HashMap::new)
                     }
                 };
-                let view = SettlementPresenter::render_with_members(&result, directory);
-                self.reply_with_settlement(ctx, msg, view).await;
+                Ok(SettlementPresenter::render_with_members(&result, directory))
             }
             Err(err) => {
                 self.log_settlement_error(&err);
-                self.reply(ctx, msg, format_settlement_error(err)).await;
+                Err(format_settlement_error(err))
             }
         }
     }
