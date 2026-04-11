@@ -279,12 +279,12 @@ pub fn syntax_error_with_form<'a>(
         if near.is_empty() {
             write!(
                 f,
-                "「{form}」として解析中にエラー (行 {line}): 入力の末尾に{expected}が必要です"
+                "「{form}」として解析中にエラー (行 {line}): {expected}が必要ですが、文が途中で終わっています"
             )
         } else {
             write!(
                 f,
-                "「{form}」として解析中にエラー (行 {line}): \"{near}\" 付近に{expected}が必要です"
+                "「{form}」として解析中にエラー (行 {line}): {expected}が必要ですが `{near}` が見つかりました"
             )
         }
     });
@@ -293,12 +293,12 @@ pub fn syntax_error_with_form<'a>(
         if near.is_empty() {
             write!(
                 f,
-                "Expected {expected} while parsing \"{form}\" at line {line}, end of input"
+                "Expected {expected} while parsing \"{form}\" at line {line}, but the line ended before {expected} was provided"
             )
         } else {
             write!(
                 f,
-                "Expected {expected} while parsing \"{form}\" at line {line}, near \"{near}\""
+                "Expected {expected} while parsing \"{form}\" at line {line}, but found `{near}`"
             )
         }
     });
@@ -310,7 +310,7 @@ pub fn syntax_error_unknown<'a>(line: usize, near: &'a str) -> impl std::fmt::Di
         if near.is_empty() {
             write!(f, "入力を認識できません (行 {line})")
         } else {
-            write!(f, "入力を認識できません (行 {line}): \"{near}\"")
+            write!(f, "`{near}` を認識できません (行 {line})")
         }
     });
     #[cfg(not(feature = "ja"))]
@@ -318,7 +318,7 @@ pub fn syntax_error_unknown<'a>(line: usize, near: &'a str) -> impl std::fmt::Di
         if near.is_empty() {
             write!(f, "Unrecognized input at line {line}")
         } else {
-            write!(f, "Unrecognized input at line {line}: \"{near}\"")
+            write!(f, "Unrecognized input `{near}` at line {line}")
         }
     });
 }
@@ -328,14 +328,14 @@ pub fn syntax_error_trailing<'a>(line: usize, text: &'a str) -> impl std::fmt::D
     return std::fmt::from_fn(move |f| {
         write!(
             f,
-            "文の末尾に不要なテキストがあります (行 {line}): \"{text}\""
+            "文の末尾に不要なテキストがあります (行 {line}): `{text}`"
         )
     });
     #[cfg(not(feature = "ja"))]
     return std::fmt::from_fn(move |f| {
         write!(
             f,
-            "Unexpected text after end of statement at line {line}: \"{text}\""
+            "Unexpected text after end of statement at line {line}: `{text}`"
         )
     });
 }
