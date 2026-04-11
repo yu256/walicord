@@ -1,5 +1,5 @@
 use crate::{
-    BalanceCalculationError, SettlementOptimizationError,
+    BalanceCalculationError, SettlementOptimizationError, SyntaxErrorKind,
     error::ProgramParseError,
     model::{
         Command, PersonBalance, Script, ScriptStatement, ScriptStatementWithLine, SettleUpContext,
@@ -34,39 +34,15 @@ pub struct MessageProcessor<'a> {
 
 pub enum ProcessingOutcome<'a> {
     Success(Script<'a>),
-    FailedToEvaluateGroup {
-        name: Cow<'a, str>,
-        line: usize,
-    },
-    UndefinedGroup {
-        name: Cow<'a, str>,
-        line: usize,
-    },
-    UndefinedRole {
-        id: u64,
-        line: usize,
-    },
-    UndefinedMember {
-        id: u64,
-        line: usize,
-    },
-    SyntaxError {
-        line: usize,
-        kind: crate::error::SyntaxErrorKind,
-    },
-    MissingContextForImplicitAuthor {
-        line: usize,
-    },
-    InvalidAmountExpression {
-        line: usize,
-        detail: String,
-    },
-    AllZeroWeights {
-        line: usize,
-    },
-    WeightedReferenceOutsidePayee {
-        line: usize,
-    },
+    FailedToEvaluateGroup { name: Cow<'a, str>, line: usize },
+    UndefinedGroup { name: Cow<'a, str>, line: usize },
+    UndefinedRole { id: u64, line: usize },
+    UndefinedMember { id: u64, line: usize },
+    SyntaxError { line: usize, kind: SyntaxErrorKind },
+    MissingContextForImplicitAuthor { line: usize },
+    InvalidAmountExpression { line: usize, detail: String },
+    AllZeroWeights { line: usize },
+    WeightedReferenceOutsidePayee { line: usize },
 }
 
 impl<'a> ProcessingOutcome<'a> {
@@ -594,6 +570,7 @@ impl<'a> MessageProcessor<'a> {
 mod tests {
     use super::*;
     use crate::{
+        ExpectedElement, SyntaxErrorKind,
         error::{BalanceCalculationError, SettlementOptimizationError},
         ports::{ProgramParser, SettlementOptimizer},
     };
@@ -733,9 +710,9 @@ mod tests {
             if content.contains("SYNTAX") {
                 return Err(ProgramParseError::SyntaxError {
                     line: 1,
-                    kind: crate::SyntaxErrorKind::ParseFailure {
+                    kind: SyntaxErrorKind::ParseFailure {
                         attempted_form: None,
-                        expected: crate::ExpectedElement::Unknown,
+                        expected: ExpectedElement::Unknown,
                         near: "stub".to_string(),
                     },
                 });
@@ -1433,7 +1410,7 @@ mod tests {
         "SYNTAX",
         Err(ProgramParseError::SyntaxError {
             line: 3,
-            kind: crate::SyntaxErrorKind::ParseFailure { attempted_form: None, expected: crate::ExpectedElement::Unknown, near: "stub".to_string() },
+            kind: SyntaxErrorKind::ParseFailure { attempted_form: None, expected: ExpectedElement::Unknown, near: "stub".to_string() },
         })
     )]
     #[case::syntax_with_trailing_newline(
@@ -1441,7 +1418,7 @@ mod tests {
         "SYNTAX",
         Err(ProgramParseError::SyntaxError {
             line: 4,
-            kind: crate::SyntaxErrorKind::ParseFailure { attempted_form: None, expected: crate::ExpectedElement::Unknown, near: "stub".to_string() },
+            kind: SyntaxErrorKind::ParseFailure { attempted_form: None, expected: ExpectedElement::Unknown, near: "stub".to_string() },
         })
     )]
     #[case::implicit_without_trailing_newline(
