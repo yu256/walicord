@@ -1,4 +1,12 @@
-use walicord_application::ProgramParseError;
+use walicord_application::{ExpectedElement, ProgramParseError, SyntaxErrorKind};
+
+fn expected_element_label(element: &ExpectedElement) -> &'static str {
+    match element {
+        ExpectedElement::Amount => walicord_i18n::EXPECTED_AMOUNT,
+        ExpectedElement::MemberOrGroup => walicord_i18n::EXPECTED_MEMBER_OR_GROUP,
+        ExpectedElement::Unknown => walicord_i18n::EXPECTED_INPUT,
+    }
+}
 
 pub fn format_program_parse_error(
     error: ProgramParseError<'_>,
@@ -29,9 +37,39 @@ pub fn format_program_parse_error(
                 walicord_i18n::undefined_member(id)
             )
         }
-        ProgramParseError::SyntaxError { line, detail } => {
-            format!("{mention} {}", walicord_i18n::syntax_error(line, detail))
-        }
+        ProgramParseError::SyntaxError { line, kind } => match &kind {
+            SyntaxErrorKind::ParseFailure {
+                attempted_form: Some(form),
+                expected,
+                near,
+            } => {
+                format!(
+                    "{mention} {}",
+                    walicord_i18n::syntax_error_with_form(
+                        line,
+                        form,
+                        expected_element_label(expected),
+                        near,
+                    )
+                )
+            }
+            SyntaxErrorKind::ParseFailure {
+                attempted_form: None,
+                near,
+                ..
+            } => {
+                format!(
+                    "{mention} {}",
+                    walicord_i18n::syntax_error_unknown(line, near)
+                )
+            }
+            SyntaxErrorKind::TrailingInput { text } => {
+                format!(
+                    "{mention} {}",
+                    walicord_i18n::syntax_error_trailing(line, text)
+                )
+            }
+        },
         ProgramParseError::MissingContextForImplicitAuthor { line } => {
             format!("{mention} {}", walicord_i18n::implicit_payer_missing(line))
         }
@@ -47,6 +85,12 @@ pub fn format_program_parse_error(
                 walicord_i18n::all_zero_weights()
             )
         }
+        ProgramParseError::WeightedReferenceOutsidePayee { line } => {
+            format!(
+                "{mention} {}",
+                walicord_i18n::weighted_reference_outside_payee(line)
+            )
+        }
     }
 }
 
@@ -58,14 +102,15 @@ mod tests {
 
     fn get_line_number(error: &ProgramParseError<'_>) -> usize {
         match error {
-            ProgramParseError::FailedToEvaluateGroup { line, .. } => *line,
-            ProgramParseError::UndefinedGroup { line, .. } => *line,
-            ProgramParseError::UndefinedRole { line, .. } => *line,
-            ProgramParseError::UndefinedMember { line, .. } => *line,
-            ProgramParseError::SyntaxError { line, .. } => *line,
-            ProgramParseError::MissingContextForImplicitAuthor { line } => *line,
-            ProgramParseError::InvalidAmountExpression { line, .. } => *line,
-            ProgramParseError::AllZeroWeights { line } => *line,
+            ProgramParseError::FailedToEvaluateGroup { line, .. }
+            | ProgramParseError::UndefinedGroup { line, .. }
+            | ProgramParseError::UndefinedRole { line, .. }
+            | ProgramParseError::UndefinedMember { line, .. }
+            | ProgramParseError::SyntaxError { line, .. }
+            | ProgramParseError::MissingContextForImplicitAuthor { line }
+            | ProgramParseError::InvalidAmountExpression { line, .. }
+            | ProgramParseError::AllZeroWeights { line }
+            | ProgramParseError::WeightedReferenceOutsidePayee { line } => *line,
         }
     }
 
@@ -95,7 +140,19 @@ mod tests {
     #[case::syntax_error(
         ProgramParseError::SyntaxError {
             line: 1,
-            detail: "unexpected token".to_string(),
+            kind: SyntaxErrorKind::ParseFailure {
+                attempted_form: Some("<PAYER> paid <AMOUNT> to <PAYEE>"), expected: ExpectedElement::Unknown,
+                near: "unexpected".to_string(),
+            },
+        },
+        "@user"
+    )]
+    #[case::syntax_error_trailing(
+        ProgramParseError::SyntaxError {
+            line: 2,
+            kind: SyntaxErrorKind::TrailingInput {
+                text: "xyz".to_string(),
+            },
         },
         "@user"
     )]

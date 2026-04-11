@@ -33,5 +33,5 @@ serde_json = "1.0"
 
 [features]
 default = ["ja"]
-ja = ["walicord-infrastructure/ja", "walicord-i18n/ja", "walicord-parser/ja"]
-en = ["walicord-infrastructure/en", "walicord-i18n/en", "walicord-parser/en"]
+ja = ["walicord-infrastructure/ja", "walicord-i18n/ja"]
+en = ["walicord-infrastructure/en", "walicord-i18n/en"]

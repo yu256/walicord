@@ -9,15 +9,35 @@ pub enum FailureKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExpectedElement {
+    Amount,
+    MemberOrGroup,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SyntaxErrorKind {
+    ParseFailure {
+        attempted_form: Option<&'static str>,
+        expected: ExpectedElement,
+        near: String,
+    },
+    TrailingInput {
+        text: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProgramParseError<'a> {
     FailedToEvaluateGroup { name: Cow<'a, str>, line: usize },
     UndefinedGroup { name: Cow<'a, str>, line: usize },
     UndefinedRole { id: u64, line: usize },
     UndefinedMember { id: u64, line: usize },
-    SyntaxError { line: usize, detail: String },
+    SyntaxError { line: usize, kind: SyntaxErrorKind },
     MissingContextForImplicitAuthor { line: usize },
     InvalidAmountExpression { line: usize, detail: String },
     AllZeroWeights { line: usize },
+    WeightedReferenceOutsidePayee { line: usize },
 }
 
 impl<'a> From<ProgramBuildError<'a>> for ProgramParseError<'a> {
@@ -108,7 +128,8 @@ impl ProgramParseError<'_> {
             | ProgramParseError::UndefinedMember { .. }
             | ProgramParseError::SyntaxError { .. }
             | ProgramParseError::InvalidAmountExpression { .. }
-            | ProgramParseError::AllZeroWeights { .. } => FailureKind::UserInput,
+            | ProgramParseError::AllZeroWeights { .. }
+            | ProgramParseError::WeightedReferenceOutsidePayee { .. } => FailureKind::UserInput,
         }
     }
 }
@@ -200,8 +221,15 @@ mod tests {
     #[case::syntax_error(
         ProgramParseError::SyntaxError {
             line: 1,
-            detail: "unexpected token".to_string(),
+            kind: SyntaxErrorKind::ParseFailure {
+                attempted_form: None, expected: ExpectedElement::Unknown,
+                near: "unexpected token".to_string(),
+            },
         },
+        FailureKind::UserInput
+    )]
+    #[case::weighted_reference_outside_payee(
+        ProgramParseError::WeightedReferenceOutsidePayee { line: 1 },
         FailureKind::UserInput
     )]
     fn program_parse_error_kind_matches_intent(

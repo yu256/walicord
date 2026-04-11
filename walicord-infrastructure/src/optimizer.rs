@@ -70,9 +70,9 @@ impl SettlementOptimizer for WalicordSettlementOptimizer {
                         // Domain convention: positive = creditor (should receive).
                         // Library convention: positive = debtor (must pay).
                         // Negate to convert at the boundary.
-                        balance: value.checked_neg().ok_or(
-                            SettlementOptimizationError::QuantizationOutOfRange,
-                        )?,
+                        balance: value
+                            .checked_neg()
+                            .ok_or(SettlementOptimizationError::QuantizationOutOfRange)?,
                     }),
                     Err(err) => Err(map_atomic_unit_error(err)),
                 },

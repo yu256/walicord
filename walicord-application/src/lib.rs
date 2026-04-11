@@ -9,7 +9,8 @@ pub mod role_visibility;
 
 pub use command_syntax::{COMMAND_PREFIXES, is_command_message, is_command_prefix};
 pub use error::{
-    BalanceCalculationError, FailureKind, ProgramParseError, SettlementOptimizationError,
+    BalanceCalculationError, ExpectedElement, FailureKind, ProgramParseError,
+    SettlementOptimizationError, SyntaxErrorKind,
 };
 pub use message_processor::{MessageProcessor, ProcessingOutcome, SettlementResult};
 pub use model::{

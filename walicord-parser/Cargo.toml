@@ -11,8 +11,3 @@ thiserror = "2.0.17"
 
 [dev-dependencies]
 rstest = "0.26.1"
-
-[features]
-default = ["ja"]
-ja = []
-en = []
