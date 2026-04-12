@@ -390,12 +390,26 @@ fn mention_sequence_weighted(input: &str) -> PResult<'_, SetExpr<'_>> {
     mention_sequence_generic(mention_or_role_weighted, input)
 }
 
+fn is_reserved_keyword(word: &str) -> bool {
+    paid_keyword(word).is_ok_and(|(rest, _)| rest.is_empty())
+        || to_keyword(word).is_ok_and(|(rest, _)| rest.is_empty())
+        || ga(word).is_ok_and(|(rest, _)| rest.is_empty())
+        || ni(word).is_ok_and(|(rest, _)| rest.is_empty())
+}
+
 fn identifier(input: &str) -> PResult<'_, &str> {
-    recognize((
+    let (rest, ident) = recognize((
         take_while1(|c: char| c.is_alphanumeric() || c == '_' || is_japanese_char(c)),
         take_while(|c: char| c.is_alphanumeric() || c == '_' || c == '-' || is_japanese_char(c)),
     ))
-    .parse(input)
+    .parse(input)?;
+    if is_reserved_keyword(ident) {
+        return Err(nom::Err::Error(NomSyntaxError::from_error_kind(
+            input,
+            ErrorKind::Tag,
+        )));
+    }
+    Ok((rest, ident))
 }
 
 fn is_japanese_char(c: char) -> bool {
@@ -1550,6 +1564,17 @@ mod tests {
             kind: SyntaxErrorKind::ParseFailure {
                 attempted_form: Some("<PAYER> が <PAYEE> に <AMOUNT> 立て替えた"),
                 expected: ExpectedElement::Amount,
+                near: "立て替えた".to_string(),
+            },
+        })
+    )]
+    #[case::ja_payment_missing_payee(
+        "<@123> が 立て替えた",
+        Err(ParseError::SyntaxError {
+            line: 1,
+            kind: SyntaxErrorKind::ParseFailure {
+                attempted_form: Some("<PAYER> が <PAYEE> に <AMOUNT> 立て替えた"),
+                expected: ExpectedElement::MemberOrGroup,
                 near: "立て替えた".to_string(),
             },
         })
