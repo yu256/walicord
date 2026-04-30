@@ -7,7 +7,7 @@ use crate::{
 use serenity::{Client, all::GatewayIntents};
 use std::env;
 use walicord_application::MessageProcessor;
-use walicord_infrastructure::{WalicordProgramParser, WalicordSettlementOptimizer};
+use walicord_infrastructure::{HighsSettlementPlanner, WalicordProgramParser};
 
 /// Application configuration and dependency injection container
 pub struct AppConfig {
@@ -34,7 +34,7 @@ pub struct AppBuilder;
 
 impl AppBuilder {
     pub async fn build(config: AppConfig) -> Result<Client, serenity::Error> {
-        let processor = MessageProcessor::new(&WalicordProgramParser, &WalicordSettlementOptimizer);
+        let processor = MessageProcessor::new(&WalicordProgramParser, &HighsSettlementPlanner);
         let channel_service = DiscordChannelService;
         let roster_provider = MemberRosterProvider::new(channel_service);
         let message_cache = MessageCache::new();

@@ -1,30 +1,13 @@
 use rstest::rstest;
-use walicord_application::{
-    MessageProcessor, PersonBalance, ProgramParseError, ProgramParser, SettlementOptimizationError,
-    SettlementOptimizer,
-};
+use walicord_application::{MessageProcessor, PersonBalance, ProgramParseError, ProgramParser};
 use walicord_domain::{
-    MemberBalances, Money, SettlementContext, Transfer,
+    MemberBalances, Money,
     model::{MemberId, RoleMembers},
 };
-use walicord_infrastructure::WalicordProgramParser;
-
-struct NoopOptimizer;
-
-impl SettlementOptimizer for NoopOptimizer {
-    fn optimize(
-        &self,
-        _balances: &[PersonBalance],
-        _settle_members: &[MemberId],
-        _cash_members: &[MemberId],
-        _context: SettlementContext,
-    ) -> Result<Vec<Transfer>, SettlementOptimizationError> {
-        Ok(Vec::new())
-    }
-}
+use walicord_infrastructure::{HighsSettlementPlanner, WalicordProgramParser};
 
 static TEST_PARSER: WalicordProgramParser = WalicordProgramParser;
-static TEST_OPTIMIZER: NoopOptimizer = NoopOptimizer;
+static TEST_PLANNER: HighsSettlementPlanner = HighsSettlementPlanner;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum TestMember {
     Alice,
@@ -130,7 +113,7 @@ async fn settle_up_pre_and_post_balances(
     #[case] expected_pre: &'static [(TestMember, i64)],
     #[case] expected_post: &'static [(TestMember, i64)],
 ) {
-    let processor = MessageProcessor::new(&TEST_PARSER, &TEST_OPTIMIZER);
+    let processor = MessageProcessor::new(&TEST_PARSER, &TEST_PLANNER);
     let program = TEST_PARSER
         .parse(members, empty_roles(), content, None)
         .expect("program should parse");
@@ -227,7 +210,7 @@ async fn settle_up_post_balances(
     #[case] content: &'static str,
     #[case] expected_post: &'static [(TestMember, i64)],
 ) {
-    let processor = MessageProcessor::new(&TEST_PARSER, &TEST_OPTIMIZER);
+    let processor = MessageProcessor::new(&TEST_PARSER, &TEST_PLANNER);
     let program = TEST_PARSER
         .parse(members, empty_roles(), content, None)
         .expect("program should parse");
@@ -350,7 +333,7 @@ async fn payment_distribution_balances(
     #[case] content: &'static str,
     #[case] expected_post: &'static [(TestMember, i64)],
 ) {
-    let processor = MessageProcessor::new(&TEST_PARSER, &TEST_OPTIMIZER);
+    let processor = MessageProcessor::new(&TEST_PARSER, &TEST_PLANNER);
     let program = TEST_PARSER
         .parse(members, empty_roles(), content, None)
         .expect("program should parse");
@@ -418,7 +401,7 @@ async fn slash_settle_up_via_synthetic_command(
     #[case] synthetic_command: &'static str,
     #[case] expected_balances: &'static [(TestMember, i64)],
 ) {
-    let processor = MessageProcessor::new(&TEST_PARSER, &TEST_OPTIMIZER);
+    let processor = MessageProcessor::new(&TEST_PARSER, &TEST_PLANNER);
 
     let program = processor
         .parse_program_sequence(
@@ -451,7 +434,7 @@ async fn slash_settle_up_via_synthetic_command(
 /// resolved at evaluation time after prior declarations are registered.
 #[tokio::test(flavor = "multi_thread")]
 async fn slash_settle_up_resolves_groups_from_cached_messages() {
-    let processor = MessageProcessor::new(&TEST_PARSER, &TEST_OPTIMIZER);
+    let processor = MessageProcessor::new(&TEST_PARSER, &TEST_PLANNER);
 
     let program = processor
         .parse_program_sequence(
@@ -487,7 +470,7 @@ async fn slash_settle_up_resolves_groups_from_cached_messages() {
 /// Empty cache with synthetic `!settleup` produces no transfers.
 #[tokio::test(flavor = "multi_thread")]
 async fn slash_settle_up_with_empty_cache() {
-    let processor = MessageProcessor::new(&TEST_PARSER, &TEST_OPTIMIZER);
+    let processor = MessageProcessor::new(&TEST_PARSER, &TEST_PLANNER);
 
     let program = processor
         .parse_program_sequence(
@@ -512,7 +495,7 @@ async fn slash_settle_up_with_empty_cache() {
 /// Different authors per cached message: implicit payer resolves per-message.
 #[tokio::test(flavor = "multi_thread")]
 async fn slash_settle_up_with_different_message_authors() {
-    let processor = MessageProcessor::new(&TEST_PARSER, &TEST_OPTIMIZER);
+    let processor = MessageProcessor::new(&TEST_PARSER, &TEST_PLANNER);
 
     // Message 1: Alice writes "100 to <@2>" → implicit payer is Alice
     // Message 2: Bob writes "50 to <@3>" → implicit payer is Bob
@@ -548,7 +531,7 @@ async fn slash_settle_up_with_different_message_authors() {
 /// Synthetic `!settleup ... --cash ...` propagates cash members to optimizer.
 #[tokio::test(flavor = "multi_thread")]
 async fn slash_settle_up_synthetic_command_with_cash_option() {
-    let processor = MessageProcessor::new(&TEST_PARSER, &TEST_OPTIMIZER);
+    let processor = MessageProcessor::new(&TEST_PARSER, &TEST_PLANNER);
 
     let program = processor
         .parse_program_sequence(
@@ -600,7 +583,7 @@ async fn slash_review_via_synthetic_command(
     #[case] cached_messages: &'static [&'static str],
     #[case] expected_balances: &'static [(TestMember, i64)],
 ) {
-    let processor = MessageProcessor::new(&TEST_PARSER, &TEST_OPTIMIZER);
+    let processor = MessageProcessor::new(&TEST_PARSER, &TEST_PLANNER);
 
     let program = processor
         .parse_program_sequence(

@@ -1,0 +1,10 @@
+[package]
+name = "walicord-ledger"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+walicord-domain = { path = "../walicord-domain" }
+
+[lints]
+workspace = true

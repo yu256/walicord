@@ -1338,7 +1338,7 @@ mod tests {
         Declaration, Statement,
         model::{MemberSetExpr, MemberSetOp},
     };
-    use walicord_infrastructure::{WalicordProgramParser, WalicordSettlementOptimizer};
+    use walicord_infrastructure::{HighsSettlementPlanner, WalicordProgramParser};
 
     fn make_cached_message(id: u64, content: &str) -> CachedMessage {
         CachedMessage {
@@ -1352,7 +1352,7 @@ mod tests {
     }
 
     fn make_processor() -> MessageProcessor<'static> {
-        MessageProcessor::new(&WalicordProgramParser, &WalicordSettlementOptimizer)
+        MessageProcessor::new(&WalicordProgramParser, &HighsSettlementPlanner)
     }
 
     fn empty_roles() -> &'static RoleMembers {

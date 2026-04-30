@@ -59,6 +59,10 @@ pub fn format_settlement_error(err: SettlementOptimizationError) -> String {
         SettlementOptimizationError::ZeroTotalWeight => {
             walicord_i18n::ZERO_TOTAL_WEIGHT.to_string()
         }
+        SettlementOptimizationError::PlannerOutputInvalid { .. }
+        | SettlementOptimizationError::PreviewDigestMismatch { .. } => {
+            walicord_i18n::SETTLEMENT_CALCULATION_FAILED.to_string()
+        }
     }
 }
 
@@ -378,7 +382,7 @@ mod tests {
     use walicord_domain::{
         AllocationStrategy, MemberSetExpr, Statement, WeightOverrideTarget, model::RoleId,
     };
-    use walicord_infrastructure::{WalicordProgramParser, WalicordSettlementOptimizer};
+    use walicord_infrastructure::{HighsSettlementPlanner, WalicordProgramParser};
 
     const TEST_MEMBER_IDS: [MemberId; 6] = [
         MemberId(1),
@@ -399,7 +403,7 @@ mod tests {
     }
 
     fn make_processor() -> MessageProcessor<'static> {
-        MessageProcessor::new(&WalicordProgramParser, &WalicordSettlementOptimizer)
+        MessageProcessor::new(&WalicordProgramParser, &HighsSettlementPlanner)
     }
 
     fn make_settlement_service<'a>(

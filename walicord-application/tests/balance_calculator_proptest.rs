@@ -1,10 +1,89 @@
 use proptest::prelude::*;
 use rust_decimal::Decimal;
 use std::collections::BTreeMap;
+use walicord_application::{SettleUpPolicy, SettlementPlanner};
 use walicord_domain::{
-    BalanceError, Program, SettleUpPolicy, SettlementContext, StatementWithLine,
+    BalanceError, MemberBalances, Program, Settlement, SettlementContext, SettlementRoundingError,
+    StatementWithLine, Transfer,
     model::{MemberId, MemberSetExpr, MemberSetOp, Money, Payment, Statement, Weight},
 };
+
+/// Deterministic greedy planner used by the application proptest. The full HiGHS-backed
+/// planner is exercised in `balance_calculator.rs` (a representative-case integration
+/// test); pulling the MILP solver into proptest's per-iteration loop adds runtime,
+/// shrinks proptest's effective case count, and entangles solver quirks (search limits,
+/// alternate-optimum oscillation) with application-invariant failures. The application
+/// invariant under test here is "settle members reach zero", which any correct planner
+/// satisfies — so a deterministic in-memory planner is the right fit.
+struct GreedyMatchingPlanner;
+
+impl SettlementPlanner for GreedyMatchingPlanner {
+    fn plan(
+        &self,
+        balances: MemberBalances,
+        settle_members: &[MemberId],
+        _cash_members: &[MemberId],
+        _context: SettlementContext,
+    ) -> Result<Settlement, SettlementRoundingError> {
+        let mut new_balances = balances.clone();
+        let mut transfers: Vec<Transfer> = Vec::new();
+
+        for &settle_member in settle_members {
+            loop {
+                let balance = new_balances
+                    .get(&settle_member)
+                    .copied()
+                    .unwrap_or(Money::ZERO);
+                if balance == Money::ZERO {
+                    break;
+                }
+                let creditor_pays = balance > Money::ZERO;
+                let counterparty = new_balances
+                    .iter()
+                    .filter(|(id, _)| **id != settle_member)
+                    .filter(|(_, b)| {
+                        if creditor_pays {
+                            **b < Money::ZERO
+                        } else {
+                            **b > Money::ZERO
+                        }
+                    })
+                    .min_by_key(|(id, _)| *id)
+                    .map(|(id, _)| *id);
+                let Some(counterparty) = counterparty else {
+                    break;
+                };
+                let counter_balance = new_balances[&counterparty];
+                let amount = if balance.abs() <= counter_balance.abs() {
+                    balance.abs()
+                } else {
+                    counter_balance.abs()
+                };
+
+                let (from, to) = if creditor_pays {
+                    (counterparty, settle_member)
+                } else {
+                    (settle_member, counterparty)
+                };
+                transfers.push(Transfer { from, to, amount });
+
+                if creditor_pays {
+                    *new_balances.entry(settle_member).or_insert(Money::ZERO) -= amount;
+                    *new_balances.entry(counterparty).or_insert(Money::ZERO) += amount;
+                } else {
+                    *new_balances.entry(settle_member).or_insert(Money::ZERO) += amount;
+                    *new_balances.entry(counterparty).or_insert(Money::ZERO) -= amount;
+                }
+            }
+        }
+
+        transfers.sort_unstable_by_key(|t| (t.from, t.to));
+        Ok(Settlement {
+            new_balances,
+            transfers,
+        })
+    }
+}
 
 #[derive(Debug)]
 struct WeightedPaymentInput {
@@ -281,14 +360,15 @@ proptest! {
         let program = Program::try_new(statements, &[]).expect("program build failed");
         let balances = program.calculate_balances().expect("balance calculation should succeed");
 
-        let settlement = SettleUpPolicy::settle(
+        let validated_plan = SettleUpPolicy::settle(
+            &GreedyMatchingPlanner,
             &balances,
             &settle_members,
             std::iter::empty(),
             SettlementContext::jpy_default(),
         )
         .expect("settle should succeed");
-        let balances = settlement.new_balances;
+        let balances = validated_plan.new_balances().clone();
 
         for member in settle_members {
             let balance = balances.get(&member).copied().unwrap_or(Money::ZERO);

@@ -8,7 +8,7 @@ pub use model::{Payment, PersonBalance};
 use thiserror::Error;
 
 pub trait MemberIdTrait: Copy + Eq + std::hash::Hash + Ord {}
-impl MemberIdTrait for u64 {}
+impl<T: Copy + Eq + std::hash::Hash + Ord> MemberIdTrait for T {}
 
 #[derive(Debug, Error)]
 pub enum SettlementError {
@@ -1336,8 +1336,6 @@ mod tests {
         Carol,
         Dave,
     }
-
-    impl MemberIdTrait for TestMember {}
 
     fn apply_transfers<MemberId: MemberIdTrait>(
         people: &[PersonBalance<MemberId>],

@@ -2919,10 +2919,12 @@ dependencies = [
  "proptest",
  "rstest",
  "rust_decimal",
+ "sha2",
  "smol_str",
  "tokio",
  "walicord-domain",
  "walicord-infrastructure",
+ "walicord-ledger",
 ]
 
 [[package]]
@@ -2938,7 +2940,6 @@ dependencies = [
  "smallvec",
  "smol_str",
  "tracing",
- "walicord-transfer-construction",
 ]
 
 [[package]]
@@ -2955,6 +2956,13 @@ dependencies = [
  "walicord-domain",
  "walicord-parser",
  "walicord-transfer-construction",
+]
+
+[[package]]
+name = "walicord-ledger"
+version = "0.1.0"
+dependencies = [
+ "walicord-domain",
 ]
 
 [[package]]

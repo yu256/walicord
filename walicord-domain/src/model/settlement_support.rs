@@ -11,7 +11,7 @@ pub struct Transfer {
     pub amount: Money,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Settlement {
     pub new_balances: MemberBalances,
     pub transfers: Vec<Transfer>,

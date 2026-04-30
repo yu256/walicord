@@ -727,7 +727,6 @@ impl std::ops::Div<Decimal> for Money {
 /// Discord user ID
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct MemberId(pub u64);
-impl walicord_transfer_construction::MemberIdTrait for MemberId {}
 
 /// Discord role ID
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]

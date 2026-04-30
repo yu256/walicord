@@ -62,19 +62,45 @@ impl<'a> From<ProgramBuildError<'a>> for ProgramParseError<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SettlementOptimizationError {
     ImbalancedTotal(i64),
-    InvalidGrid { g1: i64, g2: i64 },
-    ModelTooLarge { edge_count: usize, max_edges: usize },
+    InvalidGrid {
+        g1: i64,
+        g2: i64,
+    },
+    ModelTooLarge {
+        edge_count: usize,
+        max_edges: usize,
+    },
     NoSolution,
     RoundingMismatch,
-    QuantizationImbalancedTotal { total: walicord_domain::Money },
+    QuantizationImbalancedTotal {
+        total: walicord_domain::Money,
+    },
     QuantizationInvalidAdjustmentCount,
     QuantizationInsufficientCandidates,
     QuantizationZeroSumInvariantViolation,
     QuantizationNonIntegral,
     QuantizationOutOfRange,
-    QuantizationUnsupportedScale { scale: u32, max_supported: u32 },
+    QuantizationUnsupportedScale {
+        scale: u32,
+        max_supported: u32,
+    },
     WeightOverflow,
     ZeroTotalWeight,
+    /// The settlement planner returned a result that violated an application-level
+    /// invariant (unknown member, wrong direction, mismatched new_balances, settle
+    /// member not zeroed, zero-sum violation). Surfaced by `SettleUpPolicy::settle`.
+    PlannerOutputInvalid {
+        detail: crate::settle_up::SettlementPlanValidationError,
+    },
+    /// The previewed plan being recorded does not match the digest the caller expected.
+    /// Surfaced by `SettleUpPolicy::record_previewed_plan_matching` and treated as an
+    /// internal-bug failure: the value the user confirmed differs from the value being
+    /// recorded, which is unsafe regardless of cause. The digests are preserved here for
+    /// logs / audit trails even though end-user presentation intentionally stays generic.
+    PreviewDigestMismatch {
+        expected: crate::settle_up::PreviewedSettlementDigest,
+        actual: crate::settle_up::PreviewedSettlementDigest,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -102,6 +128,8 @@ impl SettlementOptimizationError {
             }
             SettlementOptimizationError::WeightOverflow
             | SettlementOptimizationError::ZeroTotalWeight => FailureKind::UserInput,
+            SettlementOptimizationError::PlannerOutputInvalid { .. }
+            | SettlementOptimizationError::PreviewDigestMismatch { .. } => FailureKind::InternalBug,
         }
     }
 }

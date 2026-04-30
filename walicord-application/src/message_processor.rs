@@ -4,12 +4,12 @@ use crate::{
     model::{
         Command, PersonBalance, Script, ScriptStatement, ScriptStatementWithLine, SettleUpContext,
     },
-    ports::{ProgramParser, SettlementOptimizer},
+    ports::{ProgramParser, SettlementPlanner},
+    settle_up::SettleUpPolicy,
 };
 use std::{borrow::Cow, collections::HashSet};
 use walicord_domain::{
-    BalanceAccumulator, MemberBalances, MemberSet, Money, SettleUpPolicy, SettlementContext,
-    Transfer,
+    BalanceAccumulator, MemberBalances, MemberSet, Money, SettlementContext, Transfer,
     model::{MemberId, MemberSetExpr, RoleMembers},
     quantize_balances,
 };
@@ -29,7 +29,7 @@ pub struct SettlementResult {
 #[derive(Clone, Copy)]
 pub struct MessageProcessor<'a> {
     parser: &'a dyn ProgramParser,
-    optimizer: &'a dyn SettlementOptimizer,
+    planner: &'a dyn SettlementPlanner,
 }
 
 pub enum ProcessingOutcome<'a> {
@@ -153,8 +153,8 @@ impl<'a> MessageProcessor<'a> {
         SettlementContext::jpy_default()
     }
 
-    pub fn new(parser: &'a dyn ProgramParser, optimizer: &'a dyn SettlementOptimizer) -> Self {
-        Self { parser, optimizer }
+    pub fn new(parser: &'a dyn ProgramParser, planner: &'a dyn SettlementPlanner) -> Self {
+        Self { parser, planner }
     }
 
     pub fn parse_program<'b>(
@@ -286,29 +286,45 @@ impl<'a> MessageProcessor<'a> {
             ..Self::settlement_context()
         };
 
-        let optimizer = self.optimizer;
+        let planner = self.planner;
+        let preview_balances: MemberBalances =
+            person_balances.iter().map(|p| (p.id, p.balance)).collect();
 
-        let optimized_transfers = match settle_up.as_ref() {
-            Some(settle_up) => tokio::task::block_in_place(|| {
-                optimizer.optimize(
-                    &person_balances,
-                    &settle_up.settle_members,
-                    &settle_up_cash_members,
+        // The preview / review path goes through `SettleUpPolicy::preview`, which is the
+        // same code that backs `SettleUpPolicy::settle`. This way the transfers shown to
+        // the user are validated against the exact same invariants that the commit path
+        // will enforce — overpayment, signs, zero-sum, settle-target completion — so a
+        // plan that would be rejected at commit time can never be silently shown as a
+        // valid preview. The post-state is intentionally discarded here; this method is
+        // pure-functional with respect to ledger state.
+        // When a settle-up command was applied during `apply_statements`,
+        // `apply_settle_command` already produced a validated plan via
+        // `SettleUpPolicy::settle` and stashed its transfers in
+        // `settle_up.immediate_transfers`. The review-time optimizer recommendation
+        // (`optimized_transfers`) is intentionally empty in that case: the user has
+        // already committed a plan, so there is no separate "what would the optimizer
+        // suggest next?" view to render. Re-running the planner on the post-settle
+        // balances would also be wrong on two axes at once — alternate-optimum drift
+        // (HiGHS may return a different valid plan than `immediate_transfers`) and
+        // semantic noise (the post-settle state is all zeros, so any re-plan would be
+        // trivially empty anyway). The review-only path (no settle command) does need
+        // a fresh preview call to compute the recommendation.
+        let optimized_transfers = if settle_up.is_some() {
+            Vec::new()
+        } else {
+            let all_members: Vec<MemberId> =
+                person_balances.iter().map(|balance| balance.id).collect();
+            let previewed = tokio::task::block_in_place(|| {
+                SettleUpPolicy::preview(
+                    planner,
+                    &preview_balances,
+                    &all_members,
+                    review_cash_members.iter().copied(),
                     context,
                 )
-            })?,
-            None => {
-                let all_members: Vec<MemberId> =
-                    person_balances.iter().map(|balance| balance.id).collect();
-                tokio::task::block_in_place(|| {
-                    optimizer.optimize(
-                        &person_balances,
-                        &all_members,
-                        &review_cash_members,
-                        context,
-                    )
-                })?
-            }
+            })
+            .map_err(SettlementOptimizationError::from)?;
+            previewed.plan().transfers.clone()
         };
 
         let effective_cash_members = if settle_up.is_some() {
@@ -459,6 +475,7 @@ impl<'a> MessageProcessor<'a> {
         let context = Self::settlement_context();
         let result = tokio::task::block_in_place(|| {
             SettleUpPolicy::settle(
+                self.planner,
                 balances,
                 settle_members.members(),
                 effective_cash_members.iter().copied(),
@@ -466,8 +483,12 @@ impl<'a> MessageProcessor<'a> {
             )
         })
         .map_err(SettlementOptimizationError::from)?;
-        accumulator.set_balances(result.new_balances);
-        last_settle_state.record(&settle_members, effective_cash_members, result.transfers);
+        accumulator.set_balances(result.new_balances().clone());
+        last_settle_state.record(
+            &settle_members,
+            effective_cash_members,
+            result.transfers().to_vec(),
+        );
 
         Ok(())
     }
@@ -572,14 +593,14 @@ mod tests {
     use crate::{
         ExpectedElement, SyntaxErrorKind,
         error::{BalanceCalculationError, SettlementOptimizationError},
-        ports::{ProgramParser, SettlementOptimizer},
+        ports::ProgramParser,
     };
     use fxhash::FxHashSet;
     use proptest::prelude::*;
     use rstest::{fixture, rstest};
     use std::collections::BTreeMap;
     use walicord_domain::{
-        Payment, Statement,
+        Payment, Settlement, Statement,
         model::{MemberId, MemberSetExpr, MemberSetOp, Money, RoleId, RoleMembers, Weight},
     };
 
@@ -642,59 +663,139 @@ mod tests {
         }
     }
 
-    struct NoopOptimizer;
+    struct NoopPlanner;
 
-    impl SettlementOptimizer for NoopOptimizer {
-        fn optimize(
+    impl SettlementPlanner for NoopPlanner {
+        fn plan(
             &self,
-            _balances: &[PersonBalance],
+            balances: walicord_domain::MemberBalances,
             _settle_members: &[MemberId],
             _cash_members: &[MemberId],
             _context: SettlementContext,
-        ) -> Result<Vec<Transfer>, SettlementOptimizationError> {
-            Ok(Vec::new())
+        ) -> Result<walicord_domain::Settlement, walicord_domain::SettlementRoundingError> {
+            Ok(walicord_domain::Settlement {
+                new_balances: balances,
+                transfers: Vec::new(),
+            })
         }
     }
 
-    struct AssertSettleMembersOptimizer {
-        expected: Vec<MemberId>,
-    }
+    /// Deterministic greedy debtor-creditor matching planner for tests that need realistic
+    /// settle-up output without depending on the HiGHS solver from `walicord-infrastructure`.
+    /// Pairs each settle member with the lowest-id counterparty of opposite sign and
+    /// transfers the smaller of the two absolute balances; loops until the settle member is
+    /// zero or no counterparty remains.
+    struct GreedyMatchingPlanner;
 
-    impl SettlementOptimizer for AssertSettleMembersOptimizer {
-        fn optimize(
+    impl SettlementPlanner for GreedyMatchingPlanner {
+        fn plan(
             &self,
-            _balances: &[PersonBalance],
+            balances: walicord_domain::MemberBalances,
             settle_members: &[MemberId],
             _cash_members: &[MemberId],
             _context: SettlementContext,
-        ) -> Result<Vec<Transfer>, SettlementOptimizationError> {
-            assert_eq!(settle_members, self.expected.as_slice());
-            Ok(Vec::new())
+        ) -> Result<walicord_domain::Settlement, walicord_domain::SettlementRoundingError> {
+            let mut new_balances = balances.clone();
+            let mut transfers: Vec<Transfer> = Vec::new();
+
+            for &settle_member in settle_members {
+                loop {
+                    let balance = new_balances
+                        .get(&settle_member)
+                        .copied()
+                        .unwrap_or(Money::ZERO);
+                    if balance == Money::ZERO {
+                        break;
+                    }
+                    let creditor_pays = balance > Money::ZERO;
+                    let counterparty = new_balances
+                        .iter()
+                        .filter(|(id, _)| **id != settle_member)
+                        .filter(|(_, b)| {
+                            if creditor_pays {
+                                **b < Money::ZERO
+                            } else {
+                                **b > Money::ZERO
+                            }
+                        })
+                        .min_by_key(|(id, _)| *id)
+                        .map(|(id, _)| *id);
+                    let Some(counterparty) = counterparty else {
+                        break;
+                    };
+                    let counter_balance = new_balances[&counterparty];
+                    let amount = if balance.abs() <= counter_balance.abs() {
+                        balance.abs()
+                    } else {
+                        counter_balance.abs()
+                    };
+
+                    let (from, to) = if creditor_pays {
+                        (counterparty, settle_member)
+                    } else {
+                        (settle_member, counterparty)
+                    };
+                    transfers.push(Transfer { from, to, amount });
+
+                    if creditor_pays {
+                        *new_balances.entry(settle_member).or_insert(Money::ZERO) -= amount;
+                        *new_balances.entry(counterparty).or_insert(Money::ZERO) += amount;
+                    } else {
+                        *new_balances.entry(settle_member).or_insert(Money::ZERO) += amount;
+                        *new_balances.entry(counterparty).or_insert(Money::ZERO) -= amount;
+                    }
+                }
+            }
+
+            transfers.sort_unstable_by_key(|t| (t.from, t.to));
+            Ok(walicord_domain::Settlement {
+                new_balances,
+                transfers,
+            })
         }
     }
 
-    struct AssertSettleAndCashMembersOptimizer {
+    struct AssertSettleMembersPlanner {
+        expected: Vec<MemberId>,
+    }
+
+    impl SettlementPlanner for AssertSettleMembersPlanner {
+        fn plan(
+            &self,
+            balances: walicord_domain::MemberBalances,
+            settle_members: &[MemberId],
+            cash_members: &[MemberId],
+            context: SettlementContext,
+        ) -> Result<Settlement, walicord_domain::SettlementRoundingError> {
+            assert_eq!(settle_members, self.expected.as_slice());
+            // Delegate to the greedy planner so the produced plan passes application-side
+            // validation (settle members must zero out, zero-sum preserved, etc.).
+            GreedyMatchingPlanner.plan(balances, settle_members, cash_members, context)
+        }
+    }
+
+    struct AssertSettleAndCashMembersPlanner {
         expected_settle: Vec<MemberId>,
         expected_cash: Vec<MemberId>,
     }
 
-    impl SettlementOptimizer for AssertSettleAndCashMembersOptimizer {
-        fn optimize(
+    impl SettlementPlanner for AssertSettleAndCashMembersPlanner {
+        fn plan(
             &self,
-            _balances: &[PersonBalance],
+            balances: walicord_domain::MemberBalances,
             settle_members: &[MemberId],
             cash_members: &[MemberId],
-            _context: SettlementContext,
-        ) -> Result<Vec<Transfer>, SettlementOptimizationError> {
+            context: SettlementContext,
+        ) -> Result<Settlement, walicord_domain::SettlementRoundingError> {
             assert_eq!(settle_members, self.expected_settle.as_slice());
             assert_eq!(cash_members, self.expected_cash.as_slice());
-            Ok(Vec::new())
+            GreedyMatchingPlanner.plan(balances, settle_members, cash_members, context)
         }
     }
 
     #[fixture]
     fn processor() -> MessageProcessor<'static> {
-        MessageProcessor::new(&StubParser, &NoopOptimizer)
+        MessageProcessor::new(&StubParser, &GreedyMatchingPlanner)
     }
 
     struct SequenceParser;
@@ -797,7 +898,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn build_settlement_result_passes_settle_members_to_optimizer() {
         let parser = StubParser;
-        let optimizer = AssertSettleMembersOptimizer {
+        let optimizer = AssertSettleMembersPlanner {
             expected: vec![MemberId(1)],
         };
         let processor = MessageProcessor::new(&parser, &optimizer);
@@ -816,7 +917,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn build_settlement_result_without_settleup_passes_all_members_to_optimizer() {
-        let optimizer = AssertSettleMembersOptimizer {
+        let optimizer = AssertSettleMembersPlanner {
             expected: vec![MemberId(1), MemberId(2), MemberId(3)],
         };
         let processor = MessageProcessor::new(&StubParser, &optimizer);
@@ -852,7 +953,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn build_settlement_result_passes_effective_cash_members_to_optimizer() {
-        let optimizer = AssertSettleAndCashMembersOptimizer {
+        let optimizer = AssertSettleAndCashMembersPlanner {
             expected_settle: vec![MemberId(1), MemberId(2), MemberId(3), MemberId(4)],
             expected_cash: vec![MemberId(1), MemberId(2)],
         };
@@ -890,7 +991,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn build_settlement_result_for_review_passes_cash_members_to_optimizer() {
-        let optimizer = AssertSettleAndCashMembersOptimizer {
+        let optimizer = AssertSettleAndCashMembersPlanner {
             expected_settle: vec![MemberId(1), MemberId(2), MemberId(3), MemberId(4)],
             expected_cash: vec![MemberId(1)],
         };
@@ -1175,13 +1276,13 @@ mod tests {
         #[case] left: Script<'static>,
         #[case] right: Script<'static>,
     ) {
-        let processor = MessageProcessor::new(&StubParser, &NoopOptimizer);
+        let processor = MessageProcessor::new(&StubParser, &GreedyMatchingPlanner);
         assert_settle_transfers_equal(&processor, &left, &right).await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn script_local_cash_persists_across_multiple_settleup_commands() {
-        let processor = MessageProcessor::new(&StubParser, &NoopOptimizer);
+        let processor = MessageProcessor::new(&StubParser, &GreedyMatchingPlanner);
 
         let members = union_members(&[1, 2, 3, 4]);
 
@@ -1245,7 +1346,7 @@ mod tests {
         #[case] expected_member_2: i64,
         #[case] expected_member_3: i64,
     ) {
-        let processor = MessageProcessor::new(&StubParser, &NoopOptimizer);
+        let processor = MessageProcessor::new(&StubParser, &GreedyMatchingPlanner);
         let script = Script::new(
             &[],
             empty_roles(),
@@ -1332,7 +1433,7 @@ mod tests {
         #[case] request: BalanceCalculationRequest,
         #[case] expected: Result<(), BalanceCalculationError>,
     ) {
-        let processor = MessageProcessor::new(&StubParser, &NoopOptimizer);
+        let processor = MessageProcessor::new(&StubParser, &GreedyMatchingPlanner);
 
         let result = calculate_balances_for_request(&processor, &script, request).await;
 
@@ -1390,7 +1491,7 @@ mod tests {
         #[case] second: &str,
         #[case] expected_second_line: usize,
     ) {
-        let processor = MessageProcessor::new(&SequenceParser, &NoopOptimizer);
+        let processor = MessageProcessor::new(&SequenceParser, &NoopPlanner);
         let members: [MemberId; 0] = [];
         let outcome = processor.parse_program_sequence(
             &members,
@@ -1436,7 +1537,7 @@ mod tests {
         #[case] second: &str,
         #[case] expected: Result<(), ProgramParseError>,
     ) {
-        let processor = MessageProcessor::new(&SequenceParser, &NoopOptimizer);
+        let processor = MessageProcessor::new(&SequenceParser, &NoopPlanner);
         let members: [MemberId; 0] = [];
         let outcome = processor.parse_program_sequence(
             &members,
@@ -1449,7 +1550,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn build_settlement_result_without_command_behaves_as_review() {
-        let optimizer = AssertSettleMembersOptimizer {
+        let optimizer = AssertSettleMembersPlanner {
             expected: vec![MemberId(1), MemberId(2), MemberId(3)],
         };
         let processor = MessageProcessor::new(&StubParser, &optimizer);
