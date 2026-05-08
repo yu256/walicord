@@ -25,11 +25,14 @@ futures = "0.3.31"
 smallvec = "1.15.1"
 arcstr = "1.2.0"
 smol_str = "0.3.5"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+rust_decimal = "1.36.0"
+fs2 = "0.4.3"
 
 [dev-dependencies]
 insta = "1"
 rstest = "0.26.1"
-serde_json = "1.0"
 
 [features]
 default = ["ja"]

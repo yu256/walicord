@@ -115,6 +115,17 @@ fn channel_flag_action(old_topic: Option<&str>, new_topic: Option<&str>) -> Chan
     }
 }
 
+fn slash_scope_channel_id(channel_id: ChannelId, parent_id: Option<ChannelId>) -> ChannelId {
+    parent_id.unwrap_or(channel_id)
+}
+
+fn is_ledger_poc_command(command_name: &str) -> bool {
+    matches!(
+        command_name,
+        "expense" | "review" | "settle" | "void" | "ledger"
+    )
+}
+
 fn format_program_parse_error_reply(
     error: ProgramParseError<'_>,
     diagnostics: &RoleVisibilityDiagnostics,
@@ -186,6 +197,7 @@ where
     CS: ChannelService,
     RP: RosterProvider,
 {
+    ledger_poc: crate::discord::ledger::DiscordLedgerPoc,
     message_cache: MessageCache,
     channel_service: CS,
     roster_provider: RP,
@@ -206,6 +218,7 @@ where
         channel_manager: ChannelManager,
     ) -> Self {
         Self {
+            ledger_poc: crate::discord::ledger::DiscordLedgerPoc::new(),
             message_cache,
             channel_service,
             roster_provider,
@@ -696,61 +709,108 @@ where
         ctx: &Context,
         command: &serenity::model::application::CommandInteraction,
     ) {
+        self.handle_slash_command_with_defer(ctx, command, false)
+            .await;
+    }
+
+    async fn resolve_slash_scope_channel_id(
+        &self,
+        ctx: &Context,
+        channel_id: ChannelId,
+    ) -> ChannelId {
+        match channel_id.to_channel(&ctx.http).await {
+            Ok(channel) => channel
+                .guild()
+                .map(|channel| slash_scope_channel_id(channel.id, channel.parent_id))
+                .unwrap_or(channel_id),
+            Err(error) => {
+                tracing::warn!(
+                    "Slash command: failed to resolve scope for {}: {:?}",
+                    channel_id,
+                    error
+                );
+                channel_id
+            }
+        }
+    }
+
+    async fn handle_slash_command_with_defer(
+        &self,
+        ctx: &Context,
+        command: &serenity::model::application::CommandInteraction,
+        already_deferred: bool,
+    ) {
         use serenity::builder::{
             CreateAttachment, CreateInteractionResponse, CreateInteractionResponseFollowup,
-            CreateInteractionResponseMessage,
+            CreateInteractionResponseMessage, EditInteractionResponse,
         };
 
-        let Some(tracked_id) = self.channel_manager.get_tracked(command.channel_id) else {
-            let _ = command
-                .create_response(
-                    &ctx.http,
-                    CreateInteractionResponse::Message(
-                        CreateInteractionResponseMessage::new()
-                            .content(walicord_i18n::CHANNEL_NOT_TRACKED)
-                            .ephemeral(true),
-                    ),
-                )
-                .await;
+        let scoped_channel_id = self
+            .resolve_slash_scope_channel_id(ctx, command.channel_id)
+            .await;
+
+        let Some(tracked_id) = self.channel_manager.get_tracked(scoped_channel_id) else {
+            if already_deferred {
+                let _ = command
+                    .edit_response(
+                        &ctx.http,
+                        EditInteractionResponse::new().content(walicord_i18n::CHANNEL_NOT_TRACKED),
+                    )
+                    .await;
+            } else {
+                let _ = command
+                    .create_response(
+                        &ctx.http,
+                        CreateInteractionResponse::Message(
+                            CreateInteractionResponseMessage::new()
+                                .content(walicord_i18n::CHANNEL_NOT_TRACKED)
+                                .ephemeral(true),
+                        ),
+                    )
+                    .await;
+            }
             return;
         };
 
         // Defer immediately: Discord invalidates the interaction token after 3 seconds,
         // and cache/roster loading below can exceed that on cold starts.
-        let _ = command
-            .create_response(
-                &ctx.http,
-                CreateInteractionResponse::Defer(CreateInteractionResponseMessage::new()),
-            )
-            .await;
+        if !already_deferred {
+            let _ = command
+                .create_response(
+                    &ctx.http,
+                    CreateInteractionResponse::Defer(CreateInteractionResponseMessage::new()),
+                )
+                .await;
+        }
 
         // Flush pending messages before serving the query, mirroring the
         // message-path guard so we never compute against stale history.
         let mut pending_after_rebuild = false;
         if self.has_pending_messages(tracked_id) {
-            self.rebuild_channel_cache(ctx, command.channel_id, None)
+            self.rebuild_channel_cache(ctx, scoped_channel_id, None)
                 .await;
             pending_after_rebuild = self.has_pending_messages(tracked_id);
         }
 
-        let cache_load_result = self.ensure_cache_loaded(ctx, command.channel_id).await;
+        let cache_load_result = self.ensure_cache_loaded(ctx, scoped_channel_id).await;
 
         let roster = match self
             .roster_provider
-            .roster_for_channel(ctx, command.channel_id)
+            .roster_for_channel(ctx, scoped_channel_id)
             .await
         {
             Ok(snapshot) => snapshot,
             Err(e) => {
                 tracing::warn!(
                     "Slash command: failed to fetch roster for {}: {:?}",
-                    command.channel_id,
+                    scoped_channel_id,
                     e
                 );
                 let _ = command
                     .create_followup(
                         &ctx.http,
                         CreateInteractionResponseFollowup::new()
+                            .ephemeral(already_deferred)
                             .content(walicord_i18n::SLASH_ROSTER_LOAD_FAILED),
                     )
                     .await;
@@ -766,6 +826,7 @@ where
                 .create_followup(
                     &ctx.http,
                     CreateInteractionResponseFollowup::new()
+                        .ephemeral(already_deferred)
                         .content(walicord_i18n::SLASH_PENDING_NOT_CLEARED),
                 )
                 .await;
@@ -804,7 +865,9 @@ where
                 let _ = command
                     .create_followup(
                         &ctx.http,
-                        CreateInteractionResponseFollowup::new().content(msg),
+                        CreateInteractionResponseFollowup::new()
+                            .ephemeral(already_deferred)
+                            .content(msg),
                     )
                     .await;
             }
@@ -812,7 +875,9 @@ where
                 let _ = command
                     .create_followup(
                         &ctx.http,
-                        CreateInteractionResponseFollowup::new().content(content),
+                        CreateInteractionResponseFollowup::new()
+                            .ephemeral(already_deferred)
+                            .content(content),
                     )
                     .await;
             }
@@ -821,7 +886,9 @@ where
                     let _ = command
                         .create_followup(
                             &ctx.http,
-                            CreateInteractionResponseFollowup::new().content(warning),
+                            CreateInteractionResponseFollowup::new()
+                                .ephemeral(already_deferred)
+                                .content(warning),
                         )
                         .await;
                 }
@@ -833,7 +900,7 @@ where
                 match settlement_service
                     .render_settlement_view(
                         ctx,
-                        command.channel_id,
+                        scoped_channel_id,
                         Ok(result),
                         &mut member_directory,
                     )
@@ -847,6 +914,7 @@ where
                                 .create_followup(
                                     &ctx.http,
                                     CreateInteractionResponseFollowup::new()
+                                        .ephemeral(already_deferred)
                                         .add_file(CreateAttachment::bytes(png, "settlement.png")),
                                 )
                                 .await;
@@ -856,6 +924,7 @@ where
                                 .create_followup(
                                     &ctx.http,
                                     CreateInteractionResponseFollowup::new()
+                                        .ephemeral(already_deferred)
                                         .content(walicord_i18n::SLASH_RENDER_FAILED),
                                 )
                                 .await;
@@ -865,7 +934,9 @@ where
                         let _ = command
                             .create_followup(
                                 &ctx.http,
-                                CreateInteractionResponseFollowup::new().content(error_content),
+                                CreateInteractionResponseFollowup::new()
+                                    .ephemeral(already_deferred)
+                                    .content(error_content),
                             )
                             .await;
                     }
@@ -1047,13 +1118,24 @@ where
     }
 
     async fn ready(&self, ctx: Context, ready: Ready) {
+        if let Err(error) = self.ledger_poc.ensure_single_process_runtime().await {
+            tracing::error!(
+                "discord ledger PoC requires single-process deployment; startup lock failed: {}",
+                error
+            );
+            std::process::exit(1);
+        }
         tracing::info!("Connected as {}", ready.user.name);
         self.initialize_enabled_channels(&ctx, &ready).await;
 
         use serenity::{builder::CreateCommand, model::application::Command};
 
         let commands = vec![
+            CreateCommand::new("expense").description("経費を ledger に記録します"),
             CreateCommand::new("review").description(walicord_i18n::SLASH_REVIEW_DESCRIPTION),
+            CreateCommand::new("settle").description("直前の review を ledger に確定します"),
+            CreateCommand::new("void").description("ledger entry を append-only で取り消します"),
+            CreateCommand::new("ledger").description("ledger の現在状態を表示します"),
             CreateCommand::new("variables").description(walicord_i18n::SLASH_VARIABLES_DESCRIPTION),
         ];
 
@@ -1067,8 +1149,67 @@ where
         ctx: Context,
         interaction: serenity::model::application::Interaction,
     ) {
-        if let serenity::model::application::Interaction::Command(ref command) = interaction {
-            self.handle_slash_command(&ctx, command).await;
+        match interaction {
+            serenity::model::application::Interaction::Command(ref command) => {
+                let scoped_channel_id = self
+                    .resolve_slash_scope_channel_id(&ctx, command.channel_id)
+                    .await;
+                let ledger_command_in_tracked_scope =
+                    is_ledger_poc_command(command.data.name.as_str())
+                        && self
+                            .channel_manager
+                            .get_tracked(scoped_channel_id)
+                            .is_some();
+                if command.data.name == "review" {
+                    if ledger_command_in_tracked_scope
+                        && self
+                            .ledger_poc
+                            .handle_review_command(&ctx, command, &self.roster_provider)
+                            .await
+                    {
+                        return;
+                    }
+                    self.handle_slash_command_with_defer(&ctx, command, false)
+                        .await;
+                    return;
+                }
+                if is_ledger_poc_command(command.data.name.as_str())
+                    && !ledger_command_in_tracked_scope
+                {
+                    let _ = command
+                        .create_response(
+                            &ctx.http,
+                            serenity::builder::CreateInteractionResponse::Message(
+                                serenity::builder::CreateInteractionResponseMessage::new()
+                                    .content(walicord_i18n::CHANNEL_NOT_TRACKED)
+                                    .ephemeral(true),
+                            ),
+                        )
+                        .await;
+                    return;
+                }
+                if self
+                    .ledger_poc
+                    .handle_command(&ctx, command, &self.roster_provider)
+                    .await
+                {
+                    return;
+                }
+                self.handle_slash_command(&ctx, command).await;
+            }
+            serenity::model::application::Interaction::Component(ref component) => {
+                let _ = self
+                    .ledger_poc
+                    .handle_component(&ctx, component, &self.roster_provider)
+                    .await;
+            }
+            serenity::model::application::Interaction::Modal(ref modal) => {
+                let _ = self
+                    .ledger_poc
+                    .handle_modal(&ctx, modal, &self.roster_provider)
+                    .await;
+            }
+            _ => {}
         }
     }
 
@@ -1440,6 +1581,25 @@ mod tests {
     }
 
     #[rstest]
+    #[case::top_level_channel(ChannelId::new(1), None, ChannelId::new(1))]
+    #[case::thread_channel(ChannelId::new(2), Some(ChannelId::new(1)), ChannelId::new(1))]
+    fn slash_scope_channel_id_cases(
+        #[case] channel_id: ChannelId,
+        #[case] parent_id: Option<ChannelId>,
+        #[case] expected: ChannelId,
+    ) {
+        assert_eq!(slash_scope_channel_id(channel_id, parent_id), expected);
+    }
+
+    #[rstest]
+    #[case("expense", true)]
+    #[case("review", true)]
+    #[case("variables", false)]
+    fn is_ledger_poc_command_cases(#[case] command_name: &str, #[case] expected: bool) {
+        assert_eq!(is_ledger_poc_command(command_name), expected);
+    }
+
+    #[rstest]
     #[case::enable_from_none(None, Some("#walicord"), ChannelFlagAction::Track)]
     #[case::enable_from_unflagged(Some("ops"), Some("ops #walicord"), ChannelFlagAction::Track)]
     #[case::disable_to_unflagged(Some("ops #walicord"), Some("ops"), ChannelFlagAction::Untrack)]
@@ -1481,13 +1641,8 @@ mod tests {
         assert!(!handler.message_cache.contains(channel_id));
     }
 
-    #[rstest]
-    #[case::first_untrack_clears_cache(true, false)]
-    #[case::second_untrack_is_noop(false, false)]
-    fn untrack_channel_is_idempotent_for_cache(
-        #[case] should_have_cache: bool,
-        #[case] expected_cache_present: bool,
-    ) {
+    #[test]
+    fn untrack_channel_clears_cache_on_first_call() {
         let handler = handler();
         let channel_id = ChannelId::new(1);
 
@@ -1501,14 +1656,26 @@ mod tests {
 
         handler.untrack_channel(channel_id);
 
-        if !should_have_cache {
-            handler.untrack_channel(channel_id);
-        }
+        assert!(!handler.message_cache.contains(channel_id));
+    }
 
-        assert_eq!(
-            handler.message_cache.contains(channel_id),
-            expected_cache_present
-        );
+    #[test]
+    fn untrack_channel_leaves_cache_empty_on_second_call() {
+        let handler = handler();
+        let channel_id = ChannelId::new(1);
+
+        let Some(ChannelEvent::Tracked(tracked_id)) = handler.channel_manager.track(channel_id)
+        else {
+            panic!("track should succeed");
+        };
+        let mut messages = IndexMap::new();
+        messages.insert(MessageId::new(10), make_cached_message(10, "test"));
+        handler.message_cache.insert(tracked_id, messages);
+
+        handler.untrack_channel(channel_id);
+        handler.untrack_channel(channel_id);
+
+        assert!(!handler.message_cache.contains(channel_id));
     }
 
     #[rstest]

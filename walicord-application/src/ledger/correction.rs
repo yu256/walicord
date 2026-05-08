@@ -236,3 +236,14 @@ pub fn admin_external_balance_correction(
     )
     .map_err(AdminExternalBalanceCorrectionError::Adjustment)
 }
+
+/// Reconstructs the raw `ExternalCorrection` source when decoding previously-authored
+/// canonical ledger data. This is intentionally separate from
+/// [`admin_external_balance_correction`]: transport decode needs to round-trip existing
+/// history faithfully, but new application writes should continue to go through the audited
+/// admin helper above.
+pub fn external_correction_source_for_transport_decode() -> BalanceAdjustmentSource {
+    BalanceAdjustmentSource::ExternalCorrection(
+        AdminCorrectionAuthority::explicit_admin_capability(),
+    )
+}

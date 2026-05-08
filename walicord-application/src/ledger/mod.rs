@@ -24,18 +24,20 @@ pub(crate) use walicord_ledger::AdminCorrectionAuthority;
 pub use correction::{
     AdminExternalBalanceCorrectionError, StandardPriorAdjustmentCorrectionError,
     StandardSealedEntryCorrectionError, admin_external_balance_correction,
-    standard_prior_adjustment_correction, standard_sealed_entry_correction,
+    external_correction_source_for_transport_decode, standard_prior_adjustment_correction,
+    standard_sealed_entry_correction,
 };
 pub use entry::{
     AllocationSnapshot, AllocationSnapshotError, AppendOrderedLedgerEntries,
-    AppendOrderedLedgerEntriesError, LedgerEntry, LedgerEntryConstructionError,
-    LedgerEntryMetadata, LedgerSourceCanonical, LedgerSourceCanonicalError,
-    LedgerSourceCanonicalKind, MemberWeight, NonExpenseLedgerEvent,
+    AppendOrderedLedgerEntriesError, LedgerEffectiveDate, LedgerEffectiveDateError, LedgerEntry,
+    LedgerEntryConstructionError, LedgerEntryMetadata, LedgerSourceCanonical,
+    LedgerSourceCanonicalError, LedgerSourceCanonicalKind, MemberWeight, NonExpenseLedgerEvent,
 };
 pub use hash_chain::{
     ChainPositionError, EntryHash, HashedLedgerPayload, LedgerCanonicalEncodeError,
     LedgerHashChainError, LedgerHashSuite, SchemaVersion, UnverifiedLedgerStoreEnvelope,
-    VerifiedLedgerStoreEnvelope, ledger_chain_genesis_sha256_v1, verify_envelope_sha256_v1,
+    VerifiedLedgerStoreEnvelope, ledger_chain_genesis_sha256_v1,
+    make_unverified_envelope_sha256_v1, verify_envelope_sha256_v1,
     verify_envelopes_in_append_order_sha256_v1,
 };
 #[cfg(test)]

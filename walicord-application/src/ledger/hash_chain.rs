@@ -1,6 +1,6 @@
 use super::entry::{
-    AllocationSnapshot, LedgerEntry, LedgerEntryMetadata, LedgerSourceCanonical,
-    LedgerSourceCanonicalKind, MemberWeight,
+    AllocationSnapshot, LedgerEffectiveDate, LedgerEntry, LedgerEntryMetadata,
+    LedgerSourceCanonical, LedgerSourceCanonicalKind, MemberWeight,
 };
 use walicord_domain::{Money, Transfer, model::MemberId};
 use walicord_ledger::{
@@ -54,6 +54,32 @@ pub struct UnverifiedLedgerStoreEnvelope<ExternalId> {
     pub entry_hash: EntryHash,
     pub external_id: ExternalId,
     pub payload: HashedLedgerPayload,
+}
+
+/// Constructs a new unverified envelope using the application-owned schema v1 + SHA-256
+/// canonicalization. Appenders use this to create the stored chain link before transport-
+/// specific persistence.
+pub fn make_unverified_envelope_sha256_v1<ExternalId>(
+    ledger_id: LedgerId,
+    previous_hash: EntryHash,
+    external_id: ExternalId,
+    entry: LedgerEntry,
+) -> Result<UnverifiedLedgerStoreEnvelope<ExternalId>, LedgerCanonicalEncodeError> {
+    let payload = HashedLedgerPayload {
+        ledger_id,
+        schema_version: SchemaVersion(1),
+        hash_suite: LedgerHashSuite::Sha256V1,
+        entry,
+    };
+    let bytes = DefaultLedgerCanonicalEncoder.encode(previous_hash, &payload)?;
+    let entry_hash = Sha256V1Digest.digest(&bytes);
+
+    Ok(UnverifiedLedgerStoreEnvelope {
+        previous_hash,
+        entry_hash,
+        external_id,
+        payload,
+    })
 }
 
 /// Envelope whose `entry_hash` has been recomputed from `previous_hash || canonical_payload`
@@ -198,10 +224,9 @@ impl LedgerCanonicalEncoder for DefaultLedgerCanonicalEncoder {
 
 /// Schema v1 canonical encoding. Field order, length prefixes, big-endian integer width,
 /// `Decimal` 16-byte serialization, and option/discriminant byte values are all part of the
-/// v1 contract — do not change them; introduce a v2 encoder and bump `schema_version`
-/// instead. Schema v1 supports **exactly** hash suite [`LedgerHashSuite::Sha256V1`]; any
-/// other suite is rejected up-front so the suite ↔ schema pairing is enforced by code,
-/// not by doc convention. Adding a new suite is a deliberate v2 schema change.
+/// v1 contract. Walicord has not deployed a prior ledger chain yet, so `effective_date`
+/// is part of schema v1 instead of forcing a speculative schema v2 split. Schema v1
+/// supports **exactly** hash suite [`LedgerHashSuite::Sha256V1`].
 ///
 /// `Money` values are normalized via [`rust_decimal::Decimal::normalize`] before being
 /// serialized so that any two `Money` values that compare equal as values produce identical
@@ -244,16 +269,16 @@ fn hash_suite_v1_discriminant(suite: LedgerHashSuite) -> u8 {
 /// without `..`**, so any new field added to `LedgerEntryMetadata` causes a compile error
 /// here — forcing the implementer to make a deliberate choice:
 ///
-/// 1. add the field to `MetadataV1Hashed` and update [`encode_metadata_v1`] (extends what
-///    schema v1 hashes — only safe before any v1 chain has been published), or
-/// 2. introduce a `MetadataV2Hashed` DTO and a v2 encoder, bump `SchemaVersion`, and route
-///    new entries through v2 (the standard path once v1 is in production).
+/// 1. add the field to `MetadataV1Hashed` and update [`encode_metadata_v1`] while v1 is
+///    still unpublished, or
+/// 2. introduce a new schema version once v1 has been deployed.
 ///
 /// Without this DTO, a forgotten field would silently fall outside the hash without any
 /// compiler signal — that is the exact failure mode this design prevents.
 struct MetadataV1Hashed<'a> {
     recorded_by: Option<MemberId>,
     source: Option<&'a LedgerSourceCanonical>,
+    effective_date: Option<&'a LedgerEffectiveDate>,
     allocation_snapshot: Option<&'a AllocationSnapshot>,
 }
 
@@ -263,11 +288,13 @@ impl<'a> From<&'a LedgerEntryMetadata> for MetadataV1Hashed<'a> {
         let LedgerEntryMetadata {
             recorded_by,
             source,
+            effective_date,
             allocation_snapshot,
         } = metadata;
         Self {
             recorded_by: *recorded_by,
             source: source.as_ref(),
+            effective_date: effective_date.as_ref(),
             allocation_snapshot: allocation_snapshot.as_ref(),
         }
     }
@@ -280,10 +307,12 @@ fn encode_metadata_v1(
     let MetadataV1Hashed {
         recorded_by,
         source,
+        effective_date,
         allocation_snapshot,
     } = MetadataV1Hashed::from(metadata);
     encode_optional_member(out, recorded_by);
     encode_optional_source_v1(out, source)?;
+    encode_optional_effective_date_v1(out, effective_date)?;
     encode_optional_allocation_snapshot_v1(out, allocation_snapshot)?;
     Ok(())
 }
@@ -306,7 +335,22 @@ fn encode_optional_source_v1(
 fn source_kind_v1_discriminant(kind: LedgerSourceCanonicalKind) -> u8 {
     match kind {
         LedgerSourceCanonicalKind::LegacyDsl => 1,
+        LedgerSourceCanonicalKind::DiscordUi => 2,
     }
+}
+
+fn encode_optional_effective_date_v1(
+    out: &mut Vec<u8>,
+    effective_date: Option<&LedgerEffectiveDate>,
+) -> Result<(), LedgerCanonicalEncodeError> {
+    match effective_date {
+        None => out.push(0),
+        Some(effective_date) => {
+            out.push(1);
+            encode_string(out, effective_date.as_str())?;
+        }
+    }
+    Ok(())
 }
 
 /// Schema v1 canonical encoding of `Option<AllocationSnapshot>`. Replaces the earlier
@@ -654,6 +698,7 @@ pub fn verify_envelopes_in_append_order_sha256_v1<ExternalId>(
 #[cfg(test)]
 mod schema_v1_tests {
     use super::*;
+    use crate::ledger::LedgerEffectiveDate;
     use walicord_domain::{Money, Transfer, model::MemberId};
     use walicord_ledger::{
         AdjustmentReason, AdminCorrectionAuthority, BalanceAdjusted, BalanceAdjustment,
@@ -884,6 +929,18 @@ mod schema_v1_tests {
 
         let bytes_a = encode_schema_v1_unwrap(EntryHash([0; 32]), &payload_with_meta);
         let bytes_b = encode_schema_v1_unwrap(EntryHash([0; 32]), &payload_no_meta);
+        assert_ne!(bytes_a, bytes_b);
+    }
+
+    #[test]
+    fn schema_v1_hashes_effective_date() {
+        let mut payload_with_date = payload_with_event(1, expense_event(1, 2, 100));
+        let payload_without_date = payload_with_date.clone();
+        payload_with_date.entry.metadata.effective_date =
+            Some(LedgerEffectiveDate::new("2026-05-01").expect("date should be valid"));
+
+        let bytes_a = encode_schema_v1_unwrap(EntryHash([0; 32]), &payload_with_date);
+        let bytes_b = encode_schema_v1_unwrap(EntryHash([0; 32]), &payload_without_date);
         assert_ne!(bytes_a, bytes_b);
     }
 
@@ -1196,10 +1253,9 @@ mod schema_v1_tests {
         // rather than silently saturating, which would let two distinct payloads collide on
         // canonical bytes once both exceed `u32::MAX`.
         let too_big = (u32::MAX as usize) + 1;
-        let err = u32_be_len(too_big).expect_err("oversize length must produce a typed error");
         assert_eq!(
-            err,
-            LedgerCanonicalEncodeError::LengthOverflow { len: too_big }
+            u32_be_len(too_big),
+            Err(LedgerCanonicalEncodeError::LengthOverflow { len: too_big })
         );
     }
 }

@@ -100,6 +100,9 @@ fn append_ordered_entries_preserve_application_metadata() {
         source: Some(
             LedgerSourceCanonical::legacy_dsl("/expense 100").expect("source should parse"),
         ),
+        effective_date: Some(
+            LedgerEffectiveDate::new("2026-05-01").expect("effective date should parse"),
+        ),
         allocation_snapshot: Some(
             AllocationSnapshot::weighted([
                 MemberWeight {
@@ -140,6 +143,77 @@ fn ledger_source_canonical_marks_current_supported_source_kind() {
 
     assert_eq!(source.kind(), LedgerSourceCanonicalKind::LegacyDsl);
     assert_eq!(source.canonical_text(), "/expense 100");
+}
+
+#[test]
+fn discord_ui_source_canonical_marks_discord_kind() {
+    let source =
+        LedgerSourceCanonical::discord_ui("expense/slash-modal/v1").expect("source should parse");
+
+    assert_eq!(source.kind(), LedgerSourceCanonicalKind::DiscordUi);
+    assert_eq!(source.canonical_text(), "expense/slash-modal/v1");
+}
+
+#[test]
+fn ledger_effective_date_accepts_iso_date() {
+    let actual = LedgerEffectiveDate::new(" 2026-05-01 ");
+
+    assert_eq!(
+        actual,
+        Ok(LedgerEffectiveDate::new("2026-05-01").expect("date should parse"))
+    );
+}
+
+#[test]
+fn ledger_effective_date_rejects_non_iso_date() {
+    let actual = LedgerEffectiveDate::new("05/01/2026");
+
+    assert_eq!(actual, Err(LedgerEffectiveDateError::InvalidFormat));
+}
+
+#[test]
+fn ledger_effective_date_rejects_impossible_calendar_date() {
+    let actual = LedgerEffectiveDate::new("2026-02-31");
+
+    assert_eq!(actual, Err(LedgerEffectiveDateError::InvalidFormat));
+}
+
+#[test]
+fn allocation_snapshot_weighted_preserves_zero_weight_members_for_audit() {
+    let actual = AllocationSnapshot::weighted([
+        MemberWeight {
+            member_id: MemberId(1),
+            weight: walicord_domain::model::Weight(2),
+        },
+        MemberWeight {
+            member_id: MemberId(2),
+            weight: walicord_domain::model::Weight::ZERO,
+        },
+        MemberWeight {
+            member_id: MemberId(3),
+            weight: walicord_domain::model::Weight(1),
+        },
+    ]);
+
+    assert_eq!(
+        actual,
+        Ok(AllocationSnapshot::Weighted {
+            resolved_weights: vec![
+                MemberWeight {
+                    member_id: MemberId(1),
+                    weight: walicord_domain::model::Weight(2),
+                },
+                MemberWeight {
+                    member_id: MemberId(2),
+                    weight: walicord_domain::model::Weight::ZERO,
+                },
+                MemberWeight {
+                    member_id: MemberId(3),
+                    weight: walicord_domain::model::Weight(1),
+                },
+            ],
+        })
+    );
 }
 
 #[test]

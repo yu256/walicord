@@ -5,12 +5,12 @@ use walicord_ledger::{
 };
 
 /// Source kind currently supported by `LedgerSourceCanonical`. The enum is intentionally
-/// narrow: today's application only commits canonicalized legacy-DSL text. Adding another
-/// kind (slash command, migration descriptor, modal submission, ...) should be a
-/// deliberate schema/API design step rather than an ad-hoc extra string convention.
+/// narrow: only the canonicalized input surfaces the application actively knows how to
+/// audit should appear here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LedgerSourceCanonicalKind {
     LegacyDsl,
+    DiscordUi,
 }
 
 /// Canonical representation of the input that produced a ledger entry. This is
@@ -18,14 +18,10 @@ pub enum LedgerSourceCanonicalKind {
 /// `LedgerEntryMetadata` rather than inside `ExpenseRecorded`, keeping the ledger event
 /// payload free of input-channel concerns.
 ///
-/// The current model intentionally supports **one** source kind only:
-/// [`LedgerSourceCanonicalKind::LegacyDsl`]. That keeps the hashed metadata honest about
-/// what the application can canonicalize today instead of pretending that arbitrary future
-/// adapters already share one stable string format. The canonical text (not a hash) is
-/// stored so callers can also render it directly. The hash chain still covers it because
-/// `LedgerEntryMetadata` is part of the canonical hash input via `HashedLedgerPayload::entry`.
-/// Free-form display prose belongs in adapter/presentation envelopes, not here — only
-/// stable, reproducible canonical strings.
+/// The canonical text (not a hash) is stored so callers can also render it directly. The
+/// hash chain still covers it because `LedgerEntryMetadata` is part of the canonical hash
+/// input via `HashedLedgerPayload::entry`. Free-form display prose belongs in
+/// adapter/presentation envelopes, not here — only stable, reproducible canonical strings.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LedgerSourceCanonical {
     kind: LedgerSourceCanonicalKind,
@@ -33,18 +29,30 @@ pub struct LedgerSourceCanonical {
 }
 
 impl LedgerSourceCanonical {
-    /// Canonicalized text from the current supported input surface: the legacy DSL /
-    /// message-parser path. Additional source kinds should be added intentionally, not by
-    /// overloading this constructor with new conventions.
-    pub fn legacy_dsl(canonical: impl Into<String>) -> Result<Self, LedgerSourceCanonicalError> {
+    fn new(
+        kind: LedgerSourceCanonicalKind,
+        canonical: impl Into<String>,
+    ) -> Result<Self, LedgerSourceCanonicalError> {
         let canonical = canonical.into().trim().to_owned();
         if canonical.is_empty() {
             return Err(LedgerSourceCanonicalError::Empty);
         }
-        Ok(Self {
-            kind: LedgerSourceCanonicalKind::LegacyDsl,
-            canonical,
-        })
+        Ok(Self { kind, canonical })
+    }
+
+    /// Canonicalized text from the current supported input surface: the legacy DSL /
+    /// message-parser path. Additional source kinds should be added intentionally, not by
+    /// overloading this constructor with new conventions.
+    pub fn legacy_dsl(canonical: impl Into<String>) -> Result<Self, LedgerSourceCanonicalError> {
+        Self::new(LedgerSourceCanonicalKind::LegacyDsl, canonical)
+    }
+
+    /// Canonicalized text from the Discord slash/modal/button flow.
+    ///
+    /// The text here is an application-owned source descriptor such as
+    /// `expense/slash-modal/v1` — never a generated DSL string and never human-facing prose.
+    pub fn discord_ui(canonical: impl Into<String>) -> Result<Self, LedgerSourceCanonicalError> {
+        Self::new(LedgerSourceCanonicalKind::DiscordUi, canonical)
     }
 
     pub fn kind(&self) -> LedgerSourceCanonicalKind {
@@ -63,6 +71,72 @@ impl LedgerSourceCanonical {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LedgerSourceCanonicalError {
     Empty,
+}
+
+/// Canonicalized date string attached to an entry's audit metadata.
+///
+/// The PoC keeps the shape intentionally simple and transport-agnostic: a validated
+/// `YYYY-MM-DD` string that represents the business date the actor chose for the entry,
+/// distinct from Discord transport timestamps.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LedgerEffectiveDate(String);
+
+impl LedgerEffectiveDate {
+    pub fn new(date: impl Into<String>) -> Result<Self, LedgerEffectiveDateError> {
+        let date = date.into().trim().to_owned();
+        if date.is_empty() {
+            return Err(LedgerEffectiveDateError::Empty);
+        }
+        if !is_valid_iso_date(&date) {
+            return Err(LedgerEffectiveDateError::InvalidFormat);
+        }
+        Ok(Self(date))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LedgerEffectiveDateError {
+    Empty,
+    InvalidFormat,
+}
+
+fn is_valid_iso_date(date: &str) -> bool {
+    let bytes = date.as_bytes();
+    if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
+        return false;
+    }
+    if !bytes
+        .iter()
+        .enumerate()
+        .all(|(idx, byte)| matches!(idx, 4 | 7) || byte.is_ascii_digit())
+    {
+        return false;
+    }
+
+    let parse_part =
+        |range: std::ops::Range<usize>| -> Option<u32> { date.get(range)?.parse().ok() };
+    let year = parse_part(0..4);
+    let month = parse_part(5..7);
+    let day = parse_part(8..10);
+    let (Some(year), Some(month), Some(day)) = (year, month, day) else {
+        return false;
+    };
+    let max_day = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if is_leap_year(year) => 29,
+        2 => 28,
+        _ => return false,
+    };
+    (1..=max_day).contains(&day)
+}
+
+fn is_leap_year(year: u32) -> bool {
+    (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400)
 }
 
 /// `(member, weight)` pair captured at the time an expense was resolved into amounts. The
@@ -101,8 +175,10 @@ pub enum AllocationSnapshot {
     Even,
     /// Expense was split using explicit per-member weights. `resolved_weights` is the
     /// canonical (sorted-by-`MemberId`) list of `(member, weight)` pairs the planner used
-    /// at split time. `Default::default` (= `Weight(0)`) is forbidden in this list — only
-    /// members that participated with a non-zero weight should appear.
+    /// at split time. Zero-weight members are allowed here because they are meaningful
+    /// audit data for UI flows that explicitly include a participant but assign them no
+    /// share; the event payload still omits zero-share members because replay only stores
+    /// positive amounts.
     Weighted { resolved_weights: Vec<MemberWeight> },
     /// Allocation strategy is structurally unknown — reserved for migration from
     /// pre-snapshot data sources where the original `Even` / `Weighted` cannot be
@@ -117,17 +193,14 @@ pub enum AllocationSnapshot {
 
 impl AllocationSnapshot {
     /// Constructs a [`AllocationSnapshot::Weighted`] from a flat collection of
-    /// `(member, weight)` pairs. Sorts by `MemberId` and rejects empty / zero-only inputs
-    /// up-front so canonical bytes never depend on iteration order or inadvertent zeros.
+    /// `(member, weight)` pairs. Sorts by `MemberId` and rejects empty / duplicate inputs
+    /// up-front so canonical bytes never depend on iteration order.
     pub fn weighted(
         weights: impl IntoIterator<Item = MemberWeight>,
     ) -> Result<Self, AllocationSnapshotError> {
         let mut resolved_weights: Vec<MemberWeight> = weights.into_iter().collect();
         if resolved_weights.is_empty() {
             return Err(AllocationSnapshotError::EmptyWeights);
-        }
-        if resolved_weights.iter().any(|mw| mw.weight == Weight::ZERO) {
-            return Err(AllocationSnapshotError::ZeroWeight);
         }
         resolved_weights.sort_by_key(|mw| mw.member_id);
         let mut seen = None;
@@ -146,7 +219,6 @@ impl AllocationSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AllocationSnapshotError {
     EmptyWeights,
-    ZeroWeight,
     DuplicateMember { member_id: MemberId },
 }
 
@@ -154,6 +226,7 @@ pub enum AllocationSnapshotError {
 pub struct LedgerEntryMetadata {
     pub recorded_by: Option<MemberId>,
     pub source: Option<LedgerSourceCanonical>,
+    pub effective_date: Option<LedgerEffectiveDate>,
     /// Typed audit snapshot of an expense's allocation strategy and resolved per-member
     /// weights. The projection never reads this field; it is hash-protected (because it
     /// is part of `LedgerEntryMetadata`) so audit data stays stable, but presentation
