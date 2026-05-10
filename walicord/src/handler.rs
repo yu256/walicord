@@ -115,8 +115,28 @@ fn channel_flag_action(old_topic: Option<&str>, new_topic: Option<&str>) -> Chan
     }
 }
 
-fn slash_scope_channel_id(channel_id: ChannelId, parent_id: Option<ChannelId>) -> ChannelId {
-    parent_id.unwrap_or(channel_id)
+#[derive(Debug, PartialEq, thiserror::Error)]
+enum SlashScopeError {
+    #[error("thread channel {0} has no parent channel")]
+    ThreadWithoutParent(ChannelId),
+}
+
+fn slash_scope_channel_id(
+    channel_id: ChannelId,
+    kind: serenity::model::channel::ChannelType,
+    parent_id: Option<ChannelId>,
+) -> Result<ChannelId, SlashScopeError> {
+    let is_thread = matches!(
+        kind,
+        serenity::model::channel::ChannelType::PublicThread
+            | serenity::model::channel::ChannelType::PrivateThread
+            | serenity::model::channel::ChannelType::NewsThread
+    );
+    if is_thread {
+        parent_id.ok_or(SlashScopeError::ThreadWithoutParent(channel_id))
+    } else {
+        Ok(channel_id)
+    }
 }
 
 fn is_ledger_poc_command(command_name: &str) -> bool {
@@ -717,19 +737,21 @@ where
         &self,
         ctx: &Context,
         channel_id: ChannelId,
-    ) -> ChannelId {
+    ) -> Result<ChannelId, SlashScopeError> {
         match channel_id.to_channel(&ctx.http).await {
-            Ok(channel) => channel
-                .guild()
-                .map(|channel| slash_scope_channel_id(channel.id, channel.parent_id))
-                .unwrap_or(channel_id),
+            Ok(channel) => match channel.guild() {
+                Some(gc) => slash_scope_channel_id(gc.id, gc.kind, gc.parent_id).inspect_err(
+                    |e| tracing::warn!("Slash command: {e}"),
+                ),
+                None => Ok(channel_id),
+            },
             Err(error) => {
                 tracing::warn!(
                     "Slash command: failed to resolve scope for {}: {:?}",
                     channel_id,
                     error
                 );
-                channel_id
+                Ok(channel_id)
             }
         }
     }
@@ -745,9 +767,12 @@ where
             CreateInteractionResponseMessage, EditInteractionResponse,
         };
 
-        let scoped_channel_id = self
+        let Ok(scoped_channel_id) = self
             .resolve_slash_scope_channel_id(ctx, command.channel_id)
-            .await;
+            .await
+        else {
+            return;
+        };
 
         let Some(tracked_id) = self.channel_manager.get_tracked(scoped_channel_id) else {
             if already_deferred {
@@ -1151,9 +1176,12 @@ where
     ) {
         match interaction {
             serenity::model::application::Interaction::Command(ref command) => {
-                let scoped_channel_id = self
+                let Ok(scoped_channel_id) = self
                     .resolve_slash_scope_channel_id(&ctx, command.channel_id)
-                    .await;
+                    .await
+                else {
+                    return;
+                };
                 let ledger_command_in_tracked_scope =
                     is_ledger_poc_command(command.data.name.as_str())
                         && self
@@ -1581,14 +1609,32 @@ mod tests {
     }
 
     #[rstest]
-    #[case::top_level_channel(ChannelId::new(1), None, ChannelId::new(1))]
-    #[case::thread_channel(ChannelId::new(2), Some(ChannelId::new(1)), ChannelId::new(1))]
+    #[case::top_level_channel(ChannelId::new(1), ChannelType::Text, None, Ok(ChannelId::new(1)))]
+    #[case::thread_with_parent(
+        ChannelId::new(2),
+        ChannelType::PublicThread,
+        Some(ChannelId::new(1)),
+        Ok(ChannelId::new(1))
+    )]
+    #[case::thread_without_parent(
+        ChannelId::new(2),
+        ChannelType::PublicThread,
+        None,
+        Err(SlashScopeError::ThreadWithoutParent(ChannelId::new(2)))
+    )]
+    #[case::text_in_category(
+        ChannelId::new(2),
+        ChannelType::Text,
+        Some(ChannelId::new(1)),
+        Ok(ChannelId::new(2))
+    )]
     fn slash_scope_channel_id_cases(
         #[case] channel_id: ChannelId,
+        #[case] kind: ChannelType,
         #[case] parent_id: Option<ChannelId>,
-        #[case] expected: ChannelId,
+        #[case] expected: Result<ChannelId, SlashScopeError>,
     ) {
-        assert_eq!(slash_scope_channel_id(channel_id, parent_id), expected);
+        assert_eq!(slash_scope_channel_id(channel_id, kind, parent_id), expected);
     }
 
     #[rstest]
