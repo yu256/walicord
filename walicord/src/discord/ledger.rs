@@ -4,12 +4,12 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use serenity::{
     all::{
-        ActionRowComponent, AutoArchiveDuration, ButtonStyle, ChannelId, CommandInteraction,
-        ComponentInteraction, ComponentInteractionDataKind, CreateActionRow, CreateAttachment,
-        CreateButton, CreateInputText, CreateInteractionResponse, CreateInteractionResponseMessage,
-        CreateModal, CreateSelectMenu, CreateSelectMenuKind, CreateSelectMenuOption, CreateThread,
-        EditInteractionResponse, EditMessage, GuildChannel, GuildId, InputTextStyle, Message,
-        MessageId, ModalInteraction, RoleId as SerenityRoleId, UserId,
+        ActionRowComponent, ButtonStyle, ChannelId, CommandInteraction, ComponentInteraction,
+        ComponentInteractionDataKind, CreateActionRow, CreateAttachment, CreateButton,
+        CreateInputText, CreateInteractionResponse, CreateInteractionResponseMessage, CreateModal,
+        CreateSelectMenu, CreateSelectMenuKind, CreateSelectMenuOption, EditInteractionResponse,
+        EditMessage, GuildId, InputTextStyle, Message, MessageId, ModalInteraction,
+        RoleId as SerenityRoleId, UserId,
     },
     builder::CreateMessage,
     model::channel::ChannelType,
@@ -49,9 +49,6 @@ use walicord_domain::{
 use walicord_infrastructure::HighsSettlementPlanner;
 
 pub const LEDGER_ATTACHMENT_FILENAME: &str = "walicord-ledger-entry.json";
-pub const LEDGER_THREAD_PREFIX: &str = "walicord-ledger-";
-pub const LEDGER_THREAD_SEED_CONTENT: &str = "📚 Walicord ledger thread";
-pub const LEDGER_THREAD_SEED_ID_PREFIX: &str = "thread_id=";
 pub const EXPENSE_SOURCE_CANONICAL: &str = "expense/slash-modal/v1";
 pub const SETTLE_SOURCE_CANONICAL: &str = "settle/slash/v1";
 pub const VOID_SOURCE_CANONICAL: &str = "void/slash/v1";
@@ -83,7 +80,6 @@ pub struct DiscordLedgerPoc {
     void_drafts: dashmap::DashMap<u64, PendingVoidDraft>,
     settlement_previews: dashmap::DashMap<(u64, u64), PendingSettlementPreview>,
     runtime_lock: StdMutex<Option<CrossProcessFileLock>>,
-    thread_creation_locks: dashmap::DashMap<ChannelId, Arc<Mutex<()>>>,
     append_locks: dashmap::DashMap<ChannelId, Arc<Mutex<()>>>,
 }
 
@@ -109,7 +105,7 @@ struct ExpenseDraft {
 struct PendingVoidDraft {
     actor_id: UserId,
     guild_id: GuildId,
-    ledger_thread_id: ChannelId,
+    ledger_channel_id: ChannelId,
     expires_at: SystemTime,
     selected_target: Option<LedgerEntryId>,
 }
@@ -117,14 +113,14 @@ struct PendingVoidDraft {
 #[derive(Debug, Clone)]
 struct PendingSettlementPreview {
     ledger_id: LedgerId,
-    ledger_thread_id: ChannelId,
+    ledger_channel_id: ChannelId,
     binding: PreviewConfirmationBinding,
     previewed: PreviewedSettlement,
 }
 
 struct LoadedLedgerThread {
     ledger_id: LedgerId,
-    thread_id: ChannelId,
+    channel_id: ChannelId,
     verified: Vec<VerifiedLedgerStoreEnvelope<MessageId>>,
     projected: ProjectedLedger,
     entries: Vec<LedgerEntry>,
@@ -170,12 +166,6 @@ enum ConfirmedExpenseSelectionsError {
     Drifted(Vec<ExpenseParticipantSelection>),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SeededLedgerThreadError {
-    Ambiguous,
-    Invalid,
-}
-
 impl DiscordLedgerPoc {
     pub fn new() -> Self {
         Self {
@@ -185,7 +175,6 @@ impl DiscordLedgerPoc {
             void_drafts: dashmap::DashMap::new(),
             settlement_previews: dashmap::DashMap::new(),
             runtime_lock: StdMutex::new(None),
-            thread_creation_locks: dashmap::DashMap::new(),
             append_locks: dashmap::DashMap::new(),
         }
     }
@@ -285,19 +274,12 @@ impl DiscordLedgerPoc {
         let Some(guild_id) = command.guild_id else {
             return false;
         };
-        let thread_id = match self
-            .review_thread_for_channel(ctx, guild_id, command.channel_id)
-            .await
-        {
-            Ok(Some(thread_id)) => thread_id,
-            Ok(None) => return false,
-            Err(message) => {
-                self.reply_command_error(ctx, command, &message).await;
-                return true;
-            }
+        let channel_id = match self.lookup_parent_channel_id(ctx, command.channel_id).await {
+            Ok(channel_id) => channel_id,
+            Err(_) => return false,
         };
         let _ = command.defer_ephemeral(&ctx.http).await;
-        let loaded = match self.load_thread(ctx, thread_id).await {
+        let loaded = match self.load_ledger(ctx, channel_id).await {
             Ok(loaded) => loaded,
             Err(message) => {
                 self.edit_command_message(ctx, command, message, Vec::new())
@@ -305,6 +287,16 @@ impl DiscordLedgerPoc {
                 return true;
             }
         };
+        if loaded.entries.is_empty() {
+            self.edit_command_message(
+                ctx,
+                command,
+                "まだ経費が記録されていません。先に /expense を実行してください。",
+                Vec::new(),
+            )
+            .await;
+            return true;
+        }
         let member_names = roster_provider.display_names_for_guild(
             guild_id,
             loaded.projected.state().participants().iter().copied(),
@@ -329,10 +321,10 @@ impl DiscordLedgerPoc {
             &previewed,
         );
         self.settlement_previews.insert(
-            (loaded.thread_id.get(), command.user.id.get()),
+            (loaded.channel_id.get(), command.user.id.get()),
             PendingSettlementPreview {
                 ledger_id: loaded.ledger_id,
-                ledger_thread_id: loaded.thread_id,
+                ledger_channel_id: loaded.channel_id,
                 binding,
                 previewed: previewed.clone(),
             },
@@ -549,9 +541,13 @@ impl DiscordLedgerPoc {
                     .required(false),
             ),
             CreateActionRow::InputText(
-                CreateInputText::new(InputTextStyle::Short, "日付 (今日・昨日・5/1 も可)", EXPENSE_DATE_FIELD)
-                    .value(today_date().format("%Y-%m-%d").to_string())
-                    .required(false),
+                CreateInputText::new(
+                    InputTextStyle::Short,
+                    "日付 (今日・昨日・5/1 も可)",
+                    EXPENSE_DATE_FIELD,
+                )
+                .value(today_date().format("%Y-%m-%d").to_string())
+                .required(false),
             ),
         ]);
 
@@ -1260,24 +1256,11 @@ impl DiscordLedgerPoc {
             effective_date: draft.effective_date.clone(),
             recorded_by: MemberId(component.user.id.get()),
         };
-        let thread_creation_lock = self.thread_creation_lock(draft.parent_channel_id);
-        let _thread_creation_guard = thread_creation_lock.lock().await;
-        let thread_id = match self
-            .ensure_thread(ctx, draft.guild_id, draft.parent_channel_id)
-            .await
-        {
-            Ok(thread_id) => thread_id,
-            Err(message) => {
-                self.release_expense_recording(session_id);
-                self.edit_component_message(ctx, component, message, Vec::new())
-                    .await;
-                return;
-            }
-        };
-        let append_lock = self.append_lock(thread_id);
+        let channel_id = draft.parent_channel_id;
+        let append_lock = self.append_lock(channel_id);
         let _append_guard = append_lock.lock().await;
         let _cross_process_append_guard =
-            match self.acquire_cross_process_append_lock(thread_id).await {
+            match self.acquire_cross_process_append_lock(channel_id).await {
                 Ok(guard) => guard,
                 Err(message) => {
                     self.release_expense_recording(session_id);
@@ -1286,7 +1269,7 @@ impl DiscordLedgerPoc {
                     return;
                 }
             };
-        let loaded = match self.load_thread(ctx, thread_id).await {
+        let loaded = match self.load_ledger(ctx, channel_id).await {
             Ok(loaded) => loaded,
             Err(message) => {
                 self.release_expense_recording(session_id);
@@ -1315,7 +1298,7 @@ impl DiscordLedgerPoc {
             }
         };
         if let Err(message) = self
-            .append_entry(ctx, &loaded, thread_id, entry, &member_names)
+            .append_entry(ctx, &loaded, channel_id, entry, &member_names)
             .await
         {
             self.release_expense_recording(session_id);
@@ -1342,21 +1325,8 @@ impl DiscordLedgerPoc {
             return;
         };
         let _ = command.defer_ephemeral(&ctx.http).await;
-        let thread_id = match self
-            .resolve_ledger_thread(ctx, Some(guild_id), command.channel_id)
-            .await
-        {
-            Ok(Some(thread_id)) => thread_id,
-            Ok(None) => {
-                self.edit_command_message(
-                    ctx,
-                    command,
-                    "まだ経費が記録されていません。先に /expense を実行してください。",
-                    Vec::new(),
-                )
-                .await;
-                return;
-            }
+        let channel_id = match self.lookup_parent_channel_id(ctx, command.channel_id).await {
+            Ok(channel_id) => channel_id,
             Err(message) => {
                 self.edit_command_message(ctx, command, message, Vec::new())
                     .await;
@@ -1365,7 +1335,7 @@ impl DiscordLedgerPoc {
         };
         let Some(preview) = self
             .settlement_previews
-            .get(&(thread_id.get(), command.user.id.get()))
+            .get(&(channel_id.get(), command.user.id.get()))
             .map(|preview| preview.clone())
         else {
             self.edit_command_message(
@@ -1377,10 +1347,10 @@ impl DiscordLedgerPoc {
             .await;
             return;
         };
-        let append_lock = self.append_lock(preview.ledger_thread_id);
+        let append_lock = self.append_lock(preview.ledger_channel_id);
         let _append_guard = append_lock.lock().await;
         let _cross_process_append_guard = match self
-            .acquire_cross_process_append_lock(preview.ledger_thread_id)
+            .acquire_cross_process_append_lock(preview.ledger_channel_id)
             .await
         {
             Ok(guard) => guard,
@@ -1391,7 +1361,7 @@ impl DiscordLedgerPoc {
             }
         };
 
-        let loaded = match self.load_thread(ctx, preview.ledger_thread_id).await {
+        let loaded = match self.load_ledger(ctx, preview.ledger_channel_id).await {
             Ok(loaded) => loaded,
             Err(message) => {
                 self.edit_command_message(ctx, command, message, Vec::new())
@@ -1406,7 +1376,7 @@ impl DiscordLedgerPoc {
             || SystemTime::now() > preview.binding.expires_at
         {
             self.settlement_previews
-                .remove(&(preview.ledger_thread_id.get(), command.user.id.get()));
+                .remove(&(preview.ledger_channel_id.get(), command.user.id.get()));
             self.edit_command_message(
                 ctx,
                 command,
@@ -1428,7 +1398,13 @@ impl DiscordLedgerPoc {
         ) {
             Ok(Some(entry)) => {
                 if let Err(message) = self
-                    .append_entry(ctx, &loaded, preview.ledger_thread_id, entry, &member_names)
+                    .append_entry(
+                        ctx,
+                        &loaded,
+                        preview.ledger_channel_id,
+                        entry,
+                        &member_names,
+                    )
                     .await
                 {
                     self.edit_command_message(ctx, command, message, Vec::new())
@@ -1436,14 +1412,9 @@ impl DiscordLedgerPoc {
                     return;
                 }
                 self.settlement_previews
-                    .remove(&(preview.ledger_thread_id.get(), command.user.id.get()));
-                self.edit_command_message(
-                    ctx,
-                    command,
-                    "清算を記録しました。",
-                    Vec::new(),
-                )
-                .await;
+                    .remove(&(preview.ledger_channel_id.get(), command.user.id.get()));
+                self.edit_command_message(ctx, command, "清算を記録しました。", Vec::new())
+                    .await;
             }
             Ok(None) => {
                 self.edit_command_message(
@@ -1480,28 +1451,15 @@ impl DiscordLedgerPoc {
             return;
         };
         let _ = command.defer_ephemeral(&ctx.http).await;
-        let thread_id = match self
-            .resolve_ledger_thread(ctx, Some(guild_id), command.channel_id)
-            .await
-        {
-            Ok(Some(thread_id)) => thread_id,
-            Ok(None) => {
-                self.edit_command_message(
-                    ctx,
-                    command,
-                    "まだ経費が記録されていません。先に /expense を実行してください。",
-                    Vec::new(),
-                )
-                .await;
-                return;
-            }
+        let channel_id = match self.lookup_parent_channel_id(ctx, command.channel_id).await {
+            Ok(channel_id) => channel_id,
             Err(message) => {
                 self.edit_command_message(ctx, command, message, Vec::new())
                     .await;
                 return;
             }
         };
-        let loaded = match self.load_thread(ctx, thread_id).await {
+        let loaded = match self.load_ledger(ctx, channel_id).await {
             Ok(loaded) => loaded,
             Err(message) => {
                 self.edit_command_message(ctx, command, message, Vec::new())
@@ -1509,6 +1467,16 @@ impl DiscordLedgerPoc {
                 return;
             }
         };
+        if loaded.entries.is_empty() {
+            self.edit_command_message(
+                ctx,
+                command,
+                "まだ経費が記録されていません。先に /expense を実行してください。",
+                Vec::new(),
+            )
+            .await;
+            return;
+        }
         let member_names = roster_provider.display_names_for_guild(
             guild_id,
             loaded.projected.state().participants().iter().copied(),
@@ -1536,28 +1504,15 @@ impl DiscordLedgerPoc {
             return;
         };
         let _ = command.defer_ephemeral(&ctx.http).await;
-        let thread_id = match self
-            .resolve_ledger_thread(ctx, Some(guild_id), command.channel_id)
-            .await
-        {
-            Ok(Some(thread_id)) => thread_id,
-            Ok(None) => {
-                self.edit_command_message(
-                    ctx,
-                    command,
-                    "まだ経費が記録されていません。先に /expense を実行してください。",
-                    Vec::new(),
-                )
-                .await;
-                return;
-            }
+        let channel_id = match self.lookup_parent_channel_id(ctx, command.channel_id).await {
+            Ok(channel_id) => channel_id,
             Err(message) => {
                 self.edit_command_message(ctx, command, message, Vec::new())
                     .await;
                 return;
             }
         };
-        let loaded = match self.load_thread(ctx, thread_id).await {
+        let loaded = match self.load_ledger(ctx, channel_id).await {
             Ok(loaded) => loaded,
             Err(message) => {
                 self.edit_command_message(ctx, command, message, Vec::new())
@@ -1565,6 +1520,16 @@ impl DiscordLedgerPoc {
                 return;
             }
         };
+        if loaded.entries.is_empty() {
+            self.edit_command_message(
+                ctx,
+                command,
+                "まだ経費が記録されていません。先に /expense を実行してください。",
+                Vec::new(),
+            )
+            .await;
+            return;
+        }
         let member_names = roster_provider.display_names_for_guild(
             guild_id,
             loaded.projected.state().participants().iter().copied(),
@@ -1586,7 +1551,7 @@ impl DiscordLedgerPoc {
             PendingVoidDraft {
                 actor_id: command.user.id,
                 guild_id,
-                ledger_thread_id: thread_id,
+                ledger_channel_id: channel_id,
                 expires_at: interaction_state_expires_at(),
                 selected_target: candidates.first().map(|entry| entry.id),
             },
@@ -1644,8 +1609,8 @@ impl DiscordLedgerPoc {
         draft_guard.selected_target = selected_target;
         drop(draft_guard);
         let guild_id = draft.guild_id;
-        let thread_id = draft.ledger_thread_id;
-        let loaded = match self.load_thread(ctx, thread_id).await {
+        let channel_id = draft.ledger_channel_id;
+        let loaded = match self.load_ledger(ctx, channel_id).await {
             Ok(loaded) => loaded,
             Err(message) => {
                 self.reply_component_error(ctx, component, &message).await;
@@ -1714,62 +1679,19 @@ impl DiscordLedgerPoc {
             return;
         };
         let _ = component.defer(&ctx.http).await;
-        let parent_channel_id = match self
-            .lookup_parent_channel_id(ctx, draft.ledger_thread_id)
-            .await
-        {
-            Ok(parent_channel_id) => parent_channel_id,
-            Err(message) => {
-                self.edit_component_message(ctx, component, message, Vec::new())
-                    .await;
-                return;
-            }
-        };
-        let authoritative_thread_id = match self
-            .resolve_ledger_thread(ctx, Some(draft.guild_id), parent_channel_id)
-            .await
-        {
-            Ok(Some(thread_id)) if thread_id == draft.ledger_thread_id => thread_id,
-            Ok(Some(_)) => {
-                self.edit_component_message(
-                    ctx,
-                    component,
-                    "他の操作で台帳が更新されました。/void をやり直してください。",
-                    Vec::new(),
-                )
-                .await;
-                return;
-            }
-            Ok(None) => {
-                self.edit_component_message(
-                    ctx,
-                    component,
-                    "まだ経費が記録されていません。先に /expense を実行してください。",
-                    Vec::new(),
-                )
-                .await;
-                return;
-            }
-            Err(message) => {
-                self.edit_component_message(ctx, component, message, Vec::new())
-                    .await;
-                return;
-            }
-        };
-        let append_lock = self.append_lock(authoritative_thread_id);
+        let channel_id = draft.ledger_channel_id;
+        let append_lock = self.append_lock(channel_id);
         let _append_guard = append_lock.lock().await;
-        let _cross_process_append_guard = match self
-            .acquire_cross_process_append_lock(authoritative_thread_id)
-            .await
-        {
-            Ok(guard) => guard,
-            Err(message) => {
-                self.edit_component_message(ctx, component, message, Vec::new())
-                    .await;
-                return;
-            }
-        };
-        let loaded = match self.load_thread(ctx, authoritative_thread_id).await {
+        let _cross_process_append_guard =
+            match self.acquire_cross_process_append_lock(channel_id).await {
+                Ok(guard) => guard,
+                Err(message) => {
+                    self.edit_component_message(ctx, component, message, Vec::new())
+                        .await;
+                    return;
+                }
+            };
+        let loaded = match self.load_ledger(ctx, channel_id).await {
             Ok(loaded) => loaded,
             Err(message) => {
                 self.edit_component_message(ctx, component, message, Vec::new())
@@ -1787,7 +1709,7 @@ impl DiscordLedgerPoc {
             target,
         );
         if let Err(message) = self
-            .append_entry(ctx, &loaded, authoritative_thread_id, entry, &member_names)
+            .append_entry(ctx, &loaded, channel_id, entry, &member_names)
             .await
         {
             self.edit_component_message(ctx, component, message, Vec::new())
@@ -2080,16 +2002,9 @@ impl DiscordLedgerPoc {
 
     async fn acquire_cross_process_append_lock(
         &self,
-        thread_id: ChannelId,
+        channel_id: ChannelId,
     ) -> Result<CrossProcessFileLock, String> {
-        acquire_cross_process_file_lock(append_lock_path(thread_id)).await
-    }
-
-    async fn acquire_cross_process_thread_creation_lock(
-        &self,
-        parent_channel_id: ChannelId,
-    ) -> Result<CrossProcessFileLock, String> {
-        acquire_cross_process_file_lock(thread_creation_lock_path(parent_channel_id)).await
+        acquire_cross_process_file_lock(append_lock_path(channel_id)).await
     }
 
     async fn lookup_parent_channel_id(
@@ -2116,297 +2031,15 @@ impl DiscordLedgerPoc {
         Ok(channel.id)
     }
 
-    async fn resolve_ledger_thread(
+    async fn load_ledger(
         &self,
         ctx: &Context,
-        guild_id: Option<GuildId>,
         channel_id: ChannelId,
-    ) -> Result<Option<ChannelId>, String> {
-        let lookup_channel_id = self.lookup_parent_channel_id(ctx, channel_id).await?;
-        self.lookup_thread(ctx, guild_id, lookup_channel_id).await
-    }
-
-    async fn review_thread_for_channel(
-        &self,
-        ctx: &Context,
-        guild_id: GuildId,
-        channel_id: ChannelId,
-    ) -> Result<Option<ChannelId>, String> {
-        let channel = channel_id
-            .to_channel(&ctx.http)
-            .await
-            .map_err(|error| format!("現在の channel を確認できませんでした: {error:?}"))?;
-        let Some(channel) = channel.guild() else {
-            return Ok(None);
-        };
-        let bot_id = ctx.cache.current_user().id;
-        if channel.kind != ChannelType::PublicThread || channel.owner_id != Some(bot_id) {
-            return Ok(None);
-        }
-        let parent_channel_id = channel.parent_id.unwrap_or(channel.id);
-        self.lookup_thread(ctx, Some(guild_id), parent_channel_id).await
-    }
-
-    async fn thread_has_ledger_marker(
-        &self,
-        ctx: &Context,
-        thread_id: ChannelId,
-        bot_id: UserId,
-    ) -> Result<bool, String> {
-        Ok(fetch_all_channel_messages(ctx, thread_id)
-            .await
-            .map_err(|error| {
-                format!("ledger thread marker を読み込めませんでした: {thread_id}: {error:?}")
-            })?
-            .into_iter()
-            .any(|message| {
-                message.author.id == bot_id
-                    && ((message.content == LEDGER_THREAD_SEED_CONTENT)
-                        || parse_ledger_thread_seed(&message.content).is_some()
-                        || message
-                            .attachments
-                            .iter()
-                            .any(|attachment| attachment.filename == LEDGER_ATTACHMENT_FILENAME))
-            }))
-    }
-
-    async fn marked_ledger_thread_ids_in_candidates(
-        &self,
-        ctx: &Context,
-        candidates: Vec<GuildChannel>,
-        parent_channel_id: ChannelId,
-        bot_id: UserId,
-    ) -> Result<HashSet<ChannelId>, String> {
-        let mut marked = HashSet::new();
-        for thread in candidates {
-            if thread.kind != ChannelType::PublicThread
-                || thread.parent_id != Some(parent_channel_id)
-                || thread.owner_id != Some(bot_id)
-            {
-                continue;
-            }
-            if self
-                .thread_has_ledger_marker(ctx, thread.id, bot_id)
-                .await?
-            {
-                marked.insert(thread.id);
-            }
-        }
-        Ok(marked)
-    }
-
-    async fn fetch_seed_thread_channel(
-        &self,
-        ctx: &Context,
-        thread_id: ChannelId,
-    ) -> Result<Option<GuildChannel>, String> {
-        match thread_id.to_channel(&ctx.http).await {
-            Ok(channel) => Ok(channel.guild()),
-            Err(error) if is_unknown_channel_error(&error) => Ok(None),
-            Err(error) => Err(format!(
-                "ledger seed thread を確認できませんでした: {thread_id}: {error:?}"
-            )),
-        }
-    }
-
-    async fn lookup_thread_from_seed(
-        &self,
-        ctx: &Context,
-        parent_channel_id: ChannelId,
-        bot_id: UserId,
-    ) -> Result<Option<ChannelId>, String> {
-        let messages = fetch_all_channel_messages(ctx, parent_channel_id)
-            .await
-            .map_err(|error| format!("ledger seed message を読み込めませんでした: {error:?}"))?;
-        let mut parsed_seed_ids = Vec::new();
-        let mut seeded_thread_ids = Vec::new();
-        let mut saw_invalid_existing_seed = false;
-        for message in messages {
-            if message.author.id != bot_id {
-                continue;
-            }
-            let Some(thread_id) = parse_ledger_thread_seed(&message.content) else {
-                continue;
-            };
-            parsed_seed_ids.push(thread_id);
-            let Some(thread) = self.fetch_seed_thread_channel(ctx, thread_id).await? else {
-                continue;
-            };
-            if thread.kind == ChannelType::PublicThread
-                && thread.parent_id == Some(parent_channel_id)
-                && thread.owner_id == Some(bot_id)
-            {
-                seeded_thread_ids.push(thread.id);
-            } else {
-                saw_invalid_existing_seed = true;
-            }
-        }
-        resolve_seeded_thread_id(parsed_seed_ids, seeded_thread_ids, saw_invalid_existing_seed)
-            .map_err(|error| match error {
-            SeededLedgerThreadError::Ambiguous => {
-                "複数の ledger thread 候補が見つかりました。seed message を修復してください。"
-                    .to_string()
-            }
-            SeededLedgerThreadError::Invalid => {
-                "ledger seed message が壊れているか古くなっています。seed message を修復してください。"
-                    .to_string()
-            }
-        })
-    }
-
-    async fn marked_ledger_thread_ids(
-        &self,
-        ctx: &Context,
-        guild_id: GuildId,
-        parent_channel_id: ChannelId,
-        bot_id: UserId,
-    ) -> Result<HashSet<ChannelId>, String> {
-        let active = guild_id
-            .get_active_threads(&ctx.http)
-            .await
-            .map_err(|error| format!("ledger thread 一覧を取得できませんでした: {error:?}"))?;
-        let mut marked = self
-            .marked_ledger_thread_ids_in_candidates(ctx, active.threads, parent_channel_id, bot_id)
-            .await?;
-        let mut before = None;
-        loop {
-            let archived = parent_channel_id
-                .get_archived_public_threads(&ctx.http, before, Some(100))
-                .await
-                .map_err(|error| {
-                    format!("archived ledger thread を取得できませんでした: {error:?}")
-                })?;
-            marked.extend(
-                self.marked_ledger_thread_ids_in_candidates(
-                    ctx,
-                    archived.threads.clone(),
-                    parent_channel_id,
-                    bot_id,
-                )
-                .await?,
-            );
-            if !archived.has_more {
-                break;
-            }
-            before = archived
-                .threads
-                .last()
-                .and_then(|thread| thread.thread_metadata.as_ref())
-                .and_then(|metadata| metadata.archive_timestamp.as_ref())
-                .map(|timestamp| timestamp.unix_timestamp() as u64);
-            let Some(next_before) = before else {
-                break;
-            };
-            before = Some(next_before);
-        }
-        Ok(marked)
-    }
-
-    async fn lookup_thread(
-        &self,
-        ctx: &Context,
-        guild_id: Option<GuildId>,
-        parent_channel_id: ChannelId,
-    ) -> Result<Option<ChannelId>, String> {
-        let bot_id = ctx.cache.current_user().id;
-        let seeded_thread_id = self
-            .lookup_thread_from_seed(ctx, parent_channel_id, bot_id)
-            .await?;
-        let Some(guild_id) = guild_id else {
-            return Ok(seeded_thread_id);
-        };
-        let marked = self
-            .marked_ledger_thread_ids(ctx, guild_id, parent_channel_id, bot_id)
-            .await?;
-        if let Some(thread_id) = seeded_thread_id {
-            if marked
-                .iter()
-                .any(|marked_thread_id| *marked_thread_id != thread_id)
-            {
-                return Err(
-                    "複数の ledger thread 候補が見つかりました。seed message を修復してください。"
-                        .into(),
-                );
-            }
-            return Ok(Some(thread_id));
-        }
-        match marked.len() {
-            0 => Ok(None),
-            1 => Ok(Some(marked.into_iter().next().expect("one marked thread"))),
-            _ => Err(
-                "複数の ledger thread 候補が見つかりました。seed message を修復してください。"
-                    .into(),
-            ),
-        }
-    }
-
-    async fn ensure_thread(
-        &self,
-        ctx: &Context,
-        guild_id: GuildId,
-        parent_channel_id: ChannelId,
-    ) -> Result<ChannelId, String> {
-        let _cross_process_guard = self
-            .acquire_cross_process_thread_creation_lock(parent_channel_id)
-            .await?;
-        if let Some(thread_id) = self
-            .lookup_thread(ctx, Some(guild_id), parent_channel_id)
-            .await?
-        {
-            return Ok(thread_id);
-        }
-
-        let seed = parent_channel_id
-            .say(&ctx.http, LEDGER_THREAD_SEED_CONTENT)
-            .await
-            .map_err(|error| format!("ledger seed message を作成できませんでした: {error:?}"))?;
-        let thread = parent_channel_id
-            .create_thread_from_message(
-                &ctx.http,
-                seed.id,
-                CreateThread::new(ledger_thread_name(parent_channel_id))
-                    .auto_archive_duration(AutoArchiveDuration::OneWeek)
-                    .kind(ChannelType::PublicThread),
-            )
-            .await
-            .map_err(|error| format!("ledger thread を作成できませんでした: {error:?}"))?;
-        let seed_message = ledger_thread_seed_message(thread.id);
-        if let Err(error) = parent_channel_id
-            .edit_message(
-                &ctx.http,
-                seed.id,
-                EditMessage::new().content(seed_message.clone()),
-            )
-            .await
-        {
-            tracing::warn!(
-                "Failed to update ledger seed message for parent {} thread {}: {:?}",
-                parent_channel_id,
-                thread.id,
-                error
-            );
-            thread
-                .id
-                .say(&ctx.http, seed_message)
-                .await
-                .map_err(|marker_error| {
-                    format!(
-                        "ledger seed message を保存できませんでした: seed update failed: {error:?}; thread marker write failed: {marker_error:?}"
-                    )
-                })?;
-        }
-        Ok(thread.id)
-    }
-
-    async fn load_thread(
-        &self,
-        ctx: &Context,
-        thread_id: ChannelId,
     ) -> Result<LoadedLedgerThread, String> {
-        let messages = fetch_all_channel_messages(ctx, thread_id)
+        let messages = fetch_all_channel_messages(ctx, channel_id)
             .await
-            .map_err(|error| format!("ledger thread を読み込めませんでした: {error:?}"))?;
-        let ledger_id = LedgerId(thread_id.get());
+            .map_err(|error| format!("ledger を読み込めませんでした: {error:?}"))?;
+        let ledger_id = LedgerId(channel_id.get());
         let mut envelopes = Vec::new();
         let mut entries = Vec::new();
         let bot_id = ctx.cache.current_user().id;
@@ -2435,7 +2068,7 @@ impl DiscordLedgerPoc {
             .map_err(|error| format!("hash chain verify / replay に失敗しました: {error:?}"))?;
         Ok(LoadedLedgerThread {
             ledger_id,
-            thread_id,
+            channel_id,
             verified,
             projected,
             entries,
@@ -2446,7 +2079,7 @@ impl DiscordLedgerPoc {
         &self,
         ctx: &Context,
         loaded: &LoadedLedgerThread,
-        thread_id: ChannelId,
+        channel_id: ChannelId,
         entry: LedgerEntry,
         member_names: &HashMap<MemberId, SmolStr>,
     ) -> Result<(), String> {
@@ -2465,7 +2098,7 @@ impl DiscordLedgerPoc {
         replay_entries(entries)
             .map_err(|error| format!("ledger entry の事前 replay に失敗しました: {error:?}"))?;
 
-        thread_id
+        channel_id
             .send_message(
                 &ctx.http,
                 CreateMessage::new()
@@ -2480,16 +2113,9 @@ impl DiscordLedgerPoc {
         Ok(())
     }
 
-    fn append_lock(&self, thread_id: ChannelId) -> Arc<Mutex<()>> {
+    fn append_lock(&self, channel_id: ChannelId) -> Arc<Mutex<()>> {
         self.append_locks
-            .entry(thread_id)
-            .or_insert_with(|| Arc::new(Mutex::new(())))
-            .clone()
-    }
-
-    fn thread_creation_lock(&self, parent_channel_id: ChannelId) -> Arc<Mutex<()>> {
-        self.thread_creation_locks
-            .entry(parent_channel_id)
+            .entry(channel_id)
             .or_insert_with(|| Arc::new(Mutex::new(())))
             .clone()
     }
@@ -2565,17 +2191,6 @@ impl DiscordLedgerPoc {
     }
 }
 
-fn ledger_thread_name(parent_channel_id: ChannelId) -> String {
-    format!("{LEDGER_THREAD_PREFIX}{}", parent_channel_id.get())
-}
-
-fn ledger_thread_seed_message(thread_id: ChannelId) -> String {
-    format!(
-        "{LEDGER_THREAD_SEED_CONTENT}\n{LEDGER_THREAD_SEED_ID_PREFIX}{}",
-        thread_id.get()
-    )
-}
-
 fn new_interaction_nonce() -> u64 {
     let started_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2590,10 +2205,6 @@ fn ledger_lock_dir() -> PathBuf {
 
 fn append_lock_path(thread_id: ChannelId) -> PathBuf {
     ledger_lock_dir().join(format!("append-{}.lock", thread_id.get()))
-}
-
-fn thread_creation_lock_path(parent_channel_id: ChannelId) -> PathBuf {
-    ledger_lock_dir().join(format!("thread-create-{}.lock", parent_channel_id.get()))
 }
 
 fn instance_lock_path() -> PathBuf {
@@ -2627,51 +2238,6 @@ fn is_unknown_channel_error(error: &serenity::Error) -> bool {
         serenity::Error::Http(serenity::http::HttpError::UnsuccessfulRequest(response))
             if response.status_code.as_u16() == 404 || response.error.code == 10_003
     )
-}
-
-fn parse_ledger_thread_seed(content: &str) -> Option<ChannelId> {
-    if !content.starts_with(LEDGER_THREAD_SEED_CONTENT) {
-        return None;
-    }
-    content
-        .lines()
-        .find_map(|line| line.strip_prefix(LEDGER_THREAD_SEED_ID_PREFIX))
-        .and_then(|id| id.parse::<u64>().ok())
-        .map(ChannelId::new)
-}
-
-fn unique_seeded_thread_id(
-    thread_ids: impl IntoIterator<Item = ChannelId>,
-) -> Result<Option<ChannelId>, SeededLedgerThreadError> {
-    let ids = thread_ids
-        .into_iter()
-        .map(ChannelId::get)
-        .collect::<Vec<_>>();
-    match ids.as_slice() {
-        [] => Ok(None),
-        [thread_id] => Ok(Some(ChannelId::new(*thread_id))),
-        _ => Err(SeededLedgerThreadError::Ambiguous),
-    }
-}
-
-fn resolve_seeded_thread_id(
-    parsed_seed_ids: impl IntoIterator<Item = ChannelId>,
-    valid_thread_ids: impl IntoIterator<Item = ChannelId>,
-    saw_invalid_existing_seed: bool,
-) -> Result<Option<ChannelId>, SeededLedgerThreadError> {
-    if saw_invalid_existing_seed {
-        return Err(SeededLedgerThreadError::Invalid);
-    }
-    match unique_seeded_thread_id(valid_thread_ids)? {
-        Some(thread_id) => Ok(Some(thread_id)),
-        None => {
-            if parsed_seed_ids.into_iter().next().is_some() {
-                Err(SeededLedgerThreadError::Invalid)
-            } else {
-                Ok(None)
-            }
-        }
-    }
 }
 
 fn parse_session_id(custom_id: &str, prefix: &str, interaction_nonce: u64) -> SessionIdMatch {
@@ -4516,50 +4082,6 @@ mod tests {
     }
 
     #[test]
-    fn unique_seeded_thread_id_rejects_multiple_distinct_seed_mappings() {
-        assert_eq!(
-            unique_seeded_thread_id([ChannelId::new(10), ChannelId::new(10), ChannelId::new(11)]),
-            Err(SeededLedgerThreadError::Ambiguous)
-        );
-    }
-
-    #[test]
-    fn unique_seeded_thread_id_rejects_duplicate_seed_mappings_to_same_thread() {
-        assert_eq!(
-            unique_seeded_thread_id([ChannelId::new(12), ChannelId::new(12)]),
-            Err(SeededLedgerThreadError::Ambiguous)
-        );
-    }
-
-    #[test]
-    fn resolve_seeded_thread_id_accepts_one_valid_thread_with_stale_seed() {
-        assert_eq!(
-            resolve_seeded_thread_id(
-                [ChannelId::new(10), ChannelId::new(11)],
-                [ChannelId::new(11)],
-                false,
-            ),
-            Ok(Some(ChannelId::new(11)))
-        );
-    }
-
-    #[test]
-    fn resolve_seeded_thread_id_rejects_stale_seed_without_valid_thread() {
-        assert_eq!(
-            resolve_seeded_thread_id([ChannelId::new(10)], std::iter::empty(), false),
-            Err(SeededLedgerThreadError::Invalid)
-        );
-    }
-
-    #[test]
-    fn resolve_seeded_thread_id_rejects_invalid_existing_seed() {
-        assert_eq!(
-            resolve_seeded_thread_id([ChannelId::new(10)], [ChannelId::new(10)], true),
-            Err(SeededLedgerThreadError::Invalid)
-        );
-    }
-
-    #[test]
     fn claim_expense_recording_blocks_duplicate_recording_until_released() {
         let poc = DiscordLedgerPoc::new();
         let session_id = 1;
@@ -4704,7 +4226,7 @@ mod tests {
             PendingVoidDraft {
                 actor_id: UserId::new(9),
                 guild_id: GuildId::new(1),
-                ledger_thread_id: thread_id,
+                ledger_channel_id: thread_id,
                 expires_at: UNIX_EPOCH,
                 selected_target: Some(LedgerEntryId(1)),
             },
@@ -4713,7 +4235,7 @@ mod tests {
             stale_preview_key,
             PendingSettlementPreview {
                 ledger_id,
-                ledger_thread_id: thread_id,
+                ledger_channel_id: thread_id,
                 binding: PreviewConfirmationBinding {
                     ledger_id,
                     ledger_head_hash: ledger_chain_genesis_sha256_v1(ledger_id),

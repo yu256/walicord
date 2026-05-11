@@ -740,9 +740,8 @@ where
     ) -> Result<ChannelId, SlashScopeError> {
         match channel_id.to_channel(&ctx.http).await {
             Ok(channel) => match channel.guild() {
-                Some(gc) => slash_scope_channel_id(gc.id, gc.kind, gc.parent_id).inspect_err(
-                    |e| tracing::warn!("Slash command: {e}"),
-                ),
+                Some(gc) => slash_scope_channel_id(gc.id, gc.kind, gc.parent_id)
+                    .inspect_err(|e| tracing::warn!("Slash command: {e}")),
                 None => Ok(channel_id),
             },
             Err(error) => {
@@ -1634,7 +1633,10 @@ mod tests {
         #[case] parent_id: Option<ChannelId>,
         #[case] expected: Result<ChannelId, SlashScopeError>,
     ) {
-        assert_eq!(slash_scope_channel_id(channel_id, kind, parent_id), expected);
+        assert_eq!(
+            slash_scope_channel_id(channel_id, kind, parent_id),
+            expected
+        );
     }
 
     #[rstest]
