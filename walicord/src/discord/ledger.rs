@@ -1,3 +1,4 @@
+use chrono::{Datelike, Local, NaiveDate};
 use fs2::FileExt;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -548,13 +549,9 @@ impl DiscordLedgerPoc {
                     .required(false),
             ),
             CreateActionRow::InputText(
-                CreateInputText::new(
-                    InputTextStyle::Short,
-                    "日付 (YYYY-MM-DD)",
-                    EXPENSE_DATE_FIELD,
-                )
-                .placeholder("2026-05-01")
-                .required(false),
+                CreateInputText::new(InputTextStyle::Short, "日付 (今日・昨日・5/1 も可)", EXPENSE_DATE_FIELD)
+                    .value(today_date().format("%Y-%m-%d").to_string())
+                    .required(false),
             ),
         ]);
 
@@ -607,22 +604,26 @@ impl DiscordLedgerPoc {
 
         let effective_date = match values.get(EXPENSE_DATE_FIELD).map(String::as_str) {
             Some("") | None => None,
-            Some(date) => match LedgerEffectiveDate::new(date) {
-                Ok(date) => Some(date),
-                Err(_) => {
-                    let _ = modal
-                        .create_response(
-                            &ctx.http,
-                            CreateInteractionResponse::Message(
-                                CreateInteractionResponseMessage::new()
-                                    .ephemeral(true)
-                                    .content("日付は YYYY-MM-DD 形式で入力してください。"),
-                            ),
-                        )
-                        .await;
-                    return;
+            Some(raw) => {
+                let normalized = normalize_date_input(raw, today_date())
+                    .and_then(|d| LedgerEffectiveDate::new(d.format("%Y-%m-%d").to_string()).ok());
+                match normalized {
+                    Some(date) => Some(date),
+                    None => {
+                        let _ = modal
+                            .create_response(
+                                &ctx.http,
+                                CreateInteractionResponse::Message(
+                                    CreateInteractionResponseMessage::new()
+                                        .ephemeral(true)
+                                        .content("日付の形式が正しくありません。例: 今日、昨日、5/1、2026-05-01"),
+                                ),
+                            )
+                            .await;
+                        return;
+                    }
                 }
-            },
+            }
         };
         let parent_channel_id = match self.lookup_parent_channel_id(ctx, modal.channel_id).await {
             Ok(parent_channel_id) => parent_channel_id,
@@ -4086,6 +4087,43 @@ fn source_kind_name(kind: LedgerSourceCanonicalKind) -> &'static str {
     }
 }
 
+fn today_date() -> NaiveDate {
+    Local::now().date_naive()
+}
+
+/// Accepts human-friendly date strings and parses them into a `NaiveDate`.
+///
+/// Supported forms (in addition to `YYYY-MM-DD` pass-through):
+/// - `今日` / `today` / `きょう` → today
+/// - `昨日` / `yesterday` / `きのう` → yesterday
+/// - `YYYY/MM/DD` → separator normalisation only
+/// - `M/D` / `MM/DD` → current year is assumed
+fn normalize_date_input(raw: &str, today: NaiveDate) -> Option<NaiveDate> {
+    let s = raw.trim();
+    match s {
+        "今日" | "today" | "きょう" => return Some(today),
+        "昨日" | "yesterday" | "きのう" => return today.pred_opt(),
+        _ => {}
+    }
+    if s.len() == 10 && s.as_bytes().get(4) == Some(&b'-') && s.as_bytes().get(7) == Some(&b'-') {
+        return NaiveDate::parse_from_str(s, "%Y-%m-%d").ok();
+    }
+    if s.len() == 10 && s.as_bytes().get(4) == Some(&b'/') && s.as_bytes().get(7) == Some(&b'/') {
+        return NaiveDate::parse_from_str(s, "%Y/%m/%d").ok();
+    }
+    if let Some(slash_pos) = s.find('/') {
+        let m_str = &s[..slash_pos];
+        let d_str = &s[slash_pos + 1..];
+        let all_digits = |t: &str| !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit());
+        if all_digits(m_str) && all_digits(d_str) {
+            let m: u32 = m_str.parse().ok()?;
+            let d: u32 = d_str.parse().ok()?;
+            return NaiveDate::from_ymd_opt(today.year(), m, d);
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4848,5 +4886,38 @@ mod tests {
         let text = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
         let decoded = decode_hash(text).expect("hash should decode");
         assert_eq!(encode_hash(decoded), text);
+    }
+
+    mod normalize_date_input_tests {
+        use super::*;
+        use rstest::rstest;
+
+        fn fixed_today() -> NaiveDate {
+            NaiveDate::from_ymd_opt(2026, 5, 11).unwrap()
+        }
+
+        fn d(y: i32, m: u32, day: u32) -> Option<NaiveDate> {
+            NaiveDate::from_ymd_opt(y, m, day)
+        }
+
+        #[rstest]
+        #[case("今日", d(2026, 5, 11))]
+        #[case("today", d(2026, 5, 11))]
+        #[case("きょう", d(2026, 5, 11))]
+        #[case("昨日", d(2026, 5, 10))]
+        #[case("yesterday", d(2026, 5, 10))]
+        #[case("きのう", d(2026, 5, 10))]
+        #[case("2026-03-15", d(2026, 3, 15))]
+        #[case(" 2026-03-15 ", d(2026, 3, 15))]
+        #[case("2026/03/15", d(2026, 3, 15))]
+        #[case("5/1", d(2026, 5, 1))]
+        #[case("12/31", d(2026, 12, 31))]
+        #[case("05/01/2026", None)]
+        #[case("not-a-date", None)]
+        #[case("", None)]
+        fn parses_to_naive_date(#[case] input: &str, #[case] expected: Option<NaiveDate>) {
+            let actual = normalize_date_input(input, fixed_today());
+            assert_eq!(actual, expected);
+        }
     }
 }
