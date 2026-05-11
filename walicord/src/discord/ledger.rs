@@ -1324,7 +1324,7 @@ impl DiscordLedgerPoc {
             return;
         }
         self.expense_drafts.remove(&session_id);
-        self.edit_component_message(ctx, component, "ledger に経費を記録しました。", Vec::new())
+        self.edit_component_message(ctx, component, "経費を記録しました。", Vec::new())
             .await;
     }
 
@@ -1351,7 +1351,7 @@ impl DiscordLedgerPoc {
                 self.edit_command_message(
                     ctx,
                     command,
-                    "ledger thread はまだ作成されていません。",
+                    "まだ経費が記録されていません。先に /expense を実行してください。",
                     Vec::new(),
                 )
                 .await;
@@ -1440,7 +1440,7 @@ impl DiscordLedgerPoc {
                 self.edit_command_message(
                     ctx,
                     command,
-                    "清算 transfer を ledger に記録しました。",
+                    "清算を記録しました。",
                     Vec::new(),
                 )
                 .await;
@@ -1489,7 +1489,7 @@ impl DiscordLedgerPoc {
                 self.edit_command_message(
                     ctx,
                     command,
-                    "ledger thread はまだ作成されていません。",
+                    "まだ経費が記録されていません。先に /expense を実行してください。",
                     Vec::new(),
                 )
                 .await;
@@ -1545,7 +1545,7 @@ impl DiscordLedgerPoc {
                 self.edit_command_message(
                     ctx,
                     command,
-                    "ledger thread はまだ作成されていません。",
+                    "まだ経費が記録されていません。先に /expense を実行してください。",
                     Vec::new(),
                 )
                 .await;
@@ -1734,7 +1734,7 @@ impl DiscordLedgerPoc {
                 self.edit_component_message(
                     ctx,
                     component,
-                    "ledger thread が更新されました。/void をやり直してください。",
+                    "他の操作で台帳が更新されました。/void をやり直してください。",
                     Vec::new(),
                 )
                 .await;
@@ -1744,7 +1744,7 @@ impl DiscordLedgerPoc {
                 self.edit_component_message(
                     ctx,
                     component,
-                    "ledger thread はまだ作成されていません。",
+                    "まだ経費が記録されていません。先に /expense を実行してください。",
                     Vec::new(),
                 )
                 .await;
@@ -1970,7 +1970,7 @@ impl DiscordLedgerPoc {
             .void_drafts
             .get(&session_id)
             .and_then(|draft| draft.selected_target);
-        let mut out = String::from("🗑️ 取り消す entry を選んでください\n");
+        let mut out = String::from("🗑️ 取り消す項目を選んでください\n");
         if let Some(selected) = selected {
             out.push_str(&format!("\n選択中: #{}\n", selected.0));
         }
@@ -2138,14 +2138,7 @@ impl DiscordLedgerPoc {
             return Ok(None);
         }
         let parent_channel_id = channel.parent_id.unwrap_or(channel.id);
-        match self.lookup_thread(ctx, Some(guild_id), parent_channel_id).await? {
-            Some(thread_id) if thread_id == channel.id => Ok(Some(thread_id)),
-            Some(_) => Err(
-                "現在の thread は authoritative ledger thread ではありません。正しい ledger thread で /review を実行してください。"
-                    .into(),
-            ),
-            None => Ok(None),
-        }
+        self.lookup_thread(ctx, Some(guild_id), parent_channel_id).await
     }
 
     async fn thread_has_ledger_marker(
@@ -3349,7 +3342,7 @@ fn render_expense_message(
         .map(|paid| paid.amount)
         .sum::<Money>();
     let mut out = format!(
-        "🧾 経費を記録しました\n\nEntry: #{}\n支払者: {payer}\n金額: {total}円\n",
+        "🧾 経費を記録しました\n\n#{}\n支払者: {payer}\n金額: {total}円\n",
         entry.id.0
     );
 
