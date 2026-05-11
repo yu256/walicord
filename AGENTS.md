@@ -32,8 +32,8 @@
 ## Default Commands
 
 - Always run the following commands after code changes and before committing:
-  - PowerShell: `cargo +nightly clippy --fix --allow-dirty --all-targets; cargo +nightly fmt; cargo test`
-  - Bash/sh: `cargo +nightly clippy --fix --allow-dirty --all-targets && cargo +nightly fmt && cargo test`
+  - PowerShell: `cargo clippy --fix --allow-dirty --all-targets; cargo fmt; cargo test`
+  - Bash/sh: `cargo clippy --fix --allow-dirty --all-targets && cargo fmt && cargo test`
 
 ## Architecture Rule
 

@@ -7,8 +7,7 @@ use serenity::{
         ActionRowComponent, ButtonStyle, ChannelId, CommandInteraction, ComponentInteraction,
         ComponentInteractionDataKind, CreateActionRow, CreateAttachment, CreateButton,
         CreateInputText, CreateInteractionResponse, CreateInteractionResponseMessage, CreateModal,
-        CreateSelectMenu, CreateSelectMenuKind, CreateSelectMenuOption, EditInteractionResponse,
-        EditMessage, GuildId, InputTextStyle, Message, MessageId, ModalInteraction,
+        CreateSelectMenu, CreateSelectMenuKind, CreateSelectMenuOption, EditInteractionResponse, GuildId, InputTextStyle, Message, MessageId, ModalInteraction,
         RoleId as SerenityRoleId, UserId,
     },
     builder::CreateMessage,
@@ -2023,11 +2022,10 @@ impl DiscordLedgerPoc {
             channel.kind,
             ChannelType::PublicThread | ChannelType::PrivateThread | ChannelType::NewsThread
         );
-        if is_thread {
-            if let Some(parent_id) = channel.parent_id {
+        if is_thread
+            && let Some(parent_id) = channel.parent_id {
                 return Ok(parent_id);
             }
-        }
         Ok(channel.id)
     }
 
@@ -2230,14 +2228,6 @@ async fn acquire_cross_process_file_lock(path: PathBuf) -> Result<CrossProcessFi
     })
     .await
     .map_err(|error| format!("cross-process lock task が失敗しました: {error}"))?
-}
-
-fn is_unknown_channel_error(error: &serenity::Error) -> bool {
-    matches!(
-        error,
-        serenity::Error::Http(serenity::http::HttpError::UnsuccessfulRequest(response))
-            if response.status_code.as_u16() == 404 || response.error.code == 10_003
-    )
 }
 
 fn parse_session_id(custom_id: &str, prefix: &str, interaction_nonce: u64) -> SessionIdMatch {
