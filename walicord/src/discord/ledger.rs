@@ -2104,8 +2104,14 @@ impl DiscordLedgerPoc {
         let Some(channel) = channel.guild() else {
             return Ok(channel_id);
         };
-        if let Some(parent_id) = channel.parent_id {
-            return Ok(parent_id);
+        let is_thread = matches!(
+            channel.kind,
+            ChannelType::PublicThread | ChannelType::PrivateThread | ChannelType::NewsThread
+        );
+        if is_thread {
+            if let Some(parent_id) = channel.parent_id {
+                return Ok(parent_id);
+            }
         }
         Ok(channel.id)
     }
