@@ -142,7 +142,7 @@ fn slash_scope_channel_id(
 fn is_ledger_poc_command(command_name: &str) -> bool {
     matches!(
         command_name,
-        "expense" | "review" | "settle" | "void" | "ledger"
+        "panel" | "expense" | "review" | "settle" | "void" | "ledger"
     )
 }
 
@@ -1155,6 +1155,7 @@ where
         use serenity::{builder::CreateCommand, model::application::Command};
 
         let commands = vec![
+            CreateCommand::new("panel").description("Walicord 操作パネルを投稿します"),
             CreateCommand::new("expense").description("経費を ledger に記録します"),
             CreateCommand::new("review").description(walicord_i18n::SLASH_REVIEW_DESCRIPTION),
             CreateCommand::new("settle").description("直前の review を ledger に確定します"),
@@ -1225,6 +1226,31 @@ where
                 self.handle_slash_command(&ctx, command).await;
             }
             serenity::model::application::Interaction::Component(ref component) => {
+                if crate::discord::ledger::is_ledger_panel_component_id(
+                    component.data.custom_id.as_str(),
+                ) {
+                    let scoped_channel_id = self
+                        .resolve_slash_scope_channel_id(&ctx, component.channel_id)
+                        .await
+                        .unwrap_or(component.channel_id);
+                    if self
+                        .channel_manager
+                        .get_tracked(scoped_channel_id)
+                        .is_none()
+                    {
+                        let _ = component
+                            .create_response(
+                                &ctx.http,
+                                serenity::builder::CreateInteractionResponse::Message(
+                                    serenity::builder::CreateInteractionResponseMessage::new()
+                                        .content(walicord_i18n::CHANNEL_NOT_TRACKED)
+                                        .ephemeral(true),
+                                ),
+                            )
+                            .await;
+                        return;
+                    }
+                }
                 let _ = self
                     .ledger_poc
                     .handle_component(&ctx, component, &self.roster_provider)
@@ -1640,6 +1666,7 @@ mod tests {
     }
 
     #[rstest]
+    #[case("panel", true)]
     #[case("expense", true)]
     #[case("review", true)]
     #[case("variables", false)]

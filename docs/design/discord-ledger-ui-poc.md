@@ -94,6 +94,10 @@ Discord からの UI 操作で ledger event をそのまま append し、ledger 
 - ledger PoC の `/review` は ledger thread 内で実行し、legacy `/review` を横取りしない
 - PoC の ledger slash commands は ledger thread だけを source of truth として読む
 
+## 関連設計
+
+- [Button-First Discord Ledger UI](button-ledger-ui.md): `/expense` などの処理本体を流用しつつ、日常操作の入口を操作パネルのボタンに寄せる設計。
+
 ## 今回の整理で固定したこと
 
 - hash chain は speculative な v2 を持たず、deployed target である schema v1 + `sha256_v1` に統一する

@@ -7,8 +7,9 @@ use serenity::{
         ActionRowComponent, ButtonStyle, ChannelId, CommandInteraction, ComponentInteraction,
         ComponentInteractionDataKind, CreateActionRow, CreateAttachment, CreateButton,
         CreateInputText, CreateInteractionResponse, CreateInteractionResponseMessage, CreateModal,
-        CreateSelectMenu, CreateSelectMenuKind, CreateSelectMenuOption, EditInteractionResponse, GuildId, InputTextStyle, Message, MessageId, ModalInteraction,
-        RoleId as SerenityRoleId, UserId,
+        CreateSelectMenu, CreateSelectMenuKind, CreateSelectMenuOption, EditInteractionResponse,
+        GuildId, InputTextStyle, Message, MessageId, ModalInteraction, RoleId as SerenityRoleId,
+        UserId,
     },
     builder::CreateMessage,
     model::channel::ChannelType,
@@ -66,6 +67,10 @@ const EXPENSE_EDIT_PREFIX: &str = "expense:edit:";
 const EXPENSE_RECORD_PREFIX: &str = "expense:record:";
 const VOID_SELECT_PREFIX: &str = "void:select:";
 const VOID_CONFIRM_PREFIX: &str = "void:confirm:";
+const LEDGER_PANEL_EXPENSE_ID: &str = "ledger:panel:expense";
+const LEDGER_PANEL_REVIEW_ID: &str = "ledger:panel:review";
+const LEDGER_PANEL_LEDGER_ID: &str = "ledger:panel:ledger";
+const LEDGER_PANEL_VOID_ID: &str = "ledger:panel:void";
 const EXPENSE_AMOUNT_FIELD: &str = "expense_amount";
 const EXPENSE_NOTE_FIELD: &str = "expense_note";
 const EXPENSE_DATE_FIELD: &str = "expense_date";
@@ -240,6 +245,10 @@ impl DiscordLedgerPoc {
     {
         self.prune_stale_state();
         match command.data.name.as_str() {
+            "panel" => {
+                self.post_panel(ctx, command).await;
+                true
+            }
             "expense" => {
                 self.start_expense(ctx, command).await;
                 true
@@ -349,6 +358,26 @@ impl DiscordLedgerPoc {
     {
         self.prune_stale_state();
         let custom_id = component.data.custom_id.as_str();
+
+        if custom_id == LEDGER_PANEL_EXPENSE_ID {
+            self.start_expense_from_component(ctx, component).await;
+            return true;
+        }
+        if custom_id == LEDGER_PANEL_REVIEW_ID {
+            self.show_review_from_component(ctx, component, roster_provider)
+                .await;
+            return true;
+        }
+        if custom_id == LEDGER_PANEL_LEDGER_ID {
+            self.show_ledger_from_component(ctx, component, roster_provider)
+                .await;
+            return true;
+        }
+        if custom_id == LEDGER_PANEL_VOID_ID {
+            self.start_void_from_component(ctx, component, roster_provider)
+                .await;
+            return true;
+        }
 
         match self
             .component_session_id(ctx, component, custom_id, EXPENSE_PAYER_PREFIX)
@@ -525,35 +554,300 @@ impl DiscordLedgerPoc {
         };
 
         let session_id = self.next_session_id.fetch_add(1, Ordering::Relaxed);
-        let modal = CreateModal::new(
-            session_custom_id(self.interaction_nonce, EXPENSE_MODAL_PREFIX, session_id),
-            "経費を記録する",
-        )
-        .components(vec![
-            CreateActionRow::InputText(
-                CreateInputText::new(InputTextStyle::Short, "金額", EXPENSE_AMOUNT_FIELD)
-                    .placeholder("10000")
-                    .required(true),
-            ),
-            CreateActionRow::InputText(
-                CreateInputText::new(InputTextStyle::Paragraph, "メモ", EXPENSE_NOTE_FIELD)
-                    .required(false),
-            ),
-            CreateActionRow::InputText(
-                CreateInputText::new(
-                    InputTextStyle::Short,
-                    "日付 (今日・昨日・5/1 も可)",
-                    EXPENSE_DATE_FIELD,
-                )
-                .value(today_date().format("%Y-%m-%d").to_string())
-                .required(false),
-            ),
-        ]);
+        let modal = expense_modal(self.interaction_nonce, session_id);
 
         let _ = guild_id; // kept for symmetry with later draft creation
         let _ = command
             .create_response(&ctx.http, CreateInteractionResponse::Modal(modal))
             .await;
+    }
+
+    async fn start_expense_from_component(&self, ctx: &Context, component: &ComponentInteraction) {
+        if component.guild_id.is_none() {
+            self.reply_component_error(ctx, component, "Guild channel で実行してください。")
+                .await;
+            return;
+        }
+
+        let session_id = self.next_session_id.fetch_add(1, Ordering::Relaxed);
+        let modal = expense_modal(self.interaction_nonce, session_id);
+        let _ = component
+            .create_response(&ctx.http, CreateInteractionResponse::Modal(modal))
+            .await;
+    }
+
+    async fn post_panel(&self, ctx: &Context, command: &CommandInteraction) {
+        let Some(_) = command.guild_id else {
+            let _ = command
+                .create_response(
+                    &ctx.http,
+                    CreateInteractionResponse::Message(
+                        CreateInteractionResponseMessage::new()
+                            .ephemeral(true)
+                            .content("Guild channel で実行してください。"),
+                    ),
+                )
+                .await;
+            return;
+        };
+
+        let _ = command.defer_ephemeral(&ctx.http).await;
+        let channel_id = match self.lookup_parent_channel_id(ctx, command.channel_id).await {
+            Ok(channel_id) => channel_id,
+            Err(message) => {
+                self.edit_command_message(ctx, command, message, Vec::new())
+                    .await;
+                return;
+            }
+        };
+
+        match channel_id
+            .send_message(
+                &ctx.http,
+                CreateMessage::new()
+                    .content("Walicord 操作パネル")
+                    .components(ledger_panel_components()),
+            )
+            .await
+        {
+            Ok(_) => {
+                self.edit_command_message(ctx, command, "操作パネルを投稿しました。", Vec::new())
+                    .await;
+            }
+            Err(error) => {
+                self.edit_command_message(
+                    ctx,
+                    command,
+                    format!("操作パネルを投稿できませんでした: {error:?}"),
+                    Vec::new(),
+                )
+                .await;
+            }
+        }
+    }
+
+    async fn show_review_from_component<RP>(
+        &self,
+        ctx: &Context,
+        component: &ComponentInteraction,
+        roster_provider: &RP,
+    ) where
+        RP: crate::discord::ports::RosterProvider,
+    {
+        let Some(guild_id) = component.guild_id else {
+            self.reply_component_error(ctx, component, "このボタンはサーバー内でのみ使えます。")
+                .await;
+            return;
+        };
+        self.defer_ephemeral_component(ctx, component).await;
+        let channel_id = match self
+            .lookup_parent_channel_id(ctx, component.channel_id)
+            .await
+        {
+            Ok(channel_id) => channel_id,
+            Err(message) => {
+                self.edit_component_message(ctx, component, message, Vec::new())
+                    .await;
+                return;
+            }
+        };
+        let loaded = match self.load_ledger(ctx, channel_id).await {
+            Ok(loaded) => loaded,
+            Err(message) => {
+                self.edit_component_message(ctx, component, message, Vec::new())
+                    .await;
+                return;
+            }
+        };
+        if loaded.entries.is_empty() {
+            self.edit_component_message(
+                ctx,
+                component,
+                "まだ経費が記録されていません。先に「記録する」から経費を追加してください。",
+                Vec::new(),
+            )
+            .await;
+            return;
+        }
+        let member_names = roster_provider.display_names_for_guild(
+            guild_id,
+            loaded.projected.state().participants().iter().copied(),
+        );
+        let previewed = match preview_settlement_from_ledger(&loaded.projected) {
+            Ok(previewed) => previewed,
+            Err(_) => {
+                self.edit_component_message(
+                    ctx,
+                    component,
+                    "清算案を作成できませんでした。",
+                    Vec::new(),
+                )
+                .await;
+                return;
+            }
+        };
+        let binding = create_preview_binding(
+            loaded.ledger_id,
+            current_head_hash(loaded.ledger_id, &loaded.verified),
+            MemberId(component.user.id.get()),
+            &previewed,
+        );
+        self.settlement_previews.insert(
+            (loaded.channel_id.get(), component.user.id.get()),
+            PendingSettlementPreview {
+                ledger_id: loaded.ledger_id,
+                ledger_channel_id: loaded.channel_id,
+                binding,
+                previewed: previewed.clone(),
+            },
+        );
+        self.edit_component_message(
+            ctx,
+            component,
+            render_review_message(&loaded.projected, &previewed, &member_names),
+            Vec::new(),
+        )
+        .await;
+    }
+
+    async fn show_ledger_from_component<RP>(
+        &self,
+        ctx: &Context,
+        component: &ComponentInteraction,
+        roster_provider: &RP,
+    ) where
+        RP: crate::discord::ports::RosterProvider,
+    {
+        let Some(guild_id) = component.guild_id else {
+            self.reply_component_error(ctx, component, "このボタンはサーバー内でのみ使えます。")
+                .await;
+            return;
+        };
+        self.defer_ephemeral_component(ctx, component).await;
+        let channel_id = match self
+            .lookup_parent_channel_id(ctx, component.channel_id)
+            .await
+        {
+            Ok(channel_id) => channel_id,
+            Err(message) => {
+                self.edit_component_message(ctx, component, message, Vec::new())
+                    .await;
+                return;
+            }
+        };
+        let loaded = match self.load_ledger(ctx, channel_id).await {
+            Ok(loaded) => loaded,
+            Err(message) => {
+                self.edit_component_message(ctx, component, message, Vec::new())
+                    .await;
+                return;
+            }
+        };
+        if loaded.entries.is_empty() {
+            self.edit_component_message(
+                ctx,
+                component,
+                "まだ経費が記録されていません。先に「記録する」から経費を追加してください。",
+                Vec::new(),
+            )
+            .await;
+            return;
+        }
+        let member_names = roster_provider.display_names_for_guild(
+            guild_id,
+            loaded.projected.state().participants().iter().copied(),
+        );
+        self.edit_component_message(
+            ctx,
+            component,
+            render_ledger_summary(&loaded.projected, &member_names),
+            Vec::new(),
+        )
+        .await;
+    }
+
+    async fn start_void_from_component<RP>(
+        &self,
+        ctx: &Context,
+        component: &ComponentInteraction,
+        roster_provider: &RP,
+    ) where
+        RP: crate::discord::ports::RosterProvider,
+    {
+        let Some(guild_id) = component.guild_id else {
+            self.reply_component_error(ctx, component, "このボタンはサーバー内でのみ使えます。")
+                .await;
+            return;
+        };
+        self.defer_ephemeral_component(ctx, component).await;
+        let channel_id = match self
+            .lookup_parent_channel_id(ctx, component.channel_id)
+            .await
+        {
+            Ok(channel_id) => channel_id,
+            Err(message) => {
+                self.edit_component_message(ctx, component, message, Vec::new())
+                    .await;
+                return;
+            }
+        };
+        let loaded = match self.load_ledger(ctx, channel_id).await {
+            Ok(loaded) => loaded,
+            Err(message) => {
+                self.edit_component_message(ctx, component, message, Vec::new())
+                    .await;
+                return;
+            }
+        };
+        if loaded.entries.is_empty() {
+            self.edit_component_message(
+                ctx,
+                component,
+                "まだ経費が記録されていません。先に「記録する」から経費を追加してください。",
+                Vec::new(),
+            )
+            .await;
+            return;
+        }
+        let member_names = roster_provider.display_names_for_guild(
+            guild_id,
+            loaded.projected.state().participants().iter().copied(),
+        );
+        let candidates = candidate_entries_for_void(&loaded.entries, &loaded.projected);
+        if candidates.is_empty() {
+            self.edit_component_message(
+                ctx,
+                component,
+                "取り消し候補の entry がありません。",
+                Vec::new(),
+            )
+            .await;
+            return;
+        }
+        let session_id = self.next_session_id.fetch_add(1, Ordering::Relaxed);
+        self.void_drafts.insert(
+            session_id,
+            PendingVoidDraft {
+                actor_id: component.user.id,
+                guild_id,
+                ledger_channel_id: channel_id,
+                expires_at: interaction_state_expires_at(),
+                selected_target: candidates.first().map(|entry| entry.id),
+            },
+        );
+        self.edit_component_message(
+            ctx,
+            component,
+            self.render_void_message(session_id, &candidates, &member_names),
+            void_components(
+                session_id,
+                &candidates,
+                &member_names,
+                candidates.first().map(|entry| entry.id),
+                self.interaction_nonce,
+            ),
+        )
+        .await;
     }
 
     async fn complete_expense_modal<RP>(
@@ -2022,10 +2316,9 @@ impl DiscordLedgerPoc {
             channel.kind,
             ChannelType::PublicThread | ChannelType::PrivateThread | ChannelType::NewsThread
         );
-        if is_thread
-            && let Some(parent_id) = channel.parent_id {
-                return Ok(parent_id);
-            }
+        if is_thread && let Some(parent_id) = channel.parent_id {
+            return Ok(parent_id);
+        }
         Ok(channel.id)
     }
 
@@ -2148,6 +2441,17 @@ impl DiscordLedgerPoc {
                 EditInteractionResponse::new()
                     .content(content)
                     .components(components),
+            )
+            .await;
+    }
+
+    async fn defer_ephemeral_component(&self, ctx: &Context, component: &ComponentInteraction) {
+        let _ = component
+            .create_response(
+                &ctx.http,
+                CreateInteractionResponse::Defer(
+                    CreateInteractionResponseMessage::new().ephemeral(true),
+                ),
             )
             .await;
     }
@@ -2281,6 +2585,60 @@ fn void_confirm_custom_id(
         "{VOID_CONFIRM_PREFIX}{interaction_nonce}:{session_id}:{}",
         target.0
     )
+}
+
+pub fn is_ledger_panel_component_id(custom_id: &str) -> bool {
+    matches!(
+        custom_id,
+        LEDGER_PANEL_EXPENSE_ID
+            | LEDGER_PANEL_REVIEW_ID
+            | LEDGER_PANEL_LEDGER_ID
+            | LEDGER_PANEL_VOID_ID
+    )
+}
+
+fn expense_modal(interaction_nonce: u64, session_id: u64) -> CreateModal {
+    CreateModal::new(
+        session_custom_id(interaction_nonce, EXPENSE_MODAL_PREFIX, session_id),
+        "経費を記録する",
+    )
+    .components(vec![
+        CreateActionRow::InputText(
+            CreateInputText::new(InputTextStyle::Short, "金額", EXPENSE_AMOUNT_FIELD)
+                .placeholder("10000")
+                .required(true),
+        ),
+        CreateActionRow::InputText(
+            CreateInputText::new(InputTextStyle::Paragraph, "メモ", EXPENSE_NOTE_FIELD)
+                .required(false),
+        ),
+        CreateActionRow::InputText(
+            CreateInputText::new(
+                InputTextStyle::Short,
+                "日付 (今日・昨日・5/1 も可)",
+                EXPENSE_DATE_FIELD,
+            )
+            .value(today_date().format("%Y-%m-%d").to_string())
+            .required(false),
+        ),
+    ])
+}
+
+fn ledger_panel_components() -> Vec<CreateActionRow> {
+    vec![CreateActionRow::Buttons(vec![
+        CreateButton::new(LEDGER_PANEL_EXPENSE_ID)
+            .label("記録する")
+            .style(ButtonStyle::Success),
+        CreateButton::new(LEDGER_PANEL_REVIEW_ID)
+            .label("清算確認")
+            .style(ButtonStyle::Primary),
+        CreateButton::new(LEDGER_PANEL_LEDGER_ID)
+            .label("台帳")
+            .style(ButtonStyle::Secondary),
+        CreateButton::new(LEDGER_PANEL_VOID_ID)
+            .label("取り消し")
+            .style(ButtonStyle::Danger),
+    ])]
 }
 
 fn expense_editor_components(session_id: u64, interaction_nonce: u64) -> Vec<CreateActionRow> {
@@ -3708,6 +4066,19 @@ mod tests {
             ),
             recorded_by: MemberId(9),
         }
+    }
+
+    #[test]
+    fn ledger_panel_component_ids_are_fixed_launchers() {
+        assert!(is_ledger_panel_component_id(LEDGER_PANEL_EXPENSE_ID));
+        assert!(is_ledger_panel_component_id(LEDGER_PANEL_REVIEW_ID));
+        assert!(is_ledger_panel_component_id(LEDGER_PANEL_LEDGER_ID));
+        assert!(is_ledger_panel_component_id(LEDGER_PANEL_VOID_ID));
+        assert!(!is_ledger_panel_component_id(&session_custom_id(
+            10,
+            EXPENSE_RECORD_PREFIX,
+            99
+        )));
     }
 
     #[test]
