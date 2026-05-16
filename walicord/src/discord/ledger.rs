@@ -315,7 +315,7 @@ impl DiscordLedgerPoc {
                 self.edit_command_message(
                     ctx,
                     command,
-                    "清算プランを作成できませんでした。",
+                    "清算確認を表示できませんでした。",
                     Vec::new(),
                 )
                 .await;
@@ -667,7 +667,7 @@ impl DiscordLedgerPoc {
             self.edit_component_message(
                 ctx,
                 component,
-                "まだ経費が記録されていません。先に「記録する」から経費を追加してください。",
+                "まだ経費が記録されていません。先に「記録する」から経費を記録してください。",
                 Vec::new(),
             )
             .await;
@@ -683,7 +683,7 @@ impl DiscordLedgerPoc {
                 self.edit_component_message(
                     ctx,
                     component,
-                    "清算プランを作成できませんでした。",
+                    "清算確認を表示できませんでした。",
                     Vec::new(),
                 )
                 .await;
@@ -751,7 +751,7 @@ impl DiscordLedgerPoc {
             self.edit_component_message(
                 ctx,
                 component,
-                "まだ経費が記録されていません。先に「記録する」から経費を追加してください。",
+                "まだ経費が記録されていません。先に「記録する」から経費を記録してください。",
                 Vec::new(),
             )
             .await;
@@ -807,7 +807,7 @@ impl DiscordLedgerPoc {
             self.edit_component_message(
                 ctx,
                 component,
-                "まだ経費が記録されていません。先に「記録する」から経費を追加してください。",
+                "まだ経費が記録されていません。先に「記録する」から経費を記録してください。",
                 Vec::new(),
             )
             .await;
@@ -2009,13 +2009,8 @@ impl DiscordLedgerPoc {
             return;
         }
         self.void_drafts.remove(&session_id);
-        self.edit_component_message(
-            ctx,
-            component,
-            "対象の台帳記録を取り消しました。",
-            Vec::new(),
-        )
-        .await;
+        self.edit_component_message(ctx, component, "記録を取り消しました。", Vec::new())
+            .await;
     }
 
     async fn update_expense_editor_message<RP>(
@@ -2184,7 +2179,7 @@ impl DiscordLedgerPoc {
             .void_drafts
             .get(&session_id)
             .and_then(|draft| draft.selected_target);
-        let mut out = String::from("🗑️ 取り消す項目を選んでください\n");
+        let mut out = String::from("🗑️ 取り消す記録を選んでください\n");
         if let Some(selected) = selected {
             out.push_str(&format!("\n選択中: #{}\n", selected.0));
         }
@@ -3154,7 +3149,7 @@ pub fn render_ledger_summary(
     projected: &ProjectedLedger,
     member_names: &HashMap<MemberId, SmolStr>,
 ) -> String {
-    let mut out = String::from("📚 台帳の状態\n\n参加者\n");
+    let mut out = String::from("📚 台帳\n\n参加者\n");
     for member_id in projected.state().participants() {
         out.push_str(&format!("- {}\n", display_name(member_names, *member_id)));
     }
@@ -3171,7 +3166,7 @@ pub fn render_ledger_summary(
         }
     }
 
-    out.push_str("\n\n履歴確定範囲\n");
+    out.push_str("\n\n確認済み\n");
     match projected.state().sealed_through() {
         Some(entry_id) => out.push_str(&format!("#{}", entry_id.0)),
         None => out.push_str("なし"),
@@ -3308,7 +3303,7 @@ fn render_settlement_message(
     event: &NormalizedSettlementPlanRecorded,
     member_names: &HashMap<MemberId, SmolStr>,
 ) -> String {
-    let mut out = format!("💸 清算を記録しました\n\n台帳記録: #{}\n", entry.id.0);
+    let mut out = format!("💸 清算を記録しました\n\n記録: #{}\n", entry.id.0);
     for transfer in event.transfers() {
         out.push_str(&format!(
             "- {} -> {}: {}円\n",
@@ -3326,7 +3321,7 @@ fn render_void_message(
     _member_names: &HashMap<MemberId, SmolStr>,
 ) -> String {
     format!(
-        "🪫 台帳記録を取り消しました\n\n台帳記録: #{}\n対象: #{}",
+        "🪫 記録を取り消しました\n\n記録: #{}\n対象: #{}",
         entry.id.0,
         event.target().0
     )
@@ -3334,7 +3329,7 @@ fn render_void_message(
 
 fn render_seal_message(entry: &LedgerEntry, event: &LedgerHistorySealed) -> String {
     format!(
-        "🔒 履歴を確定しました\n\n台帳記録: #{}\n履歴確定範囲: #{} まで",
+        "🔒 履歴を確認済みにしました\n\n記録: #{}\n確認済み: #{} まで",
         entry.id.0,
         event.through().0
     )
@@ -3346,7 +3341,7 @@ fn render_adjustment_message(
     member_names: &HashMap<MemberId, SmolStr>,
 ) -> String {
     let mut out = format!(
-        "🩹 残高補正を記録しました\n\n台帳記録: #{}\n理由: {}\n",
+        "🩹 残高補正を記録しました\n\n記録: #{}\n理由: {}\n",
         entry.id.0,
         event.reason().as_str()
     );
