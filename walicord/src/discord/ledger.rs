@@ -546,7 +546,7 @@ impl DiscordLedgerPoc {
                     CreateInteractionResponse::Message(
                         CreateInteractionResponseMessage::new()
                             .ephemeral(true)
-                            .content("Guild channel で実行してください。"),
+                            .content("サーバー内のチャンネルで実行してください。"),
                     ),
                 )
                 .await;
@@ -564,8 +564,12 @@ impl DiscordLedgerPoc {
 
     async fn start_expense_from_component(&self, ctx: &Context, component: &ComponentInteraction) {
         if component.guild_id.is_none() {
-            self.reply_component_error(ctx, component, "Guild channel で実行してください。")
-                .await;
+            self.reply_component_error(
+                ctx,
+                component,
+                "サーバー内のチャンネルで実行してください。",
+            )
+            .await;
             return;
         }
 
@@ -584,7 +588,7 @@ impl DiscordLedgerPoc {
                     CreateInteractionResponse::Message(
                         CreateInteractionResponseMessage::new()
                             .ephemeral(true)
-                            .content("Guild channel で実行してください。"),
+                            .content("サーバー内のチャンネルで実行してください。"),
                     ),
                 )
                 .await;
@@ -818,7 +822,7 @@ impl DiscordLedgerPoc {
             self.edit_component_message(
                 ctx,
                 component,
-                "取り消し候補の entry がありません。",
+                "取り消せる台帳項目がありません。",
                 Vec::new(),
             )
             .await;
@@ -1634,7 +1638,7 @@ impl DiscordLedgerPoc {
             self.edit_command_message(
                 ctx,
                 command,
-                "先に /review を実行してください。",
+                "先に /review で清算案を確認してください。",
                 Vec::new(),
             )
             .await;
@@ -1673,7 +1677,7 @@ impl DiscordLedgerPoc {
             self.edit_command_message(
                 ctx,
                 command,
-                "preview が古くなりました。/review をやり直してください。",
+                "清算案が古くなりました。/review で確認し直してください。",
                 Vec::new(),
             )
             .await;
@@ -1713,7 +1717,7 @@ impl DiscordLedgerPoc {
                 self.edit_command_message(
                     ctx,
                     command,
-                    "この清算案は transfer を記録する必要がありません。",
+                    "この清算案では、送金を記録する必要がありません。",
                     Vec::new(),
                 )
                 .await;
@@ -1722,7 +1726,7 @@ impl DiscordLedgerPoc {
                 self.edit_command_message(
                     ctx,
                     command,
-                    "清算 transfer を作成できませんでした。",
+                    "清算用の送金記録を作成できませんでした。",
                     Vec::new(),
                 )
                 .await;
@@ -1829,13 +1833,8 @@ impl DiscordLedgerPoc {
         );
         let candidates = candidate_entries_for_void(&loaded.entries, &loaded.projected);
         if candidates.is_empty() {
-            self.edit_command_message(
-                ctx,
-                command,
-                "取り消し候補の entry がありません。",
-                Vec::new(),
-            )
-            .await;
+            self.edit_command_message(ctx, command, "取り消せる台帳項目がありません。", Vec::new())
+                .await;
             return;
         }
         let session_id = self.next_session_id.fetch_add(1, Ordering::Relaxed);
@@ -1874,7 +1873,7 @@ impl DiscordLedgerPoc {
         RP: crate::discord::ports::RosterProvider,
     {
         let Some(draft) = self.void_drafts.get(&session_id).map(|draft| draft.clone()) else {
-            self.reply_component_error(ctx, component, "void セッションが見つかりません。")
+            self.reply_component_error(ctx, component, "取り消し操作の入力状態が見つかりません。")
                 .await;
             return;
         };
@@ -1895,7 +1894,7 @@ impl DiscordLedgerPoc {
             _ => draft.selected_target,
         };
         let Some(mut draft_guard) = self.void_drafts.get_mut(&session_id) else {
-            self.reply_component_error(ctx, component, "void セッションが見つかりません。")
+            self.reply_component_error(ctx, component, "取り消し操作の入力状態が見つかりません。")
                 .await;
             return;
         };
@@ -1944,7 +1943,7 @@ impl DiscordLedgerPoc {
         RP: crate::discord::ports::RosterProvider,
     {
         let Some(draft) = self.void_drafts.get(&session_id).map(|draft| draft.clone()) else {
-            self.reply_component_error(ctx, component, "void セッションが見つかりません。")
+            self.reply_component_error(ctx, component, "取り消し操作の入力状態が見つかりません。")
                 .await;
             return;
         };
@@ -2013,7 +2012,7 @@ impl DiscordLedgerPoc {
         self.edit_component_message(
             ctx,
             component,
-            "対象 entry を append-only で void しました。",
+            "対象の台帳項目を追記型で取り消しました。",
             Vec::new(),
         )
         .await;
@@ -2308,7 +2307,7 @@ impl DiscordLedgerPoc {
         let channel = channel_id
             .to_channel(&ctx.http)
             .await
-            .map_err(|error| format!("現在の channel を確認できませんでした: {error:?}"))?;
+            .map_err(|error| format!("現在のチャンネルを確認できませんでした: {error:?}"))?;
         let Some(channel) = channel.guild() else {
             return Ok(channel_id);
         };
@@ -2329,7 +2328,7 @@ impl DiscordLedgerPoc {
     ) -> Result<LoadedLedgerThread, String> {
         let messages = fetch_all_channel_messages(ctx, channel_id)
             .await
-            .map_err(|error| format!("ledger を読み込めませんでした: {error:?}"))?;
+            .map_err(|error| format!("台帳を読み込めませんでした: {error:?}"))?;
         let ledger_id = LedgerId(channel_id.get());
         let mut envelopes = Vec::new();
         let mut entries = Vec::new();
@@ -2345,18 +2344,17 @@ impl DiscordLedgerPoc {
             else {
                 continue;
             };
-            let bytes = attachment.download().await.map_err(|error| {
-                format!("canonical attachment を取得できませんでした: {error:?}")
-            })?;
-            let envelope =
-                decode_discord_canonical_attachment(&bytes, message.id).map_err(|error| {
-                    format!("canonical attachment を decode できませんでした: {error:?}")
-                })?;
+            let bytes = attachment
+                .download()
+                .await
+                .map_err(|error| format!("正規データ添付を取得できませんでした: {error:?}"))?;
+            let envelope = decode_discord_canonical_attachment(&bytes, message.id)
+                .map_err(|error| format!("正規データ添付を復元できませんでした: {error:?}"))?;
             entries.push(envelope.payload.entry.clone());
             envelopes.push(envelope);
         }
         let (verified, projected) = load_and_replay_verified_sha256_v1(envelopes, ledger_id)
-            .map_err(|error| format!("hash chain verify / replay に失敗しました: {error:?}"))?;
+            .map_err(|error| format!("ハッシュチェーンの検証と再生に失敗しました: {error:?}"))?;
         Ok(LoadedLedgerThread {
             ledger_id,
             channel_id,
@@ -2380,14 +2378,13 @@ impl DiscordLedgerPoc {
             (),
             entry.clone(),
         )
-        .map_err(|error| format!("hash chain payload を構築できませんでした: {error:?}"))?;
-        let attachment_bytes = encode_discord_canonical_attachment(&envelope).map_err(|error| {
-            format!("canonical attachment を encode できませんでした: {error:?}")
-        })?;
+        .map_err(|error| format!("ハッシュチェーン用のデータを構築できませんでした: {error:?}"))?;
+        let attachment_bytes = encode_discord_canonical_attachment(&envelope)
+            .map_err(|error| format!("正規データ添付を作成できませんでした: {error:?}"))?;
         let mut entries = loaded.entries.clone();
         entries.push(entry.clone());
         replay_entries(entries)
-            .map_err(|error| format!("ledger entry の事前 replay に失敗しました: {error:?}"))?;
+            .map_err(|error| format!("台帳項目の事前再生に失敗しました: {error:?}"))?;
 
         channel_id
             .send_message(
@@ -2400,7 +2397,7 @@ impl DiscordLedgerPoc {
                     )),
             )
             .await
-            .map_err(|error| format!("ledger entry を送信できませんでした: {error:?}"))?;
+            .map_err(|error| format!("台帳項目を送信できませんでした: {error:?}"))?;
         Ok(())
     }
 
@@ -2517,7 +2514,7 @@ async fn acquire_cross_process_file_lock(path: PathBuf) -> Result<CrossProcessFi
     tokio::task::spawn_blocking(move || -> Result<CrossProcessFileLock, String> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
-                .map_err(|error| format!("lock directory を作成できませんでした: {error}"))?;
+                .map_err(|error| format!("ロック用ディレクトリを作成できませんでした: {error}"))?;
         }
         let file = OpenOptions::new()
             .read(true)
@@ -2525,13 +2522,13 @@ async fn acquire_cross_process_file_lock(path: PathBuf) -> Result<CrossProcessFi
             .create(true)
             .truncate(false)
             .open(&path)
-            .map_err(|error| format!("lock file を開けませんでした: {error}"))?;
+            .map_err(|error| format!("ロックファイルを開けませんでした: {error}"))?;
         file.lock_exclusive()
-            .map_err(|error| format!("cross-process lock を取得できませんでした: {error}"))?;
+            .map_err(|error| format!("プロセス間ロックを取得できませんでした: {error}"))?;
         Ok(CrossProcessFileLock { _file: file })
     })
     .await
-    .map_err(|error| format!("cross-process lock task が失敗しました: {error}"))?
+    .map_err(|error| format!("プロセス間ロックの取得処理に失敗しました: {error}"))?
 }
 
 fn parse_session_id(custom_id: &str, prefix: &str, interaction_nonce: u64) -> SessionIdMatch {
@@ -2751,7 +2748,7 @@ fn void_components(
                 session_custom_id(interaction_nonce, VOID_SELECT_PREFIX, session_id),
                 CreateSelectMenuKind::String { options },
             )
-            .placeholder("void 対象を選ぶ")
+            .placeholder("取り消し対象を選ぶ")
             .min_values(1)
             .max_values(1),
         ),
@@ -2955,7 +2952,7 @@ fn expense_entry_build_error_message(error: &ExpenseEntryBuildError) -> &'static
         }
         ExpenseEntryBuildError::InvalidNote
         | ExpenseEntryBuildError::InvalidSource
-        | ExpenseEntryBuildError::LedgerConstruction => "経費 entry を作成できませんでした。",
+        | ExpenseEntryBuildError::LedgerConstruction => "経費の台帳項目を作成できませんでした。",
     }
 }
 
@@ -3137,7 +3134,7 @@ pub fn render_review_message(
 ) -> String {
     let mut out = String::from("📊 現在の清算案\n\n残高\n");
     out.push_str(&render_balances(projected.state(), member_names));
-    out.push_str("\n\n清算 transfer\n");
+    out.push_str("\n\n清算用の送金\n");
     if previewed.plan().transfers.is_empty() {
         out.push_str("清算対象はありません。");
     } else {
@@ -3165,7 +3162,7 @@ pub fn render_ledger_summary(
     out.push_str("\n残高\n");
     out.push_str(&render_balances(projected.state(), member_names));
 
-    out.push_str("\n\nVoid 済み entry\n");
+    out.push_str("\n\n取り消し済みの台帳項目\n");
     if projected.state().voided_entry_ids().is_empty() {
         out.push_str("なし");
     } else {
@@ -3311,7 +3308,7 @@ fn render_settlement_message(
     event: &NormalizedSettlementPlanRecorded,
     member_names: &HashMap<MemberId, SmolStr>,
 ) -> String {
-    let mut out = format!("💸 清算を記録しました\n\nEntry: #{}\n", entry.id.0);
+    let mut out = format!("💸 清算を記録しました\n\n台帳項目: #{}\n", entry.id.0);
     for transfer in event.transfers() {
         out.push_str(&format!(
             "- {} -> {}: {}円\n",
@@ -3329,7 +3326,7 @@ fn render_void_message(
     _member_names: &HashMap<MemberId, SmolStr>,
 ) -> String {
     format!(
-        "🪫 台帳項目を取り消しました\n\nEntry: #{}\n対象: #{}",
+        "🪫 台帳項目を取り消しました\n\n台帳項目: #{}\n対象: #{}",
         entry.id.0,
         event.target().0
     )
@@ -3337,7 +3334,7 @@ fn render_void_message(
 
 fn render_seal_message(entry: &LedgerEntry, event: &LedgerHistorySealed) -> String {
     format!(
-        "🔒 履歴を封印しました\n\nEntry: #{}\nsealed through: #{}",
+        "🔒 履歴を封印しました\n\n台帳項目: #{}\n封印済み範囲: #{} まで",
         entry.id.0,
         event.through().0
     )
@@ -3349,7 +3346,7 @@ fn render_adjustment_message(
     member_names: &HashMap<MemberId, SmolStr>,
 ) -> String {
     let mut out = format!(
-        "🩹 残高補正を記録しました\n\nEntry: #{}\n理由: {}\n",
+        "🩹 残高補正を記録しました\n\n台帳項目: #{}\n理由: {}\n",
         entry.id.0,
         event.reason().as_str()
     );

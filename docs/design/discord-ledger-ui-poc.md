@@ -2,97 +2,97 @@
 
 ## PoC の目的
 
-Discord からの UI 操作で ledger event をそのまま append し、ledger channel から hash chain を検証して replay できる経路を通す。技術的な綺麗さより、ユーザーから見える `/expense` → `/review` → `/settle` → `/void` → `/ledger` の振る舞いを先に成立させる。
+Discord 上の UI 操作から台帳イベントをそのまま追記し、台帳チャンネルからハッシュチェーンを検証して再生できる経路を通す。技術的な整理を先に詰め切るより、ユーザーから見える `/expense` -> `/review` -> `/settle` -> `/void` -> `/ledger` の動きを先に成立させる。
 
 ## 実現するユーザー体験
 
-- `/expense` で modal から金額・メモ・日付を入力する
-- payer / participants / roles / built-in `MEMBERS` group / weights を順に選んで確認する
-- 「記録する」で ledger thread に人間可読な台帳メッセージを append する
-- `/review` で ledger thread から current balances と清算案を表示する
-- `/settle` で直前 review の transfer を確定し、固定 transfer を append する
-- `/void` で最近の ledger entry 候補から対象を選んで append-only で取り消す
-- `/ledger` で participants / balances / void / sealed through を確認する
+- `/expense` でモーダルを開き、金額・メモ・日付を入力する
+- 支払者、対象者、ロール、組み込みグループ `MEMBERS`、重みを順に選んで確認する
+- 「記録する」で、台帳スレッドに人間が読める台帳メッセージを追記する
+- `/review` で、台帳スレッドから現在の残高と清算案を表示する
+- `/settle` で、直前の清算確認で表示した送金を確定し、固定の送金記録として追記する
+- `/void` で、最近の台帳項目から対象を選び、追記型で取り消す
+- `/ledger` で、参加者、残高、取り消し済み項目、封印済み範囲を確認する
 
 ## Discord UI の制約
 
-- Modal は表編集の代わりではないので、自由入力は amount / note / date のみに寄せる
-- 参加者・payer・void target は select menu / button で段階的に選ぶ
-- ledger thread 内の `/review` は ephemeral に preview を表示し、legacy `/review` は既存の公開挙動を保つ
-- `/void` は ephemeral message 上の confirm button で進める
-- 人間向け本文や embed 文言は presentation のみで、復元には使わない
-- draft / preview などの interaction state は process memory に置くので、この PoC は single-process deployment を前提にする
+- モーダルは表編集には向かないため、自由入力は金額・メモ・日付に絞る
+- 参加者、支払者、取り消し対象は、選択メニューやボタンで段階的に選ぶ
+- 台帳スレッド内の `/review` は清算案を一時表示し、既存の `/review` は従来の公開表示を保つ
+- `/void` は一時表示メッセージ上の確認ボタンで進める
+- 人間向け本文や embed 文言は表示専用であり、復元には使わない
+- 入力中状態や清算確認の保持はプロセス内メモリに置くため、この PoC は単一プロセス実行を前提にする
 
 ## コマンドごとの方針
 
 ### `/expense`
 
-- Slash command で modal を開く
-- modal 送信後、ephemeral UI で payer / participants / role / built-in `MEMBERS` group / weights を選ぶ
+- スラッシュコマンドでモーダルを開く
+- モーダル送信後、一時表示 UI で支払者、対象者、ロール、組み込みグループ `MEMBERS`、重みを選ぶ
 - 入力値から直接 `ExpenseRecorded` と `LedgerEntry` を構築する
-- `LedgerEntryMetadata` には `recorded_by` / `source` / `allocation_snapshot` / `effective_date` を入れる
-- role / built-in `MEMBERS` group は append 時点で resolved member + weight に展開する
+- `LedgerEntryMetadata` には `recorded_by`、`source`、`allocation_snapshot`、`effective_date` を入れる
+- ロールと組み込みグループ `MEMBERS` は、追記時点でメンバーと重みに展開する
 
 ### `/review`
 
-- ledger thread の canonical attachment を load する
-- hash chain を検証する
-- append order を検証する
-- `LedgerProjector` で replay する
-- current balances から settlement preview を作り、確認用に保持する
+- 台帳スレッドの正規データ添付を読み込む
+- ハッシュチェーンを検証する
+- 追記順を検証する
+- `LedgerProjector` で再生する
+- 現在の残高から清算案を作り、確認用に保持する
 
 ### `/settle`
 
-- `/review` で保持した preview を ledger head binding 付きで再確認する
-- confirm 時は preview で見せた transfer そのものを `NormalizedSettlementPlanRecorded` として append する
-- replay 時に optimizer は再実行しない
+- `/review` で保持した清算案を、現在の台帳ハッシュと結び付けて再確認する
+- 確定時は、清算確認で見せた送金そのものを `NormalizedSettlementPlanRecorded` として追記する
+- 再生時に最適化処理は再実行しない
 
 ### `/void`
 
-- recent ledger entry を候補表示する
-- confirm 後は `EntryVoided` を append する
-- 元メッセージの編集 / 削除は state 変更に使わない
+- 最近の台帳項目を候補として表示する
+- 確認後は `EntryVoided` を追記する
+- 元メッセージの編集や削除を状態変更には使わない
 
 ### `/ledger`
 
-- projected ledger state を表示する
-- participants / balances / voided entries / sealed through を確認できるようにする
+- 再生済みの台帳状態を表示する
+- 参加者、残高、取り消し済み項目、封印済み範囲を確認できるようにする
 
-## ledger channel への保存形式
+## 台帳チャンネルへの保存形式
 
-- source of truth は dedicated ledger thread に append される bot message
-- 表示本文は人間可読な経費 / 清算 / void / state 表示
-- canonical data は message attachment (`walicord-ledger-entry.json`) に入れる
-- attachment の中身は versioned Discord transport DTO と application-owned ledger envelope を持つ
+- 正本は、専用の台帳スレッドに追記される bot メッセージとする
+- 表示本文は、人間が読むための経費・清算・取り消し・状態表示とする
+- 機械判読用の正規データは、メッセージ添付 (`walicord-ledger-entry.json`) に入れる
+- 添付の中身は、バージョン付き Discord 転送 DTO と、アプリケーション所有の台帳 envelope を持つ
 
-## canonical data の保存場所
+## 正規データの保存場所
 
-- machine-readable canonical data は JSON attachment に保存する
-- message 本文や embed は display cache であり、decode の入力にはしない
+- 機械判読用の正規データは JSON 添付として保存する
+- メッセージ本文や embed は表示キャッシュであり、復元の入力にはしない
 
-## hash chain の扱い
+## ハッシュチェーンの扱い
 
-- append 前に current ledger tail を load して head hash を得る
-- append する entry は application-owned schema v1 + `sha256_v1` で hash を作る
-- load 時は attachment から envelope を decode し、`sha256_v1` で verify / replay する
+- 追記前に現在の台帳末尾を読み込み、先頭ハッシュを得る
+- 追記する項目は、アプリケーション所有のスキーマ v1 と `sha256_v1` でハッシュを作る
+- 読み込み時は添付から envelope を復元し、`sha256_v1` で検証して再生する
 
-## load / replay の流れ
+## 読み込みと再生の流れ
 
-1. ledger thread lookup / create
-2. bot-authored ledger messages から attachment DTO を load
-3. DTO → `UnverifiedLedgerStoreEnvelope<MessageId>`
-4. hash chain verify
-5. append-order validation
-6. replay
-7. presentation / interaction state 更新
+1. 台帳スレッドを検索し、なければ作成する
+2. bot が投稿した台帳メッセージから添付 DTO を読み込む
+3. DTO を `UnverifiedLedgerStoreEnvelope<MessageId>` に変換する
+4. ハッシュチェーンを検証する
+5. 追記順を検証する
+6. 台帳を再生する
+7. 表示と入力中状態を更新する
 
 ## 既存 Script 経路との関係
 
-- 既存 message + DSL path はそのまま残す
-- 新 slash-ledger path は legacy history を source of truth に混ぜない
-- 既存 `/review` 相当の script flow は残す
-- ledger PoC の `/review` は ledger thread 内で実行し、legacy `/review` を横取りしない
-- PoC の ledger slash commands は ledger thread だけを source of truth として読む
+- 既存のメッセージ入力と DSL 経路はそのまま残す
+- 新しいスラッシュコマンド台帳経路は、既存履歴を正本として混ぜない
+- 既存 `/review` 相当のスクリプト処理は残す
+- 台帳 PoC の `/review` は台帳スレッド内で実行し、既存 `/review` を横取りしない
+- PoC の台帳スラッシュコマンドは、台帳スレッドだけを正本として読む
 
 ## 関連設計
 
@@ -100,7 +100,7 @@ Discord からの UI 操作で ledger event をそのまま append し、ledger 
 
 ## 今回の整理で固定したこと
 
-- hash chain は speculative な v2 を持たず、deployed target である schema v1 + `sha256_v1` に統一する
-- `effective_date` も schema v1 の canonical bytes に含め、Discord path だけ別 schema に逃がさない
-- weight UI と canonical attachment roundtrip は回帰テストで固定し、表示変更が source of truth に影響しないようにする
-- runtime 起動時に cross-process instance lock を取得し、interaction state が分散しないよう single-process を強制する
+- ハッシュチェーンは検討段階の v2 を持たず、実装対象であるスキーマ v1 と `sha256_v1` に統一する
+- `effective_date` もスキーマ v1 の正規バイト列に含め、Discord 経路だけ別スキーマに逃がさない
+- 重み UI と正規データ添付の往復は回帰テストで固定し、表示変更が正本に影響しないようにする
+- 起動時にプロセス間インスタンスロックを取得し、入力中状態が分散しないよう単一プロセス実行を強制する

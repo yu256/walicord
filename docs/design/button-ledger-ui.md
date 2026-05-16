@@ -2,44 +2,44 @@
 
 ## 目的
 
-経費記録の入口を slash command からボタンに寄せ、初回利用者がコマンド名を覚えなくても ledger UI を開始できるようにする。
+経費記録の入口をスラッシュコマンドからボタンに寄せ、初めて使う人がコマンド名を覚えなくても台帳 UI を開始できるようにする。
 
-既存の `/expense` PoC は modal / select menu / confirm button / canonical attachment append まで実装済みなので、処理本体は流用し、入口だけを button-first にする。
+既存の `/expense` PoC は、モーダル入力、選択メニュー、確認ボタン、正規データ添付による台帳追記まで実装済みである。そのため処理本体は流用し、入口だけをボタン起点にする。
 
 ## 結論
 
-Discord の制約上、任意の常設アプリ内ボタンをチャンネル UI に直接追加することはできない。ボタンは bot が投稿した message component として表示する必要がある。
+Discord の制約上、チャンネル画面に任意の常設ボタンを直接追加することはできない。ボタンは、bot が投稿したメッセージのコンポーネントとして表示する必要がある。
 
-そのため Walicord では、tracked channel に bot が「操作パネル」メッセージを投稿し、そこに以下のボタンを置く。
+Walicord では、追跡対象チャンネルに bot が「操作パネル」メッセージを投稿し、そこに以下のボタンを置く。
 
-- `記録する`: 既存の `/expense` と同じ modal を開く
-- `清算確認`: ledger PoC の review preview を ephemeral に表示する
-- `台帳`: ledger summary を ephemeral に表示する
-- `取り消し`: void 対象選択 UI を ephemeral に表示する
+- `記録する`: 既存の `/expense` と同じモーダルを開く
+- `清算確認`: 台帳から清算案を作り、一時表示する
+- `台帳`: 台帳の現在状態を一時表示する
+- `取り消し`: 取り消し対象の選択 UI を一時表示する
 
-Slash command は管理者・上級者用の代替入口として残す。
+スラッシュコマンドは、管理者や慣れた利用者向けの代替入口として残す。
 
 ## ユーザー体験
 
-1. 管理者が `/panel` を実行する、または bot 起動時に tracked channel へ未設置なら投稿する。
-2. bot がチャンネルに Walicord 操作パネルを投稿する。
+1. 管理者または利用者が、追跡対象チャンネルで `/panel` を実行する。
+2. bot がそのチャンネルに Walicord 操作パネルを投稿する。
 3. ユーザーは `記録する` ボタンを押す。
-4. bot は既存 `/expense` と同じ modal を開く。
-5. modal 送信後は既存どおり、payer / participants / roles / MEMBERS / weights を選んで `記録する` で append する。
+4. bot は既存の `/expense` と同じモーダルを開く。
+5. モーダル送信後は既存どおり、支払者、対象者、ロール、`MEMBERS`、重みを選んで `記録する` で台帳に追記する。
 
 ## Discord 制約への対応
 
-- Button は message component なので、操作パネルメッセージが入口になる。
-- Modal は command interaction だけでなく component interaction への response としても開ける。
-- Button の custom id は再起動後も押されうるため、セッション依存の ID と固定 launcher ID を分ける。
-- 操作パネルのボタン押下は公開メッセージを汚さないよう、以降の応答を ephemeral にする。
-- 既存の draft state は process memory なので、入力中セッションは引き続き single-process runtime 前提にする。
+- ボタンはメッセージコンポーネントなので、操作パネルメッセージを入口にする。
+- モーダルは、スラッシュコマンドだけでなくボタン操作への応答としても開ける。
+- ボタンの `custom_id` は再起動後も押されうるため、セッションに依存しない固定 ID と、入力中セッション用の ID を分ける。
+- 操作パネルのボタン押下後は、公開チャンネルを汚さないように一時表示で応答する。
+- 既存の入力中状態はプロセス内メモリに置くため、入力中セッションは引き続き単一プロセス実行を前提にする。
 
 ## 実装方針
 
-### 1. 固定 launcher component を追加する
+### 1. 固定の起動ボタンを追加する
 
-`walicord/src/discord/ledger.rs` に固定 custom id を追加する。
+`walicord/src/discord/ledger.rs` に固定 `custom_id` を追加する。
 
 ```text
 ledger:panel:expense
@@ -48,54 +48,54 @@ ledger:panel:ledger
 ledger:panel:void
 ```
 
-既存の session custom id は `expense:new:{nonce}:{session}` のような nonce 付きなので、launcher と衝突しない。
+既存のセッション用 `custom_id` は `expense:new:{nonce}:{session}` のように起動ごとの nonce を含むため、固定の起動ボタンとは衝突しない。
 
-### 2. slash command 専用の開始処理を分離する
+### 2. スラッシュコマンド専用の開始処理を分離する
 
-現在の `start_expense(ctx, command)` は `CommandInteraction` に直接 modal response を返している。これを以下の形に分ける。
+現在の `start_expense(ctx, command)` は `CommandInteraction` に直接モーダル応答を返している。これを以下の形に分ける。
 
 - `expense_modal(session_id) -> CreateModal`
 - `start_expense_from_command(ctx, command)`
 - `start_expense_from_component(ctx, component)`
 
-component 版では `component.create_response(... Modal(modal))` を使う。modal の custom id は既存と同じ `EXPENSE_MODAL_PREFIX` を使うため、送信後の `complete_expense_modal` は変更しない。
+ボタン版では `component.create_response(... Modal(modal))` を使う。モーダルの `custom_id` は既存と同じ `EXPENSE_MODAL_PREFIX` を使うため、送信後の `complete_expense_modal` は変更しない。
 
 ### 3. パネル投稿コマンドを追加する
 
-`/panel` を追加し、tracked channel でだけ利用可能にする。
+`/panel` を追加し、追跡対象チャンネルでだけ使えるようにする。
 
-パネルメッセージは bot message として投稿する。本文は最小限にし、重要なのは component。
+パネルは bot メッセージとして投稿する。本文は最小限にし、主な操作はコンポーネントに置く。
 
-初期実装では重複投稿を厳密に防がず、管理者が必要なチャンネルに置く運用でよい。次段階で message id を永続化するか、直近 bot message から custom id を検出して upsert する。
+初期実装では重複投稿を厳密には防がず、必要なチャンネルに手動で置く運用にする。次段階でメッセージ ID を永続化するか、直近の bot メッセージから `custom_id` を検出して更新する。
 
-### 4. 既存 ledger PoC の処理を button から呼ぶ
+### 4. 既存の台帳 PoC 処理をボタンから呼ぶ
 
-`handle_component` の先頭で launcher custom id を判定する。
+`handle_component` の先頭で固定 `custom_id` を判定する。
 
-- `ledger:panel:expense` → `start_expense_from_component`
-- `ledger:panel:review` → review command の中身を component 用に共通化して呼ぶ
-- `ledger:panel:ledger` → ledger summary の中身を component 用に共通化して呼ぶ
-- `ledger:panel:void` → void start の中身を component 用に共通化して呼ぶ
+- `ledger:panel:expense` -> `start_expense_from_component`
+- `ledger:panel:review` -> 清算確認処理をボタン用に呼び出す
+- `ledger:panel:ledger` -> 台帳表示処理をボタン用に呼び出す
+- `ledger:panel:void` -> 取り消し開始処理をボタン用に呼び出す
 
-最初の実装単位は `記録する` だけでよい。review / ledger / void は同じ形で追える。
+まず `記録する` を通し、その後 `清算確認`、`台帳`、`取り消し` を同じ形でつなぐ。
 
 ## 推奨する実装順
 
-1. `記録する` launcher button と `/panel` を実装する。
-2. `start_expense` を command/component 共通 modal builder に分離する。
-3. `記録する` ボタンから既存 modal flow が完走するテストを追加する。
-4. `清算確認` と `台帳` を component 起点にする。
-5. `取り消し` を component 起点にする。
-6. パネル重複投稿の upsert 戦略を決める。
+1. `記録する` 起動ボタンと `/panel` を実装する。
+2. `start_expense` を、コマンドとボタンで共通利用できるモーダル生成処理に分離する。
+3. `記録する` ボタンから既存のモーダル入力が完走するテストを追加する。
+4. `清算確認` と `台帳` をボタン起点にする。
+5. `取り消し` をボタン起点にする。
+6. パネルの重複投稿をどう扱うか決める。
 
 ## テスト観点
 
-- 固定 launcher custom id が stale nonce 判定に巻き込まれない。
-- `ledger:panel:expense` が session id を発行し、既存 `EXPENSE_MODAL_PREFIX` の modal を返す。
-- modal 送信後は既存の `complete_expense_modal` に入り、draft が作られる。
-- tracked channel 以外では `/panel` と launcher component が `CHANNEL_NOT_TRACKED` を返す。
-- 再起動前に投稿された操作パネルの固定ボタンは、再起動後も押せる。
+- 固定の起動ボタン `custom_id` が、古いセッション判定に巻き込まれない。
+- `ledger:panel:expense` がセッション ID を発行し、既存 `EXPENSE_MODAL_PREFIX` のモーダルを返す。
+- モーダル送信後は既存の `complete_expense_modal` に入り、入力中状態が作られる。
+- 追跡対象チャンネル以外では、`/panel` と起動ボタンが `CHANNEL_NOT_TRACKED` を返す。
+- 再起動前に投稿された操作パネルの固定ボタンを、再起動後も押せる。
 
 ## 残す判断
 
-コマンドを完全に消す必要はない。Discord ではコマンドが bot の発見性・権限管理・管理操作の入口として自然なので、`/panel` と既存 slash commands は残し、日常操作だけをボタン起点にする。
+コマンドを完全に消す必要はない。Discord ではコマンドが bot の発見性、権限管理、管理操作の入口として自然に機能する。`/panel` と既存のスラッシュコマンドは残し、日常操作だけをボタン起点にする。

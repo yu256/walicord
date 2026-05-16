@@ -1156,11 +1156,11 @@ where
 
         let commands = vec![
             CreateCommand::new("panel").description("Walicord 操作パネルを投稿します"),
-            CreateCommand::new("expense").description("経費を ledger に記録します"),
+            CreateCommand::new("expense").description("経費を台帳に記録します"),
             CreateCommand::new("review").description(walicord_i18n::SLASH_REVIEW_DESCRIPTION),
-            CreateCommand::new("settle").description("直前の review を ledger に確定します"),
-            CreateCommand::new("void").description("ledger entry を append-only で取り消します"),
-            CreateCommand::new("ledger").description("ledger の現在状態を表示します"),
+            CreateCommand::new("settle").description("直前の清算確認を台帳に記録します"),
+            CreateCommand::new("void").description("台帳項目を追記型で取り消します"),
+            CreateCommand::new("ledger").description("台帳の現在状態を表示します"),
             CreateCommand::new("variables").description(walicord_i18n::SLASH_VARIABLES_DESCRIPTION),
         ];
 
