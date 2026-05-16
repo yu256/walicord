@@ -315,7 +315,7 @@ impl DiscordLedgerPoc {
                 self.edit_command_message(
                     ctx,
                     command,
-                    "清算案を作成できませんでした。",
+                    "清算プランを作成できませんでした。",
                     Vec::new(),
                 )
                 .await;
@@ -683,7 +683,7 @@ impl DiscordLedgerPoc {
                 self.edit_component_message(
                     ctx,
                     component,
-                    "清算案を作成できませんでした。",
+                    "清算プランを作成できませんでした。",
                     Vec::new(),
                 )
                 .await;
@@ -822,7 +822,7 @@ impl DiscordLedgerPoc {
             self.edit_component_message(
                 ctx,
                 component,
-                "取り消せる台帳項目がありません。",
+                "取り消せる台帳記録がありません。",
                 Vec::new(),
             )
             .await;
@@ -1638,7 +1638,7 @@ impl DiscordLedgerPoc {
             self.edit_command_message(
                 ctx,
                 command,
-                "先に /review で清算案を確認してください。",
+                "先に /review で清算プランを確認してください。",
                 Vec::new(),
             )
             .await;
@@ -1677,7 +1677,7 @@ impl DiscordLedgerPoc {
             self.edit_command_message(
                 ctx,
                 command,
-                "清算案が古くなりました。/review で確認し直してください。",
+                "清算プランが古くなりました。/review で確認し直してください。",
                 Vec::new(),
             )
             .await;
@@ -1717,7 +1717,7 @@ impl DiscordLedgerPoc {
                 self.edit_command_message(
                     ctx,
                     command,
-                    "この清算案では、送金を記録する必要がありません。",
+                    "この清算プランでは、送金を記録する必要がありません。",
                     Vec::new(),
                 )
                 .await;
@@ -1726,7 +1726,7 @@ impl DiscordLedgerPoc {
                 self.edit_command_message(
                     ctx,
                     command,
-                    "清算用の送金記録を作成できませんでした。",
+                    "送金記録を作成できませんでした。",
                     Vec::new(),
                 )
                 .await;
@@ -1833,7 +1833,7 @@ impl DiscordLedgerPoc {
         );
         let candidates = candidate_entries_for_void(&loaded.entries, &loaded.projected);
         if candidates.is_empty() {
-            self.edit_command_message(ctx, command, "取り消せる台帳項目がありません。", Vec::new())
+            self.edit_command_message(ctx, command, "取り消せる台帳記録がありません。", Vec::new())
                 .await;
             return;
         }
@@ -2012,7 +2012,7 @@ impl DiscordLedgerPoc {
         self.edit_component_message(
             ctx,
             component,
-            "対象の台帳項目を追記型で取り消しました。",
+            "対象の台帳記録を取り消しました。",
             Vec::new(),
         )
         .await;
@@ -2384,7 +2384,7 @@ impl DiscordLedgerPoc {
         let mut entries = loaded.entries.clone();
         entries.push(entry.clone());
         replay_entries(entries)
-            .map_err(|error| format!("台帳項目の事前再生に失敗しました: {error:?}"))?;
+            .map_err(|error| format!("台帳記録の事前再生に失敗しました: {error:?}"))?;
 
         channel_id
             .send_message(
@@ -2397,7 +2397,7 @@ impl DiscordLedgerPoc {
                     )),
             )
             .await
-            .map_err(|error| format!("台帳項目を送信できませんでした: {error:?}"))?;
+            .map_err(|error| format!("台帳記録を送信できませんでした: {error:?}"))?;
         Ok(())
     }
 
@@ -2952,7 +2952,7 @@ fn expense_entry_build_error_message(error: &ExpenseEntryBuildError) -> &'static
         }
         ExpenseEntryBuildError::InvalidNote
         | ExpenseEntryBuildError::InvalidSource
-        | ExpenseEntryBuildError::LedgerConstruction => "経費の台帳項目を作成できませんでした。",
+        | ExpenseEntryBuildError::LedgerConstruction => "経費の台帳記録を作成できませんでした。",
     }
 }
 
@@ -3132,9 +3132,9 @@ pub fn render_review_message(
     previewed: &PreviewedSettlement,
     member_names: &HashMap<MemberId, SmolStr>,
 ) -> String {
-    let mut out = String::from("📊 現在の清算案\n\n残高\n");
+    let mut out = String::from("📊 現在の清算プラン\n\n残高\n");
     out.push_str(&render_balances(projected.state(), member_names));
-    out.push_str("\n\n清算用の送金\n");
+    out.push_str("\n\n送金リスト\n");
     if previewed.plan().transfers.is_empty() {
         out.push_str("清算対象はありません。");
     } else {
@@ -3154,7 +3154,7 @@ pub fn render_ledger_summary(
     projected: &ProjectedLedger,
     member_names: &HashMap<MemberId, SmolStr>,
 ) -> String {
-    let mut out = String::from("📚 Ledger 状態\n\n参加者\n");
+    let mut out = String::from("📚 台帳の状態\n\n参加者\n");
     for member_id in projected.state().participants() {
         out.push_str(&format!("- {}\n", display_name(member_names, *member_id)));
     }
@@ -3162,7 +3162,7 @@ pub fn render_ledger_summary(
     out.push_str("\n残高\n");
     out.push_str(&render_balances(projected.state(), member_names));
 
-    out.push_str("\n\n取り消し済みの台帳項目\n");
+    out.push_str("\n\n取り消し済み記録\n");
     if projected.state().voided_entry_ids().is_empty() {
         out.push_str("なし");
     } else {
@@ -3171,7 +3171,7 @@ pub fn render_ledger_summary(
         }
     }
 
-    out.push_str("\n\nSealed through\n");
+    out.push_str("\n\n履歴確定範囲\n");
     match projected.state().sealed_through() {
         Some(entry_id) => out.push_str(&format!("#{}", entry_id.0)),
         None => out.push_str("なし"),
@@ -3308,7 +3308,7 @@ fn render_settlement_message(
     event: &NormalizedSettlementPlanRecorded,
     member_names: &HashMap<MemberId, SmolStr>,
 ) -> String {
-    let mut out = format!("💸 清算を記録しました\n\n台帳項目: #{}\n", entry.id.0);
+    let mut out = format!("💸 清算を記録しました\n\n台帳記録: #{}\n", entry.id.0);
     for transfer in event.transfers() {
         out.push_str(&format!(
             "- {} -> {}: {}円\n",
@@ -3326,7 +3326,7 @@ fn render_void_message(
     _member_names: &HashMap<MemberId, SmolStr>,
 ) -> String {
     format!(
-        "🪫 台帳項目を取り消しました\n\n台帳項目: #{}\n対象: #{}",
+        "🪫 台帳記録を取り消しました\n\n台帳記録: #{}\n対象: #{}",
         entry.id.0,
         event.target().0
     )
@@ -3334,7 +3334,7 @@ fn render_void_message(
 
 fn render_seal_message(entry: &LedgerEntry, event: &LedgerHistorySealed) -> String {
     format!(
-        "🔒 履歴を封印しました\n\n台帳項目: #{}\n封印済み範囲: #{} まで",
+        "🔒 履歴を確定しました\n\n台帳記録: #{}\n履歴確定範囲: #{} まで",
         entry.id.0,
         event.through().0
     )
@@ -3346,7 +3346,7 @@ fn render_adjustment_message(
     member_names: &HashMap<MemberId, SmolStr>,
 ) -> String {
     let mut out = format!(
-        "🩹 残高補正を記録しました\n\n台帳項目: #{}\n理由: {}\n",
+        "🩹 残高補正を記録しました\n\n台帳記録: #{}\n理由: {}\n",
         entry.id.0,
         event.reason().as_str()
     );

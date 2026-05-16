@@ -1159,7 +1159,7 @@ where
             CreateCommand::new("expense").description("経費を台帳に記録します"),
             CreateCommand::new("review").description(walicord_i18n::SLASH_REVIEW_DESCRIPTION),
             CreateCommand::new("settle").description("直前の清算確認を台帳に記録します"),
-            CreateCommand::new("void").description("台帳項目を追記型で取り消します"),
+            CreateCommand::new("void").description("台帳記録を取り消します"),
             CreateCommand::new("ledger").description("台帳の現在状態を表示します"),
             CreateCommand::new("variables").description(walicord_i18n::SLASH_VARIABLES_DESCRIPTION),
         ];
