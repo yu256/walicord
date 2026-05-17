@@ -15,17 +15,17 @@ use walicord_presentation::{SettlementPresenter, SettlementView};
 
 /// Formats settlement optimization error for user display
 pub fn format_settlement_error(err: SettlementOptimizationError) -> String {
-    match err {
+    let message = match &err {
         SettlementOptimizationError::ImbalancedTotal(total) => {
             walicord_i18n::settlement_imbalanced_total(total).to_string()
         }
         SettlementOptimizationError::InvalidGrid { g1, g2 } => {
-            walicord_i18n::settlement_invalid_grid(g1, g2).to_string()
+            walicord_i18n::settlement_invalid_grid(*g1, *g2).to_string()
         }
         SettlementOptimizationError::ModelTooLarge {
             edge_count,
             max_edges,
-        } => walicord_i18n::settlement_model_too_large(edge_count, max_edges).to_string(),
+        } => walicord_i18n::settlement_model_too_large(*edge_count, *max_edges).to_string(),
         SettlementOptimizationError::NoSolution => {
             walicord_i18n::SETTLEMENT_CALCULATION_FAILED.to_string()
         }
@@ -53,7 +53,7 @@ pub fn format_settlement_error(err: SettlementOptimizationError) -> String {
         SettlementOptimizationError::QuantizationUnsupportedScale {
             scale,
             max_supported,
-        } => walicord_i18n::settlement_quantization_unsupported_scale(scale, max_supported)
+        } => walicord_i18n::settlement_quantization_unsupported_scale(*scale, *max_supported)
             .to_string(),
         SettlementOptimizationError::WeightOverflow => walicord_i18n::WEIGHT_OVERFLOW.to_string(),
         SettlementOptimizationError::ZeroTotalWeight => {
@@ -62,6 +62,69 @@ pub fn format_settlement_error(err: SettlementOptimizationError) -> String {
         SettlementOptimizationError::PlannerOutputInvalid { .. }
         | SettlementOptimizationError::PreviewDigestMismatch { .. } => {
             walicord_i18n::SETTLEMENT_CALCULATION_FAILED.to_string()
+        }
+    };
+    if settlement_error_should_show_detail(&err) {
+        format!("{message}\n詳細: {}", settlement_error_diagnostic(&err))
+    } else {
+        message
+    }
+}
+
+fn settlement_error_should_show_detail(err: &SettlementOptimizationError) -> bool {
+    !matches!(
+        err,
+        SettlementOptimizationError::WeightOverflow | SettlementOptimizationError::ZeroTotalWeight
+    )
+}
+
+fn settlement_error_diagnostic(err: &SettlementOptimizationError) -> String {
+    match err {
+        SettlementOptimizationError::ImbalancedTotal(total) => {
+            format!("imbalanced total ({total})")
+        }
+        SettlementOptimizationError::InvalidGrid { g1, g2 } => {
+            format!("invalid grid (g1={g1}, g2={g2})")
+        }
+        SettlementOptimizationError::ModelTooLarge {
+            edge_count,
+            max_edges,
+        } => {
+            format!("model too large (edges={edge_count}, max={max_edges})")
+        }
+        SettlementOptimizationError::QuantizationImbalancedTotal { total } => {
+            format!("quantization imbalanced total ({total})")
+        }
+        SettlementOptimizationError::QuantizationUnsupportedScale {
+            scale,
+            max_supported,
+        } => {
+            format!("quantization unsupported scale (scale={scale}, max={max_supported})")
+        }
+        SettlementOptimizationError::NoSolution => "no solution".to_string(),
+        SettlementOptimizationError::RoundingMismatch => "rounding mismatch".to_string(),
+        SettlementOptimizationError::QuantizationInvalidAdjustmentCount => {
+            "quantization invalid adjustment count".to_string()
+        }
+        SettlementOptimizationError::QuantizationInsufficientCandidates => {
+            "quantization insufficient candidates".to_string()
+        }
+        SettlementOptimizationError::QuantizationZeroSumInvariantViolation => {
+            "quantization zero-sum invariant violation".to_string()
+        }
+        SettlementOptimizationError::QuantizationNonIntegral => {
+            "quantization non-integral result".to_string()
+        }
+        SettlementOptimizationError::QuantizationOutOfRange => {
+            "quantization out of range".to_string()
+        }
+        SettlementOptimizationError::WeightOverflow => "weight overflow".to_string(),
+        SettlementOptimizationError::ZeroTotalWeight => "zero total weight".to_string(),
+        SettlementOptimizationError::PlannerOutputInvalid { .. } => {
+            "planner output invalid".to_string()
+        }
+        SettlementOptimizationError::PreviewDigestMismatch { .. } => {
+            "preview digest mismatch".to_string()
         }
     }
 }
@@ -289,13 +352,25 @@ where
         let kind = err.kind();
         match kind {
             FailureKind::InternalBug => {
-                tracing::error!(error = ?err, "Settlement processing failed due to internal bug");
+                tracing::error!(
+                    error = ?err,
+                    diagnostic = %settlement_error_diagnostic(err),
+                    "Settlement processing failed due to internal bug"
+                );
             }
             FailureKind::Misconfiguration => {
-                tracing::warn!(error = ?err, "Settlement processing failed due to misconfiguration");
+                tracing::warn!(
+                    error = ?err,
+                    diagnostic = %settlement_error_diagnostic(err),
+                    "Settlement processing failed due to misconfiguration"
+                );
             }
             FailureKind::UserInput => {
-                tracing::info!(error = ?err, "Settlement processing failed due to user input");
+                tracing::info!(
+                    error = ?err,
+                    diagnostic = %settlement_error_diagnostic(err),
+                    "Settlement processing failed due to user input"
+                );
             }
         }
     }
@@ -837,33 +912,51 @@ mod tests {
     #[rstest]
     #[case::zero_sum_invariant(
         SettlementOptimizationError::QuantizationZeroSumInvariantViolation,
-        walicord_i18n::SETTLEMENT_QUANTIZATION_ZERO_SUM_INVARIANT.to_string()
+        format!(
+            "{}\n詳細: quantization zero-sum invariant violation",
+            walicord_i18n::SETTLEMENT_QUANTIZATION_ZERO_SUM_INVARIANT
+        )
     )]
     #[case::non_integral(
         SettlementOptimizationError::QuantizationNonIntegral,
-        walicord_i18n::SETTLEMENT_QUANTIZATION_NON_INTEGRAL.to_string()
+        format!(
+            "{}\n詳細: quantization non-integral result",
+            walicord_i18n::SETTLEMENT_QUANTIZATION_NON_INTEGRAL
+        )
     )]
     #[case::out_of_range(
         SettlementOptimizationError::QuantizationOutOfRange,
-        walicord_i18n::SETTLEMENT_QUANTIZATION_FAILED.to_string()
+        format!(
+            "{}\n詳細: quantization out of range",
+            walicord_i18n::SETTLEMENT_QUANTIZATION_FAILED
+        )
     )]
     #[case::unsupported_scale(
         SettlementOptimizationError::QuantizationUnsupportedScale {
             scale: 30,
             max_supported: 22,
         },
-        walicord_i18n::settlement_quantization_unsupported_scale(30, 22).to_string()
+        format!(
+            "{}\n詳細: quantization unsupported scale (scale=30, max=22)",
+            walicord_i18n::settlement_quantization_unsupported_scale(30, 22)
+        )
     )]
     #[case::invalid_grid(
         SettlementOptimizationError::InvalidGrid { g1: 1000, g2: 300 },
-        walicord_i18n::settlement_invalid_grid(1000, 300).to_string()
+        format!(
+            "{}\n詳細: invalid grid (g1=1000, g2=300)",
+            walicord_i18n::settlement_invalid_grid(1000, 300)
+        )
     )]
     #[case::model_too_large(
         SettlementOptimizationError::ModelTooLarge {
             edge_count: 121,
             max_edges: 120,
         },
-        walicord_i18n::settlement_model_too_large(121, 120).to_string()
+        format!(
+            "{}\n詳細: model too large (edges=121, max=120)",
+            walicord_i18n::settlement_model_too_large(121, 120)
+        )
     )]
     fn format_settlement_error_uses_quantization_message(
         #[case] error: SettlementOptimizationError,

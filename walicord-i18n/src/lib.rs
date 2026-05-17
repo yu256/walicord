@@ -7,28 +7,30 @@ compile_error!("Cannot enable both 'ja' and 'en' features at the same time");
 pub mod strings {
     pub const MEMBER: &str = "メンバー";
     pub const BALANCE: &str = "収支";
-    pub const FROM: &str = "支払人";
+    pub const FROM: &str = "支払者";
     pub const TO: &str = "受取人";
     pub const AMOUNT: &str = "金額";
     pub const CATEGORY: &str = "カテゴリ";
     pub const STATUS: &str = "状態";
-    pub const SETTLEMENT_PAYMENT: &str = "確定者の支払い";
-    pub const PAYMENT_TO_SETTLOR: &str = "確定者への支払い";
+    pub const SETTLEMENT_PAYMENT: &str = "支払う金額";
+    pub const PAYMENT_TO_SETTLOR: &str = "受け取る金額";
     pub const PENDING: &str = "保留";
     pub const SETTLED_MEMBER: &str = "確定対象";
     pub const UNSETTLED_MEMBER: &str = "未確定";
     pub const SETTLED_TRANSFER: &str = "確定済み";
     pub const PLANNED_TRANSFER: &str = "参考";
-    pub const SETTLEMENT_CALCULATION_FAILED: &str = "清算の計算に失敗しました";
-    pub const SETTLEMENT_QUANTIZATION_FAILED: &str = "清算の丸めに失敗しました";
+    pub const SETTLEMENT_CALCULATION_FAILED: &str =
+        "清算計算に失敗しました。入力内容を確認してください。";
+    pub const SETTLEMENT_QUANTIZATION_FAILED: &str =
+        "清算計算に失敗しました。入力内容を確認してください。";
     pub const SETTLEMENT_QUANTIZATION_INVALID_ADJUSTMENT: &str =
-        "清算の丸めに失敗しました (調整回数が不正です)";
+        "清算計算に失敗しました。入力内容を確認してください。";
     pub const SETTLEMENT_QUANTIZATION_INSUFFICIENT_CANDIDATES: &str =
-        "清算の丸めに失敗しました (調整候補が不足しています)";
+        "清算計算に失敗しました。入力内容を確認してください。";
     pub const SETTLEMENT_QUANTIZATION_ZERO_SUM_INVARIANT: &str =
-        "清算の丸めに失敗しました (ゼロサム整合性を満たせませんでした)";
+        "清算計算に失敗しました。入力内容を確認してください。";
     pub const SETTLEMENT_QUANTIZATION_NON_INTEGRAL: &str =
-        "清算の丸めに失敗しました (整数化できません)";
+        "清算計算に失敗しました。入力内容を確認してください。";
     pub const WEIGHT_OVERFLOW: &str = "重みの合計がオーバーフローしました";
     pub const ZERO_TOTAL_WEIGHT: &str = "重みの合計が0です";
     pub const RECEIVER_BALANCE: &str = "受取後残高";
@@ -43,7 +45,7 @@ pub mod strings {
         "メッセージの処理が完了していません。しばらく待ってから再度お試しください。";
     pub const SLASH_ROSTER_LOAD_FAILED: &str = "メンバー情報の読み込みに失敗しました。";
     pub const SLASH_NO_VARIABLES: &str = "変数は定義されていません。";
-    pub const SLASH_RENDER_FAILED: &str = "精算画像の生成に失敗しました。";
+    pub const SLASH_RENDER_FAILED: &str = "清算結果の画像を生成できませんでした。";
 }
 
 #[cfg(feature = "en")]
@@ -418,7 +420,10 @@ impl std::fmt::Display for AmountExpressionErrorMessage {
 
 pub fn settlement_quantization_imbalanced(total: impl std::fmt::Display) -> impl std::fmt::Display {
     #[cfg(feature = "ja")]
-    return std::fmt::from_fn(move |f| write!(f, "清算の丸めに失敗しました (合計: {total})"));
+    return std::fmt::from_fn(move |f| {
+        let _ = &total;
+        write!(f, "清算計算に失敗しました。入力内容を確認してください。")
+    });
     #[cfg(not(feature = "ja"))]
     return std::fmt::from_fn(move |f| {
         write!(f, "Settlement quantization failed (total: {})", total)
@@ -431,10 +436,8 @@ pub fn settlement_quantization_unsupported_scale(
 ) -> impl std::fmt::Display {
     #[cfg(feature = "ja")]
     return std::fmt::from_fn(move |f| {
-        write!(
-            f,
-            "清算の丸めに失敗しました (scale={scale}, max={max_supported})"
-        )
+        let _ = (scale, max_supported);
+        write!(f, "清算計算に失敗しました。入力内容を確認してください。")
     });
     #[cfg(not(feature = "ja"))]
     return std::fmt::from_fn(move |f| {
@@ -448,7 +451,10 @@ pub fn settlement_quantization_unsupported_scale(
 
 pub fn settlement_imbalanced_total(total: impl std::fmt::Display) -> impl std::fmt::Display {
     #[cfg(feature = "ja")]
-    return std::fmt::from_fn(move |f| write!(f, "清算の計算に失敗しました (total: {total})"));
+    return std::fmt::from_fn(move |f| {
+        let _ = &total;
+        write!(f, "清算計算に失敗しました。入力内容を確認してください。")
+    });
     #[cfg(not(feature = "ja"))]
     return std::fmt::from_fn(move |f| {
         write!(f, "Settlement calculation failed (total: {})", total)
@@ -458,10 +464,8 @@ pub fn settlement_imbalanced_total(total: impl std::fmt::Display) -> impl std::f
 pub fn settlement_invalid_grid(g1: i64, g2: i64) -> impl std::fmt::Display {
     #[cfg(feature = "ja")]
     return std::fmt::from_fn(move |f| {
-        write!(
-            f,
-            "清算の計算に失敗しました (invalid grid: g1={g1}, g2={g2})"
-        )
+        let _ = (g1, g2);
+        write!(f, "清算計算に失敗しました。入力内容を確認してください。")
     });
     #[cfg(not(feature = "ja"))]
     return std::fmt::from_fn(move |f| {
@@ -476,10 +480,8 @@ pub fn settlement_invalid_grid(g1: i64, g2: i64) -> impl std::fmt::Display {
 pub fn settlement_model_too_large(edge_count: usize, max_edges: usize) -> impl std::fmt::Display {
     #[cfg(feature = "ja")]
     return std::fmt::from_fn(move |f| {
-        write!(
-            f,
-            "清算の計算に失敗しました (model too large: edges={edge_count}, max={max_edges})"
-        )
+        let _ = (edge_count, max_edges);
+        write!(f, "清算計算に失敗しました。入力内容を確認してください。")
     });
     #[cfg(not(feature = "ja"))]
     return std::fmt::from_fn(move |f| {

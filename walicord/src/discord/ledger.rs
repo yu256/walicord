@@ -71,6 +71,9 @@ const LEDGER_PANEL_EXPENSE_ID: &str = "ledger:panel:expense";
 const LEDGER_PANEL_REVIEW_ID: &str = "ledger:panel:review";
 const LEDGER_PANEL_LEDGER_ID: &str = "ledger:panel:ledger";
 const LEDGER_PANEL_VOID_ID: &str = "ledger:panel:void";
+const EXPENSE_DRAFT_MISSING_MESSAGE: &str =
+    "入力内容が見つかりません。もう一度「記録する」から始めてください。";
+const STALE_INTERACTION_MESSAGE: &str = "この操作は期限切れです。もう一度やり直してください。";
 const EXPENSE_AMOUNT_FIELD: &str = "expense_amount";
 const EXPENSE_NOTE_FIELD: &str = "expense_note";
 const EXPENSE_DATE_FIELD: &str = "expense_date";
@@ -1007,7 +1010,7 @@ impl DiscordLedgerPoc {
             .get(&session_id)
             .map(|draft| draft.actor_id)
         else {
-            self.reply_component_error(ctx, component, "経費入力セッションが見つかりません。")
+            self.reply_component_error(ctx, component, EXPENSE_DRAFT_MISSING_MESSAGE)
                 .await;
             return;
         };
@@ -1021,7 +1024,7 @@ impl DiscordLedgerPoc {
             return;
         }
         let Some(mut draft) = self.expense_drafts.get_mut(&session_id) else {
-            self.reply_component_error(ctx, component, "経費入力セッションが見つかりません。")
+            self.reply_component_error(ctx, component, EXPENSE_DRAFT_MISSING_MESSAGE)
                 .await;
             return;
         };
@@ -1047,7 +1050,7 @@ impl DiscordLedgerPoc {
             .get(&session_id)
             .map(|draft| draft.actor_id)
         else {
-            self.reply_component_error(ctx, component, "経費入力セッションが見つかりません。")
+            self.reply_component_error(ctx, component, EXPENSE_DRAFT_MISSING_MESSAGE)
                 .await;
             return;
         };
@@ -1061,7 +1064,7 @@ impl DiscordLedgerPoc {
             return;
         }
         let Some(mut draft) = self.expense_drafts.get_mut(&session_id) else {
-            self.reply_component_error(ctx, component, "経費入力セッションが見つかりません。")
+            self.reply_component_error(ctx, component, EXPENSE_DRAFT_MISSING_MESSAGE)
                 .await;
             return;
         };
@@ -1094,7 +1097,7 @@ impl DiscordLedgerPoc {
             .get(&session_id)
             .map(|draft| draft.actor_id)
         else {
-            self.reply_component_error(ctx, component, "経費入力セッションが見つかりません。")
+            self.reply_component_error(ctx, component, EXPENSE_DRAFT_MISSING_MESSAGE)
                 .await;
             return;
         };
@@ -1108,7 +1111,7 @@ impl DiscordLedgerPoc {
             return;
         }
         let Some(mut draft) = self.expense_drafts.get_mut(&session_id) else {
-            self.reply_component_error(ctx, component, "経費入力セッションが見つかりません。")
+            self.reply_component_error(ctx, component, EXPENSE_DRAFT_MISSING_MESSAGE)
                 .await;
             return;
         };
@@ -1137,7 +1140,7 @@ impl DiscordLedgerPoc {
             .get(&session_id)
             .map(|draft| draft.actor_id)
         else {
-            self.reply_component_error(ctx, component, "経費入力セッションが見つかりません。")
+            self.reply_component_error(ctx, component, EXPENSE_DRAFT_MISSING_MESSAGE)
                 .await;
             return;
         };
@@ -1151,7 +1154,7 @@ impl DiscordLedgerPoc {
             return;
         }
         let Some(mut draft) = self.expense_drafts.get_mut(&session_id) else {
-            self.reply_component_error(ctx, component, "経費入力セッションが見つかりません。")
+            self.reply_component_error(ctx, component, EXPENSE_DRAFT_MISSING_MESSAGE)
                 .await;
             return;
         };
@@ -1177,7 +1180,7 @@ impl DiscordLedgerPoc {
             .get(&session_id)
             .map(|draft| draft.clone())
         else {
-            self.reply_component_error(ctx, component, "経費入力セッションが見つかりません。")
+            self.reply_component_error(ctx, component, EXPENSE_DRAFT_MISSING_MESSAGE)
                 .await;
             return;
         };
@@ -1213,13 +1216,9 @@ impl DiscordLedgerPoc {
             "対象者ごとの重み",
         )
         .components(vec![CreateActionRow::InputText(
-            CreateInputText::new(
-                InputTextStyle::Paragraph,
-                "member_id=weight",
-                EXPENSE_WEIGHTS_FIELD,
-            )
-            .value(body)
-            .required(true),
+            CreateInputText::new(InputTextStyle::Paragraph, "重み", EXPENSE_WEIGHTS_FIELD)
+                .value(body)
+                .required(true),
         )]);
         let _ = component
             .create_response(&ctx.http, CreateInteractionResponse::Modal(modal))
@@ -1246,7 +1245,9 @@ impl DiscordLedgerPoc {
                     CreateInteractionResponse::Message(
                         CreateInteractionResponseMessage::new()
                             .ephemeral(true)
-                            .content("重みは `member_id=weight` 形式で入力してください。"),
+                            .content(
+                                "表示されている形式のまま、重みだけ変更してください。例: 123=2",
+                            ),
                     ),
                 )
                 .await;
@@ -1263,7 +1264,7 @@ impl DiscordLedgerPoc {
                     CreateInteractionResponse::Message(
                         CreateInteractionResponseMessage::new()
                             .ephemeral(true)
-                            .content("経費入力セッションが見つかりません。"),
+                            .content(EXPENSE_DRAFT_MISSING_MESSAGE),
                     ),
                 )
                 .await;
@@ -1289,7 +1290,7 @@ impl DiscordLedgerPoc {
                     CreateInteractionResponse::Message(
                         CreateInteractionResponseMessage::new()
                             .ephemeral(true)
-                            .content("経費入力セッションが見つかりません。"),
+                            .content(EXPENSE_DRAFT_MISSING_MESSAGE),
                     ),
                 )
                 .await;
@@ -1346,7 +1347,7 @@ impl DiscordLedgerPoc {
             .get(&session_id)
             .map(|draft| draft.clone())
         else {
-            self.reply_component_error(ctx, component, "経費入力セッションが見つかりません。")
+            self.reply_component_error(ctx, component, EXPENSE_DRAFT_MISSING_MESSAGE)
                 .await;
             return;
         };
@@ -1418,7 +1419,7 @@ impl DiscordLedgerPoc {
         let draft = match self.claim_expense_recording(session_id, component.user.id) {
             Ok(draft) => draft,
             Err(ExpenseRecordingClaimError::Missing) => {
-                self.reply_component_error(ctx, component, "経費入力セッションが見つかりません。")
+                self.reply_component_error(ctx, component, EXPENSE_DRAFT_MISSING_MESSAGE)
                     .await;
                 return;
             }
@@ -2027,7 +2028,7 @@ impl DiscordLedgerPoc {
             .get(&session_id)
             .map(|draft| draft.clone())
         else {
-            self.reply_component_error(ctx, component, "経費入力セッションが見つかりません。")
+            self.reply_component_error(ctx, component, EXPENSE_DRAFT_MISSING_MESSAGE)
                 .await;
             return;
         };
@@ -2066,7 +2067,7 @@ impl DiscordLedgerPoc {
         member_names: &HashMap<MemberId, SmolStr>,
     ) -> String {
         let Some(draft) = self.expense_drafts.get(&session_id) else {
-            return "経費入力セッションが見つかりません。".into();
+            return EXPENSE_DRAFT_MISSING_MESSAGE.into();
         };
         let selections = resolve_expense_selections(&draft, roster);
         let mut out = format!(
@@ -2133,7 +2134,7 @@ impl DiscordLedgerPoc {
         member_names: &HashMap<MemberId, SmolStr>,
     ) -> Result<String, String> {
         let Some(draft) = self.expense_drafts.get(&session_id) else {
-            return Err("経費入力セッションが見つかりません。".into());
+            return Err(EXPENSE_DRAFT_MISSING_MESSAGE.into());
         };
         let payer = draft
             .payer
@@ -2226,12 +2227,8 @@ impl DiscordLedgerPoc {
         match parse_session_id(custom_id, prefix, self.interaction_nonce) {
             SessionIdMatch::Match(session_id) => Ok(Some(session_id)),
             SessionIdMatch::Stale => {
-                self.reply_component_error(
-                    ctx,
-                    component,
-                    "この操作は古くなりました。もう一度コマンドを実行してください。",
-                )
-                .await;
+                self.reply_component_error(ctx, component, STALE_INTERACTION_MESSAGE)
+                    .await;
                 Err(())
             }
             SessionIdMatch::NoMatch => Ok(None),
@@ -2247,12 +2244,8 @@ impl DiscordLedgerPoc {
         match parse_void_confirm_id(custom_id, self.interaction_nonce) {
             VoidConfirmMatch::Match { session_id, target } => Ok(Some((session_id, target))),
             VoidConfirmMatch::Stale => {
-                self.reply_component_error(
-                    ctx,
-                    component,
-                    "この操作は古くなりました。もう一度コマンドを実行してください。",
-                )
-                .await;
+                self.reply_component_error(ctx, component, STALE_INTERACTION_MESSAGE)
+                    .await;
                 Err(())
             }
             VoidConfirmMatch::NoMatch => Ok(None),
@@ -2275,9 +2268,7 @@ impl DiscordLedgerPoc {
                         CreateInteractionResponse::Message(
                             CreateInteractionResponseMessage::new()
                                 .ephemeral(true)
-                                .content(
-                                    "この操作は古くなりました。もう一度コマンドを実行してください。",
-                                ),
+                                .content(STALE_INTERACTION_MESSAGE),
                         ),
                     )
                     .await;

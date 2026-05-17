@@ -46,7 +46,7 @@ L4 command !review
 
 <rect width="351" height="172" fill="#cbd5e0" rx="4" />
 <rect x="1" y="1" width="349" height="34" fill="#4a5568" rx="3" />
-<text x="10" y="22" fill="#ffffff" text-anchor="start">支払人</text>
+<text x="10" y="22" fill="#ffffff" text-anchor="start">支払者</text>
 <text x="91" y="22" fill="#ffffff" text-anchor="start">受取人</text>
 <text x="226" y="22" fill="#ffffff" text-anchor="end">金額</text>
 <text x="341" y="22" fill="#ffffff" text-anchor="end">受取後残高</text>

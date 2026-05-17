@@ -59,7 +59,7 @@ L5 command !settleup members=(members=[] roles=[] groups=[core]) cash=(members=[
 <rect width="449" height="206" fill="#cbd5e0" rx="4" />
 <rect x="1" y="1" width="447" height="34" fill="#4a5568" rx="3" />
 <text x="10" y="22" fill="#ffffff" text-anchor="start">状態</text>
-<text x="108" y="22" fill="#ffffff" text-anchor="start">支払人</text>
+<text x="108" y="22" fill="#ffffff" text-anchor="start">支払者</text>
 <text x="189" y="22" fill="#ffffff" text-anchor="start">受取人</text>
 <text x="324" y="22" fill="#ffffff" text-anchor="end">金額</text>
 <text x="439" y="22" fill="#ffffff" text-anchor="end">受取後残高</text>
