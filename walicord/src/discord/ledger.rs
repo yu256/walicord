@@ -83,6 +83,9 @@ mod expense_flow;
 #[path = "ledger/expense_modal.rs"]
 mod expense_modal;
 #[allow(dead_code)]
+#[path = "ledger/expense_modal_open.rs"]
+mod expense_modal_open;
+#[allow(dead_code)]
 #[path = "ledger/expense_write.rs"]
 mod expense_write;
 #[allow(dead_code)]

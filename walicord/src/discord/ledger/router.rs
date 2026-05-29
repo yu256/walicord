@@ -8,6 +8,9 @@ use walicord_application::{Clock, NonceProvider, SettlementPlanner};
 use crate::channel::ChannelManager;
 
 use super::{
+    expense_modal_open::{
+        ExpenseModalBuildError, ExpenseModalPrefill, build_expense_modal_response,
+    },
     observability::LedgerObservability,
     preview_store::PreviewStore,
     route_guard::{LedgerInteractionGuardError, guard_ledger_interaction},
@@ -80,17 +83,18 @@ impl LedgerRouter {
     /// DSL record paths preserved by criterion 13 / 94.
     pub async fn handle_command(
         &self,
-        _ctx: &Context,
+        ctx: &Context,
         command: &CommandInteraction,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
         match command.data.name.as_str() {
-            "expense" => self.dispatch_expense_command(command).await,
+            "expense" => self.dispatch_expense_command(ctx, command).await,
             _ => Ok(InteractionDispatch::Ignored),
         }
     }
 
     async fn dispatch_expense_command(
         &self,
+        ctx: &Context,
         command: &CommandInteraction,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
         let _scope = guard_ledger_interaction(
@@ -99,9 +103,20 @@ impl LedgerRouter {
             self.deps.channels.as_ref(),
         )
         .map_err(map_guard_error)?;
-        // The actual modal-open response is wired in the next slice; until then the
-        // route reports Handled so the legacy handler does not also process it once
-        // handler.rs delegates here.
+
+        let nonce = self.deps.nonce_provider.next_interaction_nonce();
+        let response = build_expense_modal_response(
+            self.deps.clock.as_ref(),
+            nonce,
+            &ExpenseModalPrefill::default(),
+        )
+        .map_err(map_modal_build_error)?;
+        command
+            .create_response(&ctx.http, response)
+            .await
+            .map_err(|error| {
+                LedgerRouteError::Internal(format!("expense modal create_response: {error}"))
+            })?;
         Ok(InteractionDispatch::Handled)
     }
 
@@ -132,6 +147,14 @@ fn map_guard_error(error: LedgerInteractionGuardError) -> LedgerRouteError {
         LedgerInteractionGuardError::GuildOnly => LedgerRouteError::GuildOnly,
         LedgerInteractionGuardError::NotInTrackedChannel { .. } => {
             LedgerRouteError::NotInTrackedChannel
+        }
+    }
+}
+
+fn map_modal_build_error(error: ExpenseModalBuildError) -> LedgerRouteError {
+    match error {
+        ExpenseModalBuildError::Budget(budget) => {
+            LedgerRouteError::Internal(format!("expense modal exceeded budget: {budget:?}"))
         }
     }
 }
