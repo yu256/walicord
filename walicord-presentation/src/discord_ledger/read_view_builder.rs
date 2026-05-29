@@ -372,3 +372,84 @@ pub fn build_ledger_empty_page_model(
         ..Default::default()
     }
 }
+
+pub struct ReviewPageInputs<'a> {
+    pub route: super::surfaces::ReadViewRoute,
+    pub state: &'a LedgerState,
+    pub previewed: &'a PreviewedSettlement,
+    pub labels: &'a SurfaceMemberLabels,
+    pub uncertain_write: bool,
+    pub recovery_cta: super::surfaces::RecoveryCta,
+    pub recovery_url: Option<String>,
+}
+
+pub fn build_review_page_model(inputs: ReviewPageInputs<'_>) -> super::surfaces::ReadViewPageModel {
+    use super::surfaces::{ReadViewKind, ReadViewPageModel};
+    ReadViewPageModel {
+        kind: ReadViewKind::Review,
+        route: inputs.route,
+        title: std::borrow::Cow::Borrowed(i18n::panel_review_button_label()),
+        uncertain_write: inputs.uncertain_write,
+        recovery_cta: inputs.recovery_cta,
+        recovery_url: inputs.recovery_url,
+        balances: balance_rows_for_state(inputs.state, inputs.labels),
+        transfers: preview_transfer_rows(inputs.previewed, inputs.labels),
+        ephemeral: true,
+        ..Default::default()
+    }
+}
+
+pub fn build_review_empty_page_model(
+    route: super::surfaces::ReadViewRoute,
+    uncertain_write: bool,
+    recovery_url: Option<String>,
+) -> super::surfaces::ReadViewPageModel {
+    use super::surfaces::{ReadViewKind, ReadViewPageModel, RecoveryCta};
+    let (empty_state, recovery_cta, recovery_url) = match route {
+        super::surfaces::ReadViewRoute::ReviewParent => (
+            std::borrow::Cow::Borrowed(i18n::review_parent_empty_state()),
+            RecoveryCta::None,
+            None,
+        ),
+        _ => (
+            std::borrow::Cow::Borrowed(i18n::review_thread_empty_state()),
+            RecoveryCta::ParentLink,
+            recovery_url,
+        ),
+    };
+    ReadViewPageModel {
+        kind: ReadViewKind::Review,
+        route,
+        title: std::borrow::Cow::Borrowed(i18n::panel_review_button_label()),
+        uncertain_write,
+        empty_state: Some(empty_state),
+        recovery_cta,
+        recovery_url,
+        ephemeral: true,
+        ..Default::default()
+    }
+}
+
+pub fn build_review_no_transfers_page_model(
+    route: super::surfaces::ReadViewRoute,
+    uncertain_write: bool,
+) -> super::surfaces::ReadViewPageModel {
+    use super::surfaces::{ReadViewKind, ReadViewPageModel};
+    use std::fmt::Write as _;
+    let mut body = String::new();
+    let _ = write!(
+        body,
+        "{}\n{}",
+        i18n::settlement_already_not_needed_message(),
+        i18n::settlement_preview_not_saved_message(),
+    );
+    ReadViewPageModel {
+        kind: ReadViewKind::Review,
+        route,
+        title: std::borrow::Cow::Borrowed(i18n::panel_review_button_label()),
+        uncertain_write,
+        empty_state: Some(std::borrow::Cow::Owned(body)),
+        ephemeral: true,
+        ..Default::default()
+    }
+}
