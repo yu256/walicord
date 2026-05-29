@@ -26,9 +26,12 @@ use walicord_i18n as i18n;
 use walicord_presentation::discord_ledger::{
     BusinessDateTime, DiscordLedgerPresenter, ExpenseConfirmationButtonIds,
     ExpenseSelectionStepButtonIds, LedgerPageInputs, PanelButtonStates, PanelSurfaceModel,
-    ReadViewBuildError, ReadViewPageModel, ReadViewRoute, RenderBudgetError, SurfaceMemberLabels,
-    build_expense_confirmation_surface, build_expense_selection_step_surface,
-    build_ledger_empty_page_model, build_ledger_page_model, paginate_read_view_model,
+    PublicCanonicalMessageModel, PublicSettlementMessageModel, ReadViewBuildError,
+    ReadViewPageModel, ReadViewRoute, RecoveryCta, RecoveryReference, RenderBudgetError,
+    SurfaceMemberLabels, TransferRow, build_expense_confirmation_surface,
+    build_expense_selection_step_surface, build_ledger_empty_page_model, build_ledger_page_model,
+    build_review_empty_page_model, build_review_no_transfers_page_model, build_review_page_model,
+    paginate_read_view_model,
 };
 
 use crate::channel::ChannelManager;
@@ -59,9 +62,13 @@ use walicord_application::ledger::{
         ExpenseWriteOrchestrationError, RecordTimeOutcome, build_canonical_envelope,
         compose_expense_entry,
     },
-    preview_store::PreviewStore,
+    preview_store::{PreviewStore, PreviewStoreError, PreviewStoreKey, PreviewStoreTransition},
     projection::project_verified_entries,
     read_view_session::{ReadViewSession, ReadViewSessionKey, ReadViewSessionStore},
+    settle_flow::{
+        PreviewAttemptError, PreviewAttemptOutcome, SettleAttemptError, SettleAttemptOutcome,
+        compose_and_store_preview, compose_settlement_entry_from_preview, mark_preview_delivered,
+    },
     write_coordinator::{
         RetainedCanonicalWrite, UncertainWriteRegistry, WriteCoordinator, WriteTargetKey,
     },
@@ -190,6 +197,12 @@ pub enum InternalLedgerRouteError {
     Projection(#[from] walicord_application::ledger::projection::ProjectionConsistencyError),
     #[error("read view build: {0}")]
     ReadViewBuild(#[from] ReadViewBuildError),
+    #[error("settlement preview composition: {0}")]
+    PreviewAttempt(#[from] PreviewAttemptError),
+    #[error("settlement commit composition: {0}")]
+    SettleAttempt(#[from] SettleAttemptError),
+    #[error("preview store transition: {0}")]
+    PreviewStore(#[from] PreviewStoreError),
     #[error("uncertain write already live for ledger {ledger_id:?}")]
     UncertainWriteAlreadyLive { ledger_id: LedgerId },
     #[error("expense modal submission missing required fields")]
@@ -248,6 +261,24 @@ impl From<ConfirmationBuildError> for LedgerRouteError {
 
 impl From<RouterRosterFetchError> for LedgerRouteError {
     fn from(error: RouterRosterFetchError) -> Self {
+        Self::Internal(error.into())
+    }
+}
+
+impl From<PreviewAttemptError> for LedgerRouteError {
+    fn from(error: PreviewAttemptError) -> Self {
+        Self::Internal(error.into())
+    }
+}
+
+impl From<SettleAttemptError> for LedgerRouteError {
+    fn from(error: SettleAttemptError) -> Self {
+        Self::Internal(error.into())
+    }
+}
+
+impl From<PreviewStoreError> for LedgerRouteError {
+    fn from(error: PreviewStoreError) -> Self {
         Self::Internal(error.into())
     }
 }
@@ -335,6 +366,14 @@ pub enum DiscordCallSite {
     LedgerDeferEphemeral,
     #[error("ledger edit response")]
     LedgerEditResponse,
+    #[error("review defer ephemeral")]
+    ReviewDeferEphemeral,
+    #[error("review edit response")]
+    ReviewEditResponse,
+    #[error("settle defer ephemeral")]
+    SettleDeferEphemeral,
+    #[error("settle edit response")]
+    SettleEditResponse,
     #[error("read view nav update_response")]
     ReadViewNavUpdateResponse,
 }
@@ -364,6 +403,8 @@ impl LedgerRouter {
             "expense" => self.dispatch_expense_command(ctx, command).await,
             "panel" => self.dispatch_panel_command(ctx, command).await,
             "ledger" => self.dispatch_ledger_command(ctx, command).await,
+            "review" => self.dispatch_review_command(ctx, command).await,
+            "settle" => self.dispatch_settle_command(ctx, command).await,
             _ => Ok(InteractionDispatch::Ignored),
         }
     }
@@ -405,6 +446,371 @@ impl LedgerRouter {
             .await
             .map_err(discord_call_error(DiscordCallSite::PanelCreateResponse))?;
         Ok(InteractionDispatch::Handled)
+    }
+
+    async fn dispatch_review_command(
+        &self,
+        ctx: &Context,
+        command: &CommandInteraction,
+    ) -> Result<InteractionDispatch, LedgerRouteError> {
+        let scope = match guard_ledger_interaction(
+            command.guild_id,
+            command.channel_id,
+            self.deps.channels.as_ref(),
+        ) {
+            Ok(scope) => scope,
+            Err(LedgerInteractionGuardError::NotInTrackedChannel { .. }) => {
+                return Ok(InteractionDispatch::Ignored);
+            }
+            Err(error) => return Err(LedgerRouteError::from(error)),
+        };
+
+        command
+            .defer_ephemeral(&ctx.http)
+            .await
+            .map_err(discord_call_error(DiscordCallSite::ReviewDeferEphemeral))?;
+
+        let load = self
+            .deps
+            .thread_loader
+            .load(ctx, scope.channel_id(), scope.ledger_id())
+            .await?;
+        let roster = self
+            .deps
+            .roster_fetcher
+            .fetch(ctx, scope.guild_id(), scope.channel_id())
+            .await?;
+        let labels = SurfaceMemberLabels::from_member_names(
+            roster
+                .display_names
+                .iter()
+                .map(|(member_id, name)| (*member_id, Some(name.as_str()))),
+        );
+        let views = project_verified_entries(&load).map_err(LedgerRouteError::from)?;
+        let route = ReadViewRoute::ReviewThread;
+
+        let mut stored_preview_instance_id = None;
+        let key = PreviewStoreKey::new(scope.ledger_id(), MemberId(command.user.id.get()));
+        let prior_preview_instance_id = self
+            .deps
+            .preview_store
+            .current(key)
+            .map(|state| state.preview_instance_id());
+
+        let pages = if views.is_empty() {
+            if let Some(preview_instance_id) = prior_preview_instance_id {
+                let _ = self.deps.preview_store.transition(
+                    key,
+                    PreviewStoreTransition::ClearMatching {
+                        preview_instance_id,
+                    },
+                );
+            }
+            vec![build_review_empty_page_model(route, false, None)]
+        } else {
+            let actor_id = MemberId(command.user.id.get());
+            match compose_and_store_preview(
+                load.snapshot(),
+                scope.ledger_id(),
+                actor_id,
+                self.deps.planner.as_ref(),
+                self.deps.clock.as_ref(),
+                self.deps.nonce_provider.as_ref(),
+                self.deps.preview_store.as_ref(),
+            ) {
+                Err(error) => {
+                    if let Some(preview_instance_id) = prior_preview_instance_id {
+                        let _ = self.deps.preview_store.transition(
+                            key,
+                            PreviewStoreTransition::ClearMatching {
+                                preview_instance_id,
+                            },
+                        );
+                    }
+                    let message = match error {
+                        PreviewAttemptError::Store(PreviewStoreError::CommitInProgress {
+                            ..
+                        }) => uncertain_write_block_message(false, true),
+                        _ => i18n::review_render_failed_message().to_owned(),
+                    };
+                    return self
+                        .edit_command_response(
+                            ctx,
+                            command,
+                            message,
+                            DiscordCallSite::ReviewEditResponse,
+                        )
+                        .await;
+                }
+                Ok(outcome) => match outcome {
+                    PreviewAttemptOutcome::NoTransfersNeeded => {
+                        if let Some(preview_instance_id) = prior_preview_instance_id {
+                            let _ = self.deps.preview_store.transition(
+                                key,
+                                PreviewStoreTransition::ClearMatching {
+                                    preview_instance_id,
+                                },
+                            );
+                        }
+                        vec![build_review_no_transfers_page_model(route, false)]
+                    }
+                    PreviewAttemptOutcome::Stored {
+                        record,
+                        preview_instance_id,
+                    } => {
+                        stored_preview_instance_id = Some(preview_instance_id);
+                        paginate_read_view_model(build_review_page_model(
+                            walicord_presentation::discord_ledger::ReviewPageInputs {
+                                route,
+                                state: load.snapshot().projected().state(),
+                                previewed: record.previewed(),
+                                labels: &labels,
+                                uncertain_write: false,
+                                recovery_cta: RecoveryCta::ParentLink,
+                                recovery_url: None,
+                            },
+                        ))
+                    }
+                },
+            }
+        };
+
+        let nonce = self.deps.nonce_provider.next_interaction_nonce();
+        let actor_id = MemberId(command.user.id.get());
+        self.deps.read_view_sessions.replace(ReadViewSession::new(
+            ReadViewSessionKey {
+                ledger_id: scope.ledger_id(),
+                actor_id,
+            },
+            nonce,
+            pages.clone(),
+            self.deps.clock.now(),
+        ));
+
+        let total_pages = pages.len();
+        let rendered = DiscordLedgerPresenter::render_read_view_page(&pages[0])
+            .map_err(LedgerRouteError::from)?;
+        let (body, mut components) = rendered_surface_to_message(rendered);
+        if total_pages > 1 {
+            components.push(read_view_navigation_row(nonce, 0, total_pages));
+        }
+        command
+            .edit_response(
+                &ctx.http,
+                serenity::all::EditInteractionResponse::new()
+                    .content(body)
+                    .components(components)
+                    .allowed_mentions(suppressed_allowed_mentions()),
+            )
+            .await
+            .map_err(discord_call_error(DiscordCallSite::ReviewEditResponse))?;
+
+        if let Some(preview_instance_id) = stored_preview_instance_id {
+            mark_preview_delivered(self.deps.preview_store.as_ref(), key, preview_instance_id)?;
+        }
+
+        Ok(InteractionDispatch::Handled)
+    }
+
+    async fn dispatch_settle_command(
+        &self,
+        ctx: &Context,
+        command: &CommandInteraction,
+    ) -> Result<InteractionDispatch, LedgerRouteError> {
+        let scope = match guard_ledger_interaction(
+            command.guild_id,
+            command.channel_id,
+            self.deps.channels.as_ref(),
+        ) {
+            Ok(scope) => scope,
+            Err(LedgerInteractionGuardError::NotInTrackedChannel { .. }) => {
+                return Ok(InteractionDispatch::Ignored);
+            }
+            Err(error) => return Err(LedgerRouteError::from(error)),
+        };
+
+        command
+            .defer_ephemeral(&ctx.http)
+            .await
+            .map_err(discord_call_error(DiscordCallSite::SettleDeferEphemeral))?;
+
+        let ledger_id = scope.ledger_id();
+        let actor_id = MemberId(command.user.id.get());
+        let key = PreviewStoreKey::new(ledger_id, actor_id);
+        if self.deps.uncertain_writes.current(ledger_id).is_some() {
+            return self
+                .edit_command_response(
+                    ctx,
+                    command,
+                    uncertain_write_block_message(false, true),
+                    DiscordCallSite::SettleEditResponse,
+                )
+                .await;
+        }
+
+        let lock = self.deps.write_coordinator.lock_for(ledger_id);
+        let _guard = lock.lock().await;
+
+        let load = self
+            .deps
+            .thread_loader
+            .load(ctx, scope.channel_id(), ledger_id)
+            .await?;
+        let next_entry_id =
+            LedgerEntryId((load.snapshot().canonical_entry_count() as u64).saturating_add(1));
+        let Some(preview_instance_id) = self
+            .deps
+            .preview_store
+            .current(key)
+            .map(|state| state.preview_instance_id())
+        else {
+            return self
+                .edit_command_response(
+                    ctx,
+                    command,
+                    i18n::review_preview_required_message(),
+                    DiscordCallSite::SettleEditResponse,
+                )
+                .await;
+        };
+        if let Err(error) = self.deps.preview_store.transition(
+            key,
+            PreviewStoreTransition::BeginCommit {
+                preview_instance_id,
+            },
+        ) {
+            return self
+                .edit_command_response(
+                    ctx,
+                    command,
+                    settle_attempt_error_message(&SettleAttemptError::Store(error)),
+                    DiscordCallSite::SettleEditResponse,
+                )
+                .await;
+        }
+
+        let outcome = match compose_settlement_entry_from_preview(
+            load.snapshot(),
+            ledger_id,
+            actor_id,
+            next_entry_id,
+            DiscordLedgerSourceDescriptor::settle_thread_v1(),
+            self.deps.preview_store.as_ref(),
+            self.deps.clock.as_ref(),
+        ) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                if should_clear_preview_after_settle_error(&error) {
+                    let _ = self.deps.preview_store.transition(
+                        key,
+                        PreviewStoreTransition::ClearMatching {
+                            preview_instance_id,
+                        },
+                    );
+                } else {
+                    let _ = self.deps.preview_store.transition(
+                        key,
+                        PreviewStoreTransition::AbortCommit {
+                            preview_instance_id,
+                        },
+                    );
+                }
+                return self
+                    .edit_command_response(
+                        ctx,
+                        command,
+                        settle_attempt_error_message(&error),
+                        DiscordCallSite::SettleEditResponse,
+                    )
+                    .await;
+            }
+        };
+
+        let SettleAttemptOutcome::RecordableEntry { entry, envelope } = outcome else {
+            self.deps.preview_store.transition(
+                key,
+                PreviewStoreTransition::FinishCommit {
+                    preview_instance_id,
+                },
+            )?;
+            return self
+                .edit_command_response(
+                    ctx,
+                    command,
+                    i18n::settlement_no_transfer_message(),
+                    DiscordCallSite::SettleEditResponse,
+                )
+                .await;
+        };
+
+        let roster = self
+            .deps
+            .roster_fetcher
+            .fetch(ctx, scope.guild_id(), scope.channel_id())
+            .await?;
+        let prepared_body =
+            render_public_settlement_body(&entry, ledger_id, &roster.display_names)?;
+        let envelope_bytes =
+            walicord_application::ledger::canonical_attachment::CanonicalAttachmentCodec::encode_with_pre_self_link_content(
+                &envelope,
+                Some(prepared_body.as_str()),
+            )
+            .map_err(|error| {
+                LedgerRouteError::Internal(InternalLedgerRouteError::ThreadWrite(
+                    StoreWriteError::Prepare(error),
+                ))
+            })?;
+        let retained = RetainedCanonicalWrite::new(
+            ledger_id,
+            &envelope,
+            envelope_bytes,
+            prepared_body.clone(),
+            short_summary_for_entry(&entry),
+        );
+        self.deps.uncertain_writes.set_live(retained).map_err(|_| {
+            LedgerRouteError::Internal(InternalLedgerRouteError::UncertainWriteAlreadyLive {
+                ledger_id,
+            })
+        })?;
+
+        let append_result = self
+            .deps
+            .canonical_store
+            .append_authoritative(ctx, scope.channel_id(), &envelope, prepared_body.as_str())
+            .await;
+        match append_result {
+            Ok(_verified) => {
+                self.deps.uncertain_writes.clear(ledger_id);
+                self.deps.preview_store.transition(
+                    key,
+                    PreviewStoreTransition::FinishCommit {
+                        preview_instance_id,
+                    },
+                )?;
+                self.edit_command_response(
+                    ctx,
+                    command,
+                    i18n::settlement_recorded_message(),
+                    DiscordCallSite::SettleEditResponse,
+                )
+                .await
+            }
+            Err(_error) => {
+                let _ = self.deps.preview_store.transition(
+                    key,
+                    PreviewStoreTransition::AbortCommit {
+                        preview_instance_id,
+                    },
+                );
+                self.edit_command_response(
+                    ctx,
+                    command,
+                    uncertain_write_block_message(false, true),
+                    DiscordCallSite::SettleEditResponse,
+                )
+                .await
+            }
+        }
     }
 
     async fn dispatch_expense_command(
@@ -1416,6 +1822,26 @@ impl LedgerRouter {
             .map_err(discord_call_error(DiscordCallSite::ExpenseModalSuccessAck))?;
         Ok(InteractionDispatch::Handled)
     }
+
+    async fn edit_command_response(
+        &self,
+        ctx: &Context,
+        command: &CommandInteraction,
+        content: impl Into<String>,
+        site: DiscordCallSite,
+    ) -> Result<InteractionDispatch, LedgerRouteError> {
+        command
+            .edit_response(
+                &ctx.http,
+                serenity::all::EditInteractionResponse::new()
+                    .content(content)
+                    .components(Vec::new())
+                    .allowed_mentions(suppressed_allowed_mentions()),
+            )
+            .await
+            .map_err(discord_call_error(site))?;
+        Ok(InteractionDispatch::Handled)
+    }
 }
 
 /// Discord-call failures need both a static `DiscordCallSite` (known at the call
@@ -1640,6 +2066,120 @@ fn render_public_expense_body(
     Ok(rendered.body().to_owned())
 }
 
+#[allow(clippy::result_large_err)] // LedgerRouteError is the project's standard error envelope.
+fn render_public_settlement_body(
+    entry: &LedgerEntry,
+    ledger_id: LedgerId,
+    display_names: &HashMap<MemberId, smol_str::SmolStr>,
+) -> Result<String, LedgerRouteError> {
+    let walicord_application::ledger::LedgerEvent::NormalizedSettlementPlanRecorded(event) =
+        &entry.event
+    else {
+        unreachable!("settle path produced non-settlement entry {:?}", entry.id);
+    };
+
+    let labels =
+        SurfaceMemberLabels::from_member_names(event.transfers().iter().flat_map(|transfer| {
+            [
+                (
+                    transfer.from,
+                    display_names.get(&transfer.from).map(|s| s.as_str()),
+                ),
+                (
+                    transfer.to,
+                    display_names.get(&transfer.to).map(|s| s.as_str()),
+                ),
+            ]
+        }));
+    let transfers = event
+        .transfers()
+        .iter()
+        .map(|transfer| TransferRow {
+            from_display_name: labels.safe_member_label(transfer.from),
+            to_display_name: labels.safe_member_label(transfer.to),
+            amount: format_money_for_modal(transfer.amount),
+        })
+        .collect();
+
+    let actor_member_id = entry
+        .metadata
+        .recorded_by
+        .expect("composed settlement entry always records `recorded_by`");
+    let actor_labels = SurfaceMemberLabels::from_member_names(std::iter::once((
+        actor_member_id,
+        display_names.get(&actor_member_id).map(|s| s.as_str()),
+    )));
+    let actor_display_name = actor_labels.safe_member_label(actor_member_id);
+    let recorded_at = entry
+        .metadata
+        .recorded_at
+        .expect("composed settlement entry always records `recorded_at`");
+
+    let model = PublicCanonicalMessageModel::Settlement(PublicSettlementMessageModel {
+        entry_id: entry.id,
+        recorded_date: walicord_application::ledger::LedgerEffectiveDate::from_system_time(
+            recorded_at,
+        ),
+        transfers,
+        actor_display_name,
+        recorded_at: BusinessDateTime::from_system_time(recorded_at),
+        recovery_reference: RecoveryReference {
+            ledger_id_short: format!("{:08x}", ledger_id.0),
+            entry_id: entry.id,
+            message_link: None,
+        },
+    });
+
+    let rendered = DiscordLedgerPresenter::render_public_entry(&model).map_err(|error| {
+        LedgerRouteError::Internal(InternalLedgerRouteError::PanelRender(error))
+    })?;
+    Ok(rendered.body().to_owned())
+}
+
+fn settle_attempt_error_message(error: &SettleAttemptError) -> &'static str {
+    match error {
+        SettleAttemptError::NoPreviewStored => i18n::review_preview_required_message(),
+        SettleAttemptError::StaleHead { .. } | SettleAttemptError::Expired { .. } => {
+            i18n::stale_settlement_preview_message()
+        }
+        SettleAttemptError::Record(
+            walicord_application::ledger::SettlementRecordError::PreviewNotDelivered,
+        ) => i18n::settlement_preview_not_delivered_message(),
+        SettleAttemptError::Store(PreviewStoreError::CommitInProgress { .. }) => {
+            i18n::uncertain_write_block_message()
+        }
+        SettleAttemptError::Store(_)
+        | SettleAttemptError::Record(_)
+        | SettleAttemptError::EnvelopeEncode(_) => i18n::settlement_confirmation_failed_message(),
+    }
+}
+
+fn should_clear_preview_after_settle_error(error: &SettleAttemptError) -> bool {
+    matches!(
+        error,
+        SettleAttemptError::StaleHead { .. }
+            | SettleAttemptError::Expired { .. }
+            | SettleAttemptError::Record(
+                walicord_application::ledger::SettlementRecordError::PreviewNotDelivered
+            )
+            | SettleAttemptError::Record(_)
+            | SettleAttemptError::EnvelopeEncode(_)
+    )
+}
+
+fn uncertain_write_block_message(preserve_input: bool, preserve_preview: bool) -> String {
+    let mut message = String::from(i18n::uncertain_write_block_message());
+    if preserve_input {
+        message.push('\n');
+        message.push_str(i18n::uncertain_write_input_preserved_message());
+    }
+    if preserve_preview {
+        message.push('\n');
+        message.push_str(i18n::uncertain_write_preview_preserved_message());
+    }
+    message
+}
+
 /// Parse a session-scoped button custom_id of the form `{prefix}{nonce}` and return
 /// the carried [`InteractionNonce`] when the prefix matches. Returns `None` on prefix
 /// mismatch or on a non-numeric / zero nonce — both treated as "not for this route"
@@ -1656,6 +2196,21 @@ pub(crate) fn parse_expense_session_button_nonce(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
+    use std::time::UNIX_EPOCH;
+    use walicord_application::{PreviewInstanceId, ledger::ledger_chain_genesis_sha256_v1};
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum ExpectedClearPolicy {
+        Clear,
+        Preserve,
+    }
+
+    impl From<bool> for ExpectedClearPolicy {
+        fn from(value: bool) -> Self {
+            if value { Self::Clear } else { Self::Preserve }
+        }
+    }
 
     #[test]
     fn dispatch_outcomes_distinguish_handled_from_ignored() {
@@ -1705,5 +2260,77 @@ mod tests {
 
         assert!(rendered.contains("forward"));
         assert!(rendered.contains("InConfirmation"));
+    }
+
+    #[rstest]
+    #[case::no_preview(
+        SettleAttemptError::NoPreviewStored,
+        i18n::review_preview_required_message()
+    )]
+    #[case::stale_head(
+        SettleAttemptError::StaleHead {
+            stored_head: ledger_chain_genesis_sha256_v1(LedgerId(1)),
+            observed_head: None,
+        },
+        i18n::stale_settlement_preview_message()
+    )]
+    #[case::expired(
+        SettleAttemptError::Expired {
+            now: UNIX_EPOCH,
+            expires_at: UNIX_EPOCH,
+        },
+        i18n::stale_settlement_preview_message()
+    )]
+    #[case::preview_not_delivered(
+        SettleAttemptError::Record(
+            walicord_application::ledger::SettlementRecordError::PreviewNotDelivered
+        ),
+        i18n::settlement_preview_not_delivered_message()
+    )]
+    #[case::commit_in_progress(
+        SettleAttemptError::Store(PreviewStoreError::CommitInProgress {
+            preview_instance_id: PreviewInstanceId::new(7).expect("non-zero preview instance"),
+        }),
+        i18n::uncertain_write_block_message()
+    )]
+    fn settle_attempt_error_maps_to_user_message(
+        #[case] error: SettleAttemptError,
+        #[case] expected: &'static str,
+    ) {
+        assert_eq!(settle_attempt_error_message(&error), expected);
+    }
+
+    #[rstest]
+    #[case::stale_head(
+        SettleAttemptError::StaleHead {
+            stored_head: ledger_chain_genesis_sha256_v1(LedgerId(1)),
+            observed_head: None,
+        },
+        ExpectedClearPolicy::Clear
+    )]
+    #[case::no_preview(SettleAttemptError::NoPreviewStored, ExpectedClearPolicy::Preserve)]
+    #[case::commit_in_progress(
+        SettleAttemptError::Store(PreviewStoreError::CommitInProgress {
+            preview_instance_id: PreviewInstanceId::new(7).expect("non-zero preview instance"),
+        }),
+        ExpectedClearPolicy::Preserve
+    )]
+    fn settle_attempt_error_clear_policy_is_explicit(
+        #[case] error: SettleAttemptError,
+        #[case] expected: ExpectedClearPolicy,
+    ) {
+        assert_eq!(
+            ExpectedClearPolicy::from(should_clear_preview_after_settle_error(&error)),
+            expected
+        );
+    }
+
+    #[test]
+    fn uncertain_write_block_message_preserves_preview_when_requested() {
+        let actual = uncertain_write_block_message(false, true);
+
+        assert!(actual.contains(i18n::uncertain_write_block_message()));
+        assert!(actual.contains(i18n::uncertain_write_preview_preserved_message()));
+        assert!(!actual.contains(i18n::uncertain_write_input_preserved_message()));
     }
 }
