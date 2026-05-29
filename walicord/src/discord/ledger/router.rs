@@ -141,10 +141,45 @@ impl LedgerRouter {
         ctx: &Context,
         component: &ComponentInteraction,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
-        match component.data.custom_id.as_str() {
-            LEDGER_PANEL_EXPENSE_ID => self.dispatch_panel_expense_launcher(ctx, component).await,
-            _ => Ok(InteractionDispatch::Ignored),
+        if component.data.custom_id == LEDGER_PANEL_EXPENSE_ID {
+            return self.dispatch_panel_expense_launcher(ctx, component).await;
         }
+        if let Some(_nonce) = parse_expense_session_button_nonce(
+            &component.data.custom_id,
+            EXPENSE_CANCEL_CUSTOM_ID_PREFIX,
+        ) {
+            return self.dispatch_expense_cancel(ctx, component).await;
+        }
+        Ok(InteractionDispatch::Ignored)
+    }
+
+    async fn dispatch_expense_cancel(
+        &self,
+        ctx: &Context,
+        component: &ComponentInteraction,
+    ) -> Result<InteractionDispatch, LedgerRouteError> {
+        let (guild_id, channel_id) = guard_ledger_interaction(
+            component.guild_id,
+            component.channel_id,
+            self.deps.channels.as_ref(),
+        )
+        .map_err(map_guard_error)?;
+        let key = ExpenseSessionKey::new(guild_id, channel_id, MemberId(component.user.id.get()));
+        self.deps.expense_sessions.clear(key);
+        let response = CreateInteractionResponse::UpdateMessage(
+            CreateInteractionResponseMessage::new()
+                .ephemeral(true)
+                .allowed_mentions(suppressed_allowed_mentions())
+                .content(walicord_i18n::expense_cancelled_message())
+                .components(Vec::new()),
+        );
+        component
+            .create_response(&ctx.http, response)
+            .await
+            .map_err(|error| {
+                LedgerRouteError::Internal(format!("expense cancel create_response: {error}"))
+            })?;
+        Ok(InteractionDispatch::Handled)
     }
 
     async fn dispatch_panel_expense_launcher(
@@ -321,6 +356,21 @@ fn map_modal_build_error(error: ExpenseModalBuildError) -> LedgerRouteError {
 
 fn map_construction_error(error: ExpenseSessionConstructionError) -> LedgerRouteError {
     LedgerRouteError::Internal(format!("expense session construction failed: {error:?}"))
+}
+
+pub(crate) const EXPENSE_CANCEL_CUSTOM_ID_PREFIX: &str = "ledger:expense:cancel:";
+
+/// Parse a session-scoped button custom_id of the form `{prefix}{nonce}` and return
+/// the carried [`InteractionNonce`] when the prefix matches. Returns `None` on prefix
+/// mismatch or on a non-numeric / zero nonce — both treated as "not for this route"
+/// by the caller.
+pub(crate) fn parse_expense_session_button_nonce(
+    custom_id: &str,
+    prefix: &str,
+) -> Option<walicord_application::InteractionNonce> {
+    let remainder = custom_id.strip_prefix(prefix)?;
+    let value = remainder.parse::<u64>().ok()?;
+    walicord_application::InteractionNonce::new(value).ok()
 }
 
 #[cfg(test)]
