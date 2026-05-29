@@ -545,7 +545,7 @@ impl Default for ReadViewSectionVisibility {
 pub struct ReadViewPageModel {
     pub kind: ReadViewKind,
     pub route: ReadViewRoute,
-    pub title: String,
+    pub title: std::borrow::Cow<'static, str>,
     pub uncertain_write: bool,
     pub stale_page: bool,
     pub page_indicator: Option<String>,
@@ -562,7 +562,7 @@ pub struct ReadViewPageModel {
     pub balance_adjustments: Vec<BalanceAdjustmentSummary>,
     pub footer_lines: Vec<String>,
     pub visible_sections: ReadViewSectionVisibility,
-    pub empty_state: Option<String>,
+    pub empty_state: Option<std::borrow::Cow<'static, str>>,
     pub action_rows: Vec<SurfaceActionRow>,
     pub ephemeral: bool,
 }
@@ -699,7 +699,7 @@ impl DiscordLedgerPresenter {
     ) -> Result<RenderedSurface, RenderBudgetError> {
         RenderedSurface::new(
             render_sections([
-                Some(model.title.as_str()),
+                Some(model.title.as_ref()),
                 model.validation_message.as_deref(),
                 non_empty_join(&model.summary_lines).as_deref(),
                 non_empty_join(&model.detail_lines).as_deref(),
@@ -769,7 +769,7 @@ impl DiscordLedgerPresenter {
 
         RenderedSurface::new(
             render_sections([
-                Some(model.title.as_str()),
+                Some(model.title.as_ref()),
                 model.selected_summary.as_deref(),
                 model.page_indicator.as_deref(),
                 model.range_indicator.as_deref(),
@@ -825,7 +825,7 @@ impl DiscordLedgerPresenter {
 
         let body = if model.stale_page {
             render_sections([
-                Some(model.title.as_str()),
+                Some(model.title.as_ref()),
                 Some(read_view_stale_message(model.kind)),
                 model
                     .missing_thread_note
@@ -833,9 +833,9 @@ impl DiscordLedgerPresenter {
             ])
         } else if let Some(empty_state) = &model.empty_state {
             render_sections([
-                Some(model.title.as_str()),
+                Some(model.title.as_ref()),
                 advisory.as_deref(),
-                Some(empty_state.as_str()),
+                Some(empty_state.as_ref()),
                 model
                     .missing_thread_note
                     .then_some(i18n::no_ledger_thread_yet_note()),
@@ -870,7 +870,7 @@ impl DiscordLedgerPresenter {
                         }
                     };
                     render_sections([
-                        Some(model.title.as_str()),
+                        Some(model.title.as_ref()),
                         advisory.as_deref(),
                         model.page_indicator.as_deref(),
                         model.snapshot_notice.as_deref(),
@@ -902,7 +902,7 @@ impl DiscordLedgerPresenter {
                     let confirmed_section = render_ledger_confirmed_section(model);
                     let footer = render_ledger_footer(model);
                     render_sections([
-                        Some(model.title.as_str()),
+                        Some(model.title.as_ref()),
                         advisory.as_deref(),
                         model.page_indicator.as_deref(),
                         model.snapshot_notice.as_deref(),
@@ -950,7 +950,7 @@ impl DiscordLedgerPresenter {
 
         let body = if model.stale_page {
             render_sections([
-                Some(model.title.as_str()),
+                Some(model.title.as_ref()),
                 Some(i18n::stale_void_page_message()),
                 model
                     .missing_thread_note
@@ -969,7 +969,7 @@ impl DiscordLedgerPresenter {
                 .collect::<Vec<_>>();
 
             render_sections([
-                Some(model.title.as_str()),
+                Some(model.title.as_ref()),
                 model.page_indicator.as_deref(),
                 model.snapshot_notice.as_deref(),
                 non_empty_join(&model.phase_copy).as_deref(),
@@ -990,7 +990,7 @@ impl DiscordLedgerPresenter {
     ) -> Result<RenderedSurface, RenderBudgetError> {
         RenderedSurface::new(
             render_sections([
-                Some(model.title.as_str()),
+                Some(model.title.as_ref()),
                 non_empty_join(&model.body_lines).as_deref(),
             ]),
             model.action_rows.clone(),
@@ -1003,7 +1003,7 @@ impl DiscordLedgerPresenter {
     ) -> Result<RenderedSurface, RenderBudgetError> {
         RenderedSurface::new(
             render_sections([
-                Some(model.title.as_str()),
+                Some(model.title.as_ref()),
                 non_empty_join(&model.status_lines).as_deref(),
                 model.recovery_reference.as_deref(),
             ]),
@@ -1608,7 +1608,7 @@ mod tests {
             let actual = DiscordLedgerPresenter::render_read_view_page(&ReadViewPageModel {
                 kind: ReadViewKind::Review,
                 route: ReadViewRoute::ReviewParent,
-                title: "清算確認".to_owned(),
+                title: std::borrow::Cow::Borrowed("清算確認"),
                 uncertain_write: false,
                 stale_page: false,
                 page_indicator: None,
@@ -1625,7 +1625,7 @@ mod tests {
                 balance_adjustments: Vec::new(),
                 footer_lines: Vec::new(),
                 visible_sections: ReadViewSectionVisibility::default(),
-                empty_state: Some("empty".to_owned()),
+                empty_state: Some(std::borrow::Cow::Borrowed("empty")),
                 action_rows: Vec::new(),
                 ephemeral: true,
             })
@@ -2125,7 +2125,7 @@ mod tests {
         let actual = DiscordLedgerPresenter::render_read_view_page(&ReadViewPageModel {
             kind: ReadViewKind::Review,
             route: ReadViewRoute::ReviewThread,
-            title: "清算確認".to_owned(),
+            title: std::borrow::Cow::Borrowed("清算確認"),
             uncertain_write: true,
             stale_page: false,
             page_indicator: None,
@@ -2243,7 +2243,7 @@ mod tests {
         let actual = DiscordLedgerPresenter::render_read_view_page(&ReadViewPageModel {
             kind: ReadViewKind::Ledger,
             route: ReadViewRoute::LedgerCommand,
-            title: "台帳".to_owned(),
+            title: std::borrow::Cow::Borrowed("台帳"),
             uncertain_write: true,
             stale_page: false,
             page_indicator: None,
@@ -2304,7 +2304,7 @@ mod tests {
         let actual = DiscordLedgerPresenter::render_read_view_page(&ReadViewPageModel {
             kind: ReadViewKind::Ledger,
             route: ReadViewRoute::LedgerPanel,
-            title: "台帳".to_owned(),
+            title: std::borrow::Cow::Borrowed("台帳"),
             uncertain_write: false,
             stale_page: false,
             page_indicator: None,
@@ -2321,7 +2321,7 @@ mod tests {
             balance_adjustments: Vec::new(),
             footer_lines: vec!["表示範囲: これは出てはいけない".to_owned()],
             visible_sections: ReadViewSectionVisibility::default(),
-            empty_state: Some(i18n::ledger_empty_state().to_owned()),
+            empty_state: Some(std::borrow::Cow::Borrowed(i18n::ledger_empty_state())),
             action_rows: Vec::new(),
             ephemeral: true,
         })
@@ -2338,7 +2338,7 @@ mod tests {
         let actual = DiscordLedgerPresenter::render_read_view_page(&ReadViewPageModel {
             kind: ReadViewKind::Review,
             route: ReadViewRoute::ReviewParent,
-            title: "清算確認".to_owned(),
+            title: std::borrow::Cow::Borrowed("清算確認"),
             uncertain_write: false,
             stale_page: false,
             page_indicator: None,
@@ -2378,7 +2378,7 @@ mod tests {
         let stale_read = DiscordLedgerPresenter::render_read_view_page(&ReadViewPageModel {
             kind: ReadViewKind::Ledger,
             route: ReadViewRoute::LedgerPanel,
-            title: "台帳".to_owned(),
+            title: std::borrow::Cow::Borrowed("台帳"),
             uncertain_write: false,
             stale_page: true,
             page_indicator: None,
@@ -2429,7 +2429,7 @@ mod tests {
         let actual = DiscordLedgerPresenter::render_read_view_page(&ReadViewPageModel {
             kind: ReadViewKind::Ledger,
             route: ReadViewRoute::LedgerCommand,
-            title: "台帳".to_owned(),
+            title: std::borrow::Cow::Borrowed("台帳"),
             uncertain_write: false,
             stale_page: false,
             page_indicator: Some(i18n::page_indicator(1, 2).to_string()),

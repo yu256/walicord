@@ -20,7 +20,10 @@ use super::{
     },
 };
 
-pub fn balance_rows_for_state(state: &LedgerState, labels: &SurfaceMemberLabels) -> Vec<BalanceRow> {
+pub fn balance_rows_for_state(
+    state: &LedgerState,
+    labels: &SurfaceMemberLabels,
+) -> Vec<BalanceRow> {
     let mut rows = state
         .balances()
         .iter()
@@ -190,7 +193,9 @@ pub fn summary_for_view(
                 .map(|paid| paid.amount)
                 .sum::<Money>()
                 .to_string(),
-            note: event.note().and_then(|note| SafeLiteralText::from_note(note.as_str())),
+            note: event
+                .note()
+                .and_then(|note| SafeLiteralText::from_note(note.as_str())),
         }),
         LedgerEvent::NormalizedSettlementPlanRecorded(event) => {
             let Some(first) = event.transfers().first() else {
@@ -336,7 +341,7 @@ pub fn build_ledger_page_model(
     Ok(ReadViewPageModel {
         kind: ReadViewKind::Ledger,
         route: inputs.route,
-        title: i18n::panel_ledger_button_label().to_owned(),
+        title: std::borrow::Cow::Borrowed(i18n::panel_ledger_button_label()),
         uncertain_write: inputs.uncertain_write,
         balances: balance_rows_for_state(inputs.state, inputs.labels),
         participants: participant_names_for_state(inputs.state, inputs.labels),
@@ -360,9 +365,9 @@ pub fn build_ledger_empty_page_model(
     ReadViewPageModel {
         kind: ReadViewKind::Ledger,
         route,
-        title: i18n::panel_ledger_button_label().to_owned(),
+        title: std::borrow::Cow::Borrowed(i18n::panel_ledger_button_label()),
         uncertain_write,
-        empty_state: Some(i18n::ledger_empty_state().to_owned()),
+        empty_state: Some(std::borrow::Cow::Borrowed(i18n::ledger_empty_state())),
         ephemeral: true,
         ..Default::default()
     }

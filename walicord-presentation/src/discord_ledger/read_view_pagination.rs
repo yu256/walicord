@@ -220,7 +220,7 @@ mod tests {
         let pages = paginate_read_view_model(ReadViewPageModel {
             kind: ReadViewKind::Review,
             route: ReadViewRoute::ReviewThread,
-            title: "清算確認".to_owned(),
+            title: std::borrow::Cow::Borrowed("清算確認"),
             uncertain_write: false,
             stale_page: false,
             page_indicator: None,
@@ -263,7 +263,7 @@ mod tests {
         let pages = paginate_read_view_model(ReadViewPageModel {
             kind: ReadViewKind::Ledger,
             route: ReadViewRoute::LedgerCommand,
-            title: "台帳".to_owned(),
+            title: std::borrow::Cow::Borrowed("台帳"),
             uncertain_write: false,
             stale_page: false,
             page_indicator: None,
@@ -307,7 +307,7 @@ mod tests {
         let pages = paginate_read_view_model(ReadViewPageModel {
             kind: ReadViewKind::Ledger,
             route: ReadViewRoute::LedgerCommand,
-            title: "台帳".to_owned(),
+            title: std::borrow::Cow::Borrowed("台帳"),
             uncertain_write: false,
             stale_page: false,
             page_indicator: None,

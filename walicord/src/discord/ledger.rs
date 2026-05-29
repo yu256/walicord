@@ -8762,7 +8762,7 @@ fn render_review_surface_pages(
         walicord_presentation::discord_ledger::paginate_read_view_model(ReadViewPageModel {
             kind: ReadViewKind::Review,
             route,
-            title: i18n::panel_review_button_label().to_owned(),
+            title: std::borrow::Cow::Borrowed(i18n::panel_review_button_label()),
             uncertain_write: render_state.uncertain_write,
             stale_page: render_state.stale_page,
             page_indicator: render_state.page_indicator.clone(),
@@ -8793,12 +8793,12 @@ fn render_review_empty_state(
 ) -> Result<(String, Vec<CreateActionRow>), String> {
     let (empty_state, recovery_cta, recovery_url) = match route {
         ReadViewRoute::ReviewParent => (
-            i18n::review_parent_empty_state().to_owned(),
+            std::borrow::Cow::Borrowed(i18n::review_parent_empty_state()),
             RecoveryCta::None,
             None,
         ),
         _ => (
-            i18n::review_thread_empty_state().to_owned(),
+            std::borrow::Cow::Borrowed(i18n::review_thread_empty_state()),
             RecoveryCta::ParentLink,
             Some(recovery_url),
         ),
@@ -8806,7 +8806,7 @@ fn render_review_empty_state(
     DiscordLedgerPresenter::render_read_view_page(&ReadViewPageModel {
         kind: ReadViewKind::Review,
         route,
-        title: i18n::panel_review_button_label().to_owned(),
+        title: std::borrow::Cow::Borrowed(i18n::panel_review_button_label()),
         uncertain_write: render_state.uncertain_write,
         stale_page: render_state.stale_page,
         page_indicator: render_state.page_indicator.clone(),
@@ -8876,7 +8876,7 @@ fn render_ledger_surface_pages(
         walicord_presentation::discord_ledger::paginate_read_view_model(ReadViewPageModel {
             kind: ReadViewKind::Ledger,
             route,
-            title: i18n::panel_ledger_button_label().to_owned(),
+            title: std::borrow::Cow::Borrowed(i18n::panel_ledger_button_label()),
             uncertain_write: render_state.uncertain_write,
             stale_page: render_state.stale_page,
             page_indicator: render_state.page_indicator.clone(),
@@ -8907,7 +8907,7 @@ fn render_ledger_empty_state(
     DiscordLedgerPresenter::render_read_view_page(&ReadViewPageModel {
         kind: ReadViewKind::Ledger,
         route,
-        title: i18n::panel_ledger_button_label().to_owned(),
+        title: std::borrow::Cow::Borrowed(i18n::panel_ledger_button_label()),
         uncertain_write: render_state.uncertain_write,
         stale_page: render_state.stale_page,
         page_indicator: render_state.page_indicator.clone(),
@@ -8924,7 +8924,7 @@ fn render_ledger_empty_state(
         balance_adjustments: Vec::new(),
         footer_lines: Vec::new(),
         visible_sections: ReadViewSectionVisibility::default(),
-        empty_state: Some(i18n::ledger_empty_state().to_owned()),
+        empty_state: Some(std::borrow::Cow::Borrowed(i18n::ledger_empty_state())),
         action_rows: Vec::new(),
         ephemeral: true,
     })
@@ -12456,7 +12456,7 @@ mod tests {
             walicord_presentation::discord_ledger::paginate_read_view_model(ReadViewPageModel {
                 kind: ReadViewKind::Review,
                 route: ReadViewRoute::ReviewThread,
-                title: i18n::panel_review_button_label().to_owned(),
+                title: std::borrow::Cow::Borrowed(i18n::panel_review_button_label()),
                 uncertain_write: false,
                 stale_page: false,
                 page_indicator: None,
@@ -12525,7 +12525,7 @@ mod tests {
             walicord_presentation::discord_ledger::paginate_read_view_model(ReadViewPageModel {
                 kind: ReadViewKind::Ledger,
                 route: ReadViewRoute::LedgerCommand,
-                title: i18n::panel_ledger_button_label().to_owned(),
+                title: std::borrow::Cow::Borrowed(i18n::panel_ledger_button_label()),
                 uncertain_write: false,
                 stale_page: false,
                 page_indicator: None,
@@ -12573,7 +12573,7 @@ mod tests {
             walicord_presentation::discord_ledger::paginate_read_view_model(ReadViewPageModel {
                 kind: ReadViewKind::Ledger,
                 route: ReadViewRoute::LedgerCommand,
-                title: i18n::panel_ledger_button_label().to_owned(),
+                title: std::borrow::Cow::Borrowed(i18n::panel_ledger_button_label()),
                 uncertain_write: false,
                 stale_page: false,
                 page_indicator: None,
