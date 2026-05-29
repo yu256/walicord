@@ -27,11 +27,11 @@ impl InstanceLock {
 
 #[derive(Debug, thiserror::Error)]
 pub enum InstanceLockError {
-    #[error("failed to create lock directory: {0}")]
+    #[error("ロック用ディレクトリを作成できませんでした: {0}")]
     EnsureLockDir(#[source] io::Error),
-    #[error("failed to open lock file: {0}")]
+    #[error("ロックファイルを開けませんでした: {0}")]
     OpenLockFile(#[source] io::Error),
-    #[error("failed to acquire exclusive startup instance lock: {0}")]
+    #[error("起動時のインスタンスロックを取得できませんでした: {0}")]
     AcquireExclusive(#[source] io::Error),
 }
 
