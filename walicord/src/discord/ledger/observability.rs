@@ -88,8 +88,18 @@ impl DiscordLedgerObservability for TracingLedgerObservability {
     }
 }
 
+/// Test-only sink that captures both trait surfaces into one ordered log. Holding a
+/// single `Vec` (rather than two per-trait `Vec`s) preserves the relative ordering
+/// between application-side and Discord-side emissions, which integration tests
+/// covering the split rely on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CapturedLedgerObservabilityEvent {
+    Application(LedgerObservabilityEvent),
+    Discord(DiscordLedgerObservabilityEvent),
+}
+
 pub struct CapturingLedgerObservability {
-    events: Mutex<Vec<LedgerObservabilityEvent>>,
+    events: Mutex<Vec<CapturedLedgerObservabilityEvent>>,
 }
 
 impl Default for CapturingLedgerObservability {
@@ -105,7 +115,7 @@ impl CapturingLedgerObservability {
         }
     }
 
-    pub fn snapshot(&self) -> Vec<LedgerObservabilityEvent> {
+    pub fn snapshot(&self) -> Vec<CapturedLedgerObservabilityEvent> {
         self.events
             .lock()
             .expect("CapturingLedgerObservability mutex poisoned")
@@ -118,7 +128,16 @@ impl LedgerObservability for CapturingLedgerObservability {
         self.events
             .lock()
             .expect("CapturingLedgerObservability mutex poisoned")
-            .push(event);
+            .push(CapturedLedgerObservabilityEvent::Application(event));
+    }
+}
+
+impl DiscordLedgerObservability for CapturingLedgerObservability {
+    fn emit_discord(&self, event: DiscordLedgerObservabilityEvent) {
+        self.events
+            .lock()
+            .expect("CapturingLedgerObservability mutex poisoned")
+            .push(CapturedLedgerObservabilityEvent::Discord(event));
     }
 }
 
@@ -133,30 +152,44 @@ mod tests {
     }
 
     #[test]
-    fn capturing_sink_records_each_emitted_event_in_order() {
+    fn capturing_sink_records_application_and_discord_emissions_in_relative_order() {
         let sink = CapturingLedgerObservability::new();
         sink.emit(LedgerObservabilityEvent::GrowthWarning {
             ledger_id: ledger(),
             entry_count: LEDGER_GROWTH_WARNING_THRESHOLD,
+        });
+        sink.emit_discord(DiscordLedgerObservabilityEvent::RetryBudgetExhausted {
+            ledger_id: Some(ledger()),
+            route: CanonicalLoadRoute::Read,
+            attempts: 3,
         });
         sink.emit(LedgerObservabilityEvent::LoadTimeoutWarning {
             ledger_id: ledger(),
             elapsed: Duration::from_secs(20),
         });
 
-        let events = sink.snapshot();
-
         assert_eq!(
-            events,
+            sink.snapshot(),
             vec![
-                LedgerObservabilityEvent::GrowthWarning {
-                    ledger_id: ledger(),
-                    entry_count: LEDGER_GROWTH_WARNING_THRESHOLD,
-                },
-                LedgerObservabilityEvent::LoadTimeoutWarning {
-                    ledger_id: ledger(),
-                    elapsed: Duration::from_secs(20),
-                },
+                CapturedLedgerObservabilityEvent::Application(
+                    LedgerObservabilityEvent::GrowthWarning {
+                        ledger_id: ledger(),
+                        entry_count: LEDGER_GROWTH_WARNING_THRESHOLD,
+                    }
+                ),
+                CapturedLedgerObservabilityEvent::Discord(
+                    DiscordLedgerObservabilityEvent::RetryBudgetExhausted {
+                        ledger_id: Some(ledger()),
+                        route: CanonicalLoadRoute::Read,
+                        attempts: 3,
+                    }
+                ),
+                CapturedLedgerObservabilityEvent::Application(
+                    LedgerObservabilityEvent::LoadTimeoutWarning {
+                        ledger_id: ledger(),
+                        elapsed: Duration::from_secs(20),
+                    }
+                ),
             ]
         );
     }
