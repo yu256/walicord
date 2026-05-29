@@ -12,7 +12,7 @@ use walicord_domain::model::MemberId;
 use crate::channel::ChannelManager;
 
 use super::{
-    expense_flow::bootstrap_expense_session,
+    expense_flow::{NavigationError, bootstrap_expense_session, navigate_back},
     expense_modal::{ExpenseModalValidationError, validate_expense_modal_submission},
     expense_modal_open::{
         ExpenseModalBuildError, ExpenseModalCustomIdMatch, ExpenseModalPrefill,
@@ -144,13 +144,94 @@ impl LedgerRouter {
         if component.data.custom_id == LEDGER_PANEL_EXPENSE_ID {
             return self.dispatch_panel_expense_launcher(ctx, component).await;
         }
-        if let Some(_nonce) = parse_expense_session_button_nonce(
+        if parse_expense_session_button_nonce(
             &component.data.custom_id,
             EXPENSE_CANCEL_CUSTOM_ID_PREFIX,
-        ) {
+        )
+        .is_some()
+        {
             return self.dispatch_expense_cancel(ctx, component).await;
         }
+        if parse_expense_session_button_nonce(
+            &component.data.custom_id,
+            EXPENSE_BACK_CUSTOM_ID_PREFIX,
+        )
+        .is_some()
+        {
+            return self.dispatch_expense_back(ctx, component).await;
+        }
         Ok(InteractionDispatch::Ignored)
+    }
+
+    async fn dispatch_expense_back(
+        &self,
+        ctx: &Context,
+        component: &ComponentInteraction,
+    ) -> Result<InteractionDispatch, LedgerRouteError> {
+        let (guild_id, channel_id) = guard_ledger_interaction(
+            component.guild_id,
+            component.channel_id,
+            self.deps.channels.as_ref(),
+        )
+        .map_err(map_guard_error)?;
+        let key = ExpenseSessionKey::new(guild_id, channel_id, MemberId(component.user.id.get()));
+        let Some(current) = self.deps.expense_sessions.clear(key) else {
+            return self.respond_expense_session_missing(ctx, component).await;
+        };
+        match navigate_back(current, self.deps.clock.as_ref()) {
+            Ok(updated) => {
+                self.deps.expense_sessions.replace(updated);
+                // The actual rendered selection-step body is wired in a later slice;
+                // for now we acknowledge so Discord does not time out and the legacy
+                // handler does not also try to handle this button.
+                self.acknowledge_navigation(ctx, component).await
+            }
+            Err(NavigationError::AlreadyAtFirstStep) => {
+                // From the first phase Back == Cancel (criterion 201).
+                self.dispatch_expense_cancel(ctx, component).await
+            }
+            Err(other) => Err(map_navigation_error(other)),
+        }
+    }
+
+    async fn respond_expense_session_missing(
+        &self,
+        ctx: &Context,
+        component: &ComponentInteraction,
+    ) -> Result<InteractionDispatch, LedgerRouteError> {
+        let response = CreateInteractionResponse::Message(
+            CreateInteractionResponseMessage::new()
+                .ephemeral(true)
+                .allowed_mentions(suppressed_allowed_mentions())
+                .content(walicord_i18n::expense_session_expired_message()),
+        );
+        component
+            .create_response(&ctx.http, response)
+            .await
+            .map_err(|error| {
+                LedgerRouteError::Internal(format!("expense session missing reply: {error}"))
+            })?;
+        Ok(InteractionDispatch::Handled)
+    }
+
+    async fn acknowledge_navigation(
+        &self,
+        ctx: &Context,
+        component: &ComponentInteraction,
+    ) -> Result<InteractionDispatch, LedgerRouteError> {
+        let response = CreateInteractionResponse::UpdateMessage(
+            CreateInteractionResponseMessage::new()
+                .ephemeral(true)
+                .allowed_mentions(suppressed_allowed_mentions())
+                .content(walicord_i18n::expense_step_title_payer()),
+        );
+        component
+            .create_response(&ctx.http, response)
+            .await
+            .map_err(|error| {
+                LedgerRouteError::Internal(format!("expense navigation ack: {error}"))
+            })?;
+        Ok(InteractionDispatch::Handled)
     }
 
     async fn dispatch_expense_cancel(
@@ -359,6 +440,11 @@ fn map_construction_error(error: ExpenseSessionConstructionError) -> LedgerRoute
 }
 
 pub(crate) const EXPENSE_CANCEL_CUSTOM_ID_PREFIX: &str = "ledger:expense:cancel:";
+pub(crate) const EXPENSE_BACK_CUSTOM_ID_PREFIX: &str = "ledger:expense:back:";
+
+fn map_navigation_error(error: NavigationError) -> LedgerRouteError {
+    LedgerRouteError::Internal(format!("expense navigation failed: {error:?}"))
+}
 
 /// Parse a session-scoped button custom_id of the form `{prefix}{nonce}` and return
 /// the carried [`InteractionNonce`] when the prefix matches. Returns `None` on prefix
