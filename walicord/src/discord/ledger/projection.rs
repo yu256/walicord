@@ -1,9 +1,5 @@
-use super::store::{StoreLoadError, VerifiedLedgerThreadLoad};
-use std::time::SystemTime;
-use walicord_application::ledger::{
-    LedgerEntry, LedgerEntryId, ProjectedEntryInfo, ProjectedEntryKind,
-    canonical_attachment::AttachmentCodecError,
-};
+use super::store::StoreLoadError;
+use walicord_application::ledger::{LedgerEntryId, canonical_attachment::AttachmentCodecError};
 use walicord_i18n as i18n;
 
 pub const UNKNOWN_LEDGER_FORMAT_EVENT: &str = "ledger_unknown_variant";
@@ -167,91 +163,6 @@ impl CanonicalLoadRoute {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum ProjectionConsistencyError {
-    #[error("replayed entry {entry_id:?} is missing projected metadata")]
-    MissingProjectedEntry { entry_id: LedgerEntryId },
-    #[error("replayed entry {entry_id:?} is missing transport metadata")]
-    MissingTransport { entry_id: LedgerEntryId },
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct VerifiedLedgerEntryView {
-    entry: LedgerEntry,
-    projected: ProjectedEntryInfo,
-    message_link: String,
-    recorded_at: SystemTime,
-}
-
-impl VerifiedLedgerEntryView {
-    pub fn entry(&self) -> &LedgerEntry {
-        &self.entry
-    }
-
-    pub fn projected(&self) -> &ProjectedEntryInfo {
-        &self.projected
-    }
-
-    pub fn message_link(&self) -> &str {
-        &self.message_link
-    }
-
-    pub fn recorded_at(&self) -> SystemTime {
-        self.recorded_at
-    }
-}
-
-pub fn project_verified_entries(
-    load: &VerifiedLedgerThreadLoad,
-) -> Result<Vec<VerifiedLedgerEntryView>, ProjectionConsistencyError> {
-    let projected = load.snapshot().projected();
-    let mut out = Vec::with_capacity(load.verified().len());
-
-    for envelope in load.verified() {
-        let entry = envelope.payload().entry.clone();
-        let entry_id = entry.id;
-        let projected_entry = projected
-            .entry(entry_id)
-            .cloned()
-            .ok_or(ProjectionConsistencyError::MissingProjectedEntry { entry_id })?;
-        let transport = load
-            .transport_index()
-            .get(entry_id)
-            .ok_or(ProjectionConsistencyError::MissingTransport { entry_id })?;
-        out.push(VerifiedLedgerEntryView {
-            recorded_at: entry
-                .metadata
-                .recorded_at
-                .unwrap_or_else(|| transport.recorded_at()),
-            entry,
-            projected: projected_entry,
-            message_link: transport.message_link().to_owned(),
-        });
-    }
-
-    Ok(out)
-}
-
-pub fn project_recent_voidable_entries(
-    load: &VerifiedLedgerThreadLoad,
-    limit: usize,
-) -> Result<Vec<VerifiedLedgerEntryView>, ProjectionConsistencyError> {
-    let all = project_verified_entries(load)?;
-    let mut candidates = all
-        .into_iter()
-        .filter(|entry| {
-            matches!(
-                entry.projected().kind,
-                ProjectedEntryKind::Expense | ProjectedEntryKind::SettlementTransfer
-            ) && !entry.projected().voided
-                && !entry.projected().sealed
-        })
-        .collect::<Vec<_>>();
-    candidates.reverse();
-    candidates.truncate(limit);
-    Ok(candidates)
-}
-
 fn is_schema_or_event_version_mismatch(error: &AttachmentCodecError) -> bool {
     matches!(
         error,
@@ -263,11 +174,12 @@ fn is_schema_or_event_version_mismatch(error: &AttachmentCodecError) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::discord::ledger::store::verified_thread_load_for_test;
+    use crate::discord::ledger::store::{VerifiedLedgerThreadLoad, verified_thread_load_for_test};
     use serenity::all::MessageId;
     use walicord_application::ledger::{
         AllocationSnapshot, EntryVoided, ExpenseNote, ExpenseRecorded, LedgerEntry, LedgerEntryId,
         LedgerHistorySealed, MemberAmount, NormalizedSettlementPlanRecorded,
+        projection::{project_recent_voidable_entries, project_verified_entries},
     };
     use walicord_domain::{Money, Transfer, model::MemberId};
 

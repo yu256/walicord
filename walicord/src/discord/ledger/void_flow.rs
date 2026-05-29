@@ -1,9 +1,4 @@
-use super::{
-    projection::{
-        ProjectionConsistencyError, VerifiedLedgerEntryView, project_recent_voidable_entries,
-    },
-    store::VerifiedLedgerThreadLoad,
-};
+use super::store::VerifiedLedgerThreadLoad;
 use walicord_application::{
     Clock, InteractionNonce, NonceProvider,
     ledger::{
@@ -15,6 +10,9 @@ use walicord_application::{
             VoidSessionStage,
         },
         make_unverified_envelope_sha256_v1,
+        projection::{
+            ProjectionConsistencyError, VerifiedLedgerEntryView, project_recent_voidable_entries,
+        },
     },
 };
 use walicord_domain::model::MemberId;

@@ -10,6 +10,7 @@ mod hash_chain;
 mod load;
 pub mod participant_resolution;
 pub mod preview_store;
+pub mod projection;
 mod seal;
 pub mod settle_flow;
 pub mod write_coordinator;

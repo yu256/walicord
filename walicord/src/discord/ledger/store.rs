@@ -15,11 +15,15 @@ use std::{
 };
 use walicord_application::ledger::{
     LedgerEntry, LedgerEntryId, LedgerEvent, LedgerId, LedgerLoadError, LedgerReplayError,
-    UnverifiedLedgerStoreEnvelope, VerifiedLedgerSnapshot, VerifiedLedgerStoreEnvelope,
+    UnverifiedLedgerStoreEnvelope, VerifiedLedgerStoreEnvelope,
     canonical_attachment::{AttachmentCodecError, CanonicalAttachmentCodec},
+    projection::{VerifiedEntryTransport, VerifiedEntryTransportIndex},
     replay_verified_snapshot, verify_envelope_sha256_v1,
     verify_envelopes_in_append_order_sha256_v1,
 };
+
+pub type VerifiedLedgerThreadLoad =
+    walicord_application::ledger::projection::VerifiedLedgerThreadLoad<MessageId>;
 
 pub const MAX_AUTHORITATIVE_ATTACHMENT_BYTES: u32 = 64 * 1024;
 pub const CANONICAL_LOAD_TIMEOUT: Duration = Duration::from_secs(30);
@@ -137,112 +141,52 @@ trait LineageRecord {
     fn webhook_id(&self) -> Option<u64>;
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VerifiedEntryTransport {
-    message_id: MessageId,
-    message_link: String,
-    recorded_at: SystemTime,
-}
+fn build_transport_index(
+    canonical_thread_id: ChannelId,
+    verified: &[VerifiedLedgerStoreEnvelope<MessageId>],
+    records: &[CanonicalMessageRecord],
+) -> Result<VerifiedEntryTransportIndex, StoreLoadError> {
+    let records_by_message_id: BTreeMap<MessageId, &CanonicalMessageRecord> = records
+        .iter()
+        .map(|record| (record.message_id, record))
+        .collect();
+    let mut by_entry_id = BTreeMap::new();
 
-impl VerifiedEntryTransport {
-    pub fn message_id(&self) -> MessageId {
-        self.message_id
-    }
-
-    pub fn message_link(&self) -> &str {
-        &self.message_link
-    }
-
-    pub fn recorded_at(&self) -> SystemTime {
-        self.recorded_at
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct VerifiedEntryTransportIndex {
-    by_entry_id: BTreeMap<LedgerEntryId, VerifiedEntryTransport>,
-}
-
-impl VerifiedEntryTransportIndex {
-    pub fn get(&self, entry_id: LedgerEntryId) -> Option<&VerifiedEntryTransport> {
-        self.by_entry_id.get(&entry_id)
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = (LedgerEntryId, &VerifiedEntryTransport)> {
-        self.by_entry_id
-            .iter()
-            .map(|(entry_id, transport)| (*entry_id, transport))
-    }
-
-    fn from_verified_records(
-        canonical_thread_id: ChannelId,
-        verified: &[VerifiedLedgerStoreEnvelope<MessageId>],
-        records: &[CanonicalMessageRecord],
-    ) -> Result<Self, StoreLoadError> {
-        let records_by_message_id: BTreeMap<MessageId, &CanonicalMessageRecord> = records
-            .iter()
-            .map(|record| (record.message_id, record))
-            .collect();
-        let mut by_entry_id = BTreeMap::new();
-
-        for envelope in verified {
-            let message_id = *envelope.external_id();
-            let entry_id = envelope.payload().entry.id;
-            let record =
-                records_by_message_id
-                    .get(&message_id)
-                    .ok_or(StoreLoadError::MetadataCoherence(
-                        MetadataCoherenceFailure::MissingTransportMetadata {
-                            entry_id,
-                            message_id,
-                        },
-                    ))?;
-            let guild_id = record.guild_id.ok_or(StoreLoadError::MetadataCoherence(
-                MetadataCoherenceFailure::MissingGuildContext { message_id },
-            ))?;
-            if record.channel_id != canonical_thread_id {
-                return Err(StoreLoadError::MetadataCoherence(
-                    MetadataCoherenceFailure::MismatchedChannel {
+    for envelope in verified {
+        let message_id = *envelope.external_id();
+        let entry_id = envelope.payload().entry.id;
+        let record =
+            records_by_message_id
+                .get(&message_id)
+                .ok_or(StoreLoadError::MetadataCoherence(
+                    MetadataCoherenceFailure::MissingTransportMetadata {
+                        entry_id,
                         message_id,
-                        expected: canonical_thread_id,
-                        actual: record.channel_id,
                     },
-                ));
-            }
-
-            by_entry_id.insert(
-                entry_id,
-                VerifiedEntryTransport {
+                ))?;
+        let guild_id = record.guild_id.ok_or(StoreLoadError::MetadataCoherence(
+            MetadataCoherenceFailure::MissingGuildContext { message_id },
+        ))?;
+        if record.channel_id != canonical_thread_id {
+            return Err(StoreLoadError::MetadataCoherence(
+                MetadataCoherenceFailure::MismatchedChannel {
                     message_id,
-                    message_link: canonical_message_link(guild_id, canonical_thread_id, message_id),
-                    recorded_at: record.recorded_at,
+                    expected: canonical_thread_id,
+                    actual: record.channel_id,
                 },
-            );
+            ));
         }
 
-        Ok(Self { by_entry_id })
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct VerifiedLedgerThreadLoad {
-    snapshot: VerifiedLedgerSnapshot,
-    transport_index: VerifiedEntryTransportIndex,
-    verified: Vec<VerifiedLedgerStoreEnvelope<MessageId>>,
-}
-
-impl VerifiedLedgerThreadLoad {
-    pub fn snapshot(&self) -> &VerifiedLedgerSnapshot {
-        &self.snapshot
+        by_entry_id.insert(
+            entry_id,
+            VerifiedEntryTransport::new(
+                canonical_message_link(guild_id, canonical_thread_id, message_id),
+                record.recorded_at,
+            ),
+        );
     }
 
-    pub fn transport_index(&self) -> &VerifiedEntryTransportIndex {
-        &self.transport_index
-    }
-
-    pub fn verified(&self) -> &[VerifiedLedgerStoreEnvelope<MessageId>] {
-        &self.verified
-    }
+    Ok(VerifiedEntryTransportIndex::from_entries(by_entry_id))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -744,11 +688,7 @@ impl DiscordCanonicalLedgerStore {
                 "canonical ledger thread exceeded growth warning threshold"
             );
         }
-        let transport_index = VerifiedEntryTransportIndex::from_verified_records(
-            canonical_thread_id,
-            &verified,
-            &records,
-        )?;
+        let transport_index = build_transport_index(canonical_thread_id, &verified, &records)?;
         let records_by_message_id: BTreeMap<MessageId, &CanonicalMessageRecord> = records
             .iter()
             .map(|record| (record.message_id, record))
@@ -768,11 +708,11 @@ impl DiscordCanonicalLedgerStore {
             display_guard(envelope, record)?;
         }
 
-        Ok(VerifiedLedgerThreadLoad {
+        Ok(VerifiedLedgerThreadLoad::new(
             snapshot,
             transport_index,
             verified,
-        })
+        ))
     }
 }
 

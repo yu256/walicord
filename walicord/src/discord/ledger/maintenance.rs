@@ -1,4 +1,6 @@
-use walicord_application::ledger::{LedgerEntryId, LedgerId};
+use walicord_application::ledger::{
+    LedgerEntryId, LedgerId, projection::project_recent_voidable_entries,
+};
 use walicord_domain::model::MemberId;
 
 use super::{store::VerifiedLedgerThreadLoad, void_flow::VOID_CANDIDATE_WINDOW};
@@ -105,9 +107,8 @@ pub fn validate_older_than_twenty_void(
         return Err(MaintenanceValidationError::TargetSealed { target_entry_id });
     }
 
-    let recent_voidable =
-        super::projection::project_recent_voidable_entries(load, VOID_CANDIDATE_WINDOW)
-            .map_err(|_| MaintenanceValidationError::TargetNotInLedger { target_entry_id })?;
+    let recent_voidable = project_recent_voidable_entries(load, VOID_CANDIDATE_WINDOW)
+        .map_err(|_| MaintenanceValidationError::TargetNotInLedger { target_entry_id })?;
     let target_in_window = recent_voidable
         .iter()
         .any(|view| view.entry().id == target_entry_id);
