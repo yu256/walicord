@@ -114,7 +114,10 @@ impl ExpenseParticipantSourceBadge {
 pub struct ExpenseConfirmationParticipantRow {
     pub display_name: SafeLiteralText,
     pub share_amount: Option<String>,
-    pub weight: u32,
+    /// Per-member weight. Matches the domain `Weight(u64)` so the presentation row
+    /// never has to lossily cast and presentation never silently saturates an
+    /// out-of-range weight from the domain.
+    pub weight: u64,
     pub badges: Vec<ExpenseParticipantSourceBadge>,
     pub defaulted_weight: bool,
 }

@@ -5293,8 +5293,7 @@ impl DiscordLedgerPoc {
                 share_amount: share_amounts
                     .get(&selection.member_id)
                     .map(ToString::to_string),
-                weight: u32::try_from(selection.weight.0)
-                    .expect("expense weight should fit presentation row"),
+                weight: selection.weight.0,
                 badges: confirmation_badges(&draft, roster, selection.member_id),
                 defaulted_weight: defaulted_members.contains(&selection.member_id),
             };

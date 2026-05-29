@@ -535,6 +535,18 @@ fn allocation_snapshot_for(
         .map_err(|_| ExpenseAuthoringError::InvalidWeightConfiguration)
 }
 
+/// Compute the canonical per-member owed amounts for a given expense `amount` and
+/// resolved `participants` (`MemberWeight` pairs). This is the same distribution the
+/// record path uses inside `RecordableExpenseAuthoring::new`, exposed publicly so the
+/// confirmation / preview UIs can render the exact shares the actor will see on the
+/// ledger — calling the same function eliminates divergence by construction.
+pub fn compute_expense_owed_amounts(
+    participants: &[MemberWeight],
+    amount: Money,
+) -> Result<Vec<MemberAmount>, ExpenseAuthoringError> {
+    distribute_owed_amounts(participants, amount)
+}
+
 fn distribute_owed_amounts(
     participants: &[MemberWeight],
     amount: Money,

@@ -12,12 +12,16 @@ use std::{
     collections::{BTreeSet, HashMap},
     sync::Arc,
 };
-use walicord_application::{Clock, NonceProvider, SettlementPlanner};
-use walicord_domain::model::MemberId;
+use walicord_application::{
+    Clock, NonceProvider, SettlementPlanner,
+    ledger::{ExpenseAuthoringError, MemberWeight, compute_expense_owed_amounts},
+};
+use walicord_domain::{Money, model::MemberId};
 use walicord_i18n as i18n;
 use walicord_presentation::discord_ledger::{
-    DiscordLedgerPresenter, ExpenseDraftSummary, PanelButtonStates, PanelSurfaceModel,
-    RenderBudgetError, SurfaceMemberLabels,
+    DiscordLedgerPresenter, ExpenseConfirmationParticipantRow, ExpenseDraftSummary,
+    ExpenseParticipantSourceBadge, PanelButtonStates, PanelSurfaceModel, RenderBudgetError,
+    SurfaceMemberLabels,
 };
 
 use crate::channel::ChannelManager;
@@ -144,6 +148,8 @@ pub enum InternalLedgerRouteError {
     ConfirmationBuild(#[from] ConfirmationBuildError),
     #[error("roster fetch: {0}")]
     RosterFetch(#[from] RouterRosterFetchError),
+    #[error("expense share computation: {0}")]
+    ExpenseAuthoring(#[from] ExpenseAuthoringError),
     #[error("expense modal submission missing required fields")]
     ModalSubmissionMissingFields,
     #[error("expense {operation} navigation landed on non-selection stage: {observed_stage:?}")]
@@ -200,6 +206,12 @@ impl From<ConfirmationBuildError> for LedgerRouteError {
 
 impl From<RouterRosterFetchError> for LedgerRouteError {
     fn from(error: RouterRosterFetchError) -> Self {
+        Self::Internal(error.into())
+    }
+}
+
+impl From<ExpenseAuthoringError> for LedgerRouteError {
+    fn from(error: ExpenseAuthoringError) -> Self {
         Self::Internal(error.into())
     }
 }
@@ -500,7 +512,7 @@ impl LedgerRouter {
             &outcome.snapshot.participants,
             &outcome.defaulted_members,
             &roster_snapshot.display_names,
-        );
+        )?;
         let components = confirmation_action_rows(nonce);
 
         let response = CreateInteractionResponse::UpdateMessage(
@@ -1010,23 +1022,23 @@ fn format_money_for_modal(money: walicord_domain::Money) -> String {
 /// Layout:
 /// 1. Step title (4/4)
 /// 2. Draft summary (amount / date / note) via `ExpenseDraftSummary`
-/// 3. One line per resolved participant with display name + weight; rows whose final
-///    weight defaulted to 1 get the criterion-216 `既定値 1` cue
+/// 3. One row per resolved participant with display_name + per-member share + weight +
+///    criterion-216 `既定値 1` cue on defaulted weights
 /// 4. Confirmation source disclosure (criterion 111: roles / MEMBERS re-evaluated at
 ///    record time)
 ///
-/// Per-member share amounts are intentionally not rendered here: the canonical share
-/// breakdown must match the settlement-rounding output that runs at record time
-/// (`compose_expense_entry`). Showing a confirmation-time approximation would diverge
-/// from the on-ledger amounts under integer-rounding edge cases. The shared breakdown
-/// will land in a follow-up commit that wires the record path through the same
-/// `ResolvedExpenseAuthoringInput` used at append time.
+/// Share amounts come from `walicord_application::ledger::compute_expense_owed_amounts`
+/// — the same distribution the record path uses inside `RecordableExpenseAuthoring::
+/// new`. Calling the same function eliminates divergence between the confirmation
+/// preview and the on-ledger amounts by construction; any authoring failure (zero total
+/// weight, oversize note, etc.) propagates as a typed `ExpenseAuthoringError` rather
+/// than being silently absorbed into a misleading preview.
 fn render_confirmation_body(
     basic_info: &super::sessions::ExpenseBasicInfo,
     participants: &[super::sessions::ExpenseParticipantSelection],
     defaulted_members: &[MemberId],
     display_names: &HashMap<MemberId, smol_str::SmolStr>,
-) -> String {
+) -> Result<String, ExpenseAuthoringError> {
     let defaulted: BTreeSet<MemberId> = defaulted_members.iter().copied().collect();
     let labels = SurfaceMemberLabels::from_member_names(participants.iter().map(|row| {
         (
@@ -1049,6 +1061,19 @@ fn render_confirmation_body(
         note: summary_note,
     };
 
+    let canonical_weights: Vec<MemberWeight> = participants
+        .iter()
+        .map(|row| MemberWeight {
+            member_id: row.member_id,
+            weight: row.weight,
+        })
+        .collect();
+    let owed = compute_expense_owed_amounts(&canonical_weights, basic_info.amount)?;
+    let share_by_member: HashMap<MemberId, Money> = owed
+        .into_iter()
+        .map(|amount| (amount.member_id, amount.amount))
+        .collect();
+
     let mut lines: Vec<String> = Vec::new();
     lines.push(i18n::expense_step_title_confirm().to_owned());
     lines.extend(summary.render_lines());
@@ -1056,20 +1081,35 @@ fn render_confirmation_body(
     for row in participants {
         let display_name = labels
             .member(row.member_id)
-            .map(|label| label.visible().as_str().to_owned())
-            .unwrap_or_else(|| i18n::unknown_user_label(row.member_id.0).to_string());
-        let defaulted_cue = if defaulted.contains(&row.member_id) {
-            format!(" [{}]", i18n::weight_default_badge())
-        } else {
-            String::new()
+            .map(|label| label.visible().clone())
+            .unwrap_or_else(|| {
+                walicord_presentation::discord_ledger::SafeLiteralText::from_roster_label(
+                    &i18n::unknown_user_label(row.member_id.0).to_string(),
+                )
+                .expect("unknown_user_label is a fixed fallback that always sanitises")
+            });
+        // `share_by_member` only carries entries with positive share (the canonical
+        // distribution drops zero-units). Both weight==0 members and weight>0 members
+        // that rounded to 0 share fall through `share_amount = None`, which
+        // `ExpenseConfirmationParticipantRow` renders as the `(取り分なし)` /
+        // `(端数で0)` row template — no fabricated share value.
+        let share_amount = share_by_member
+            .get(&row.member_id)
+            .map(|amount| format_money_for_modal(*amount));
+        let confirmation_row = ExpenseConfirmationParticipantRow {
+            display_name,
+            share_amount,
+            weight: row.weight.0,
+            badges: vec![ExpenseParticipantSourceBadge::DirectSelection],
+            defaulted_weight: defaulted.contains(&row.member_id),
         };
-        lines.push(format!("- {display_name} ×{}{defaulted_cue}", row.weight.0));
+        lines.push(confirmation_row.render());
     }
     lines.push(
         walicord_presentation::discord_ledger::confirmation_source_disclosure_line().to_owned(),
     );
 
-    lines.join("\n")
+    Ok(lines.join("\n"))
 }
 
 fn confirmation_action_rows(nonce: walicord_application::InteractionNonce) -> Vec<CreateActionRow> {

@@ -32,7 +32,8 @@ pub use discord_authoring::{
     DiscordLedgerEntryError, DiscordLedgerSourceDescriptor, ExpenseAuthoringError,
     PreviewedSettlementOutcome, RecordableExpenseAuthoring, ResolvedExpenseAuthoringInput,
     SettlementPreviewError, SettlementRecordError, build_discord_expense_entry,
-    build_discord_void_entry, preview_settlement_from_snapshot, record_previewed_plan_matching,
+    build_discord_void_entry, compute_expense_owed_amounts, preview_settlement_from_snapshot,
+    record_previewed_plan_matching,
 };
 pub use entry::{
     AllocationSnapshot, AllocationSnapshotError, AppendOrderedLedgerEntries,
