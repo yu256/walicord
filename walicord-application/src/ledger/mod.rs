@@ -13,6 +13,7 @@ pub mod observability;
 pub mod participant_resolution;
 pub mod preview_store;
 pub mod projection;
+pub mod read_singleflight;
 mod seal;
 pub mod settle_flow;
 pub mod void_flow;

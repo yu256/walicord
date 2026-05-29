@@ -3432,8 +3432,10 @@ name = "walicord-infrastructure"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "fs2",
  "proptest",
  "rstest",
+ "thiserror 2.0.17",
  "walicord-application",
  "walicord-domain",
  "walicord-parser",

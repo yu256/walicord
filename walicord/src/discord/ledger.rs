@@ -98,9 +98,6 @@ mod permissions;
 #[path = "ledger/projection.rs"]
 mod projection;
 #[allow(dead_code)]
-#[path = "ledger/read_singleflight.rs"]
-mod read_singleflight;
-#[allow(dead_code)]
 #[path = "ledger/response_writer.rs"]
 mod response_writer;
 #[allow(dead_code)]
