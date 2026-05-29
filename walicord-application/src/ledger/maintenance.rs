@@ -159,6 +159,7 @@ pub fn validate_duplicate_resolution(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
     fn channel(id: u64) -> TransportChannelId {
         TransportChannelId::new(id).expect("test channel id is non-zero")
@@ -172,29 +173,32 @@ mod tests {
         );
     }
 
-    #[test]
-    fn duplicate_resolution_rejects_empty_retired_list() {
-        let actual = validate_duplicate_resolution(channel(1), &[], &[channel(1), channel(2)]);
-        assert_eq!(
-            actual,
-            Err(MaintenanceValidationError::DuplicateResolutionEmpty)
-        );
-    }
-
-    #[test]
-    fn duplicate_resolution_rejects_authoritative_not_in_observed() {
-        let actual =
-            validate_duplicate_resolution(channel(999), &[channel(2)], &[channel(1), channel(2)]);
-        assert_eq!(
-            actual,
-            Err(MaintenanceValidationError::AuthoritativeNotAmongCandidates)
-        );
-    }
-
-    #[test]
-    fn duplicate_resolution_accepts_authoritative_in_observed_with_at_least_one_retired() {
-        let actual =
-            validate_duplicate_resolution(channel(1), &[channel(2)], &[channel(1), channel(2)]);
-        assert_eq!(actual, Ok(()));
+    #[rstest]
+    #[case::empty_retired_list(
+        channel(1),
+        vec![],
+        vec![channel(1), channel(2)],
+        Err(MaintenanceValidationError::DuplicateResolutionEmpty)
+    )]
+    #[case::authoritative_not_in_observed(
+        channel(999),
+        vec![channel(2)],
+        vec![channel(1), channel(2)],
+        Err(MaintenanceValidationError::AuthoritativeNotAmongCandidates)
+    )]
+    #[case::authoritative_in_observed_with_at_least_one_retired(
+        channel(1),
+        vec![channel(2)],
+        vec![channel(1), channel(2)],
+        Ok(())
+    )]
+    fn duplicate_resolution_validates_each_command_shape(
+        #[case] authoritative: TransportChannelId,
+        #[case] retired: Vec<TransportChannelId>,
+        #[case] observed: Vec<TransportChannelId>,
+        #[case] expected: Result<(), MaintenanceValidationError>,
+    ) {
+        let actual = validate_duplicate_resolution(authoritative, &retired, &observed);
+        assert_eq!(actual, expected);
     }
 }

@@ -263,22 +263,19 @@ mod tests {
         assert_eq!(actual.as_str(), "foo(example．com)");
     }
 
-    #[test]
-    fn business_date_time_requires_the_fixed_business_timestamp_format() {
-        let actual = BusinessDateTime::parse("2026-05-25 18:55");
+    #[rstest::rstest]
+    #[case::canonical_form("2026-05-25 18:55", Some("2026-05-25 18:55"))]
+    #[case::wrong_date_separator("2026/05/25 18:55", None)]
+    #[case::missing_space_between_date_and_time("2026-05-25T18:55", None)]
+    #[case::hour_out_of_range("2026-05-25 24:00", None)]
+    #[case::minute_out_of_range("2026-05-25 18:60", None)]
+    #[case::nonexistent_calendar_day("2026-02-30 18:55", None)]
+    fn business_date_time_parses_only_the_business_timestamp_format(
+        #[case] input: &str,
+        #[case] expected_display: Option<&str>,
+    ) {
+        let actual = BusinessDateTime::parse(input).map(|x| x.to_string());
 
-        assert_eq!(
-            actual.expect("timestamp should parse").to_string(),
-            "2026-05-25 18:55"
-        );
-    }
-
-    #[test]
-    fn business_date_time_rejects_invalid_shapes_and_ranges() {
-        assert_eq!(BusinessDateTime::parse("2026/05/25 18:55"), None);
-        assert_eq!(BusinessDateTime::parse("2026-05-25T18:55"), None);
-        assert_eq!(BusinessDateTime::parse("2026-05-25 24:00"), None);
-        assert_eq!(BusinessDateTime::parse("2026-05-25 18:60"), None);
-        assert_eq!(BusinessDateTime::parse("2026-02-30 18:55"), None);
+        assert_eq!(actual.as_deref(), expected_display);
     }
 }
