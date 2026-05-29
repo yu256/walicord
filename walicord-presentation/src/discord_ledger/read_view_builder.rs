@@ -319,3 +319,51 @@ pub fn balance_adjustment_summaries(
         })
         .collect()
 }
+
+pub struct LedgerPageInputs<'a> {
+    pub route: super::surfaces::ReadViewRoute,
+    pub views: &'a [VerifiedLedgerEntryView],
+    pub state: &'a LedgerState,
+    pub labels: &'a SurfaceMemberLabels,
+    pub ledger_id: LedgerId,
+    pub uncertain_write: bool,
+}
+
+pub fn build_ledger_page_model(
+    inputs: LedgerPageInputs<'_>,
+) -> Result<super::surfaces::ReadViewPageModel, ReadViewBuildError> {
+    use super::surfaces::{ReadViewKind, ReadViewPageModel};
+    Ok(ReadViewPageModel {
+        kind: ReadViewKind::Ledger,
+        route: inputs.route,
+        title: i18n::panel_ledger_button_label().to_owned(),
+        uncertain_write: inputs.uncertain_write,
+        balances: balance_rows_for_state(inputs.state, inputs.labels),
+        participants: participant_names_for_state(inputs.state, inputs.labels),
+        voided_entries: voided_entry_rows(inputs.views, inputs.labels, inputs.ledger_id)?,
+        sealed_range: sealed_range_summary(
+            inputs.views,
+            inputs.state.sealed_through(),
+            inputs.labels,
+        )?,
+        balance_adjustments: balance_adjustment_summaries(inputs.views, inputs.labels),
+        ephemeral: true,
+        ..Default::default()
+    })
+}
+
+pub fn build_ledger_empty_page_model(
+    route: super::surfaces::ReadViewRoute,
+    uncertain_write: bool,
+) -> super::surfaces::ReadViewPageModel {
+    use super::surfaces::{ReadViewKind, ReadViewPageModel};
+    ReadViewPageModel {
+        kind: ReadViewKind::Ledger,
+        route,
+        title: i18n::panel_ledger_button_label().to_owned(),
+        uncertain_write,
+        empty_state: Some(i18n::ledger_empty_state().to_owned()),
+        ephemeral: true,
+        ..Default::default()
+    }
+}
