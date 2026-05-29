@@ -83,9 +83,6 @@ mod expense_modal_open;
 #[path = "ledger/locator.rs"]
 mod locator;
 #[allow(dead_code)]
-#[path = "ledger/maintenance.rs"]
-mod maintenance;
-#[allow(dead_code)]
 #[path = "ledger/observability.rs"]
 mod observability;
 #[allow(dead_code)]
