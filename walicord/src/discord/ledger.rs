@@ -119,6 +119,9 @@ mod response_writer;
 #[path = "ledger/route_guard.rs"]
 mod route_guard;
 #[allow(dead_code)]
+#[path = "ledger/router.rs"]
+mod router;
+#[allow(dead_code)]
 #[path = "ledger/runtime_lock.rs"]
 mod runtime_lock;
 #[allow(dead_code)]
