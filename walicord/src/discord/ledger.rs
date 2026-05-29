@@ -148,7 +148,6 @@ pub(crate) use self::{
     adapters::{DiscordLedgerThreadLoader, DiscordRouterRosterFetcher},
     observability::TracingLedgerObservability,
     router::{InteractionDispatch, LedgerRouter, LedgerRouterDependencies},
-    runtime_clock::{ProcessNonceProvider, SystemClock},
     store::{DiscordCanonicalLedgerStore, WriterLineagePolicy},
 };
 pub(crate) use walicord_application::ledger::{
@@ -156,6 +155,7 @@ pub(crate) use walicord_application::ledger::{
     preview_store::PreviewStore,
     write_coordinator::{UncertainWriteRegistry, WriteCoordinator},
 };
+pub(crate) use walicord_infrastructure::{ProcessNonceProvider, SystemClock};
 
 pub const LEDGER_ATTACHMENT_FILENAME: &str = "walicord-ledger-entry.json";
 #[cfg_attr(not(test), allow(dead_code))]

@@ -3431,6 +3431,7 @@ version = "0.1.0"
 name = "walicord-infrastructure"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "proptest",
  "rstest",
  "walicord-application",
