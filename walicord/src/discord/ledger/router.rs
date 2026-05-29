@@ -1,38 +1,32 @@
 use serenity::{
     all::{
-        ButtonStyle, ChannelId, CommandInteraction, ComponentInteraction, CreateActionRow,
-        CreateButton, CreateInteractionResponse, CreateInteractionResponseMessage, GuildId,
-        ModalInteraction,
+        ChannelId, CommandInteraction, ComponentInteraction, CreateInteractionResponse,
+        CreateInteractionResponseMessage, GuildId, ModalInteraction,
     },
     async_trait,
     prelude::Context,
 };
-use std::{
-    borrow::Cow,
-    collections::{BTreeSet, HashMap},
-    sync::Arc,
-};
+use std::{borrow::Cow, collections::HashMap, sync::Arc};
 use walicord_application::{
     Clock, NonceProvider, SettlementPlanner,
     ledger::{
         DiscordLedgerSourceDescriptor, ExpenseAuthoringError, LedgerEntry, LedgerEntryId, LedgerId,
-        MemberWeight, UnverifiedLedgerStoreEnvelope, compute_expense_owed_amounts,
+        UnverifiedLedgerStoreEnvelope,
         expense_session::{
-            ExpenseBasicInfo, ExpenseConfirmationSnapshot, ExpenseDraftSnapshot,
-            ExpenseParticipantSelection, ExpenseSelectionPhase, ExpenseSession,
-            ExpenseSessionConstructionError, ExpenseSessionKey, ExpenseSessionStage,
-            ExpenseSessionStore, ModalRetryBinding, ModalRetryBindingStore, ModalRetryPreserved,
-            VoidSessionStore,
+            ExpenseConfirmationSnapshot, ExpenseDraftSnapshot, ExpenseParticipantSelection,
+            ExpenseSelectionPhase, ExpenseSession, ExpenseSessionConstructionError,
+            ExpenseSessionKey, ExpenseSessionStage, ExpenseSessionStore, ModalRetryBinding,
+            ModalRetryBindingStore, ModalRetryPreserved, VoidSessionStore,
         },
         participant_resolution::{ParticipantDrift, RosterSnapshot},
     },
 };
-use walicord_domain::{Money, model::MemberId};
+use walicord_domain::model::MemberId;
 use walicord_i18n as i18n;
 use walicord_presentation::discord_ledger::{
-    DiscordLedgerPresenter, ExpenseConfirmationParticipantRow, ExpenseDraftSummary,
-    ExpenseParticipantSourceBadge, PanelButtonStates, PanelSurfaceModel, RenderBudgetError,
-    SurfaceMemberLabels,
+    DiscordLedgerPresenter, ExpenseConfirmationButtonIds, ExpenseSelectionStepButtonIds,
+    PanelButtonStates, PanelSurfaceModel, RenderBudgetError, SurfaceMemberLabels,
+    build_expense_confirmation_surface, build_expense_selection_step_surface,
 };
 
 use crate::channel::ChannelManager;
@@ -571,13 +565,16 @@ impl LedgerRouter {
         )?;
         self.deps.expense_sessions.replace(outcome.session);
 
-        let body = render_confirmation_body(
+        let button_ids = build_confirmation_button_ids(nonce);
+        let model = build_expense_confirmation_surface(
             &basic_info,
             &outcome.snapshot.participants,
             &outcome.defaulted_members,
             &roster_snapshot.display_names,
+            &button_ids,
         )?;
-        let components = confirmation_action_rows(nonce);
+        let rendered = DiscordLedgerPresenter::render_expense_step(&model)?;
+        let (body, components) = rendered_surface_to_message(rendered);
 
         let response = CreateInteractionResponse::UpdateMessage(
             CreateInteractionResponseMessage::new()
@@ -733,13 +730,20 @@ impl LedgerRouter {
         let nonce = refreshed_session.nonce();
         self.deps.expense_sessions.replace(refreshed_session);
 
-        let mut body =
-            render_confirmation_body(&basic_info, &refreshed, &defaulted_members, display_names)?;
+        let button_ids = build_confirmation_button_ids(nonce);
+        let model = build_expense_confirmation_surface(
+            &basic_info,
+            &refreshed,
+            &defaulted_members,
+            display_names,
+            &button_ids,
+        )?;
+        let rendered = DiscordLedgerPresenter::render_expense_step(&model)?;
+        let (mut body, components) = rendered_surface_to_message(rendered);
         if !drift.is_empty() {
             body.push('\n');
             body.push_str(i18n::expense_participants_drifted_cue());
         }
-        let components = confirmation_action_rows(nonce);
 
         let response = CreateInteractionResponse::UpdateMessage(
             CreateInteractionResponseMessage::new()
@@ -905,13 +909,15 @@ impl LedgerRouter {
         phase: &ExpenseSelectionPhase,
         nonce: walicord_application::InteractionNonce,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
-        let title = step_title_for_phase(phase);
-        let components = step_action_rows_for_phase(phase, nonce);
+        let button_ids = build_selection_step_button_ids(nonce);
+        let model = build_expense_selection_step_surface(phase, &button_ids);
+        let rendered = DiscordLedgerPresenter::render_expense_step(&model)?;
+        let (body, components) = rendered_surface_to_message(rendered);
         let response = CreateInteractionResponse::UpdateMessage(
             CreateInteractionResponseMessage::new()
                 .ephemeral(true)
                 .allowed_mentions(suppressed_allowed_mentions())
-                .content(title)
+                .content(body)
                 .components(components),
         );
         component
@@ -1189,15 +1195,17 @@ impl LedgerRouter {
         modal: &ModalInteraction,
         nonce: walicord_application::InteractionNonce,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
+        let button_ids = build_selection_step_button_ids(nonce);
+        let model =
+            build_expense_selection_step_surface(&ExpenseSelectionPhase::Payer, &button_ids);
+        let rendered = DiscordLedgerPresenter::render_expense_step(&model)?;
+        let (body, components) = rendered_surface_to_message(rendered);
         let response = CreateInteractionResponse::Message(
             CreateInteractionResponseMessage::new()
                 .ephemeral(true)
                 .allowed_mentions(suppressed_allowed_mentions())
-                .content(i18n::expense_step_title_payer())
-                .components(step_action_rows_for_phase(
-                    &ExpenseSelectionPhase::Payer,
-                    nonce,
-                )),
+                .content(body)
+                .components(components),
         );
         modal
             .create_response(&ctx.http, response)
@@ -1230,97 +1238,36 @@ pub(crate) const EXPENSE_MODIFY_SELECTION_CUSTOM_ID_PREFIX: &str =
     "ledger:expense:modify-selection:";
 pub(crate) const EXPENSE_RECORD_CUSTOM_ID_PREFIX: &str = "ledger:expense:record:";
 
-fn step_title_for_phase(phase: &ExpenseSelectionPhase) -> &'static str {
-    match phase {
-        ExpenseSelectionPhase::Payer => i18n::expense_step_title_payer(),
-        ExpenseSelectionPhase::ParticipantSource
-        | ExpenseSelectionPhase::IndividualSelection
-        | ExpenseSelectionPhase::Roles => i18n::expense_step_title_participants(),
-        ExpenseSelectionPhase::WeightEditor => i18n::expense_step_title_weight(),
+/// Build the custom_id strings for every button the selection wizard can show. The
+/// adapter owns the custom_id format (Discord component identity); the presentation
+/// builder takes them as opaque strings.
+fn build_selection_step_button_ids(
+    nonce: walicord_application::InteractionNonce,
+) -> ExpenseSelectionStepButtonIds {
+    let n = nonce.get();
+    ExpenseSelectionStepButtonIds {
+        to_participants: format!("{EXPENSE_TO_PARTICIPANTS_CUSTOM_ID_PREFIX}{n}"),
+        source_individual: format!("{EXPENSE_SOURCE_INDIVIDUAL_CUSTOM_ID_PREFIX}{n}"),
+        source_roles: format!("{EXPENSE_SOURCE_ROLES_CUSTOM_ID_PREFIX}{n}"),
+        source_members: format!("{EXPENSE_SOURCE_MEMBERS_CUSTOM_ID_PREFIX}{n}"),
+        to_weights: format!("{EXPENSE_TO_WEIGHTS_CUSTOM_ID_PREFIX}{n}"),
+        to_confirm: format!("{EXPENSE_TO_CONFIRM_CUSTOM_ID_PREFIX}{n}"),
+        back: format!("{EXPENSE_BACK_CUSTOM_ID_PREFIX}{n}"),
+        cancel: format!("{EXPENSE_CANCEL_CUSTOM_ID_PREFIX}{n}"),
     }
 }
 
-/// Build the chrome action rows for a selection-wizard step. Each phase ends with a
-/// `Back` and `Cancel` row so the actor always has an exit; the phase-specific row
-/// carries the forward-navigation buttons and any toggle (`MEMBERS`) controls. The
-/// per-step picker select menus are added in a follow-up commit.
-fn step_action_rows_for_phase(
-    phase: &ExpenseSelectionPhase,
+/// Build the custom_id strings for the confirmation-page buttons.
+fn build_confirmation_button_ids(
     nonce: walicord_application::InteractionNonce,
-) -> Vec<CreateActionRow> {
-    let mut rows = Vec::new();
-    let phase_specific = match phase {
-        ExpenseSelectionPhase::Payer => vec![
-            CreateButton::new(format!(
-                "{EXPENSE_TO_PARTICIPANTS_CUSTOM_ID_PREFIX}{}",
-                nonce.get()
-            ))
-            .label(i18n::expense_next_label())
-            .style(ButtonStyle::Primary),
-        ],
-        ExpenseSelectionPhase::ParticipantSource => vec![
-            CreateButton::new(format!(
-                "{EXPENSE_SOURCE_INDIVIDUAL_CUSTOM_ID_PREFIX}{}",
-                nonce.get()
-            ))
-            .label(i18n::participant_source_individual_label())
-            .style(ButtonStyle::Secondary),
-            CreateButton::new(format!(
-                "{EXPENSE_SOURCE_ROLES_CUSTOM_ID_PREFIX}{}",
-                nonce.get()
-            ))
-            .label(i18n::participant_source_role_label())
-            .style(ButtonStyle::Secondary),
-            CreateButton::new(format!(
-                "{EXPENSE_SOURCE_MEMBERS_CUSTOM_ID_PREFIX}{}",
-                nonce.get()
-            ))
-            .label(i18n::participant_source_members_label())
-            .style(ButtonStyle::Secondary),
-            CreateButton::new(format!(
-                "{EXPENSE_TO_WEIGHTS_CUSTOM_ID_PREFIX}{}",
-                nonce.get()
-            ))
-            .label(i18n::expense_to_weights_label())
-            .style(ButtonStyle::Primary),
-        ],
-        ExpenseSelectionPhase::IndividualSelection | ExpenseSelectionPhase::Roles => {
-            vec![
-                CreateButton::new(format!(
-                    "{EXPENSE_TO_WEIGHTS_CUSTOM_ID_PREFIX}{}",
-                    nonce.get()
-                ))
-                .label(i18n::expense_to_weights_label())
-                .style(ButtonStyle::Primary),
-                CreateButton::new(format!(
-                    "{EXPENSE_TO_CONFIRM_CUSTOM_ID_PREFIX}{}",
-                    nonce.get()
-                ))
-                .label(i18n::expense_to_confirm_label())
-                .style(ButtonStyle::Primary),
-            ]
-        }
-        ExpenseSelectionPhase::WeightEditor => vec![
-            CreateButton::new(format!(
-                "{EXPENSE_TO_CONFIRM_CUSTOM_ID_PREFIX}{}",
-                nonce.get()
-            ))
-            .label(i18n::expense_to_confirm_label())
-            .style(ButtonStyle::Primary),
-        ],
-    };
-    if !phase_specific.is_empty() {
-        rows.push(CreateActionRow::Buttons(phase_specific));
+) -> ExpenseConfirmationButtonIds {
+    let n = nonce.get();
+    ExpenseConfirmationButtonIds {
+        record: format!("{EXPENSE_RECORD_CUSTOM_ID_PREFIX}{n}"),
+        modify_selection: format!("{EXPENSE_MODIFY_SELECTION_CUSTOM_ID_PREFIX}{n}"),
+        basic_edit: format!("{EXPENSE_BASIC_EDIT_CUSTOM_ID_PREFIX}{n}"),
+        cancel: format!("{EXPENSE_CANCEL_CUSTOM_ID_PREFIX}{n}"),
     }
-    rows.push(CreateActionRow::Buttons(vec![
-        CreateButton::new(format!("{EXPENSE_BACK_CUSTOM_ID_PREFIX}{}", nonce.get()))
-            .label(i18n::expense_back_label())
-            .style(ButtonStyle::Secondary),
-        CreateButton::new(format!("{EXPENSE_CANCEL_CUSTOM_ID_PREFIX}{}", nonce.get()))
-            .label(i18n::expense_cancel_label())
-            .style(ButtonStyle::Danger),
-    ]));
-    rows
 }
 
 fn format_money_for_modal(money: walicord_domain::Money) -> String {
@@ -1468,127 +1415,6 @@ fn render_public_expense_body(
         LedgerRouteError::Internal(InternalLedgerRouteError::PanelRender(error))
     })?;
     Ok(rendered.body().to_owned())
-}
-
-/// Compose the ephemeral confirmation body the actor sees after pressing 確認へ.
-/// Layout:
-/// 1. Step title (4/4)
-/// 2. Draft summary (amount / date / note) via `ExpenseDraftSummary`
-/// 3. One row per resolved participant with display_name + per-member share + weight +
-///    criterion-216 `既定値 1` cue on defaulted weights
-/// 4. Confirmation source disclosure (criterion 111: roles / MEMBERS re-evaluated at
-///    record time)
-///
-/// Share amounts come from `walicord_application::ledger::compute_expense_owed_amounts`
-/// — the same distribution the record path uses inside `RecordableExpenseAuthoring::
-/// new`. Calling the same function eliminates divergence between the confirmation
-/// preview and the on-ledger amounts by construction; any authoring failure (zero total
-/// weight, oversize note, etc.) propagates as a typed `ExpenseAuthoringError` rather
-/// than being silently absorbed into a misleading preview.
-fn render_confirmation_body(
-    basic_info: &ExpenseBasicInfo,
-    participants: &[ExpenseParticipantSelection],
-    defaulted_members: &[MemberId],
-    display_names: &HashMap<MemberId, smol_str::SmolStr>,
-) -> Result<String, ExpenseAuthoringError> {
-    let defaulted: BTreeSet<MemberId> = defaulted_members.iter().copied().collect();
-    let labels = SurfaceMemberLabels::from_member_names(participants.iter().map(|row| {
-        (
-            row.member_id,
-            display_names.get(&row.member_id).map(|s| s.as_str()),
-        )
-    }));
-
-    let summary_note = basic_info.note.as_ref().map(|note| {
-        // `ExpenseNote::new` already enforces a non-empty, trimmed canonical string, so
-        // `SafeLiteralText::from_note` returning None here would mean ExpenseNote and
-        // SafeLiteralText disagree on validity — an upstream invariant violation, not
-        // a runtime case we should silently swallow.
-        walicord_presentation::discord_ledger::SafeLiteralText::from_note(note.as_str())
-            .expect("validated ExpenseNote should always produce a SafeLiteralText")
-    });
-    let summary = ExpenseDraftSummary {
-        amount: format_money_for_modal(basic_info.amount),
-        effective_date: basic_info.effective_date.clone(),
-        note: summary_note,
-    };
-
-    let canonical_weights: Vec<MemberWeight> = participants
-        .iter()
-        .map(|row| MemberWeight {
-            member_id: row.member_id,
-            weight: row.weight,
-        })
-        .collect();
-    let owed = compute_expense_owed_amounts(&canonical_weights, basic_info.amount)?;
-    let share_by_member: HashMap<MemberId, Money> = owed
-        .into_iter()
-        .map(|amount| (amount.member_id, amount.amount))
-        .collect();
-
-    let mut lines: Vec<String> = Vec::new();
-    lines.push(i18n::expense_step_title_confirm().to_owned());
-    lines.extend(summary.render_lines());
-
-    for row in participants {
-        let display_name = labels
-            .member(row.member_id)
-            .map(|label| label.visible().clone())
-            .unwrap_or_else(|| {
-                walicord_presentation::discord_ledger::SafeLiteralText::from_roster_label(
-                    &i18n::unknown_user_label(row.member_id.0).to_string(),
-                )
-                .expect("unknown_user_label is a fixed fallback that always sanitises")
-            });
-        // `share_by_member` only carries entries with positive share (the canonical
-        // distribution drops zero-units). Both weight==0 members and weight>0 members
-        // that rounded to 0 share fall through `share_amount = None`, which
-        // `ExpenseConfirmationParticipantRow` renders as the `(取り分なし)` /
-        // `(端数で0)` row template — no fabricated share value.
-        let share_amount = share_by_member
-            .get(&row.member_id)
-            .map(|amount| format_money_for_modal(*amount));
-        let confirmation_row = ExpenseConfirmationParticipantRow {
-            display_name,
-            share_amount,
-            weight: row.weight.0,
-            badges: vec![ExpenseParticipantSourceBadge::DirectSelection],
-            defaulted_weight: defaulted.contains(&row.member_id),
-        };
-        lines.push(confirmation_row.render());
-    }
-    lines.push(
-        walicord_presentation::discord_ledger::confirmation_source_disclosure_line().to_owned(),
-    );
-
-    Ok(lines.join("\n"))
-}
-
-fn confirmation_action_rows(nonce: walicord_application::InteractionNonce) -> Vec<CreateActionRow> {
-    vec![
-        CreateActionRow::Buttons(vec![
-            CreateButton::new(format!("{EXPENSE_RECORD_CUSTOM_ID_PREFIX}{}", nonce.get()))
-                .label(i18n::expense_record_label())
-                .style(ButtonStyle::Primary),
-            CreateButton::new(format!(
-                "{EXPENSE_MODIFY_SELECTION_CUSTOM_ID_PREFIX}{}",
-                nonce.get()
-            ))
-            .label(i18n::expense_revise_label())
-            .style(ButtonStyle::Secondary),
-            CreateButton::new(format!(
-                "{EXPENSE_BASIC_EDIT_CUSTOM_ID_PREFIX}{}",
-                nonce.get()
-            ))
-            .label(i18n::expense_basic_info_edit_label())
-            .style(ButtonStyle::Secondary),
-        ]),
-        CreateActionRow::Buttons(vec![
-            CreateButton::new(format!("{EXPENSE_CANCEL_CUSTOM_ID_PREFIX}{}", nonce.get()))
-                .label(i18n::expense_cancel_label())
-                .style(ButtonStyle::Danger),
-        ]),
-    ]
 }
 
 /// Parse a session-scoped button custom_id of the form `{prefix}{nonce}` and return

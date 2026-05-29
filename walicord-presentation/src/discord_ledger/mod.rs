@@ -1,9 +1,15 @@
 mod budgets;
+mod expense_confirmation;
 mod member_labels;
 mod pickers;
 mod sanitizer;
 mod surfaces;
 mod void_surfaces;
+
+pub use expense_confirmation::{
+    ExpenseConfirmationButtonIds, ExpenseSelectionStepButtonIds,
+    build_expense_confirmation_surface, build_expense_selection_step_surface,
+};
 
 pub use budgets::{
     RenderBudgetError, truncate_component_label, validate_button_label,

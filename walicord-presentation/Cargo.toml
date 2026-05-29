@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 icu = { version = "2.2.0", features = ["compiled_data"] }
+smol_str = "0.3.5"
 thiserror = "2.0.17"
 tracing = "0.1"
 walicord-application = { path = "../walicord-application" }

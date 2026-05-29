@@ -3463,6 +3463,7 @@ dependencies = [
  "icu",
  "insta",
  "rstest",
+ "smol_str",
  "thiserror 2.0.17",
  "tracing",
  "walicord-application",
