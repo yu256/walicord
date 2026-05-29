@@ -19,7 +19,8 @@ use std::{
 };
 use walicord_application::ledger::{
     LedgerEntry, LedgerEntryId, LedgerEvent, LedgerId, LedgerLoadError, LedgerReplayError,
-    VerifiedLedgerSnapshot, VerifiedLedgerStoreEnvelope, replay_verified_snapshot,
+    UnverifiedLedgerStoreEnvelope, VerifiedLedgerSnapshot, VerifiedLedgerStoreEnvelope,
+    replay_verified_snapshot, verify_envelope_sha256_v1,
     verify_envelopes_in_append_order_sha256_v1,
 };
 
@@ -415,6 +416,47 @@ impl StoreLoadError {
     }
 }
 
+fn classify_send_error(error: serenity::Error) -> StoreWriteError {
+    use serenity::{Error, all::HttpError};
+    match &error {
+        Error::Http(HttpError::UnsuccessfulRequest(response))
+            if response.status_code == serenity::all::StatusCode::FORBIDDEN =>
+        {
+            StoreWriteError::Permission(format!("send forbidden: {error}"))
+        }
+        Error::Http(HttpError::UnsuccessfulRequest(response))
+            if response.status_code == serenity::all::StatusCode::UNAUTHORIZED =>
+        {
+            StoreWriteError::Permission(format!("send unauthorized: {error}"))
+        }
+        _ => StoreWriteError::Transport(format!("send failed: {error}")),
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum StoreWriteError {
+    /// Canonical attachment encoding failed (codec rejected the envelope).
+    #[error("canonical attachment encode failed: {0}")]
+    Prepare(AttachmentCodecError),
+    /// Bot or actor permissions are missing for posting / attaching files /
+    /// unarchiving. The detail string is the Discord-native diagnostic.
+    #[error("canonical thread permissions are not sufficient: {0}")]
+    Permission(String),
+    /// The canonical thread is archived or locked and unarchive is not possible.
+    #[error("canonical thread is archived or locked")]
+    ArchivedOrLocked,
+    /// Generic Discord transport / rate-limit failure during the post call.
+    #[error("canonical thread post failed: {0}")]
+    Transport(String),
+    /// Send appeared to succeed but the read-back fetch returned a payload that does
+    /// not match the canonical bytes we just posted.
+    #[error("canonical thread read-back verification failed: {0}")]
+    ReadBack(String),
+    /// Operation exceeded the write timeout budget.
+    #[error("canonical thread write timed out after {elapsed:?}")]
+    WriteTimeout { elapsed: Duration },
+}
+
 #[derive(Debug, Clone)]
 pub struct DiscordCanonicalLedgerStore {
     writer_lineage: WriterLineagePolicy,
@@ -437,6 +479,89 @@ impl DiscordCanonicalLedgerStore {
             writer_lineage,
             display_drift_guard,
         }
+    }
+
+    /// Post a canonical entry to the bound thread, then read the just-posted message
+    /// back to verify the authoritative attachment survived intact (criterion 54-55,
+    /// 148, 209-212). The function does no locking — the caller is expected to hold
+    /// the per-`LedgerId` mutex from `WriteCoordinator` for the duration. On a
+    /// successful post + verify, it returns the verified envelope keyed by the
+    /// Discord `MessageId`.
+    pub async fn append_authoritative(
+        &self,
+        ctx: &Context,
+        canonical_thread_id: ChannelId,
+        envelope: &UnverifiedLedgerStoreEnvelope<()>,
+        prepared_body: &str,
+    ) -> Result<VerifiedLedgerStoreEnvelope<MessageId>, StoreWriteError> {
+        let attachment_bytes = CanonicalAttachmentCodec::encode_with_pre_self_link_content(
+            envelope,
+            Some(prepared_body),
+        )
+        .map_err(StoreWriteError::Prepare)?;
+
+        let send_outcome = canonical_thread_id
+            .send_message(
+                &ctx.http,
+                serenity::builder::CreateMessage::new()
+                    .content(prepared_body)
+                    .add_file(serenity::all::CreateAttachment::bytes(
+                        attachment_bytes.clone(),
+                        LEDGER_ATTACHMENT_FILENAME,
+                    )),
+            )
+            .await
+            .map_err(classify_send_error)?;
+
+        let read_back = canonical_thread_id
+            .message(&ctx.http, send_outcome.id)
+            .await
+            .map_err(|error| {
+                StoreWriteError::ReadBack(format!("fetch read-back failed: {error}"))
+            })?;
+
+        let mut matching_attachments = read_back
+            .attachments
+            .iter()
+            .filter(|attachment| attachment.filename == LEDGER_ATTACHMENT_FILENAME);
+        let authoritative = matching_attachments.next().ok_or_else(|| {
+            StoreWriteError::ReadBack("authoritative attachment missing on read-back".to_owned())
+        })?;
+        if matching_attachments.next().is_some() {
+            return Err(StoreWriteError::ReadBack(
+                "more than one authoritative attachment on read-back".to_owned(),
+            ));
+        }
+        if (authoritative.size as usize) != attachment_bytes.len() {
+            return Err(StoreWriteError::ReadBack(format!(
+                "attachment size drift: expected {expected}, got {actual}",
+                expected = attachment_bytes.len(),
+                actual = authoritative.size,
+            )));
+        }
+        if read_back.content != prepared_body {
+            return Err(StoreWriteError::ReadBack(
+                "message body drift between send and read-back".to_owned(),
+            ));
+        }
+
+        let UnverifiedLedgerStoreEnvelope {
+            previous_hash,
+            entry_hash,
+            payload,
+            ..
+        } = envelope.clone();
+        let envelope_with_message_id = UnverifiedLedgerStoreEnvelope {
+            previous_hash,
+            entry_hash,
+            external_id: send_outcome.id,
+            payload: payload.clone(),
+        };
+        let verified = verify_envelope_sha256_v1(envelope_with_message_id, payload.ledger_id)
+            .map_err(|error| {
+                StoreWriteError::ReadBack(format!("envelope verification failed: {error:?}"))
+            })?;
+        Ok(verified)
     }
 
     pub async fn load_verified_thread(
