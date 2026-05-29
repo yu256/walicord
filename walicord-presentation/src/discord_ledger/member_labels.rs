@@ -14,9 +14,6 @@ use walicord_application::ledger::LedgerEntry;
 use walicord_domain::model::{MemberId, RoleId};
 use walicord_i18n as i18n;
 
-/// Fallback label for a slot whose member identity is unknown (e.g. legacy entries
-/// missing `recorded_by`). Sanitised once and returned by value so callers can
-/// embed it anywhere a `SafeLiteralText` is expected.
 pub fn unknown_member_label() -> SafeLiteralText {
     SafeLiteralText::from_roster_label(i18n::unknown_display_label())
         .expect("fallback unknown label should sanitize")
@@ -151,9 +148,6 @@ impl SurfaceMemberLabels {
         compare_display_text(lhs, rhs)
     }
 
-    /// Resolve the safe visible label for a `MemberId`. Falls back to the
-    /// `unknown_user_label` template (carrying the raw member id) when no label was
-    /// registered, so display surfaces never crash on dangling roster entries.
     pub fn safe_member_label(&self, member_id: MemberId) -> SafeLiteralText {
         self.member(member_id)
             .map(|label| label.visible().clone())
@@ -165,9 +159,6 @@ impl SurfaceMemberLabels {
             })
     }
 
-    /// Resolve the safe visible label for the actor that recorded a ledger entry.
-    /// Falls back to [`unknown_member_label`] when `metadata.recorded_by` is `None`
-    /// (criteria-compliant for legacy entries).
     pub fn safe_actor_label(&self, entry: &LedgerEntry) -> SafeLiteralText {
         entry
             .metadata
