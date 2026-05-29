@@ -89,6 +89,11 @@ pub enum LedgerRouteError {
 /// carries the underlying cause as a typed value (no `format!` at the error site);
 /// the Display impl composes the message at the boundary. Telemetry can match on the
 /// variant to bucket failures without parsing strings.
+///
+/// Plain `impl From<X>` (not thiserror's `#[from]`) is used for the source variants
+/// because the source error types do not yet impl `std::error::Error`; migrating
+/// them is a follow-up commit. The conversions still let call sites use `?` /
+/// `LedgerRouteError::from`.
 #[derive(Debug, thiserror::Error)]
 pub enum InternalLedgerRouteError {
     #[error("panel render: {0:?}")]
@@ -112,6 +117,63 @@ pub enum InternalLedgerRouteError {
         #[source]
         error: serenity::Error,
     },
+}
+
+impl From<RenderBudgetError> for InternalLedgerRouteError {
+    fn from(error: RenderBudgetError) -> Self {
+        Self::PanelRender(error)
+    }
+}
+
+impl From<ExpenseModalBuildError> for InternalLedgerRouteError {
+    fn from(error: ExpenseModalBuildError) -> Self {
+        Self::ExpenseModalBuild(error)
+    }
+}
+
+impl From<ExpenseSessionConstructionError> for InternalLedgerRouteError {
+    fn from(error: ExpenseSessionConstructionError) -> Self {
+        Self::SessionConstruction(error)
+    }
+}
+
+impl From<NavigationError> for InternalLedgerRouteError {
+    fn from(error: NavigationError) -> Self {
+        Self::Navigation(error)
+    }
+}
+
+impl From<LedgerInteractionGuardError> for LedgerRouteError {
+    fn from(error: LedgerInteractionGuardError) -> Self {
+        match error {
+            LedgerInteractionGuardError::GuildOnly => Self::GuildOnly,
+            LedgerInteractionGuardError::NotInTrackedChannel { .. } => Self::NotInTrackedChannel,
+        }
+    }
+}
+
+impl From<ExpenseModalBuildError> for LedgerRouteError {
+    fn from(error: ExpenseModalBuildError) -> Self {
+        Self::Internal(error.into())
+    }
+}
+
+impl From<ExpenseSessionConstructionError> for LedgerRouteError {
+    fn from(error: ExpenseSessionConstructionError) -> Self {
+        Self::Internal(error.into())
+    }
+}
+
+impl From<NavigationError> for LedgerRouteError {
+    fn from(error: NavigationError) -> Self {
+        Self::Internal(error.into())
+    }
+}
+
+impl From<RenderBudgetError> for LedgerRouteError {
+    fn from(error: RenderBudgetError) -> Self {
+        Self::Internal(error.into())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -189,7 +251,7 @@ impl LedgerRouter {
             command.channel_id,
             self.deps.channels.as_ref(),
         )
-        .map_err(map_guard_error)?;
+        .map_err(LedgerRouteError::from)?;
 
         let model = PanelSurfaceModel {
             thread_cue: walicord_i18n::panel_thread_cue_pending().to_owned(),
@@ -224,7 +286,7 @@ impl LedgerRouter {
             command.channel_id,
             self.deps.channels.as_ref(),
         )
-        .map_err(map_guard_error)?;
+        .map_err(LedgerRouteError::from)?;
 
         let nonce = self.deps.nonce_provider.next_interaction_nonce();
         let response = build_expense_modal_response(
@@ -232,7 +294,7 @@ impl LedgerRouter {
             nonce,
             &ExpenseModalPrefill::default(),
         )
-        .map_err(map_modal_build_error)?;
+        .map_err(LedgerRouteError::from)?;
         command
             .create_response(&ctx.http, response)
             .await
@@ -320,7 +382,7 @@ impl LedgerRouter {
             component.channel_id,
             self.deps.channels.as_ref(),
         )
-        .map_err(map_guard_error)?;
+        .map_err(LedgerRouteError::from)?;
         let key = ExpenseSessionKey::new(guild_id, channel_id, MemberId(component.user.id.get()));
         let Some(current) = self.deps.expense_sessions.clear(key) else {
             return self.respond_expense_session_missing(ctx, component).await;
@@ -349,7 +411,7 @@ impl LedgerRouter {
                 let _ = (key, from);
                 self.respond_expense_session_missing(ctx, component).await
             }
-            Err(other) => Err(map_navigation_error(other)),
+            Err(other) => Err(other.into()),
         }
     }
 
@@ -365,13 +427,13 @@ impl LedgerRouter {
             component.channel_id,
             self.deps.channels.as_ref(),
         )
-        .map_err(map_guard_error)?;
+        .map_err(LedgerRouteError::from)?;
         let key = ExpenseSessionKey::new(guild_id, channel_id, MemberId(component.user.id.get()));
         let Some(current) = self.deps.expense_sessions.clear(key) else {
             return self.respond_expense_session_missing(ctx, component).await;
         };
         let updated = toggle_members_group(current, self.deps.clock.as_ref())
-            .map_err(map_navigation_error)?;
+            .map_err(LedgerRouteError::from)?;
         let nonce = updated.nonce();
         self.deps.expense_sessions.replace(updated);
         self.respond_with_step_body(
@@ -423,7 +485,7 @@ impl LedgerRouter {
             component.channel_id,
             self.deps.channels.as_ref(),
         )
-        .map_err(map_guard_error)?;
+        .map_err(LedgerRouteError::from)?;
         let key = ExpenseSessionKey::new(guild_id, channel_id, MemberId(component.user.id.get()));
         let Some(session) = self.deps.expense_sessions.clear(key) else {
             return self.respond_expense_session_missing(ctx, component).await;
@@ -442,7 +504,7 @@ impl LedgerRouter {
         self.deps.expense_sessions.replace(session);
         let nonce = self.deps.nonce_provider.next_interaction_nonce();
         let response = build_expense_modal_response(self.deps.clock.as_ref(), nonce, &prefill)
-            .map_err(map_modal_build_error)?;
+            .map_err(LedgerRouteError::from)?;
         component
             .create_response(&ctx.http, response)
             .await
@@ -462,7 +524,7 @@ impl LedgerRouter {
             component.channel_id,
             self.deps.channels.as_ref(),
         )
-        .map_err(map_guard_error)?;
+        .map_err(LedgerRouteError::from)?;
         let key = ExpenseSessionKey::new(guild_id, channel_id, MemberId(component.user.id.get()));
         let Some(current) = self.deps.expense_sessions.clear(key) else {
             return self.respond_expense_session_missing(ctx, component).await;
@@ -488,7 +550,7 @@ impl LedgerRouter {
                 // From the first phase Back == Cancel (criterion 201).
                 self.dispatch_expense_cancel(ctx, component).await
             }
-            Err(other) => Err(map_navigation_error(other)),
+            Err(other) => Err(other.into()),
         }
     }
 
@@ -522,7 +584,7 @@ impl LedgerRouter {
             component.channel_id,
             self.deps.channels.as_ref(),
         )
-        .map_err(map_guard_error)?;
+        .map_err(LedgerRouteError::from)?;
         let key = ExpenseSessionKey::new(guild_id, channel_id, MemberId(component.user.id.get()));
         self.deps.expense_sessions.clear(key);
         let response = CreateInteractionResponse::UpdateMessage(
@@ -551,14 +613,14 @@ impl LedgerRouter {
             component.channel_id,
             self.deps.channels.as_ref(),
         )
-        .map_err(map_guard_error)?;
+        .map_err(LedgerRouteError::from)?;
         let nonce = self.deps.nonce_provider.next_interaction_nonce();
         let response = build_expense_modal_response(
             self.deps.clock.as_ref(),
             nonce,
             &ExpenseModalPrefill::default(),
         )
-        .map_err(map_modal_build_error)?;
+        .map_err(LedgerRouteError::from)?;
         component
             .create_response(&ctx.http, response)
             .await
@@ -600,7 +662,7 @@ impl LedgerRouter {
             modal.channel_id,
             self.deps.channels.as_ref(),
         )
-        .map_err(map_guard_error)?;
+        .map_err(LedgerRouteError::from)?;
 
         let raw = extract_raw_expense_modal_submission(modal)
             .ok_or(InternalLedgerRouteError::ModalSubmissionMissingFields)?;
@@ -625,7 +687,7 @@ impl LedgerRouter {
                     self.deps.clock.as_ref(),
                     self.deps.nonce_provider.as_ref(),
                 )
-                .map_err(map_construction_error)?;
+                .map_err(LedgerRouteError::from)?;
                 self.deps.expense_sessions.replace(session);
                 self.acknowledge_modal_success(ctx, modal, nonce).await
             }
@@ -661,7 +723,7 @@ impl LedgerRouter {
         };
         let response =
             build_expense_modal_response(self.deps.clock.as_ref(), binding_nonce, &prefill)
-                .map_err(map_modal_build_error)?;
+                .map_err(LedgerRouteError::from)?;
         modal
             .create_response(&ctx.http, response)
             .await
@@ -696,25 +758,13 @@ impl LedgerRouter {
     }
 }
 
+/// Discord-call failures need both a static `DiscordCallSite` (known at the call
+/// site) and the runtime `serenity::Error`. `From` is inappropriate — a tuple of two
+/// unrelated types isn't a semantic unit — so we expose a small curry helper instead:
+/// `.map_err(discord_call_error(SITE))` reads as "treat any serenity error from this
+/// call as a DiscordCall failure tagged with SITE".
 fn discord_call_error(site: DiscordCallSite) -> impl FnOnce(serenity::Error) -> LedgerRouteError {
     move |error| LedgerRouteError::Internal(InternalLedgerRouteError::DiscordCall { site, error })
-}
-
-fn map_guard_error(error: LedgerInteractionGuardError) -> LedgerRouteError {
-    match error {
-        LedgerInteractionGuardError::GuildOnly => LedgerRouteError::GuildOnly,
-        LedgerInteractionGuardError::NotInTrackedChannel { .. } => {
-            LedgerRouteError::NotInTrackedChannel
-        }
-    }
-}
-
-fn map_modal_build_error(error: ExpenseModalBuildError) -> LedgerRouteError {
-    InternalLedgerRouteError::ExpenseModalBuild(error).into()
-}
-
-fn map_construction_error(error: ExpenseSessionConstructionError) -> LedgerRouteError {
-    InternalLedgerRouteError::SessionConstruction(error).into()
 }
 
 pub(crate) const EXPENSE_CANCEL_CUSTOM_ID_PREFIX: &str = "ledger:expense:cancel:";
@@ -805,10 +855,6 @@ fn step_action_rows_for_phase(
             .style(ButtonStyle::Danger),
     ]));
     rows
-}
-
-fn map_navigation_error(error: NavigationError) -> LedgerRouteError {
-    InternalLedgerRouteError::Navigation(error).into()
 }
 
 fn format_money_for_modal(money: walicord_domain::Money) -> String {
