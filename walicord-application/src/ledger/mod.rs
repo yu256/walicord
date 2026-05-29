@@ -12,6 +12,7 @@ pub mod participant_resolution;
 pub mod preview_store;
 mod seal;
 pub mod settle_flow;
+pub mod write_coordinator;
 
 pub use walicord_ledger::{
     AdjustmentReason, AdjustmentReasonError, BalanceAdjusted, BalanceAdjustedError,

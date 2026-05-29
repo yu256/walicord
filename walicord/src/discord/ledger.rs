@@ -121,9 +121,6 @@ mod store;
 #[allow(dead_code)]
 #[path = "ledger/void_flow.rs"]
 mod void_flow;
-#[allow(dead_code)]
-#[path = "ledger/write_coordinator.rs"]
-mod write_coordinator;
 
 #[cfg(test)]
 pub(crate) use self::{
@@ -156,11 +153,11 @@ pub(crate) use self::{
     router::{InteractionDispatch, LedgerRouter, LedgerRouterDependencies},
     runtime_clock::{ProcessNonceProvider, SystemClock},
     store::{DiscordCanonicalLedgerStore, WriterLineagePolicy},
-    write_coordinator::{UncertainWriteRegistry, WriteCoordinator},
 };
 pub(crate) use walicord_application::ledger::{
     expense_session::{ExpenseSessionStore, ModalRetryBindingStore, VoidSessionStore},
     preview_store::PreviewStore,
+    write_coordinator::{UncertainWriteRegistry, WriteCoordinator},
 };
 
 pub const LEDGER_ATTACHMENT_FILENAME: &str = "walicord-ledger-entry.json";

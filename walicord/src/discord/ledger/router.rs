@@ -45,9 +45,6 @@ use super::{
     store::{
         DiscordCanonicalLedgerStore, StoreLoadError, StoreWriteError, VerifiedLedgerThreadLoad,
     },
-    write_coordinator::{
-        RetainedCanonicalWrite, UncertainWriteRegistry, WriteCoordinator, WriteTargetKey,
-    },
 };
 
 use walicord_application::ledger::{
@@ -62,6 +59,9 @@ use walicord_application::ledger::{
         compose_expense_entry,
     },
     preview_store::PreviewStore,
+    write_coordinator::{
+        RetainedCanonicalWrite, UncertainWriteRegistry, WriteCoordinator, WriteTargetKey,
+    },
 };
 
 /// Wired dependency graph required to dispatch any Discord ledger interaction. The
@@ -629,7 +629,7 @@ impl LedgerRouter {
         }
 
         let ledger_id = LedgerId(channel_id.get());
-        let write_target = WriteTargetKey::Published(ledger_id);
+        let write_target = ledger_id;
 
         // Per-ledger serialization (criterion 53 / 115 / 155 / 182): every canonical
         // append for this ledger holds the same async mutex for its whole lifecycle.
