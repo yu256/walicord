@@ -77,9 +77,6 @@ use walicord_presentation::{
 #[path = "ledger/adapters.rs"]
 mod adapters;
 #[allow(dead_code)]
-#[path = "ledger/codec.rs"]
-mod codec;
-#[allow(dead_code)]
 #[path = "ledger/expense_modal_open.rs"]
 mod expense_modal_open;
 #[allow(dead_code)]
@@ -7871,50 +7868,50 @@ pub fn encode_discord_canonical_attachment(
     envelope: &UnverifiedLedgerStoreEnvelope<()>,
     pre_self_link_content: Option<&str>,
 ) -> Result<Vec<u8>, LedgerAttachmentError> {
-    codec::CanonicalAttachmentCodec::encode_with_pre_self_link_content(
+    walicord_application::ledger::canonical_attachment::CanonicalAttachmentCodec::encode_with_pre_self_link_content(
         envelope,
         pre_self_link_content,
     )
     .map_err(|error| match error {
-        codec::AttachmentCodecError::Clock => LedgerAttachmentError::Clock,
-        codec::AttachmentCodecError::JsonEncode(error) => LedgerAttachmentError::JsonEncode(error),
-        codec::AttachmentCodecError::UnsupportedTransportVersion(version) => {
+        walicord_application::ledger::canonical_attachment::AttachmentCodecError::Clock => LedgerAttachmentError::Clock,
+        walicord_application::ledger::canonical_attachment::AttachmentCodecError::JsonEncode(error) => LedgerAttachmentError::JsonEncode(error),
+        walicord_application::ledger::canonical_attachment::AttachmentCodecError::UnsupportedTransportVersion(version) => {
             LedgerAttachmentError::UnsupportedVersion(version)
         }
-        codec::AttachmentCodecError::InvalidHashLength => LedgerAttachmentError::InvalidHashLength,
-        codec::AttachmentCodecError::InvalidHashHex => LedgerAttachmentError::InvalidHashHex,
-        codec::AttachmentCodecError::InvalidMoney => LedgerAttachmentError::InvalidMoney,
-        codec::AttachmentCodecError::InvalidSourceKind(kind) => {
+        walicord_application::ledger::canonical_attachment::AttachmentCodecError::InvalidHashLength => LedgerAttachmentError::InvalidHashLength,
+        walicord_application::ledger::canonical_attachment::AttachmentCodecError::InvalidHashHex => LedgerAttachmentError::InvalidHashHex,
+        walicord_application::ledger::canonical_attachment::AttachmentCodecError::InvalidMoney => LedgerAttachmentError::InvalidMoney,
+        walicord_application::ledger::canonical_attachment::AttachmentCodecError::InvalidSourceKind(kind) => {
             LedgerAttachmentError::InvalidSourceKind(kind)
         }
-        codec::AttachmentCodecError::InvalidSource => LedgerAttachmentError::InvalidSource,
-        codec::AttachmentCodecError::InvalidEffectiveDate => {
+        walicord_application::ledger::canonical_attachment::AttachmentCodecError::InvalidSource => LedgerAttachmentError::InvalidSource,
+        walicord_application::ledger::canonical_attachment::AttachmentCodecError::InvalidEffectiveDate => {
             LedgerAttachmentError::InvalidEffectiveDate
         }
-        codec::AttachmentCodecError::InvalidRecordedAt => LedgerAttachmentError::InvalidRecordedAt,
-        codec::AttachmentCodecError::InvalidAllocationSnapshot => {
+        walicord_application::ledger::canonical_attachment::AttachmentCodecError::InvalidRecordedAt => LedgerAttachmentError::InvalidRecordedAt,
+        walicord_application::ledger::canonical_attachment::AttachmentCodecError::InvalidAllocationSnapshot => {
             LedgerAttachmentError::InvalidAllocationSnapshot
         }
-        codec::AttachmentCodecError::InvalidNote => LedgerAttachmentError::InvalidNote,
-        codec::AttachmentCodecError::InvalidExpenseEvent => {
+        walicord_application::ledger::canonical_attachment::AttachmentCodecError::InvalidNote => LedgerAttachmentError::InvalidNote,
+        walicord_application::ledger::canonical_attachment::AttachmentCodecError::InvalidExpenseEvent => {
             LedgerAttachmentError::InvalidExpenseEvent
         }
-        codec::AttachmentCodecError::InvalidSettlementEvent => {
+        walicord_application::ledger::canonical_attachment::AttachmentCodecError::InvalidSettlementEvent => {
             LedgerAttachmentError::InvalidSettlementEvent
         }
-        codec::AttachmentCodecError::InvalidAdjustmentReason => {
+        walicord_application::ledger::canonical_attachment::AttachmentCodecError::InvalidAdjustmentReason => {
             LedgerAttachmentError::InvalidAdjustmentReason
         }
-        codec::AttachmentCodecError::InvalidAdjustmentEvent => {
+        walicord_application::ledger::canonical_attachment::AttachmentCodecError::InvalidAdjustmentEvent => {
             LedgerAttachmentError::InvalidAdjustmentEvent
         }
-        codec::AttachmentCodecError::InvalidHashSuite(suite) => {
+        walicord_application::ledger::canonical_attachment::AttachmentCodecError::InvalidHashSuite(suite) => {
             LedgerAttachmentError::InvalidHashSuite(suite)
         }
-        codec::AttachmentCodecError::JsonDecode(_)
-        | codec::AttachmentCodecError::UnreadableAttachment(_)
-        | codec::AttachmentCodecError::UnknownSchemaVersion { .. }
-        | codec::AttachmentCodecError::UnknownEventVariant { .. } => {
+        walicord_application::ledger::canonical_attachment::AttachmentCodecError::JsonDecode(_)
+        | walicord_application::ledger::canonical_attachment::AttachmentCodecError::UnreadableAttachment(_)
+        | walicord_application::ledger::canonical_attachment::AttachmentCodecError::UnknownSchemaVersion { .. }
+        | walicord_application::ledger::canonical_attachment::AttachmentCodecError::UnknownEventVariant { .. } => {
             unreachable!("attachment encoding should not emit decode-only errors")
         }
     })
@@ -7925,46 +7922,46 @@ pub fn decode_discord_canonical_attachment<ExternalId>(
     bytes: &[u8],
     external_id: ExternalId,
 ) -> Result<UnverifiedLedgerStoreEnvelope<ExternalId>, LedgerAttachmentError> {
-    codec::CanonicalAttachmentCodec::decode(bytes, external_id).map_err(|error| match error {
-        codec::AttachmentCodecError::Clock => LedgerAttachmentError::Clock,
-        codec::AttachmentCodecError::JsonEncode(error) => LedgerAttachmentError::JsonEncode(error),
-        codec::AttachmentCodecError::JsonDecode(error) => LedgerAttachmentError::JsonDecode(error),
-        codec::AttachmentCodecError::UnsupportedTransportVersion(version)
-        | codec::AttachmentCodecError::UnknownSchemaVersion { version, .. } => {
+    walicord_application::ledger::canonical_attachment::CanonicalAttachmentCodec::decode(bytes, external_id).map_err(|error| match error {
+        walicord_application::ledger::canonical_attachment::AttachmentCodecError::Clock => LedgerAttachmentError::Clock,
+        walicord_application::ledger::canonical_attachment::AttachmentCodecError::JsonEncode(error) => LedgerAttachmentError::JsonEncode(error),
+        walicord_application::ledger::canonical_attachment::AttachmentCodecError::JsonDecode(error) => LedgerAttachmentError::JsonDecode(error),
+        walicord_application::ledger::canonical_attachment::AttachmentCodecError::UnsupportedTransportVersion(version)
+        | walicord_application::ledger::canonical_attachment::AttachmentCodecError::UnknownSchemaVersion { version, .. } => {
             LedgerAttachmentError::UnsupportedVersion(version)
         }
-        codec::AttachmentCodecError::InvalidHashLength => LedgerAttachmentError::InvalidHashLength,
-        codec::AttachmentCodecError::InvalidHashHex => LedgerAttachmentError::InvalidHashHex,
-        codec::AttachmentCodecError::InvalidMoney => LedgerAttachmentError::InvalidMoney,
-        codec::AttachmentCodecError::InvalidSourceKind(kind) => {
+        walicord_application::ledger::canonical_attachment::AttachmentCodecError::InvalidHashLength => LedgerAttachmentError::InvalidHashLength,
+        walicord_application::ledger::canonical_attachment::AttachmentCodecError::InvalidHashHex => LedgerAttachmentError::InvalidHashHex,
+        walicord_application::ledger::canonical_attachment::AttachmentCodecError::InvalidMoney => LedgerAttachmentError::InvalidMoney,
+        walicord_application::ledger::canonical_attachment::AttachmentCodecError::InvalidSourceKind(kind) => {
             LedgerAttachmentError::InvalidSourceKind(kind)
         }
-        codec::AttachmentCodecError::InvalidSource => LedgerAttachmentError::InvalidSource,
-        codec::AttachmentCodecError::InvalidEffectiveDate => {
+        walicord_application::ledger::canonical_attachment::AttachmentCodecError::InvalidSource => LedgerAttachmentError::InvalidSource,
+        walicord_application::ledger::canonical_attachment::AttachmentCodecError::InvalidEffectiveDate => {
             LedgerAttachmentError::InvalidEffectiveDate
         }
-        codec::AttachmentCodecError::InvalidRecordedAt => LedgerAttachmentError::InvalidRecordedAt,
-        codec::AttachmentCodecError::InvalidAllocationSnapshot => {
+        walicord_application::ledger::canonical_attachment::AttachmentCodecError::InvalidRecordedAt => LedgerAttachmentError::InvalidRecordedAt,
+        walicord_application::ledger::canonical_attachment::AttachmentCodecError::InvalidAllocationSnapshot => {
             LedgerAttachmentError::InvalidAllocationSnapshot
         }
-        codec::AttachmentCodecError::InvalidNote => LedgerAttachmentError::InvalidNote,
-        codec::AttachmentCodecError::InvalidExpenseEvent => {
+        walicord_application::ledger::canonical_attachment::AttachmentCodecError::InvalidNote => LedgerAttachmentError::InvalidNote,
+        walicord_application::ledger::canonical_attachment::AttachmentCodecError::InvalidExpenseEvent => {
             LedgerAttachmentError::InvalidExpenseEvent
         }
-        codec::AttachmentCodecError::InvalidSettlementEvent => {
+        walicord_application::ledger::canonical_attachment::AttachmentCodecError::InvalidSettlementEvent => {
             LedgerAttachmentError::InvalidSettlementEvent
         }
-        codec::AttachmentCodecError::InvalidAdjustmentReason => {
+        walicord_application::ledger::canonical_attachment::AttachmentCodecError::InvalidAdjustmentReason => {
             LedgerAttachmentError::InvalidAdjustmentReason
         }
-        codec::AttachmentCodecError::InvalidAdjustmentEvent => {
+        walicord_application::ledger::canonical_attachment::AttachmentCodecError::InvalidAdjustmentEvent => {
             LedgerAttachmentError::InvalidAdjustmentEvent
         }
-        codec::AttachmentCodecError::InvalidHashSuite(suite) => {
+        walicord_application::ledger::canonical_attachment::AttachmentCodecError::InvalidHashSuite(suite) => {
             LedgerAttachmentError::InvalidHashSuite(suite)
         }
-        codec::AttachmentCodecError::UnreadableAttachment(_)
-        | codec::AttachmentCodecError::UnknownEventVariant { .. } => {
+        walicord_application::ledger::canonical_attachment::AttachmentCodecError::UnreadableAttachment(_)
+        | walicord_application::ledger::canonical_attachment::AttachmentCodecError::UnknownEventVariant { .. } => {
             unreachable!("in-memory attachment decode should not emit transport-read errors")
         }
     })

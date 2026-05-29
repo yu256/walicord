@@ -1,17 +1,17 @@
-use rust_decimal::Decimal;
-use serde::{Deserialize, Serialize};
-use sha2::{Digest as _, Sha256};
-use std::{
-    str::FromStr,
-    time::{SystemTime, UNIX_EPOCH},
-};
-use walicord_application::ledger::{
+use crate::ledger::{
     AllocationSnapshot, BalanceAdjusted, BalanceAdjustment, BalanceAdjustmentSource, EntryHash,
     EntryVoided, ExpenseNote, ExpenseRecorded, HashedLedgerPayload, LedgerEffectiveDate,
     LedgerEntry, LedgerEntryId, LedgerEntryMetadata, LedgerEvent, LedgerHashSuite,
     LedgerHistorySealed, LedgerId, LedgerSourceCanonical, LedgerSourceCanonicalKind, MemberAmount,
     MemberWeight, NormalizedSettlementPlanRecorded, SchemaVersion, UnverifiedLedgerStoreEnvelope,
     external_correction_source_for_transport_decode,
+};
+use rust_decimal::Decimal;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
+use std::{
+    str::FromStr,
+    time::{SystemTime, UNIX_EPOCH},
 };
 use walicord_domain::{
     Money, Transfer,
@@ -536,7 +536,7 @@ fn decode_event(
                         .into_iter()
                         .map(BalanceAdjustmentDto::into_adjustment)
                         .collect::<Result<_, _>>()?,
-                    walicord_application::ledger::AdjustmentReason::new(dto.reason)
+                    crate::ledger::AdjustmentReason::new(dto.reason)
                         .map_err(|_| AttachmentCodecError::InvalidAdjustmentReason)?,
                     dto.source.into_source()?,
                 )
@@ -795,11 +795,11 @@ fn source_kind_name(kind: LedgerSourceCanonicalKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::Value;
-    use walicord_application::ledger::{
+    use crate::ledger::{
         ledger_chain_genesis_sha256_v1, load_and_replay_verified_sha256_v1,
         make_unverified_envelope_sha256_v1,
     };
+    use serde_json::Value;
 
     fn expense_entry() -> LedgerEntry {
         LedgerEntry::expense(

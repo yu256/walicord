@@ -1,10 +1,8 @@
-use super::{
-    codec::AttachmentCodecError,
-    store::{StoreLoadError, VerifiedLedgerThreadLoad},
-};
+use super::store::{StoreLoadError, VerifiedLedgerThreadLoad};
 use std::time::SystemTime;
 use walicord_application::ledger::{
     LedgerEntry, LedgerEntryId, ProjectedEntryInfo, ProjectedEntryKind,
+    canonical_attachment::AttachmentCodecError,
 };
 use walicord_i18n as i18n;
 use walicord_presentation::discord_ledger::{

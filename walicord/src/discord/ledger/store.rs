@@ -1,8 +1,4 @@
-use super::{
-    LEDGER_ATTACHMENT_FILENAME,
-    codec::{AttachmentCodecError, CanonicalAttachmentCodec},
-    fetch_all_channel_messages,
-};
+use super::{LEDGER_ATTACHMENT_FILENAME, fetch_all_channel_messages};
 use serenity::{
     all::{ChannelId, GuildId, Message, MessageId, UserId},
     prelude::Context,
@@ -20,6 +16,7 @@ use std::{
 use walicord_application::ledger::{
     LedgerEntry, LedgerEntryId, LedgerEvent, LedgerId, LedgerLoadError, LedgerReplayError,
     UnverifiedLedgerStoreEnvelope, VerifiedLedgerSnapshot, VerifiedLedgerStoreEnvelope,
+    canonical_attachment::{AttachmentCodecError, CanonicalAttachmentCodec},
     replay_verified_snapshot, verify_envelope_sha256_v1,
     verify_envelopes_in_append_order_sha256_v1,
 };

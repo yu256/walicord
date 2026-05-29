@@ -3396,6 +3396,8 @@ dependencies = [
  "proptest",
  "rstest",
  "rust_decimal",
+ "serde",
+ "serde_json",
  "sha2 0.11.0",
  "smol_str",
  "thiserror 2.0.17",

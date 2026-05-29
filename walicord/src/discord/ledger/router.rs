@@ -782,7 +782,7 @@ impl LedgerRouter {
 
         let prepared_body = render_public_expense_body(&entry, ledger_id, display_names)?;
         let envelope_bytes =
-            super::codec::CanonicalAttachmentCodec::encode_with_pre_self_link_content(
+            walicord_application::ledger::canonical_attachment::CanonicalAttachmentCodec::encode_with_pre_self_link_content(
                 &envelope,
                 Some(prepared_body.as_str()),
             )
