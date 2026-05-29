@@ -1,13 +1,14 @@
 use serenity::{
     all::{
-        CommandInteraction, ComponentInteraction, CreateInteractionResponse,
-        CreateInteractionResponseMessage, ModalInteraction,
+        ButtonStyle, CommandInteraction, ComponentInteraction, CreateActionRow, CreateButton,
+        CreateInteractionResponse, CreateInteractionResponseMessage, ModalInteraction,
     },
     prelude::Context,
 };
 use std::sync::Arc;
 use walicord_application::{Clock, NonceProvider, SettlementPlanner};
 use walicord_domain::model::MemberId;
+use walicord_i18n as i18n;
 use walicord_presentation::discord_ledger::{
     DiscordLedgerPresenter, PanelButtonStates, PanelSurfaceModel,
 };
@@ -15,7 +16,10 @@ use walicord_presentation::discord_ledger::{
 use crate::channel::ChannelManager;
 
 use super::{
-    expense_flow::{NavigationError, bootstrap_expense_session, navigate_back},
+    expense_flow::{
+        NavigationError, bootstrap_expense_session, navigate_back, navigate_to_phase,
+        toggle_members_group,
+    },
     expense_modal::{ExpenseModalValidationError, validate_expense_modal_submission},
     expense_modal_open::{
         ExpenseModalBuildError, ExpenseModalCustomIdMatch, ExpenseModalPrefill,
@@ -28,8 +32,9 @@ use super::{
     response_writer::{rendered_surface_to_message, suppressed_allowed_mentions},
     route_guard::{LedgerInteractionGuardError, guard_ledger_interaction},
     sessions::{
-        ExpenseSessionConstructionError, ExpenseSessionKey, ExpenseSessionStore, ModalRetryBinding,
-        ModalRetryBindingStore, ModalRetryPreserved, VoidSessionStore,
+        ExpenseSelectionPhase, ExpenseSessionConstructionError, ExpenseSessionKey,
+        ExpenseSessionStage, ExpenseSessionStore, ModalRetryBinding, ModalRetryBindingStore,
+        ModalRetryPreserved, VoidSessionStore,
     },
     store::DiscordCanonicalLedgerStore,
     write_coordinator::{UncertainWriteRegistry, WriteCoordinator},
@@ -177,9 +182,9 @@ impl LedgerRouter {
         Ok(InteractionDispatch::Handled)
     }
 
-    /// Component (button / select-menu) dispatch. Currently handles the panel
-    /// `記録する` launcher; subsequent slices add the rest of the
-    /// `ledger:panel:*` buttons and session-scoped controls.
+    /// Component (button / select-menu) dispatch. Handles the panel launcher and the
+    /// session-scoped selection wizard navigation; the picker select menus and the
+    /// final `record` write button are wired in follow-up commits.
     pub async fn handle_component(
         &self,
         ctx: &Context,
@@ -188,31 +193,161 @@ impl LedgerRouter {
         if component.data.custom_id == LEDGER_PANEL_EXPENSE_ID {
             return self.dispatch_panel_expense_launcher(ctx, component).await;
         }
-        if parse_expense_session_button_nonce(
-            &component.data.custom_id,
-            EXPENSE_CANCEL_CUSTOM_ID_PREFIX,
-        )
-        .is_some()
+        let custom_id = component.data.custom_id.as_str();
+        if parse_expense_session_button_nonce(custom_id, EXPENSE_CANCEL_CUSTOM_ID_PREFIX).is_some()
         {
             return self.dispatch_expense_cancel(ctx, component).await;
         }
-        if parse_expense_session_button_nonce(
-            &component.data.custom_id,
-            EXPENSE_BACK_CUSTOM_ID_PREFIX,
-        )
-        .is_some()
-        {
+        if parse_expense_session_button_nonce(custom_id, EXPENSE_BACK_CUSTOM_ID_PREFIX).is_some() {
             return self.dispatch_expense_back(ctx, component).await;
         }
-        if parse_expense_session_button_nonce(
-            &component.data.custom_id,
-            EXPENSE_BASIC_EDIT_CUSTOM_ID_PREFIX,
-        )
-        .is_some()
+        if parse_expense_session_button_nonce(custom_id, EXPENSE_BASIC_EDIT_CUSTOM_ID_PREFIX)
+            .is_some()
         {
             return self.dispatch_expense_basic_edit(ctx, component).await;
         }
+        if parse_expense_session_button_nonce(custom_id, EXPENSE_TO_PARTICIPANTS_CUSTOM_ID_PREFIX)
+            .is_some()
+        {
+            return self
+                .dispatch_expense_forward(ctx, component, ExpenseSelectionPhase::ParticipantSource)
+                .await;
+        }
+        if parse_expense_session_button_nonce(custom_id, EXPENSE_SOURCE_INDIVIDUAL_CUSTOM_ID_PREFIX)
+            .is_some()
+        {
+            return self
+                .dispatch_expense_forward(
+                    ctx,
+                    component,
+                    ExpenseSelectionPhase::IndividualSelection,
+                )
+                .await;
+        }
+        if parse_expense_session_button_nonce(custom_id, EXPENSE_SOURCE_ROLES_CUSTOM_ID_PREFIX)
+            .is_some()
+        {
+            return self
+                .dispatch_expense_forward(ctx, component, ExpenseSelectionPhase::Roles)
+                .await;
+        }
+        if parse_expense_session_button_nonce(custom_id, EXPENSE_SOURCE_MEMBERS_CUSTOM_ID_PREFIX)
+            .is_some()
+        {
+            return self.dispatch_expense_members_toggle(ctx, component).await;
+        }
+        if parse_expense_session_button_nonce(custom_id, EXPENSE_TO_WEIGHTS_CUSTOM_ID_PREFIX)
+            .is_some()
+        {
+            return self
+                .dispatch_expense_forward(ctx, component, ExpenseSelectionPhase::WeightEditor)
+                .await;
+        }
         Ok(InteractionDispatch::Ignored)
+    }
+
+    /// Apply a legal forward selection-wizard transition, persist the new session,
+    /// and refresh the actor's ephemeral with the next step's chrome. Illegal
+    /// transitions silently refresh the current step instead of corrupting state.
+    async fn dispatch_expense_forward(
+        &self,
+        ctx: &Context,
+        component: &ComponentInteraction,
+        target: ExpenseSelectionPhase,
+    ) -> Result<InteractionDispatch, LedgerRouteError> {
+        let (guild_id, channel_id) = guard_ledger_interaction(
+            component.guild_id,
+            component.channel_id,
+            self.deps.channels.as_ref(),
+        )
+        .map_err(map_guard_error)?;
+        let key = ExpenseSessionKey::new(guild_id, channel_id, MemberId(component.user.id.get()));
+        let Some(current) = self.deps.expense_sessions.clear(key) else {
+            return self.respond_expense_session_missing(ctx, component).await;
+        };
+        match navigate_to_phase(current, target.clone(), self.deps.clock.as_ref()) {
+            Ok(updated) => {
+                let next_phase = match updated.stage() {
+                    ExpenseSessionStage::InSelection { phase } => phase.clone(),
+                    other => {
+                        return Err(LedgerRouteError::Internal(format!(
+                            "expense forward navigation landed on non-selection stage: {other:?}"
+                        )));
+                    }
+                };
+                let nonce = updated.nonce();
+                self.deps.expense_sessions.replace(updated);
+                self.respond_with_step_body(ctx, component, &next_phase, nonce)
+                    .await
+            }
+            Err(NavigationError::IllegalForwardTransition { from, .. }) => {
+                // The session was cleared above without being mutated; we have lost it
+                // because navigate_to_phase consumed it. Treat this defensively as
+                // session missing so the actor restarts cleanly.
+                let _ = (key, from);
+                self.respond_expense_session_missing(ctx, component).await
+            }
+            Err(other) => Err(map_navigation_error(other)),
+        }
+    }
+
+    /// Toggle the `MEMBERS` virtual group on the active session and refresh the
+    /// participant-source step chrome.
+    async fn dispatch_expense_members_toggle(
+        &self,
+        ctx: &Context,
+        component: &ComponentInteraction,
+    ) -> Result<InteractionDispatch, LedgerRouteError> {
+        let (guild_id, channel_id) = guard_ledger_interaction(
+            component.guild_id,
+            component.channel_id,
+            self.deps.channels.as_ref(),
+        )
+        .map_err(map_guard_error)?;
+        let key = ExpenseSessionKey::new(guild_id, channel_id, MemberId(component.user.id.get()));
+        let Some(current) = self.deps.expense_sessions.clear(key) else {
+            return self.respond_expense_session_missing(ctx, component).await;
+        };
+        let updated = toggle_members_group(current, self.deps.clock.as_ref())
+            .map_err(map_navigation_error)?;
+        let nonce = updated.nonce();
+        self.deps.expense_sessions.replace(updated);
+        self.respond_with_step_body(
+            ctx,
+            component,
+            &ExpenseSelectionPhase::ParticipantSource,
+            nonce,
+        )
+        .await
+    }
+
+    /// Render the chrome (title + Back/Cancel + phase-specific buttons) for a selection
+    /// phase. The picker select menus and the confirmation summary are added in a
+    /// follow-up commit; this scaffolds the navigation so the actor can walk the wizard
+    /// end-to-end without falling through to the legacy code path.
+    async fn respond_with_step_body(
+        &self,
+        ctx: &Context,
+        component: &ComponentInteraction,
+        phase: &ExpenseSelectionPhase,
+        nonce: walicord_application::InteractionNonce,
+    ) -> Result<InteractionDispatch, LedgerRouteError> {
+        let title = step_title_for_phase(phase);
+        let components = step_action_rows_for_phase(phase, nonce);
+        let response = CreateInteractionResponse::UpdateMessage(
+            CreateInteractionResponseMessage::new()
+                .ephemeral(true)
+                .allowed_mentions(suppressed_allowed_mentions())
+                .content(title)
+                .components(components),
+        );
+        component
+            .create_response(&ctx.http, response)
+            .await
+            .map_err(|error| {
+                LedgerRouteError::Internal(format!("expense step refresh: {error}"))
+            })?;
+        Ok(InteractionDispatch::Handled)
     }
 
     /// Re-open the expense modal prefilled from the session's current basic_info so
@@ -276,11 +411,18 @@ impl LedgerRouter {
         };
         match navigate_back(current, self.deps.clock.as_ref()) {
             Ok(updated) => {
+                let previous_phase = match updated.stage() {
+                    ExpenseSessionStage::InSelection { phase } => phase.clone(),
+                    other => {
+                        return Err(LedgerRouteError::Internal(format!(
+                            "expense back navigation landed on non-selection stage: {other:?}"
+                        )));
+                    }
+                };
+                let nonce = updated.nonce();
                 self.deps.expense_sessions.replace(updated);
-                // The actual rendered selection-step body is wired in a later slice;
-                // for now we acknowledge so Discord does not time out and the legacy
-                // handler does not also try to handle this button.
-                self.acknowledge_navigation(ctx, component).await
+                self.respond_with_step_body(ctx, component, &previous_phase, nonce)
+                    .await
             }
             Err(NavigationError::AlreadyAtFirstStep) => {
                 // From the first phase Back == Cancel (criterion 201).
@@ -306,26 +448,6 @@ impl LedgerRouter {
             .await
             .map_err(|error| {
                 LedgerRouteError::Internal(format!("expense session missing reply: {error}"))
-            })?;
-        Ok(InteractionDispatch::Handled)
-    }
-
-    async fn acknowledge_navigation(
-        &self,
-        ctx: &Context,
-        component: &ComponentInteraction,
-    ) -> Result<InteractionDispatch, LedgerRouteError> {
-        let response = CreateInteractionResponse::UpdateMessage(
-            CreateInteractionResponseMessage::new()
-                .ephemeral(true)
-                .allowed_mentions(suppressed_allowed_mentions())
-                .content(walicord_i18n::expense_step_title_payer()),
-        );
-        component
-            .create_response(&ctx.http, response)
-            .await
-            .map_err(|error| {
-                LedgerRouteError::Internal(format!("expense navigation ack: {error}"))
             })?;
         Ok(InteractionDispatch::Handled)
     }
@@ -440,7 +562,7 @@ impl LedgerRouter {
                 let _ = guild_id;
                 let key =
                     ExpenseSessionKey::new(guild_id, channel_id, MemberId(modal.user.id.get()));
-                let (session, _nonce) = bootstrap_expense_session(
+                let (session, nonce) = bootstrap_expense_session(
                     key,
                     validated,
                     self.deps.clock.as_ref(),
@@ -448,7 +570,7 @@ impl LedgerRouter {
                 )
                 .map_err(map_construction_error)?;
                 self.deps.expense_sessions.replace(session);
-                self.acknowledge_modal_success(ctx, modal).await
+                self.acknowledge_modal_success(ctx, modal, nonce).await
             }
         }
     }
@@ -497,12 +619,17 @@ impl LedgerRouter {
         &self,
         ctx: &Context,
         modal: &ModalInteraction,
+        nonce: walicord_application::InteractionNonce,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
         let response = CreateInteractionResponse::Message(
             CreateInteractionResponseMessage::new()
                 .ephemeral(true)
                 .allowed_mentions(suppressed_allowed_mentions())
-                .content(walicord_i18n::expense_step_title_payer()),
+                .content(i18n::expense_step_title_payer())
+                .components(step_action_rows_for_phase(
+                    &ExpenseSelectionPhase::Payer,
+                    nonce,
+                )),
         );
         modal
             .create_response(&ctx.http, response)
@@ -538,6 +665,92 @@ fn map_construction_error(error: ExpenseSessionConstructionError) -> LedgerRoute
 pub(crate) const EXPENSE_CANCEL_CUSTOM_ID_PREFIX: &str = "ledger:expense:cancel:";
 pub(crate) const EXPENSE_BACK_CUSTOM_ID_PREFIX: &str = "ledger:expense:back:";
 pub(crate) const EXPENSE_BASIC_EDIT_CUSTOM_ID_PREFIX: &str = "ledger:expense:basic-edit:";
+pub(crate) const EXPENSE_TO_PARTICIPANTS_CUSTOM_ID_PREFIX: &str = "ledger:expense:to-participants:";
+pub(crate) const EXPENSE_SOURCE_INDIVIDUAL_CUSTOM_ID_PREFIX: &str =
+    "ledger:expense:source-individual:";
+pub(crate) const EXPENSE_SOURCE_ROLES_CUSTOM_ID_PREFIX: &str = "ledger:expense:source-roles:";
+pub(crate) const EXPENSE_SOURCE_MEMBERS_CUSTOM_ID_PREFIX: &str = "ledger:expense:source-members:";
+pub(crate) const EXPENSE_TO_WEIGHTS_CUSTOM_ID_PREFIX: &str = "ledger:expense:to-weights:";
+
+fn step_title_for_phase(phase: &ExpenseSelectionPhase) -> &'static str {
+    match phase {
+        ExpenseSelectionPhase::Payer => i18n::expense_step_title_payer(),
+        ExpenseSelectionPhase::ParticipantSource
+        | ExpenseSelectionPhase::IndividualSelection
+        | ExpenseSelectionPhase::Roles => i18n::expense_step_title_participants(),
+        ExpenseSelectionPhase::WeightEditor => i18n::expense_step_title_weight(),
+    }
+}
+
+/// Build the chrome action rows for a selection-wizard step. Each phase ends with a
+/// `Back` and `Cancel` row so the actor always has an exit; the phase-specific row
+/// carries the forward-navigation buttons and any toggle (`MEMBERS`) controls. The
+/// per-step picker select menus are added in a follow-up commit.
+fn step_action_rows_for_phase(
+    phase: &ExpenseSelectionPhase,
+    nonce: walicord_application::InteractionNonce,
+) -> Vec<CreateActionRow> {
+    let mut rows = Vec::new();
+    let phase_specific = match phase {
+        ExpenseSelectionPhase::Payer => vec![
+            CreateButton::new(format!(
+                "{EXPENSE_TO_PARTICIPANTS_CUSTOM_ID_PREFIX}{}",
+                nonce.get()
+            ))
+            .label(i18n::expense_next_label())
+            .style(ButtonStyle::Primary),
+        ],
+        ExpenseSelectionPhase::ParticipantSource => vec![
+            CreateButton::new(format!(
+                "{EXPENSE_SOURCE_INDIVIDUAL_CUSTOM_ID_PREFIX}{}",
+                nonce.get()
+            ))
+            .label(i18n::participant_source_individual_label())
+            .style(ButtonStyle::Secondary),
+            CreateButton::new(format!(
+                "{EXPENSE_SOURCE_ROLES_CUSTOM_ID_PREFIX}{}",
+                nonce.get()
+            ))
+            .label(i18n::participant_source_role_label())
+            .style(ButtonStyle::Secondary),
+            CreateButton::new(format!(
+                "{EXPENSE_SOURCE_MEMBERS_CUSTOM_ID_PREFIX}{}",
+                nonce.get()
+            ))
+            .label(i18n::participant_source_members_label())
+            .style(ButtonStyle::Secondary),
+            CreateButton::new(format!(
+                "{EXPENSE_TO_WEIGHTS_CUSTOM_ID_PREFIX}{}",
+                nonce.get()
+            ))
+            .label(i18n::expense_to_weights_label())
+            .style(ButtonStyle::Primary),
+        ],
+        ExpenseSelectionPhase::IndividualSelection | ExpenseSelectionPhase::Roles => {
+            vec![
+                CreateButton::new(format!(
+                    "{EXPENSE_TO_WEIGHTS_CUSTOM_ID_PREFIX}{}",
+                    nonce.get()
+                ))
+                .label(i18n::expense_to_weights_label())
+                .style(ButtonStyle::Primary),
+            ]
+        }
+        ExpenseSelectionPhase::WeightEditor => Vec::new(),
+    };
+    if !phase_specific.is_empty() {
+        rows.push(CreateActionRow::Buttons(phase_specific));
+    }
+    rows.push(CreateActionRow::Buttons(vec![
+        CreateButton::new(format!("{EXPENSE_BACK_CUSTOM_ID_PREFIX}{}", nonce.get()))
+            .label(i18n::expense_back_label())
+            .style(ButtonStyle::Secondary),
+        CreateButton::new(format!("{EXPENSE_CANCEL_CUSTOM_ID_PREFIX}{}", nonce.get()))
+            .label(i18n::expense_cancel_label())
+            .style(ButtonStyle::Danger),
+    ]));
+    rows
+}
 
 fn map_navigation_error(error: NavigationError) -> LedgerRouteError {
     LedgerRouteError::Internal(format!("expense navigation failed: {error:?}"))

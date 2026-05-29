@@ -165,6 +165,14 @@ pub enum NavigationError {
     NotInSelection,
     NotInConfirmation,
     BasicInfoMissing,
+    /// The actor pressed a forward-navigation button whose target phase is not a legal
+    /// next step from the current phase (e.g. pressing `重みへ` from `Payer`). The
+    /// session has not been mutated; the caller surfaces the criterion-201 cancel cue
+    /// or refreshes the current step.
+    IllegalForwardTransition {
+        from: ExpenseSelectionPhase,
+        to: ExpenseSelectionPhase,
+    },
     ConstructionFailed(ExpenseSessionConstructionError),
 }
 
@@ -231,6 +239,91 @@ pub fn navigate_modify_selection(
         key,
         ExpenseSessionStage::InSelection {
             phase: ExpenseSelectionPhase::Payer,
+        },
+        draft,
+        nonce,
+        clock.now(),
+    )
+    .map_err(NavigationError::ConstructionFailed)
+}
+
+/// Allowed forward transitions inside the selection wizard. Adding a `Members` toggle
+/// is *not* a transition — it mutates the draft and stays on `ParticipantSource`.
+pub fn legal_forward_target(phase: &ExpenseSelectionPhase) -> &'static [ExpenseSelectionPhase] {
+    match phase {
+        ExpenseSelectionPhase::Payer => &[ExpenseSelectionPhase::ParticipantSource],
+        ExpenseSelectionPhase::ParticipantSource => &[
+            ExpenseSelectionPhase::IndividualSelection,
+            ExpenseSelectionPhase::Roles,
+            ExpenseSelectionPhase::WeightEditor,
+        ],
+        ExpenseSelectionPhase::IndividualSelection => &[ExpenseSelectionPhase::WeightEditor],
+        ExpenseSelectionPhase::Roles => &[ExpenseSelectionPhase::WeightEditor],
+        ExpenseSelectionPhase::WeightEditor => &[],
+    }
+}
+
+/// Forward-navigate one selection phase. Draft state (basic_info, selection_state) is
+/// preserved verbatim; only the stage transitions. Illegal transitions return
+/// `IllegalForwardTransition` so the caller can refresh the current step without
+/// corrupting the session.
+pub fn navigate_to_phase(
+    session: ExpenseSession,
+    target: ExpenseSelectionPhase,
+    clock: &dyn Clock,
+) -> Result<ExpenseSession, NavigationError> {
+    let ExpenseSessionStage::InSelection { phase } = session.stage() else {
+        return Err(NavigationError::NotInSelection);
+    };
+    if !legal_forward_target(phase).contains(&target) {
+        return Err(NavigationError::IllegalForwardTransition {
+            from: phase.clone(),
+            to: target,
+        });
+    }
+    let key = session.key();
+    let nonce = session.nonce();
+    let draft = session.draft().clone();
+    ExpenseSession::new(
+        key,
+        ExpenseSessionStage::InSelection { phase: target },
+        draft,
+        nonce,
+        clock.now(),
+    )
+    .map_err(NavigationError::ConstructionFailed)
+}
+
+/// Toggle the `MEMBERS` (全メンバー) virtual group in the current selection. Allowed
+/// from the `ParticipantSource` phase only; the stage does not change. Per criterion
+/// 214 the MEMBERS group is resolved at record time, so the toggle simply flips a flag
+/// in the draft.
+pub fn toggle_members_group(
+    session: ExpenseSession,
+    clock: &dyn Clock,
+) -> Result<ExpenseSession, NavigationError> {
+    let ExpenseSessionStage::InSelection {
+        phase: ExpenseSelectionPhase::ParticipantSource,
+    } = session.stage()
+    else {
+        return Err(NavigationError::NotInSelection);
+    };
+    let key = session.key();
+    let nonce = session.nonce();
+    let mut selection = session.draft().selection_state().clone();
+    selection.include_members_group = !selection.include_members_group;
+    let basic_info = session
+        .draft()
+        .basic_info()
+        .cloned()
+        .ok_or(NavigationError::BasicInfoMissing)?;
+    let draft = ExpenseDraftSnapshot::empty()
+        .with_basic_info(basic_info)
+        .with_selection_state(selection);
+    ExpenseSession::new(
+        key,
+        ExpenseSessionStage::InSelection {
+            phase: ExpenseSelectionPhase::ParticipantSource,
         },
         draft,
         nonce,
@@ -327,7 +420,7 @@ mod tests {
     fn fixed_clock() -> FixedClock {
         FixedClock {
             today: "2026-05-29",
-            now: UNIX_EPOCH + Duration::from_secs(1748_400_000),
+            now: UNIX_EPOCH + Duration::from_secs(1_748_400_000),
         }
     }
 
@@ -653,6 +746,111 @@ mod tests {
                 phase: ExpenseSelectionPhase::Payer
             }
         );
+    }
+
+    #[rstest::rstest]
+    #[case::payer_to_participant_source(
+        ExpenseSelectionPhase::Payer,
+        ExpenseSelectionPhase::ParticipantSource,
+        true
+    )]
+    #[case::participant_source_to_individual(
+        ExpenseSelectionPhase::ParticipantSource,
+        ExpenseSelectionPhase::IndividualSelection,
+        true
+    )]
+    #[case::participant_source_to_roles(
+        ExpenseSelectionPhase::ParticipantSource,
+        ExpenseSelectionPhase::Roles,
+        true
+    )]
+    #[case::participant_source_to_weight_editor(
+        ExpenseSelectionPhase::ParticipantSource,
+        ExpenseSelectionPhase::WeightEditor,
+        true
+    )]
+    #[case::individual_to_weight_editor(
+        ExpenseSelectionPhase::IndividualSelection,
+        ExpenseSelectionPhase::WeightEditor,
+        true
+    )]
+    #[case::roles_to_weight_editor(
+        ExpenseSelectionPhase::Roles,
+        ExpenseSelectionPhase::WeightEditor,
+        true
+    )]
+    #[case::payer_to_weight_editor_rejected(
+        ExpenseSelectionPhase::Payer,
+        ExpenseSelectionPhase::WeightEditor,
+        false
+    )]
+    #[case::individual_to_roles_rejected(
+        ExpenseSelectionPhase::IndividualSelection,
+        ExpenseSelectionPhase::Roles,
+        false
+    )]
+    #[case::weight_editor_has_no_forward_target(
+        ExpenseSelectionPhase::WeightEditor,
+        ExpenseSelectionPhase::WeightEditor,
+        false
+    )]
+    fn navigate_to_phase_enforces_legal_forward_transitions(
+        #[case] from: ExpenseSelectionPhase,
+        #[case] to: ExpenseSelectionPhase,
+        #[case] expect_ok: bool,
+    ) {
+        let session = session_in_phase(from.clone());
+        let actual = navigate_to_phase(session, to.clone(), &fixed_clock());
+
+        if expect_ok {
+            let next = actual.expect("transition should succeed");
+            assert_eq!(
+                next.stage(),
+                &ExpenseSessionStage::InSelection { phase: to }
+            );
+        } else {
+            assert_eq!(
+                actual.unwrap_err(),
+                NavigationError::IllegalForwardTransition { from, to }
+            );
+        }
+    }
+
+    #[test]
+    fn navigate_to_phase_preserves_draft_state_across_the_transition() {
+        let from = session_in_phase(ExpenseSelectionPhase::Payer);
+        let original_draft = from.draft().clone();
+
+        let next = navigate_to_phase(
+            from,
+            ExpenseSelectionPhase::ParticipantSource,
+            &fixed_clock(),
+        )
+        .expect("legal transition");
+
+        assert_eq!(next.draft(), &original_draft);
+    }
+
+    #[test]
+    fn toggle_members_group_flips_the_include_members_group_flag() {
+        let session = session_in_phase(ExpenseSelectionPhase::ParticipantSource);
+        assert!(!session.draft().selection_state().include_members_group);
+
+        let toggled = toggle_members_group(session, &fixed_clock()).expect("toggle should succeed");
+
+        assert!(toggled.draft().selection_state().include_members_group);
+
+        let toggled_back =
+            toggle_members_group(toggled, &fixed_clock()).expect("toggle should succeed");
+
+        assert!(!toggled_back.draft().selection_state().include_members_group);
+    }
+
+    #[test]
+    fn toggle_members_group_rejects_when_not_in_participant_source_phase() {
+        let session = session_in_phase(ExpenseSelectionPhase::Payer);
+        let actual = toggle_members_group(session, &fixed_clock());
+        assert_eq!(actual.unwrap_err(), NavigationError::NotInSelection);
     }
 
     #[test]
