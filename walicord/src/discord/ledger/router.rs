@@ -160,7 +160,59 @@ impl LedgerRouter {
         {
             return self.dispatch_expense_back(ctx, component).await;
         }
+        if parse_expense_session_button_nonce(
+            &component.data.custom_id,
+            EXPENSE_BASIC_EDIT_CUSTOM_ID_PREFIX,
+        )
+        .is_some()
+        {
+            return self.dispatch_expense_basic_edit(ctx, component).await;
+        }
         Ok(InteractionDispatch::Ignored)
+    }
+
+    /// Re-open the expense modal prefilled from the session's current basic_info so
+    /// the actor can edit amount / note / date without losing their selection
+    /// (criterion 229).
+    async fn dispatch_expense_basic_edit(
+        &self,
+        ctx: &Context,
+        component: &ComponentInteraction,
+    ) -> Result<InteractionDispatch, LedgerRouteError> {
+        let (guild_id, channel_id) = guard_ledger_interaction(
+            component.guild_id,
+            component.channel_id,
+            self.deps.channels.as_ref(),
+        )
+        .map_err(map_guard_error)?;
+        let key = ExpenseSessionKey::new(guild_id, channel_id, MemberId(component.user.id.get()));
+        let Some(session) = self.deps.expense_sessions.clear(key) else {
+            return self.respond_expense_session_missing(ctx, component).await;
+        };
+        // Put it back unchanged so other paths still see the same session; the modal
+        // submit will overwrite the basic_info via apply_modified_basic_info.
+        let prefill = session
+            .draft()
+            .basic_info()
+            .map(|info| ExpenseModalPrefill {
+                raw_amount: Some(format_money_for_modal(info.amount)),
+                raw_note: info.note.as_ref().map(|note| note.as_str().to_owned()),
+                raw_date: Some(info.effective_date.as_str().to_owned()),
+            })
+            .unwrap_or_default();
+        self.deps.expense_sessions.replace(session);
+        let nonce = self.deps.nonce_provider.next_interaction_nonce();
+        let response = build_expense_modal_response(self.deps.clock.as_ref(), nonce, &prefill)
+            .map_err(map_modal_build_error)?;
+        component
+            .create_response(&ctx.http, response)
+            .await
+            .map_err(|error| {
+                LedgerRouteError::Internal(format!(
+                    "expense basic-edit modal create_response: {error}"
+                ))
+            })?;
+        Ok(InteractionDispatch::Handled)
     }
 
     async fn dispatch_expense_back(
@@ -441,9 +493,14 @@ fn map_construction_error(error: ExpenseSessionConstructionError) -> LedgerRoute
 
 pub(crate) const EXPENSE_CANCEL_CUSTOM_ID_PREFIX: &str = "ledger:expense:cancel:";
 pub(crate) const EXPENSE_BACK_CUSTOM_ID_PREFIX: &str = "ledger:expense:back:";
+pub(crate) const EXPENSE_BASIC_EDIT_CUSTOM_ID_PREFIX: &str = "ledger:expense:basic-edit:";
 
 fn map_navigation_error(error: NavigationError) -> LedgerRouteError {
     LedgerRouteError::Internal(format!("expense navigation failed: {error:?}"))
+}
+
+fn format_money_for_modal(money: walicord_domain::Money) -> String {
+    money.to_string()
 }
 
 /// Parse a session-scoped button custom_id of the form `{prefix}{nonce}` and return
