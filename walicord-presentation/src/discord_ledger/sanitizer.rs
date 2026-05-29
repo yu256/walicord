@@ -1,7 +1,7 @@
 use std::{fmt, time::SystemTime};
 
 use chrono::{NaiveDateTime, TimeZone, Utc};
-use walicord_infrastructure::business_timezone;
+use walicord_application::business_calendar::business_timezone;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SafeLiteralText(String);

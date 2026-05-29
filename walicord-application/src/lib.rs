@@ -1,5 +1,6 @@
 #![warn(clippy::uninlined_format_args)]
 
+pub mod business_calendar;
 pub mod command_syntax;
 pub mod error;
 pub mod ledger;

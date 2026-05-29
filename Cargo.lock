@@ -3475,7 +3475,6 @@ dependencies = [
  "walicord-application",
  "walicord-domain",
  "walicord-i18n",
- "walicord-infrastructure",
  "walicord-presentation",
 ]
 

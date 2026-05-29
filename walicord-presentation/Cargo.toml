@@ -12,7 +12,6 @@ tracing = "0.1"
 walicord-application = { path = "../walicord-application" }
 walicord-domain = { path = "../walicord-domain" }
 walicord-i18n = { path = "../walicord-i18n" }
-walicord-infrastructure = { path = "../walicord-infrastructure" }
 
 [features]
 test-fixtures = []

@@ -1,22 +1,12 @@
-use chrono::{FixedOffset, Utc};
+use chrono::Utc;
 use std::{
     sync::atomic::{AtomicU64, Ordering},
     time::SystemTime,
 };
 use walicord_application::{
-    Clock, InteractionNonce, NonceProvider, ledger::LedgerEffectiveDate,
-    settle_up::PreviewInstanceId,
+    Clock, InteractionNonce, NonceProvider, business_calendar::business_timezone,
+    ledger::LedgerEffectiveDate, settle_up::PreviewInstanceId,
 };
-
-/// JST. Business date boundaries align with Asia/Tokyo because the only deployment
-/// today targets that audience; criterion 258 fixes the business timezone choice for
-/// every date / timestamp render.
-pub const BUSINESS_TIMEZONE_OFFSET_SECONDS: i32 = 9 * 60 * 60;
-
-pub fn business_timezone() -> FixedOffset {
-    FixedOffset::east_opt(BUSINESS_TIMEZONE_OFFSET_SECONDS)
-        .expect("business timezone offset should stay valid")
-}
 
 /// Production [`Clock`] implementation. `now` returns wall-clock time; the business
 /// date is the calendar date at `BUSINESS_TIMEZONE_OFFSET_SECONDS` east of UTC.
