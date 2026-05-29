@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 icu = { version = "2.2.0", features = ["compiled_data"] }
 smol_str = "0.3.5"
 thiserror = "2.0.17"
@@ -11,6 +12,7 @@ tracing = "0.1"
 walicord-application = { path = "../walicord-application" }
 walicord-domain = { path = "../walicord-domain" }
 walicord-i18n = { path = "../walicord-i18n" }
+walicord-infrastructure = { path = "../walicord-infrastructure" }
 
 [features]
 test-fixtures = []

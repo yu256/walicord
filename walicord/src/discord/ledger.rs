@@ -104,9 +104,6 @@ mod route_guard;
 #[path = "ledger/router.rs"]
 mod router;
 #[allow(dead_code)]
-#[path = "ledger/runtime_clock.rs"]
-mod runtime_clock;
-#[allow(dead_code)]
 #[path = "ledger/store.rs"]
 mod store;
 
@@ -8367,17 +8364,7 @@ fn roster_role_labels(
 }
 
 fn business_datetime_from_system_time(recorded_at: SystemTime) -> BusinessDateTime {
-    let recorded_at = chrono::DateTime::<Utc>::from(recorded_at);
-    let formatted = business_timezone()
-        .timestamp_opt(
-            recorded_at.timestamp(),
-            recorded_at.timestamp_subsec_nanos(),
-        )
-        .single()
-        .expect("business timestamp should resolve")
-        .format("%Y-%m-%d %H:%M")
-        .to_string();
-    BusinessDateTime::parse(formatted).expect("formatted business timestamp should stay valid")
+    BusinessDateTime::from_system_time(recorded_at)
 }
 
 fn effective_date_from_recorded_at(recorded_at: SystemTime) -> LedgerEffectiveDate {
@@ -8833,7 +8820,7 @@ fn render_public_entry_message(
             PublicCanonicalMessageModel::Void(PublicVoidMessageModel {
                 entry_id: entry.id,
                 voider_display_name: actor_safe_label(entry, &labels),
-                voided_at: recorded_at.clone(),
+                voided_at: recorded_at,
                 original_summary: surface_summary_for_entry(loaded, target, &labels)?,
                 recorded_at,
                 recovery_reference: RecoveryReference {

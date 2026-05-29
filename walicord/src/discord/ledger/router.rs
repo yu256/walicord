@@ -24,9 +24,9 @@ use walicord_application::{
 use walicord_domain::model::MemberId;
 use walicord_i18n as i18n;
 use walicord_presentation::discord_ledger::{
-    DiscordLedgerPresenter, ExpenseConfirmationButtonIds, ExpenseSelectionStepButtonIds,
-    PanelButtonStates, PanelSurfaceModel, RenderBudgetError, SurfaceMemberLabels,
-    build_expense_confirmation_surface, build_expense_selection_step_surface,
+    BusinessDateTime, DiscordLedgerPresenter, ExpenseConfirmationButtonIds,
+    ExpenseSelectionStepButtonIds, PanelButtonStates, PanelSurfaceModel, RenderBudgetError,
+    SurfaceMemberLabels, build_expense_confirmation_surface, build_expense_selection_step_surface,
 };
 
 use crate::channel::ChannelManager;
@@ -41,7 +41,6 @@ use super::{
     panel::LEDGER_PANEL_EXPENSE_ID,
     response_writer::{rendered_surface_to_message, suppressed_allowed_mentions},
     route_guard::{LedgerInteractionGuardError, guard_ledger_interaction},
-    runtime_clock::business_datetime_from_system_time,
     store::{
         DiscordCanonicalLedgerStore, StoreLoadError, StoreWriteError, VerifiedLedgerThreadLoad,
     },
@@ -1400,7 +1399,7 @@ fn render_public_expense_body(
         participant_rows,
         note,
         actor_display_name,
-        recorded_at: business_datetime_from_system_time(recorded_at),
+        recorded_at: BusinessDateTime::from_system_time(recorded_at),
         // message_link stays None: the self-link enrichment that edits the posted
         // message to embed its own permalink lives behind `display_drift_guard`
         // (criterion 209-212) and lands as a follow-up commit.

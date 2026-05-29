@@ -3465,6 +3465,7 @@ dependencies = [
 name = "walicord-presentation"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "icu",
  "insta",
  "rstest",
@@ -3474,6 +3475,7 @@ dependencies = [
  "walicord-application",
  "walicord-domain",
  "walicord-i18n",
+ "walicord-infrastructure",
  "walicord-presentation",
 ]
 

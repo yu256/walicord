@@ -1,6 +1,7 @@
-use std::fmt;
+use std::{fmt, time::SystemTime};
 
-use walicord_application::ledger::LedgerEffectiveDate;
+use chrono::{NaiveDateTime, TimeZone, Utc};
+use walicord_infrastructure::business_timezone;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SafeLiteralText(String);
@@ -29,34 +30,42 @@ impl fmt::Display for SafeLiteralText {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct BusinessDateTime(String);
+/// Business-timezone wall clock minute, stored as a typed `NaiveDateTime` so callers
+/// neither round-trip through formatted strings nor depend on the rendered shape.
+/// `Display` is the single place that materialises the `YYYY-MM-DD HH:MM` form, and
+/// `parse` is the only place that accepts that shape from untrusted input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct BusinessDateTime(NaiveDateTime);
 
 impl BusinessDateTime {
-    pub fn parse(raw: impl Into<String>) -> Option<Self> {
-        let raw = raw.into();
-        let (date, time) = raw.split_once(' ')?;
-        LedgerEffectiveDate::new(date.to_owned()).ok()?;
-        let (hour, minute) = time.split_once(':')?;
-        if hour.len() != 2 || minute.len() != 2 {
-            return None;
-        }
-        let hour: u32 = hour.parse().ok()?;
-        let minute: u32 = minute.parse().ok()?;
-        if hour > 23 || minute > 59 {
-            return None;
-        }
-        Some(Self(raw))
+    const FORMAT: &'static str = "%Y-%m-%d %H:%M";
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        NaiveDateTime::parse_from_str(raw, Self::FORMAT)
+            .ok()
+            .map(Self)
     }
 
-    pub fn as_str(&self) -> &str {
-        &self.0
+    /// Convert a `SystemTime` into the business timezone wall clock. The `expect` is a
+    /// total function: `FixedOffset` validity is checked once when `business_timezone`
+    /// is built, and a fixed offset has no DST fold / gap, so `single()` always
+    /// returns `Some` for any UNIX timestamp.
+    pub fn from_system_time(recorded_at: SystemTime) -> Self {
+        let recorded_at = chrono::DateTime::<Utc>::from(recorded_at);
+        let local = business_timezone()
+            .timestamp_opt(
+                recorded_at.timestamp(),
+                recorded_at.timestamp_subsec_nanos(),
+            )
+            .single()
+            .expect("fixed-offset timezone has no fold / gap; single() is total");
+        Self(local.naive_local())
     }
 }
 
 impl fmt::Display for BusinessDateTime {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
+        self.0.format(Self::FORMAT).fmt(f)
     }
 }
 
@@ -259,7 +268,7 @@ mod tests {
         let actual = BusinessDateTime::parse("2026-05-25 18:55");
 
         assert_eq!(
-            actual.expect("timestamp should parse").as_str(),
+            actual.expect("timestamp should parse").to_string(),
             "2026-05-25 18:55"
         );
     }
