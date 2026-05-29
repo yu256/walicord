@@ -63,10 +63,14 @@ pub enum LedgerObservabilityEvent {
     LoadTimeoutWarning {
         ledger_id: LedgerId,
         elapsed: Duration,
+        route_label: &'static str,
+        fetched_entry_count: usize,
     },
     LoadTimeout {
         ledger_id: LedgerId,
         elapsed: Duration,
+        route_label: &'static str,
+        fetched_entry_count: usize,
     },
     OperatorHandoff {
         ledger_id: Option<LedgerId>,

@@ -988,8 +988,12 @@ where
                 return;
             }
         };
+        let observability: Arc<
+            dyn walicord_application::ledger::observability::LedgerObservability,
+        > = Arc::new(crate::discord::ledger::TracingLedgerObservability);
         let canonical_store = Arc::new(crate::discord::ledger::DiscordCanonicalLedgerStore::new(
             writer_lineage,
+            Arc::clone(&observability),
         ));
         let deps = crate::discord::ledger::LedgerRouterDependencies {
             clock: Arc::new(crate::discord::ledger::SystemClock),

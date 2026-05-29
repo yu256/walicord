@@ -56,16 +56,54 @@ pub struct TracingLedgerObservability;
 
 impl LedgerObservability for TracingLedgerObservability {
     fn emit(&self, event: LedgerObservabilityEvent) {
-        match &event {
-            LedgerObservabilityEvent::IntegrityDrift { .. }
+        match event {
+            LedgerObservabilityEvent::GrowthWarning {
+                ledger_id,
+                entry_count,
+            } => {
+                tracing::warn!(
+                    event = "ledger_thread_growth_warning",
+                    ledger_id = ledger_id.0,
+                    canonical_entry_count = entry_count,
+                    "canonical ledger thread exceeded growth warning threshold"
+                );
+            }
+            LedgerObservabilityEvent::LoadTimeoutWarning {
+                ledger_id,
+                elapsed,
+                route_label,
+                fetched_entry_count,
+            } => {
+                tracing::warn!(
+                    event = "ledger_load_slow_warning",
+                    ledger_id = ledger_id.0,
+                    route = route_label,
+                    elapsed_secs = elapsed.as_secs(),
+                    fetched_entry_count,
+                    "canonical ledger load exceeded warning threshold"
+                );
+            }
+            LedgerObservabilityEvent::LoadTimeout {
+                ledger_id,
+                elapsed,
+                route_label,
+                fetched_entry_count,
+            } => {
+                tracing::error!(
+                    event = "ledger_load_timeout",
+                    ledger_id = ledger_id.0,
+                    route = route_label,
+                    elapsed_secs = elapsed.as_secs(),
+                    fetched_entry_count,
+                    "canonical ledger load timed out"
+                );
+            }
+            event @ (LedgerObservabilityEvent::IntegrityDrift { .. }
             | LedgerObservabilityEvent::UnknownLedgerFormat { .. }
-            | LedgerObservabilityEvent::PersistentUncertainWrite { .. }
-            | LedgerObservabilityEvent::LoadTimeout { .. } => {
+            | LedgerObservabilityEvent::PersistentUncertainWrite { .. }) => {
                 tracing::error!(?event, "ledger observability event");
             }
-            LedgerObservabilityEvent::LoadTimeoutWarning { .. }
-            | LedgerObservabilityEvent::GrowthWarning { .. }
-            | LedgerObservabilityEvent::OperatorHandoff { .. } => {
+            event @ LedgerObservabilityEvent::OperatorHandoff { .. } => {
                 tracing::warn!(?event, "ledger observability event");
             }
         }
@@ -166,6 +204,8 @@ mod tests {
         sink.emit(LedgerObservabilityEvent::LoadTimeoutWarning {
             ledger_id: ledger(),
             elapsed: Duration::from_secs(20),
+            route_label: "test",
+            fetched_entry_count: 7,
         });
 
         assert_eq!(
@@ -188,6 +228,8 @@ mod tests {
                     LedgerObservabilityEvent::LoadTimeoutWarning {
                         ledger_id: ledger(),
                         elapsed: Duration::from_secs(20),
+                        route_label: "test",
+                        fetched_entry_count: 7,
                     }
                 ),
             ]

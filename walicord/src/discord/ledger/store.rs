@@ -17,6 +17,7 @@ use walicord_application::ledger::{
     LedgerEntry, LedgerEntryId, LedgerEvent, LedgerId, LedgerLoadError, LedgerReplayError,
     UnverifiedLedgerStoreEnvelope, VerifiedLedgerStoreEnvelope,
     canonical_attachment::{AttachmentCodecError, CanonicalAttachmentCodec},
+    observability::{LedgerObservability, LedgerObservabilityEvent},
     projection::VerifiedEntryTransport,
     replay_verified_snapshot, verify_envelope_sha256_v1,
     verify_envelopes_in_append_order_sha256_v1,
@@ -398,27 +399,34 @@ pub enum StoreWriteError {
     WriteTimeout { elapsed: Duration },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct DiscordCanonicalLedgerStore {
     writer_lineage: WriterLineagePolicy,
     display_drift_guard: DisplayDriftGuard,
+    observability: Arc<dyn LedgerObservability>,
 }
 
 impl DiscordCanonicalLedgerStore {
-    pub fn new(writer_lineage: WriterLineagePolicy) -> Self {
+    pub fn new(
+        writer_lineage: WriterLineagePolicy,
+        observability: Arc<dyn LedgerObservability>,
+    ) -> Self {
         Self {
             writer_lineage,
             display_drift_guard: allow_immediate_self_link_completion_edit_only,
+            observability,
         }
     }
 
     pub fn new_with_display_drift_guard(
         writer_lineage: WriterLineagePolicy,
         display_drift_guard: DisplayDriftGuard,
+        observability: Arc<dyn LedgerObservability>,
     ) -> Self {
         Self {
             writer_lineage,
             display_drift_guard,
+            observability,
         }
     }
 
@@ -515,29 +523,26 @@ impl DiscordCanonicalLedgerStore {
         let fetched_entry_count = Arc::new(AtomicUsize::new(0));
         let warning_count = Arc::clone(&fetched_entry_count);
         let timeout_count = Arc::clone(&fetched_entry_count);
+        let warning_observability = Arc::clone(&self.observability);
+        let timeout_observability = Arc::clone(&self.observability);
         with_load_timeout(
             CANONICAL_LOAD_TIMEOUT,
             CANONICAL_LOAD_WARNING,
             move || {
-                tracing::warn!(
-                    event = "ledger_load_slow_warning",
-                    ledger_id = ledger_id.0,
-                    route = route_label,
-                    canonical_thread_id = canonical_thread_id.get(),
-                    fetched_entry_count = warning_count.load(Ordering::Relaxed),
-                    "canonical ledger load exceeded warning threshold"
-                );
+                warning_observability.emit(LedgerObservabilityEvent::LoadTimeoutWarning {
+                    ledger_id,
+                    elapsed: CANONICAL_LOAD_WARNING,
+                    route_label,
+                    fetched_entry_count: warning_count.load(Ordering::Relaxed),
+                });
             },
             move || {
-                tracing::warn!(
-                    event = "ledger_load_timeout",
-                    ledger_id = ledger_id.0,
-                    route = route_label,
-                    canonical_thread_id = canonical_thread_id.get(),
-                    fetched_entry_count = timeout_count.load(Ordering::Relaxed),
-                    timeout_secs = CANONICAL_LOAD_TIMEOUT.as_secs(),
-                    "canonical ledger load timed out"
-                );
+                timeout_observability.emit(LedgerObservabilityEvent::LoadTimeout {
+                    ledger_id,
+                    elapsed: CANONICAL_LOAD_TIMEOUT,
+                    route_label,
+                    fetched_entry_count: timeout_count.load(Ordering::Relaxed),
+                });
             },
             async {
                 let messages = fetch_all_channel_messages(ctx, canonical_thread_id)
@@ -681,12 +686,11 @@ impl DiscordCanonicalLedgerStore {
             .map_err(|error| StoreLoadError::Chain(LedgerLoadError::ChainVerification(error)))?;
         let snapshot = replay_verified_snapshot(&verified).map_err(StoreLoadError::from_replay)?;
         if snapshot.should_emit_growth_warning() {
-            tracing::warn!(
-                event = "ledger_thread_growth_warning",
-                ledger_id = ledger_id.0,
-                canonical_entry_count = snapshot.canonical_entry_count(),
-                "canonical ledger thread exceeded growth warning threshold"
-            );
+            self.observability
+                .emit(LedgerObservabilityEvent::GrowthWarning {
+                    ledger_id,
+                    entry_count: snapshot.canonical_entry_count() as u64,
+                });
         }
         let transport_entries = build_transport_entries(canonical_thread_id, &verified, &records)?;
         let records_by_message_id: BTreeMap<MessageId, &CanonicalMessageRecord> = records
@@ -1079,6 +1083,9 @@ where
 }
 
 #[cfg(test)]
+use super::observability::CapturingLedgerObservability;
+
+#[cfg(test)]
 pub(super) fn verified_thread_load_for_test(
     entries: Vec<walicord_application::ledger::LedgerEntry>,
 ) -> VerifiedLedgerThreadLoad {
@@ -1120,6 +1127,7 @@ pub(super) fn verified_thread_load_for_test(
         WriterLineagePolicy::load(Some(UserId::new(900)), Some([UserId::new(900)]))
             .expect("lineage should build"),
         reject_edited_messages,
+        Arc::new(CapturingLedgerObservability::new()),
     )
     .load_verified_thread_from_records(channel_id, ledger_id, records)
     .expect("load should succeed")
@@ -1334,6 +1342,7 @@ mod tests {
             )
             .expect("lineage should build"),
             reject_edited_messages,
+            Arc::new(CapturingLedgerObservability::new()),
         )
     }
 

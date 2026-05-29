@@ -5843,7 +5843,10 @@ impl DiscordLedgerPoc {
                 .unwrap_or(i18n::ledger_integrity_failed_message())
                 .to_owned()
         })?;
-        let store = store::DiscordCanonicalLedgerStore::new(writer_lineage);
+        let store = store::DiscordCanonicalLedgerStore::new(
+            writer_lineage,
+            Arc::new(observability::TracingLedgerObservability),
+        );
         let load = store
             .load_verified_thread(ctx, channel_id, ledger_id, route.label())
             .await
