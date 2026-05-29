@@ -10,8 +10,17 @@ use icu::{
     collator::{Collator, CollatorBorrowed, options::CollatorOptions},
     locale::locale,
 };
+use walicord_application::ledger::LedgerEntry;
 use walicord_domain::model::{MemberId, RoleId};
 use walicord_i18n as i18n;
+
+/// Fallback label for a slot whose member identity is unknown (e.g. legacy entries
+/// missing `recorded_by`). Sanitised once and returned by value so callers can
+/// embed it anywhere a `SafeLiteralText` is expected.
+pub fn unknown_member_label() -> SafeLiteralText {
+    SafeLiteralText::from_roster_label(i18n::unknown_display_label())
+        .expect("fallback unknown label should sanitize")
+}
 
 fn japanese_collator() -> &'static CollatorBorrowed<'static> {
     static COLLATOR: OnceLock<CollatorBorrowed<'static>> = OnceLock::new();
@@ -140,6 +149,31 @@ impl SurfaceMemberLabels {
 
     pub fn compare_display_text(lhs: &str, rhs: &str) -> Ordering {
         compare_display_text(lhs, rhs)
+    }
+
+    /// Resolve the safe visible label for a `MemberId`. Falls back to the
+    /// `unknown_user_label` template (carrying the raw member id) when no label was
+    /// registered, so display surfaces never crash on dangling roster entries.
+    pub fn safe_member_label(&self, member_id: MemberId) -> SafeLiteralText {
+        self.member(member_id)
+            .map(|label| label.visible().clone())
+            .unwrap_or_else(|| {
+                SafeLiteralText::from_roster_label(
+                    &i18n::unknown_user_label(member_id.0).to_string(),
+                )
+                .expect("fallback user label should sanitize")
+            })
+    }
+
+    /// Resolve the safe visible label for the actor that recorded a ledger entry.
+    /// Falls back to [`unknown_member_label`] when `metadata.recorded_by` is `None`
+    /// (criteria-compliant for legacy entries).
+    pub fn safe_actor_label(&self, entry: &LedgerEntry) -> SafeLiteralText {
+        entry
+            .metadata
+            .recorded_by
+            .map(|member_id| self.safe_member_label(member_id))
+            .unwrap_or_else(unknown_member_label)
     }
 }
 

@@ -19,7 +19,7 @@ pub use budgets::{
     validate_component_placeholder, validate_custom_id, validate_message_content,
     validate_modal_title, validate_text_input_label, validate_text_input_placeholder,
 };
-pub use member_labels::{SurfaceMemberLabel, SurfaceMemberLabels};
+pub use member_labels::{SurfaceMemberLabel, SurfaceMemberLabels, unknown_member_label};
 pub use pickers::{
     ExpenseConfirmationParticipantRow, ExpenseDraftSummary, ExpenseParticipantSourceBadge,
     PickerSurfaceModel, confirmation_source_disclosure_line, individual_selection_title,

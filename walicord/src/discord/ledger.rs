@@ -66,7 +66,7 @@ use walicord_presentation::{
         ReadViewRoute, ReadViewSectionVisibility, RecoveryContext, RecoveryCta, RecoveryReference,
         RenderedSurface, SealedRangeSummary, TransferRow, VoidCandidateRow, VoidConfirmationRecap,
         VoidRetargetReason, VoidSurfaceModel, VoidedEntryRow, individual_selection_title,
-        participant_source_help_line, validate_message_content,
+        participant_source_help_line, unknown_member_label, validate_message_content,
     },
     truncate_component_label, validate_button_label, validate_component_placeholder,
     validate_custom_id, validate_modal_title, validate_text_input_label,
@@ -5123,7 +5123,7 @@ impl DiscordLedgerPoc {
         selected_members.sort_by(|lhs, rhs| labels.compare_members(*lhs, *rhs));
         let selected_names = selected_members
             .into_iter()
-            .map(|member_id| member_safe_label(&labels, member_id))
+            .map(|member_id| labels.safe_member_label(member_id))
             .collect::<Vec<_>>();
         out.push('\n');
         out.push_str(&individual_selection_title(
@@ -5263,7 +5263,7 @@ impl DiscordLedgerPoc {
         let mut participant_rows = Vec::with_capacity(selections.len());
         for selection in selections {
             let row = ExpenseConfirmationParticipantRow {
-                display_name: member_safe_label(&labels, selection.member_id),
+                display_name: labels.safe_member_label(selection.member_id),
                 share_amount: share_amounts
                     .get(&selection.member_id)
                     .map(ToString::to_string),
@@ -8325,21 +8325,6 @@ fn sort_expense_selections(
     selections.sort_by(|lhs, rhs| labels.compare_members(lhs.member_id, rhs.member_id));
 }
 
-fn member_safe_label(labels: &SurfaceMemberLabels, member_id: MemberId) -> SafeLiteralText {
-    labels
-        .member(member_id)
-        .map(|label| label.visible().clone())
-        .unwrap_or_else(|| {
-            SafeLiteralText::from_roster_label(&i18n::unknown_user_label(member_id.0).to_string())
-                .expect("fallback user label should sanitize")
-        })
-}
-
-fn unknown_safe_label() -> SafeLiteralText {
-    SafeLiteralText::from_roster_label(i18n::unknown_display_label())
-        .expect("fallback unknown label should sanitize")
-}
-
 fn fallback_role_label(role_id: RoleId) -> SafeLiteralText {
     SafeLiteralText::from_roster_label(&i18n::unknown_role_label(role_id.0).to_string())
         .expect("fallback role label should sanitize")
@@ -8454,14 +8439,6 @@ fn confirmation_badges(
     badges
 }
 
-fn actor_safe_label(entry: &LedgerEntry, labels: &SurfaceMemberLabels) -> SafeLiteralText {
-    entry
-        .metadata
-        .recorded_by
-        .map(|member_id| member_safe_label(labels, member_id))
-        .unwrap_or_else(unknown_safe_label)
-}
-
 fn entry_effective_date_for_surface(
     loaded: &LoadedLedgerThread,
     entry: &LedgerEntry,
@@ -8493,7 +8470,7 @@ fn balance_rows_for_state(state: &LedgerState, labels: &SurfaceMemberLabels) -> 
             (
                 *member_id,
                 BalanceRow {
-                    display_name: member_safe_label(labels, *member_id),
+                    display_name: labels.safe_member_label(*member_id),
                     amount: magnitude.to_string(),
                     direction,
                 },
@@ -8512,7 +8489,7 @@ fn participant_names_for_state(
         .participants()
         .iter()
         .copied()
-        .map(|member_id| (member_id, member_safe_label(labels, member_id)))
+        .map(|member_id| (member_id, labels.safe_member_label(member_id)))
         .collect::<Vec<_>>();
     participants.sort_by(|(lhs_id, _), (rhs_id, _)| labels.compare_members(*lhs_id, *rhs_id));
     participants.into_iter().map(|(_, label)| label).collect()
@@ -8527,8 +8504,8 @@ fn preview_transfer_rows(
         .transfers
         .iter()
         .map(|transfer| TransferRow {
-            from_display_name: member_safe_label(labels, transfer.from),
-            to_display_name: member_safe_label(labels, transfer.to),
+            from_display_name: labels.safe_member_label(transfer.from),
+            to_display_name: labels.safe_member_label(transfer.to),
             amount: transfer.amount.to_string(),
         })
         .collect()
@@ -8553,7 +8530,7 @@ fn public_participant_rows(
                 (
                     member_weight.member_id,
                     ParticipantShareRow {
-                        display_name: member_safe_label(labels, member_weight.member_id),
+                        display_name: labels.safe_member_label(member_weight.member_id),
                         share_amount: owed_by
                             .get(&member_weight.member_id)
                             .copied()
@@ -8570,7 +8547,7 @@ fn public_participant_rows(
                 (
                     owed.member_id,
                     ParticipantShareRow {
-                        display_name: member_safe_label(labels, owed.member_id),
+                        display_name: labels.safe_member_label(owed.member_id),
                         share_amount: owed.amount.to_string(),
                     },
                 )
@@ -8602,7 +8579,7 @@ fn balance_adjustment_rows(
             (
                 adjustment.member_id,
                 BalanceImpactRow {
-                    display_name: member_safe_label(labels, adjustment.member_id),
+                    display_name: labels.safe_member_label(adjustment.member_id),
                     amount: magnitude.to_string(),
                     direction,
                 },
@@ -8638,8 +8615,8 @@ fn surface_summary_for_entry(
             payer_display_name: event
                 .paid_by()
                 .first()
-                .map(|paid| member_safe_label(labels, paid.member_id))
-                .unwrap_or_else(unknown_safe_label),
+                .map(|paid| labels.safe_member_label(paid.member_id))
+                .unwrap_or_else(unknown_member_label),
             amount: event
                 .paid_by()
                 .iter()
@@ -8656,8 +8633,8 @@ fn surface_summary_for_entry(
             };
             Ok(LedgerSurfaceSummary::Settlement {
                 date: effective_date_from_recorded_at(resolved_recorded_at(loaded, entry)?),
-                from_display_name: member_safe_label(labels, first.from),
-                to_display_name: member_safe_label(labels, first.to),
+                from_display_name: labels.safe_member_label(first.from),
+                to_display_name: labels.safe_member_label(first.to),
                 amount: first.amount.to_string(),
                 additional_transfers: event.transfers().len().saturating_sub(1),
             })
@@ -8666,19 +8643,19 @@ fn surface_summary_for_entry(
             let recorded_at = resolved_recorded_at(loaded, entry)?;
             Ok(LedgerSurfaceSummary::Void {
                 date: effective_date_from_recorded_at(recorded_at),
-                voider_display_name: actor_safe_label(entry, labels),
+                voider_display_name: labels.safe_actor_label(entry),
                 recorded_at: business_datetime_from_system_time(recorded_at),
             })
         }
         LedgerEvent::LedgerHistorySealed(_) => Ok(LedgerSurfaceSummary::Sealed {
             date: effective_date_from_recorded_at(resolved_recorded_at(loaded, entry)?),
-            actor_display_name: actor_safe_label(entry, labels),
+            actor_display_name: labels.safe_actor_label(entry),
         }),
         LedgerEvent::BalanceAdjusted(event) => {
             let impacts = balance_adjustment_rows(event, labels);
             Ok(LedgerSurfaceSummary::BalanceAdjustment {
                 date: effective_date_from_recorded_at(resolved_recorded_at(loaded, entry)?),
-                actor_display_name: actor_safe_label(entry, labels),
+                actor_display_name: labels.safe_actor_label(entry),
                 impact_summary: SafeLiteralText::from_note(&impact_summary_text(&impacts))
                     .expect("impact summary should sanitize"),
             })
@@ -8705,7 +8682,7 @@ fn voided_rows_for_loaded(
                 .ok_or_else(|| format!("void target #{} is missing", event.target().0))?;
             Ok(VoidedEntryRow {
                 void_entry_id: entry.id,
-                voider_display_name: actor_safe_label(entry, labels),
+                voider_display_name: labels.safe_actor_label(entry),
                 voided_at: business_datetime_from_system_time(resolved_recorded_at(loaded, entry)?),
                 original_summary: surface_summary_for_entry(loaded, target, labels)?,
                 recovery_reference: recovery_reference_for(loaded, entry.id, true)?,
@@ -8741,7 +8718,7 @@ fn adjustment_summaries_for_loaded(
         .iter()
         .filter_map(|entry| match &entry.event {
             LedgerEvent::BalanceAdjusted(event) => Some(BalanceAdjustmentSummary {
-                actor_display_name: actor_safe_label(entry, labels),
+                actor_display_name: labels.safe_actor_label(entry),
                 reason: sanitized_note_text(event.reason().as_str()).unwrap_or_else(|| {
                     SafeLiteralText::from_note(i18n::expense_note_none())
                         .expect("fallback reason should sanitize")
@@ -8769,8 +8746,8 @@ fn render_public_entry_message(
                 payer_display_name: event
                     .paid_by()
                     .first()
-                    .map(|paid| member_safe_label(&labels, paid.member_id))
-                    .unwrap_or_else(unknown_safe_label),
+                    .map(|paid| labels.safe_member_label(paid.member_id))
+                    .unwrap_or_else(unknown_member_label),
                 amount: event
                     .paid_by()
                     .iter()
@@ -8781,7 +8758,7 @@ fn render_public_entry_message(
                 note: event
                     .note()
                     .and_then(|note| sanitized_note_text(note.as_str())),
-                actor_display_name: actor_safe_label(entry, &labels),
+                actor_display_name: labels.safe_actor_label(entry),
                 recorded_at,
                 recovery_reference: RecoveryReference {
                     ledger_id_short: ledger_id_short(loaded.ledger_id),
@@ -8800,12 +8777,12 @@ fn render_public_entry_message(
                     .transfers()
                     .iter()
                     .map(|transfer| TransferRow {
-                        from_display_name: member_safe_label(&labels, transfer.from),
-                        to_display_name: member_safe_label(&labels, transfer.to),
+                        from_display_name: labels.safe_member_label(transfer.from),
+                        to_display_name: labels.safe_member_label(transfer.to),
                         amount: transfer.amount.to_string(),
                     })
                     .collect(),
-                actor_display_name: actor_safe_label(entry, &labels),
+                actor_display_name: labels.safe_actor_label(entry),
                 recorded_at,
                 recovery_reference: RecoveryReference {
                     ledger_id_short: ledger_id_short(loaded.ledger_id),
@@ -8822,7 +8799,7 @@ fn render_public_entry_message(
                 .ok_or_else(|| format!("void target #{} is missing", event.target().0))?;
             PublicCanonicalMessageModel::Void(PublicVoidMessageModel {
                 entry_id: entry.id,
-                voider_display_name: actor_safe_label(entry, &labels),
+                voider_display_name: labels.safe_actor_label(entry),
                 voided_at: recorded_at,
                 original_summary: surface_summary_for_entry(loaded, target, &labels)?,
                 recorded_at,
@@ -8843,7 +8820,7 @@ fn render_public_entry_message(
                 entry_id: entry.id,
                 through_entry_id: event.through(),
                 through_summary: surface_summary_for_entry(loaded, through_entry, &labels)?,
-                actor_display_name: actor_safe_label(entry, &labels),
+                actor_display_name: labels.safe_actor_label(entry),
                 recorded_at,
                 recovery_reference: RecoveryReference {
                     ledger_id_short: ledger_id_short(loaded.ledger_id),
@@ -8855,7 +8832,7 @@ fn render_public_entry_message(
         LedgerEvent::BalanceAdjusted(event) => {
             PublicCanonicalMessageModel::BalanceAdjustment(PublicBalanceAdjustmentMessageModel {
                 entry_id: entry.id,
-                actor_display_name: actor_safe_label(entry, &labels),
+                actor_display_name: labels.safe_actor_label(entry),
                 reason: sanitized_note_text(event.reason().as_str()).unwrap_or_else(|| {
                     SafeLiteralText::from_note(i18n::expense_note_none())
                         .expect("fallback reason should sanitize")
