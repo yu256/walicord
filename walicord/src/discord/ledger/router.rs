@@ -8,6 +8,9 @@ use serenity::{
 use std::sync::Arc;
 use walicord_application::{Clock, NonceProvider, SettlementPlanner};
 use walicord_domain::model::MemberId;
+use walicord_presentation::discord_ledger::{
+    DiscordLedgerPresenter, PanelButtonStates, PanelSurfaceModel,
+};
 
 use crate::channel::ChannelManager;
 
@@ -22,7 +25,7 @@ use super::{
     observability::LedgerObservability,
     panel::LEDGER_PANEL_EXPENSE_ID,
     preview_store::PreviewStore,
-    response_writer::suppressed_allowed_mentions,
+    response_writer::{rendered_surface_to_message, suppressed_allowed_mentions},
     route_guard::{LedgerInteractionGuardError, guard_ledger_interaction},
     sessions::{
         ExpenseSessionConstructionError, ExpenseSessionKey, ExpenseSessionStore, ModalRetryBinding,
@@ -101,8 +104,49 @@ impl LedgerRouter {
     ) -> Result<InteractionDispatch, LedgerRouteError> {
         match command.data.name.as_str() {
             "expense" => self.dispatch_expense_command(ctx, command).await,
+            "panel" => self.dispatch_panel_command(ctx, command).await,
             _ => Ok(InteractionDispatch::Ignored),
         }
+    }
+
+    /// /panel: post the operations panel with the 4 fixed launcher buttons. Panel
+    /// posts are direct responses (no defer) per criterion 178, and the body /
+    /// thread cue come straight from i18n + presentation, not from any per-channel
+    /// computation in the router.
+    async fn dispatch_panel_command(
+        &self,
+        ctx: &Context,
+        command: &CommandInteraction,
+    ) -> Result<InteractionDispatch, LedgerRouteError> {
+        let _scope = guard_ledger_interaction(
+            command.guild_id,
+            command.channel_id,
+            self.deps.channels.as_ref(),
+        )
+        .map_err(map_guard_error)?;
+
+        let model = PanelSurfaceModel {
+            thread_cue: walicord_i18n::panel_thread_cue_pending().to_owned(),
+            status_line: None,
+            button_states: PanelButtonStates::default(),
+            ephemeral: false,
+        };
+        let rendered = DiscordLedgerPresenter::render_panel(&model)
+            .map_err(|error| LedgerRouteError::Internal(format!("panel render: {error:?}")))?;
+        let (body, components) = rendered_surface_to_message(rendered);
+        let response = CreateInteractionResponse::Message(
+            CreateInteractionResponseMessage::new()
+                .content(body)
+                .components(components)
+                .allowed_mentions(suppressed_allowed_mentions()),
+        );
+        command
+            .create_response(&ctx.http, response)
+            .await
+            .map_err(|error| {
+                LedgerRouteError::Internal(format!("panel create_response: {error}"))
+            })?;
+        Ok(InteractionDispatch::Handled)
     }
 
     async fn dispatch_expense_command(
