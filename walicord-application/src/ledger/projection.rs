@@ -38,12 +38,6 @@ pub struct VerifiedEntryTransportIndex {
 }
 
 impl VerifiedEntryTransportIndex {
-    pub fn from_entries(entries: BTreeMap<LedgerEntryId, VerifiedEntryTransport>) -> Self {
-        Self {
-            by_entry_id: entries,
-        }
-    }
-
     pub fn get(&self, entry_id: LedgerEntryId) -> Option<&VerifiedEntryTransport> {
         self.by_entry_id.get(&entry_id)
     }
@@ -59,7 +53,11 @@ impl VerifiedEntryTransportIndex {
 /// the external id type so adapters can carry their native handle (e.g. Discord
 /// `MessageId`) inside `VerifiedLedgerStoreEnvelope<ExternalId>` without pulling that
 /// type into application code — projection helpers only ever touch the payload + the
-/// adapter-supplied transport index.
+/// adapter-supplied transport entries.
+///
+/// Construction goes through [`VerifiedLedgerThreadLoad::new`] which parses-then-checks
+/// that every verified envelope has a paired transport entry; downstream projection
+/// helpers therefore cannot encounter a missing-transport at runtime.
 #[derive(Debug, Clone, PartialEq)]
 pub struct VerifiedLedgerThreadLoad<ExternalId> {
     snapshot: VerifiedLedgerSnapshot,
@@ -67,17 +65,31 @@ pub struct VerifiedLedgerThreadLoad<ExternalId> {
     verified: Vec<VerifiedLedgerStoreEnvelope<ExternalId>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum VerifiedLedgerThreadLoadError {
+    #[error("verified envelope {entry_id:?} has no paired transport entry")]
+    MissingTransport { entry_id: LedgerEntryId },
+}
+
 impl<ExternalId> VerifiedLedgerThreadLoad<ExternalId> {
     pub fn new(
         snapshot: VerifiedLedgerSnapshot,
-        transport_index: VerifiedEntryTransportIndex,
         verified: Vec<VerifiedLedgerStoreEnvelope<ExternalId>>,
-    ) -> Self {
-        Self {
-            snapshot,
-            transport_index,
-            verified,
+        transport_entries: BTreeMap<LedgerEntryId, VerifiedEntryTransport>,
+    ) -> Result<Self, VerifiedLedgerThreadLoadError> {
+        for envelope in &verified {
+            let entry_id = envelope.payload().entry.id;
+            if !transport_entries.contains_key(&entry_id) {
+                return Err(VerifiedLedgerThreadLoadError::MissingTransport { entry_id });
+            }
         }
+        Ok(Self {
+            snapshot,
+            transport_index: VerifiedEntryTransportIndex {
+                by_entry_id: transport_entries,
+            },
+            verified,
+        })
     }
 
     pub fn snapshot(&self) -> &VerifiedLedgerSnapshot {
@@ -97,8 +109,6 @@ impl<ExternalId> VerifiedLedgerThreadLoad<ExternalId> {
 pub enum ProjectionConsistencyError {
     #[error("replayed entry {entry_id:?} is missing projected metadata")]
     MissingProjectedEntry { entry_id: LedgerEntryId },
-    #[error("replayed entry {entry_id:?} is missing transport metadata")]
-    MissingTransport { entry_id: LedgerEntryId },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -143,7 +153,7 @@ pub fn project_verified_entries<ExternalId>(
         let transport = load
             .transport_index()
             .get(entry_id)
-            .ok_or(ProjectionConsistencyError::MissingTransport { entry_id })?;
+            .expect("VerifiedLedgerThreadLoad::new validates every verified envelope has a paired transport entry");
         out.push(VerifiedLedgerEntryView {
             recorded_at: entry
                 .metadata

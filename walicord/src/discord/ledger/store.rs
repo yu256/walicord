@@ -17,7 +17,7 @@ use walicord_application::ledger::{
     LedgerEntry, LedgerEntryId, LedgerEvent, LedgerId, LedgerLoadError, LedgerReplayError,
     UnverifiedLedgerStoreEnvelope, VerifiedLedgerStoreEnvelope,
     canonical_attachment::{AttachmentCodecError, CanonicalAttachmentCodec},
-    projection::{VerifiedEntryTransport, VerifiedEntryTransportIndex},
+    projection::VerifiedEntryTransport,
     replay_verified_snapshot, verify_envelope_sha256_v1,
     verify_envelopes_in_append_order_sha256_v1,
 };
@@ -141,11 +141,11 @@ trait LineageRecord {
     fn webhook_id(&self) -> Option<u64>;
 }
 
-fn build_transport_index(
+fn build_transport_entries(
     canonical_thread_id: ChannelId,
     verified: &[VerifiedLedgerStoreEnvelope<MessageId>],
     records: &[CanonicalMessageRecord],
-) -> Result<VerifiedEntryTransportIndex, StoreLoadError> {
+) -> Result<BTreeMap<LedgerEntryId, VerifiedEntryTransport>, StoreLoadError> {
     let records_by_message_id: BTreeMap<MessageId, &CanonicalMessageRecord> = records
         .iter()
         .map(|record| (record.message_id, record))
@@ -186,7 +186,7 @@ fn build_transport_index(
         );
     }
 
-    Ok(VerifiedEntryTransportIndex::from_entries(by_entry_id))
+    Ok(by_entry_id)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -688,7 +688,7 @@ impl DiscordCanonicalLedgerStore {
                 "canonical ledger thread exceeded growth warning threshold"
             );
         }
-        let transport_index = build_transport_index(canonical_thread_id, &verified, &records)?;
+        let transport_entries = build_transport_entries(canonical_thread_id, &verified, &records)?;
         let records_by_message_id: BTreeMap<MessageId, &CanonicalMessageRecord> = records
             .iter()
             .map(|record| (record.message_id, record))
@@ -708,11 +708,11 @@ impl DiscordCanonicalLedgerStore {
             display_guard(envelope, record)?;
         }
 
-        Ok(VerifiedLedgerThreadLoad::new(
-            snapshot,
-            transport_index,
-            verified,
-        ))
+        Ok(
+            VerifiedLedgerThreadLoad::new(snapshot, verified, transport_entries).expect(
+                "build_transport_entries inserts a transport entry for every verified envelope",
+            ),
+        )
     }
 }
 
