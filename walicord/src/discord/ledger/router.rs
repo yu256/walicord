@@ -5,12 +5,12 @@ use serenity::{
     },
     prelude::Context,
 };
-use std::sync::Arc;
+use std::{borrow::Cow, sync::Arc};
 use walicord_application::{Clock, NonceProvider, SettlementPlanner};
 use walicord_domain::model::MemberId;
 use walicord_i18n as i18n;
 use walicord_presentation::discord_ledger::{
-    DiscordLedgerPresenter, PanelButtonStates, PanelSurfaceModel,
+    DiscordLedgerPresenter, PanelButtonStates, PanelSurfaceModel, RenderBudgetError,
 };
 
 use crate::channel::ChannelManager;
@@ -69,21 +69,82 @@ pub enum InteractionDispatch {
     Ignored,
 }
 
-/// Top-level route failure surface. Each variant maps to a concrete user-facing
-/// message at the render boundary; the router itself does not render — it returns
-/// the typed failure so the caller can apply i18n / surface budget rules.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Top-level route failure surface. Telemetry / loggers see the variant; user-facing
+/// copy comes from i18n at the render boundary. `Display` composes the message lazily
+/// (via thiserror) so we never allocate a String at the error site — the writer at
+/// the boundary calls Display once.
+#[derive(Debug, thiserror::Error)]
 pub enum LedgerRouteError {
-    /// The interaction is not from a guild context (criterion 164-166).
+    #[error("interaction lacks guild context")]
     GuildOnly,
-    /// The interaction targets a channel that is not currently tracked (criterion
-    /// 42 / 132 / 283).
+    #[error("interaction targets an untracked channel")]
     NotInTrackedChannel,
-    /// Bot or actor permissions are insufficient (criterion 231 / 237).
-    Permission(String),
-    /// A flow-internal error that the caller should surface as a generic recovery
-    /// guidance; the detail string is for observability logging only.
-    Internal(String),
+    #[error("permission denied: {0}")]
+    Permission(Cow<'static, str>),
+    #[error("internal failure: {0}")]
+    Internal(#[from] InternalLedgerRouteError),
+}
+
+/// Closed enumeration of every internal failure the router can encounter. Each variant
+/// carries the underlying cause as a typed value (no `format!` at the error site);
+/// the Display impl composes the message at the boundary. Telemetry can match on the
+/// variant to bucket failures without parsing strings.
+#[derive(Debug, thiserror::Error)]
+pub enum InternalLedgerRouteError {
+    #[error("panel render: {0:?}")]
+    PanelRender(RenderBudgetError),
+    #[error("expense modal build: {0:?}")]
+    ExpenseModalBuild(ExpenseModalBuildError),
+    #[error("expense session construction: {0:?}")]
+    SessionConstruction(ExpenseSessionConstructionError),
+    #[error("expense navigation: {0:?}")]
+    Navigation(NavigationError),
+    #[error("expense modal submission missing required fields")]
+    ModalSubmissionMissingFields,
+    #[error("expense {operation} navigation landed on non-selection stage: {observed_stage:?}")]
+    PostNavigationStageInvariant {
+        operation: PostNavigationOperation,
+        observed_stage: ExpenseSessionStage,
+    },
+    #[error("discord call ({site}) failed: {error}")]
+    DiscordCall {
+        site: DiscordCallSite,
+        #[source]
+        error: serenity::Error,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum PostNavigationOperation {
+    #[error("forward")]
+    Forward,
+    #[error("back")]
+    Back,
+}
+
+/// Every serenity API call we make from the router is tagged with a site so a failure
+/// reported via `InternalLedgerRouteError::DiscordCall` is bucket-distinguishable in
+/// logs and telemetry without parsing the underlying error string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum DiscordCallSite {
+    #[error("panel create_response")]
+    PanelCreateResponse,
+    #[error("expense modal create_response")]
+    ExpenseModalCreateResponse,
+    #[error("panel expense launcher create_response")]
+    PanelExpenseLauncherCreateResponse,
+    #[error("expense cancel create_response")]
+    ExpenseCancelCreateResponse,
+    #[error("expense step refresh")]
+    ExpenseStepRefresh,
+    #[error("expense session missing reply")]
+    ExpenseSessionMissingReply,
+    #[error("expense retry modal create_response")]
+    ExpenseRetryModalCreateResponse,
+    #[error("expense modal success ack")]
+    ExpenseModalSuccessAck,
+    #[error("expense basic-edit modal create_response")]
+    ExpenseBasicEditModalCreateResponse,
 }
 
 pub struct LedgerRouter {
@@ -136,8 +197,9 @@ impl LedgerRouter {
             button_states: PanelButtonStates::default(),
             ephemeral: false,
         };
-        let rendered = DiscordLedgerPresenter::render_panel(&model)
-            .map_err(|error| LedgerRouteError::Internal(format!("panel render: {error:?}")))?;
+        let rendered = DiscordLedgerPresenter::render_panel(&model).map_err(|error| {
+            LedgerRouteError::Internal(InternalLedgerRouteError::PanelRender(error))
+        })?;
         let (body, components) = rendered_surface_to_message(rendered);
         let response = CreateInteractionResponse::Message(
             CreateInteractionResponseMessage::new()
@@ -148,9 +210,7 @@ impl LedgerRouter {
         command
             .create_response(&ctx.http, response)
             .await
-            .map_err(|error| {
-                LedgerRouteError::Internal(format!("panel create_response: {error}"))
-            })?;
+            .map_err(discord_call_error(DiscordCallSite::PanelCreateResponse))?;
         Ok(InteractionDispatch::Handled)
     }
 
@@ -176,9 +236,9 @@ impl LedgerRouter {
         command
             .create_response(&ctx.http, response)
             .await
-            .map_err(|error| {
-                LedgerRouteError::Internal(format!("expense modal create_response: {error}"))
-            })?;
+            .map_err(discord_call_error(
+                DiscordCallSite::ExpenseModalCreateResponse,
+            ))?;
         Ok(InteractionDispatch::Handled)
     }
 
@@ -270,9 +330,11 @@ impl LedgerRouter {
                 let next_phase = match updated.stage() {
                     ExpenseSessionStage::InSelection { phase } => phase.clone(),
                     other => {
-                        return Err(LedgerRouteError::Internal(format!(
-                            "expense forward navigation landed on non-selection stage: {other:?}"
-                        )));
+                        return Err(InternalLedgerRouteError::PostNavigationStageInvariant {
+                            operation: PostNavigationOperation::Forward,
+                            observed_stage: other.clone(),
+                        }
+                        .into());
                     }
                 };
                 let nonce = updated.nonce();
@@ -344,9 +406,7 @@ impl LedgerRouter {
         component
             .create_response(&ctx.http, response)
             .await
-            .map_err(|error| {
-                LedgerRouteError::Internal(format!("expense step refresh: {error}"))
-            })?;
+            .map_err(discord_call_error(DiscordCallSite::ExpenseStepRefresh))?;
         Ok(InteractionDispatch::Handled)
     }
 
@@ -386,11 +446,9 @@ impl LedgerRouter {
         component
             .create_response(&ctx.http, response)
             .await
-            .map_err(|error| {
-                LedgerRouteError::Internal(format!(
-                    "expense basic-edit modal create_response: {error}"
-                ))
-            })?;
+            .map_err(discord_call_error(
+                DiscordCallSite::ExpenseBasicEditModalCreateResponse,
+            ))?;
         Ok(InteractionDispatch::Handled)
     }
 
@@ -414,9 +472,11 @@ impl LedgerRouter {
                 let previous_phase = match updated.stage() {
                     ExpenseSessionStage::InSelection { phase } => phase.clone(),
                     other => {
-                        return Err(LedgerRouteError::Internal(format!(
-                            "expense back navigation landed on non-selection stage: {other:?}"
-                        )));
+                        return Err(InternalLedgerRouteError::PostNavigationStageInvariant {
+                            operation: PostNavigationOperation::Back,
+                            observed_stage: other.clone(),
+                        }
+                        .into());
                     }
                 };
                 let nonce = updated.nonce();
@@ -446,9 +506,9 @@ impl LedgerRouter {
         component
             .create_response(&ctx.http, response)
             .await
-            .map_err(|error| {
-                LedgerRouteError::Internal(format!("expense session missing reply: {error}"))
-            })?;
+            .map_err(discord_call_error(
+                DiscordCallSite::ExpenseSessionMissingReply,
+            ))?;
         Ok(InteractionDispatch::Handled)
     }
 
@@ -475,9 +535,9 @@ impl LedgerRouter {
         component
             .create_response(&ctx.http, response)
             .await
-            .map_err(|error| {
-                LedgerRouteError::Internal(format!("expense cancel create_response: {error}"))
-            })?;
+            .map_err(discord_call_error(
+                DiscordCallSite::ExpenseCancelCreateResponse,
+            ))?;
         Ok(InteractionDispatch::Handled)
     }
 
@@ -502,11 +562,9 @@ impl LedgerRouter {
         component
             .create_response(&ctx.http, response)
             .await
-            .map_err(|error| {
-                LedgerRouteError::Internal(format!(
-                    "panel expense launcher create_response: {error}"
-                ))
-            })?;
+            .map_err(discord_call_error(
+                DiscordCallSite::PanelExpenseLauncherCreateResponse,
+            ))?;
         Ok(InteractionDispatch::Handled)
     }
 
@@ -544,9 +602,8 @@ impl LedgerRouter {
         )
         .map_err(map_guard_error)?;
 
-        let raw = extract_raw_expense_modal_submission(modal).ok_or_else(|| {
-            LedgerRouteError::Internal("expense modal submission missing required fields".into())
-        })?;
+        let raw = extract_raw_expense_modal_submission(modal)
+            .ok_or(InternalLedgerRouteError::ModalSubmissionMissingFields)?;
 
         match validate_expense_modal_submission(&raw, self.deps.clock.as_ref()) {
             Err(error) => {
@@ -608,9 +665,9 @@ impl LedgerRouter {
         modal
             .create_response(&ctx.http, response)
             .await
-            .map_err(|error| {
-                LedgerRouteError::Internal(format!("expense retry modal create_response: {error}"))
-            })?;
+            .map_err(discord_call_error(
+                DiscordCallSite::ExpenseRetryModalCreateResponse,
+            ))?;
         let _ = validation_error;
         Ok(InteractionDispatch::Handled)
     }
@@ -634,11 +691,13 @@ impl LedgerRouter {
         modal
             .create_response(&ctx.http, response)
             .await
-            .map_err(|error| {
-                LedgerRouteError::Internal(format!("expense modal success ack: {error}"))
-            })?;
+            .map_err(discord_call_error(DiscordCallSite::ExpenseModalSuccessAck))?;
         Ok(InteractionDispatch::Handled)
     }
+}
+
+fn discord_call_error(site: DiscordCallSite) -> impl FnOnce(serenity::Error) -> LedgerRouteError {
+    move |error| LedgerRouteError::Internal(InternalLedgerRouteError::DiscordCall { site, error })
 }
 
 fn map_guard_error(error: LedgerInteractionGuardError) -> LedgerRouteError {
@@ -651,15 +710,11 @@ fn map_guard_error(error: LedgerInteractionGuardError) -> LedgerRouteError {
 }
 
 fn map_modal_build_error(error: ExpenseModalBuildError) -> LedgerRouteError {
-    match error {
-        ExpenseModalBuildError::Budget(budget) => {
-            LedgerRouteError::Internal(format!("expense modal exceeded budget: {budget:?}"))
-        }
-    }
+    InternalLedgerRouteError::ExpenseModalBuild(error).into()
 }
 
 fn map_construction_error(error: ExpenseSessionConstructionError) -> LedgerRouteError {
-    LedgerRouteError::Internal(format!("expense session construction failed: {error:?}"))
+    InternalLedgerRouteError::SessionConstruction(error).into()
 }
 
 pub(crate) const EXPENSE_CANCEL_CUSTOM_ID_PREFIX: &str = "ledger:expense:cancel:";
@@ -753,7 +808,7 @@ fn step_action_rows_for_phase(
 }
 
 fn map_navigation_error(error: NavigationError) -> LedgerRouteError {
-    LedgerRouteError::Internal(format!("expense navigation failed: {error:?}"))
+    InternalLedgerRouteError::Navigation(error).into()
 }
 
 fn format_money_for_modal(money: walicord_domain::Money) -> String {
@@ -784,19 +839,46 @@ mod tests {
 
     #[test]
     fn route_error_variants_can_be_pattern_matched_distinctly() {
-        let cases = [
+        let cases: [LedgerRouteError; 4] = [
             LedgerRouteError::GuildOnly,
             LedgerRouteError::NotInTrackedChannel,
-            LedgerRouteError::Permission("denied".into()),
-            LedgerRouteError::Internal("oops".into()),
+            LedgerRouteError::Permission(Cow::Borrowed("denied")),
+            InternalLedgerRouteError::ModalSubmissionMissingFields.into(),
         ];
         for error in &cases {
             match error {
                 LedgerRouteError::GuildOnly => {}
                 LedgerRouteError::NotInTrackedChannel => {}
                 LedgerRouteError::Permission(detail) => assert!(!detail.is_empty()),
-                LedgerRouteError::Internal(detail) => assert!(!detail.is_empty()),
+                LedgerRouteError::Internal(_) => {}
             }
         }
+    }
+
+    #[test]
+    fn route_error_display_includes_underlying_internal_message_via_thiserror() {
+        let error: LedgerRouteError = InternalLedgerRouteError::DiscordCall {
+            site: DiscordCallSite::ExpenseStepRefresh,
+            error: serenity::Error::Other("simulated"),
+        }
+        .into();
+
+        let rendered = error.to_string();
+
+        assert!(rendered.contains("internal failure"));
+        assert!(rendered.contains("expense step refresh"));
+    }
+
+    #[test]
+    fn internal_route_error_post_navigation_invariant_renders_operation_and_stage() {
+        let error = InternalLedgerRouteError::PostNavigationStageInvariant {
+            operation: PostNavigationOperation::Forward,
+            observed_stage: ExpenseSessionStage::InConfirmation,
+        };
+
+        let rendered = error.to_string();
+
+        assert!(rendered.contains("forward"));
+        assert!(rendered.contains("InConfirmation"));
     }
 }
