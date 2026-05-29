@@ -20,6 +20,7 @@ use super::{
         parse_expense_modal_custom_id,
     },
     observability::LedgerObservability,
+    panel::LEDGER_PANEL_EXPENSE_ID,
     preview_store::PreviewStore,
     response_writer::suppressed_allowed_mentions,
     route_guard::{LedgerInteractionGuardError, guard_ledger_interaction},
@@ -132,15 +133,47 @@ impl LedgerRouter {
         Ok(InteractionDispatch::Handled)
     }
 
-    /// Component (button / select-menu) dispatch. Subsequent slices wire fixed
-    /// panel-launcher buttons (`ledger:panel:*`) and session-scoped buttons keyed by
-    /// `custom_id` prefix here.
+    /// Component (button / select-menu) dispatch. Currently handles the panel
+    /// `記録する` launcher; subsequent slices add the rest of the
+    /// `ledger:panel:*` buttons and session-scoped controls.
     pub async fn handle_component(
         &self,
-        _ctx: &Context,
-        _component: &ComponentInteraction,
+        ctx: &Context,
+        component: &ComponentInteraction,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
-        Ok(InteractionDispatch::Ignored)
+        match component.data.custom_id.as_str() {
+            LEDGER_PANEL_EXPENSE_ID => self.dispatch_panel_expense_launcher(ctx, component).await,
+            _ => Ok(InteractionDispatch::Ignored),
+        }
+    }
+
+    async fn dispatch_panel_expense_launcher(
+        &self,
+        ctx: &Context,
+        component: &ComponentInteraction,
+    ) -> Result<InteractionDispatch, LedgerRouteError> {
+        let _scope = guard_ledger_interaction(
+            component.guild_id,
+            component.channel_id,
+            self.deps.channels.as_ref(),
+        )
+        .map_err(map_guard_error)?;
+        let nonce = self.deps.nonce_provider.next_interaction_nonce();
+        let response = build_expense_modal_response(
+            self.deps.clock.as_ref(),
+            nonce,
+            &ExpenseModalPrefill::default(),
+        )
+        .map_err(map_modal_build_error)?;
+        component
+            .create_response(&ctx.http, response)
+            .await
+            .map_err(|error| {
+                LedgerRouteError::Internal(format!(
+                    "panel expense launcher create_response: {error}"
+                ))
+            })?;
+        Ok(InteractionDispatch::Handled)
     }
 
     /// Modal submission dispatch. Currently handles the expense-new modal; weight
