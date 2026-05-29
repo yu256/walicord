@@ -1,11 +1,16 @@
 mod correction;
 mod discord_authoring;
 mod entry;
+pub mod expense_flow;
+pub mod expense_modal;
 pub mod expense_session;
+pub mod expense_write;
 mod hash_chain;
 mod load;
 pub mod participant_resolution;
+pub mod preview_store;
 mod seal;
+pub mod settle_flow;
 
 pub use walicord_ledger::{
     AdjustmentReason, AdjustmentReasonError, BalanceAdjusted, BalanceAdjustedError,

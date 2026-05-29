@@ -2,8 +2,7 @@ use super::preview_store::{
     PreviewStore, PreviewStoreError, PreviewStoreKey, PreviewStoreRecord, PreviewStoreState,
     PreviewStoreTransition,
 };
-use std::time::SystemTime;
-use walicord_application::{
+use crate::{
     Clock, NonceProvider, PreviewBindingError, PreviewConfirmationBinding, PreviewInstanceId,
     SettlementPlanner,
     ledger::{
@@ -14,6 +13,7 @@ use walicord_application::{
         record_previewed_plan_matching,
     },
 };
+use std::time::SystemTime;
 use walicord_domain::model::MemberId;
 
 /// Outcome of `/review` (canonical-thread) and panel `清算確認` preview composition.
@@ -251,15 +251,11 @@ pub fn compose_settlement_entry_from_preview(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{
-        sync::atomic::{AtomicU64, Ordering},
-        time::{Duration, UNIX_EPOCH},
-    };
-    use walicord_application::{
-        InteractionNonce,
+    use crate::{
         ledger::{LedgerEffectiveDate, ledger_chain_genesis_sha256_v1},
         settle_up::PreviewedSettlement,
     };
+    use std::time::{Duration, UNIX_EPOCH};
     use walicord_domain::{
         MemberBalances, Money, Settlement, SettlementContext, SettlementRoundingError, Transfer,
     };
@@ -274,20 +270,6 @@ mod tests {
         }
         fn today_business_date(&self) -> LedgerEffectiveDate {
             LedgerEffectiveDate::new("2026-05-29").unwrap()
-        }
-    }
-
-    struct SeqNonces {
-        nonce: AtomicU64,
-        preview: AtomicU64,
-    }
-
-    impl NonceProvider for SeqNonces {
-        fn next_interaction_nonce(&self) -> InteractionNonce {
-            InteractionNonce::new(self.nonce.fetch_add(1, Ordering::SeqCst)).unwrap()
-        }
-        fn next_preview_instance_id(&self) -> PreviewInstanceId {
-            PreviewInstanceId::new(self.preview.fetch_add(1, Ordering::SeqCst)).unwrap()
         }
     }
 
@@ -322,7 +304,7 @@ mod tests {
         let mut balances = MemberBalances::default();
         balances.insert(MemberId(1), Money::from_i64(-amount));
         balances.insert(MemberId(2), Money::from_i64(amount));
-        walicord_application::SettleUpPolicy::preview(
+        crate::SettleUpPolicy::preview(
             &TwoMemberPlanner,
             &balances,
             &[MemberId(1), MemberId(2)],
@@ -395,8 +377,7 @@ mod tests {
     #[test]
     fn compose_settlement_entry_returns_no_preview_stored_when_store_is_empty() {
         let store = PreviewStore::new();
-        let snapshot = walicord_application::ledger::replay_verified_snapshot::<()>(&[])
-            .expect("empty replay");
+        let snapshot = crate::ledger::replay_verified_snapshot::<()>(&[]).expect("empty replay");
         let clock = FixedClock {
             now: UNIX_EPOCH + Duration::from_secs(30),
         };
@@ -419,8 +400,7 @@ mod tests {
         let head = ledger_chain_genesis_sha256_v1(LedgerId(77));
         let (store, key) = store_with_preview(head, UNIX_EPOCH + Duration::from_secs(600));
         // Intentionally skip `mark_preview_delivered`.
-        let snapshot = walicord_application::ledger::replay_verified_snapshot::<()>(&[])
-            .expect("empty replay");
+        let snapshot = crate::ledger::replay_verified_snapshot::<()>(&[]).expect("empty replay");
         let clock = FixedClock {
             now: UNIX_EPOCH + Duration::from_secs(30),
         };

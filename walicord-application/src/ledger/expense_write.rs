@@ -1,4 +1,4 @@
-use walicord_application::{
+use crate::{
     Clock,
     ledger::{
         DiscordLedgerEntryError, DiscordLedgerSourceDescriptor, EntryHash, ExpenseAuthoringError,
@@ -163,18 +163,12 @@ pub fn build_canonical_envelope(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::discord::ledger::{
-        expense_flow::{bootstrap_expense_session, build_confirmation_for_session},
-        expense_modal::{RawExpenseModalSubmission, validate_expense_modal_submission},
-    };
-    use std::{
-        sync::atomic::{AtomicU64, Ordering},
-        time::{Duration, SystemTime, UNIX_EPOCH},
-    };
-    use walicord_application::{
+    use crate::{
         Clock, InteractionNonce, NonceProvider,
         ledger::{
             LedgerEffectiveDate,
+            expense_flow::{bootstrap_expense_session, build_confirmation_for_session},
+            expense_modal::{RawExpenseModalSubmission, validate_expense_modal_submission},
             expense_session::{
                 ExpenseSelectionPhase, ExpenseSelectionState, ExpenseSession, ExpenseSessionKey,
                 ExpenseSessionStage,
@@ -183,6 +177,10 @@ mod tests {
             participant_resolution::RosterSnapshot,
         },
         settle_up::PreviewInstanceId,
+    };
+    use std::{
+        sync::atomic::{AtomicU64, Ordering},
+        time::{Duration, SystemTime, UNIX_EPOCH},
     };
 
     struct FixedClock;

@@ -1,7 +1,5 @@
+use crate::{PreviewConfirmationBinding, PreviewInstanceId, PreviewedSettlement, ledger::LedgerId};
 use std::{collections::HashMap, sync::Mutex, time::SystemTime};
-use walicord_application::{
-    PreviewConfirmationBinding, PreviewInstanceId, PreviewedSettlement, ledger::LedgerId,
-};
 use walicord_domain::model::MemberId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -121,7 +119,7 @@ pub enum PreviewStoreError {
     #[error("preview is not in CommitInProgress state")]
     NotInProgress,
     #[error("preview binding: {0}")]
-    Binding(#[from] walicord_application::PreviewBindingError),
+    Binding(#[from] crate::PreviewBindingError),
 }
 
 pub struct PreviewStore {
@@ -285,12 +283,12 @@ fn ensure_instance_matches(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rstest::rstest;
-    use std::time::{Duration, UNIX_EPOCH};
-    use walicord_application::{
+    use crate::{
         PreviewBindingError, SettleUpPolicy, SettlementPlanner,
         ledger::ledger_chain_genesis_sha256_v1,
     };
+    use rstest::rstest;
+    use std::time::{Duration, UNIX_EPOCH};
     use walicord_domain::{
         MemberBalances, Money, Settlement, SettlementContext, SettlementRoundingError, Transfer,
     };

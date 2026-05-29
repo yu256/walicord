@@ -12,7 +12,7 @@ use walicord_presentation::discord_ledger::{
     validate_text_input_label, validate_text_input_placeholder,
 };
 
-use super::expense_modal::RawExpenseModalSubmission;
+use walicord_application::ledger::expense_modal::RawExpenseModalSubmission;
 
 pub const EXPENSE_MODAL_CUSTOM_ID_PREFIX: &str = "ledger:expense:new:";
 const AMOUNT_FIELD: &str = "amount";

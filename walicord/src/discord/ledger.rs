@@ -80,17 +80,8 @@ mod adapters;
 #[path = "ledger/codec.rs"]
 mod codec;
 #[allow(dead_code)]
-#[path = "ledger/expense_flow.rs"]
-mod expense_flow;
-#[allow(dead_code)]
-#[path = "ledger/expense_modal.rs"]
-mod expense_modal;
-#[allow(dead_code)]
 #[path = "ledger/expense_modal_open.rs"]
 mod expense_modal_open;
-#[allow(dead_code)]
-#[path = "ledger/expense_write.rs"]
-mod expense_write;
 #[allow(dead_code)]
 #[path = "ledger/locator.rs"]
 mod locator;
@@ -106,9 +97,6 @@ mod panel;
 #[allow(dead_code)]
 #[path = "ledger/permissions.rs"]
 mod permissions;
-#[allow(dead_code)]
-#[path = "ledger/preview_store.rs"]
-mod preview_store;
 #[allow(dead_code)]
 #[path = "ledger/projection.rs"]
 mod projection;
@@ -130,9 +118,6 @@ mod runtime_clock;
 #[allow(dead_code)]
 #[path = "ledger/runtime_lock.rs"]
 mod runtime_lock;
-#[allow(dead_code)]
-#[path = "ledger/settle_flow.rs"]
-mod settle_flow;
 #[allow(dead_code)]
 #[path = "ledger/store.rs"]
 mod store;
@@ -171,14 +156,14 @@ pub(crate) use self::{
 pub(crate) use self::{
     adapters::{DiscordLedgerThreadLoader, DiscordRouterRosterFetcher},
     observability::TracingLedgerObservability,
-    preview_store::PreviewStore,
     router::{InteractionDispatch, LedgerRouter, LedgerRouterDependencies},
     runtime_clock::{ProcessNonceProvider, SystemClock},
     store::{DiscordCanonicalLedgerStore, WriterLineagePolicy},
     write_coordinator::{UncertainWriteRegistry, WriteCoordinator},
 };
-pub(crate) use walicord_application::ledger::expense_session::{
-    ExpenseSessionStore, ModalRetryBindingStore, VoidSessionStore,
+pub(crate) use walicord_application::ledger::{
+    expense_session::{ExpenseSessionStore, ModalRetryBindingStore, VoidSessionStore},
+    preview_store::PreviewStore,
 };
 
 pub const LEDGER_ATTACHMENT_FILENAME: &str = "walicord-ledger-entry.json";

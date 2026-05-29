@@ -1,5 +1,5 @@
 use super::expense_modal::ValidatedExpenseModalSubmission;
-use walicord_application::{
+use crate::{
     Clock, InteractionNonce, NonceProvider,
     ledger::{
         expense_session::{
@@ -381,16 +381,16 @@ pub fn apply_modified_basic_info(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::discord::ledger::expense_modal::{
-        RawExpenseModalSubmission, validate_expense_modal_submission,
+    use crate::{
+        ledger::{
+            ExpenseNote, LedgerEffectiveDate,
+            expense_modal::{RawExpenseModalSubmission, validate_expense_modal_submission},
+        },
+        settle_up::PreviewInstanceId,
     };
     use std::{
         sync::atomic::{AtomicU64, Ordering},
         time::{Duration, SystemTime, UNIX_EPOCH},
-    };
-    use walicord_application::{
-        ledger::{ExpenseNote, LedgerEffectiveDate},
-        settle_up::PreviewInstanceId,
     };
     use walicord_domain::Money;
 
@@ -437,7 +437,7 @@ mod tests {
     }
 
     fn key() -> ExpenseSessionKey {
-        ExpenseSessionKey::new(walicord_application::ledger::LedgerId(42), MemberId(42))
+        ExpenseSessionKey::new(crate::ledger::LedgerId(42), MemberId(42))
     }
 
     #[test]
@@ -730,9 +730,8 @@ mod tests {
     fn updated_basic_info() -> ExpenseBasicInfo {
         ExpenseBasicInfo {
             amount: walicord_domain::Money::from_i64(2500),
-            note: Some(walicord_application::ledger::ExpenseNote::new("再編集").expect("note")),
-            effective_date: walicord_application::ledger::LedgerEffectiveDate::new("2026-05-15")
-                .expect("date"),
+            note: Some(crate::ledger::ExpenseNote::new("再編集").expect("note")),
+            effective_date: crate::ledger::LedgerEffectiveDate::new("2026-05-15").expect("date"),
         }
     }
 

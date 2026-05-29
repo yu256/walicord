@@ -1,8 +1,8 @@
-use chrono::{Datelike, NaiveDate};
-use walicord_application::{
+use crate::{
     Clock,
     ledger::{ExpenseNote, LedgerEffectiveDate},
 };
+use chrono::{Datelike, NaiveDate};
 use walicord_domain::Money;
 
 /// Maximum note length enforced at modal validation per criterion 204. The cap counts

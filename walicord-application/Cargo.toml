@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+chrono = { version = "0.4", features = ["clock"] }
 dashmap = "6.1.0"
 fxhash = "0.2.1"
 rust_decimal = "1.36.0"
