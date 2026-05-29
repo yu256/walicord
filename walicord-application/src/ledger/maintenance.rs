@@ -100,10 +100,6 @@ pub enum MaintenanceValidationError {
     TargetAlreadyVoided { target_entry_id: LedgerEntryId },
     #[error("target entry {target_entry_id:?} is inside sealed history")]
     TargetSealed { target_entry_id: LedgerEntryId },
-    /// Damaged-thread replacement cannot reuse the retired ledger's parent channel
-    /// (criterion 199: same-parent dual thread forbidden).
-    #[error("damaged-thread replacement cannot reuse the retired thread's parent channel")]
-    SameParentDualThread,
     #[error("duplicate-resolution requires at least one retired thread")]
     DuplicateResolutionEmpty,
     #[error("authoritative thread is not among the observed duplicate candidates")]
