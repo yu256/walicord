@@ -8,6 +8,7 @@ pub mod expense_session;
 pub mod expense_write;
 mod hash_chain;
 mod load;
+pub mod observability;
 pub mod participant_resolution;
 pub mod preview_store;
 pub mod projection;

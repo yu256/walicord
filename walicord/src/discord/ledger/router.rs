@@ -18,6 +18,7 @@ use walicord_application::{
             ExpenseSessionKey, ExpenseSessionStage, ExpenseSessionStore, ModalRetryBinding,
             ModalRetryBindingStore, ModalRetryPreserved, VoidSessionStore,
         },
+        observability::LedgerObservability,
         participant_resolution::{ParticipantDrift, RosterSnapshot},
     },
 };
@@ -37,7 +38,7 @@ use super::{
         build_expense_modal_response, extract_raw_expense_modal_submission,
         parse_expense_modal_custom_id,
     },
-    observability::LedgerObservability,
+    observability::DiscordLedgerObservability,
     panel::LEDGER_PANEL_EXPENSE_ID,
     response_writer::{rendered_surface_to_message, suppressed_allowed_mentions},
     route_guard::{LedgerInteractionGuardError, guard_ledger_interaction},
@@ -83,6 +84,7 @@ pub struct LedgerRouterDependencies {
     pub planner: Arc<dyn SettlementPlanner>,
     pub canonical_store: Arc<DiscordCanonicalLedgerStore>,
     pub observability: Arc<dyn LedgerObservability>,
+    pub discord_observability: Arc<dyn DiscordLedgerObservability>,
 }
 
 /// Object-safe port the router uses to load the verified canonical thread for a

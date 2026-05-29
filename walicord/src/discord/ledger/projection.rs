@@ -2,15 +2,9 @@ use super::store::StoreLoadError;
 use walicord_application::ledger::{LedgerEntryId, canonical_attachment::AttachmentCodecError};
 use walicord_i18n as i18n;
 
-pub const UNKNOWN_LEDGER_FORMAT_EVENT: &str = "ledger_unknown_variant";
+pub use walicord_application::ledger::observability::CanonicalLoadRoute;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CanonicalLoadRoute {
-    Read,
-    Preview,
-    Refresh,
-    WritePrelude,
-}
+pub const UNKNOWN_LEDGER_FORMAT_EVENT: &str = "ledger_unknown_variant";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CanonicalLoadFailure {
@@ -148,17 +142,6 @@ impl CanonicalLoadFailure {
         match self {
             Self::VersionMismatch { .. } => Some(UNKNOWN_LEDGER_FORMAT_EVENT),
             _ => None,
-        }
-    }
-}
-
-impl CanonicalLoadRoute {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Read => "read",
-            Self::Preview => "preview",
-            Self::Refresh => "refresh",
-            Self::WritePrelude => "write_prelude",
         }
     }
 }
