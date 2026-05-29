@@ -1,3 +1,4 @@
+use std::time::SystemTime;
 use walicord_domain::model::{MemberId, Weight};
 use walicord_ledger::{
     BalanceAdjusted, EntryVoided, ExpenseRecorded, LedgerEntryId, LedgerEvent, LedgerHistorySealed,
@@ -227,6 +228,9 @@ pub struct LedgerEntryMetadata {
     pub recorded_by: Option<MemberId>,
     pub source: Option<LedgerSourceCanonical>,
     pub effective_date: Option<LedgerEffectiveDate>,
+    /// Application-owned append timestamp. Verified replay prefers this value and falls back
+    /// to Discord transport timestamps only for legacy entries that predate this field.
+    pub recorded_at: Option<SystemTime>,
     /// Typed audit snapshot of an expense's allocation strategy and resolved per-member
     /// weights. The projection never reads this field; it is hash-protected (because it
     /// is part of `LedgerEntryMetadata`) so audit data stays stable, but presentation

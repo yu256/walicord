@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+icu = { version = "2.2.0", features = ["compiled_data"] }
 tracing = "0.1"
 walicord-application = { path = "../walicord-application" }
 walicord-domain = { path = "../walicord-domain" }

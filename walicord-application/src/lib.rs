@@ -22,12 +22,15 @@ pub use message_processor::{MessageProcessor, ProcessingOutcome, SettlementResul
 pub use model::{
     Command, PersonBalance, Script, ScriptStatement, ScriptStatementWithLine, SettleUpContext,
 };
-pub use ports::{MemberDirectory, ProgramParser, SettlementPlanner};
+pub use ports::{
+    Clock, InteractionNonce, MemberDirectory, NonceProvider, ProgramParser, SettlementPlanner,
+};
 pub use role_visibility::{
     FilteredEmptyRoleParseError, RoleVisibilityDiagnostic, RoleVisibilityDiagnostics,
     RoleVisibilityWarning, filtered_empty_role_parse_error, warnings_for_program_prefix,
 };
 pub use settle_up::{
-    PreviewConfirmationBinding, PreviewedSettlement, PreviewedSettlementDigest, SettleUpPolicy,
-    SettlementLedgerEventOutcome, ValidatedSettlementPlan,
+    PreviewBindingError, PreviewConfirmationBinding, PreviewDeliveryState, PreviewInstanceId,
+    PreviewedSettlement, PreviewedSettlementDigest, SettleUpPolicy, SettlementLedgerEventOutcome,
+    ValidatedSettlementPlan,
 };

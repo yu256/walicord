@@ -1,6 +1,13 @@
 use crate::{
     channel::{ChannelEvent, ChannelManager, TrackedChannelId},
-    discord::ports::{ChannelService, RosterProvider, ServiceError},
+    discord::{
+        ledger::{
+            ChannelFlagAction, SlashScopeError, channel_flag_action,
+            safe_edit_interaction_response, safe_interaction_response_message,
+            slash_scope_channel_id, startup_track_targets,
+        },
+        ports::{ChannelService, RosterProvider, ServiceError},
+    },
     message_cache::{CachedMessage, MessageCache, next_line_offset},
     reaction::{BotReaction, BotReactionState, MessageValidity, ReactionService},
     role_visibility_feedback,
@@ -11,6 +18,7 @@ use indexmap::IndexMap;
 use serenity::{
     all::MessageId,
     async_trait,
+    builder::CreateInteractionResponseMessage,
     model::{
         channel::{GuildChannel, Message, Reaction, ReactionType},
         event::{GuildMemberUpdateEvent, MessageUpdateEvent},
@@ -21,12 +29,13 @@ use serenity::{
     },
     prelude::*,
 };
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 use walicord_application::{
     Command as ProgramCommand, MessageProcessor, ProgramParseError, RoleVisibilityDiagnostics,
     Script, ScriptStatement, filtered_empty_role_parse_error, warnings_for_program_prefix,
 };
 use walicord_domain::model::{MemberId, RoleId, RoleMembers};
+use walicord_infrastructure::HighsSettlementPlanner;
 use walicord_presentation::{VariablesPresenter, format_program_parse_error};
 
 /// Result of attempting to load channel cache.
@@ -40,6 +49,25 @@ pub enum CacheLoadResult {
     NotTracked,
     /// Fetch failed, cache not loaded.
     Failed,
+}
+
+fn ledger_commands() -> Vec<serenity::builder::CreateCommand> {
+    vec![
+        serenity::builder::CreateCommand::new("panel")
+            .description(walicord_i18n::slash_panel_description()),
+        serenity::builder::CreateCommand::new("expense")
+            .description(walicord_i18n::slash_expense_description()),
+        serenity::builder::CreateCommand::new("review")
+            .description(walicord_i18n::slash_review_description()),
+        serenity::builder::CreateCommand::new("settle")
+            .description(walicord_i18n::slash_settle_description()),
+        serenity::builder::CreateCommand::new("void")
+            .description(walicord_i18n::slash_void_description()),
+        serenity::builder::CreateCommand::new("ledger")
+            .description(walicord_i18n::slash_ledger_description()),
+        serenity::builder::CreateCommand::new("variables")
+            .description(walicord_i18n::SLASH_VARIABLES_DESCRIPTION),
+    ]
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -73,70 +101,6 @@ struct SlashQueryInput<'a> {
     role_members: &'a RoleMembers,
     role_visibility_diagnostics: &'a RoleVisibilityDiagnostics,
     command_name: &'a str,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ChannelFlagAction {
-    Track,
-    Untrack,
-    Keep,
-}
-
-fn startup_channel_is_track_target(
-    kind: serenity::model::channel::ChannelType,
-    topic: Option<&str>,
-) -> bool {
-    kind == serenity::model::channel::ChannelType::Text && ChannelManager::topic_has_flag(topic)
-}
-
-fn startup_track_targets<'a, I>(channels: I) -> Vec<ChannelId>
-where
-    I: IntoIterator<
-        Item = (
-            ChannelId,
-            serenity::model::channel::ChannelType,
-            Option<&'a str>,
-        ),
-    >,
-{
-    channels
-        .into_iter()
-        .filter_map(|(id, kind, topic)| startup_channel_is_track_target(kind, topic).then_some(id))
-        .collect()
-}
-
-fn channel_flag_action(old_topic: Option<&str>, new_topic: Option<&str>) -> ChannelFlagAction {
-    let old_has_flag = ChannelManager::topic_has_flag(old_topic);
-    let new_has_flag = ChannelManager::topic_has_flag(new_topic);
-    match (old_has_flag, new_has_flag) {
-        (false, true) => ChannelFlagAction::Track,
-        (true, false) => ChannelFlagAction::Untrack,
-        _ => ChannelFlagAction::Keep,
-    }
-}
-
-#[derive(Debug, PartialEq, thiserror::Error)]
-enum SlashScopeError {
-    #[error("thread channel {0} has no parent channel")]
-    ThreadWithoutParent(ChannelId),
-}
-
-fn slash_scope_channel_id(
-    channel_id: ChannelId,
-    kind: serenity::model::channel::ChannelType,
-    parent_id: Option<ChannelId>,
-) -> Result<ChannelId, SlashScopeError> {
-    let is_thread = matches!(
-        kind,
-        serenity::model::channel::ChannelType::PublicThread
-            | serenity::model::channel::ChannelType::PrivateThread
-            | serenity::model::channel::ChannelType::NewsThread
-    );
-    if is_thread {
-        parent_id.ok_or(SlashScopeError::ThreadWithoutParent(channel_id))
-    } else {
-        Ok(channel_id)
-    }
 }
 
 fn is_ledger_poc_command(command_name: &str) -> bool {
@@ -238,7 +202,9 @@ where
         channel_manager: ChannelManager,
     ) -> Self {
         Self {
-            ledger_poc: crate::discord::ledger::DiscordLedgerPoc::new(),
+            ledger_poc: crate::discord::ledger::DiscordLedgerPoc::new_with_planner(Arc::new(
+                HighsSettlementPlanner,
+            )),
             message_cache,
             channel_service,
             roster_provider,
@@ -763,7 +729,6 @@ where
     ) {
         use serenity::builder::{
             CreateAttachment, CreateInteractionResponse, CreateInteractionResponseFollowup,
-            CreateInteractionResponseMessage, EditInteractionResponse,
         };
 
         let Ok(scoped_channel_id) = self
@@ -778,7 +743,8 @@ where
                 let _ = command
                     .edit_response(
                         &ctx.http,
-                        EditInteractionResponse::new().content(walicord_i18n::CHANNEL_NOT_TRACKED),
+                        safe_edit_interaction_response()
+                            .content(walicord_i18n::CHANNEL_NOT_TRACKED),
                     )
                     .await;
             } else {
@@ -786,7 +752,7 @@ where
                     .create_response(
                         &ctx.http,
                         CreateInteractionResponse::Message(
-                            CreateInteractionResponseMessage::new()
+                            safe_interaction_response_message()
                                 .content(walicord_i18n::CHANNEL_NOT_TRACKED)
                                 .ephemeral(true),
                         ),
@@ -1152,19 +1118,9 @@ where
         tracing::info!("Connected as {}", ready.user.name);
         self.initialize_enabled_channels(&ctx, &ready).await;
 
-        use serenity::{builder::CreateCommand, model::application::Command};
+        use serenity::model::application::Command;
 
-        let commands = vec![
-            CreateCommand::new("panel").description("Walicord 操作パネルを投稿します"),
-            CreateCommand::new("expense").description("経費を台帳に記録します"),
-            CreateCommand::new("review").description(walicord_i18n::SLASH_REVIEW_DESCRIPTION),
-            CreateCommand::new("settle").description("直前の清算確認を台帳に記録します"),
-            CreateCommand::new("void").description("台帳記録を取り消します"),
-            CreateCommand::new("ledger").description("残高と記録情報を表示します"),
-            CreateCommand::new("variables").description(walicord_i18n::SLASH_VARIABLES_DESCRIPTION),
-        ];
-
-        if let Err(e) = Command::set_global_commands(&ctx.http, commands).await {
+        if let Err(e) = Command::set_global_commands(&ctx.http, ledger_commands()).await {
             tracing::error!("Failed to register slash commands: {:?}", e);
         }
     }
@@ -1208,7 +1164,7 @@ where
                         .create_response(
                             &ctx.http,
                             serenity::builder::CreateInteractionResponse::Message(
-                                serenity::builder::CreateInteractionResponseMessage::new()
+                                safe_interaction_response_message()
                                     .content(walicord_i18n::CHANNEL_NOT_TRACKED)
                                     .ephemeral(true),
                             ),
@@ -1226,9 +1182,8 @@ where
                 self.handle_slash_command(&ctx, command).await;
             }
             serenity::model::application::Interaction::Component(ref component) => {
-                if crate::discord::ledger::is_ledger_panel_component_id(
-                    component.data.custom_id.as_str(),
-                ) {
+                if crate::discord::ledger::is_ledger_component_id(component.data.custom_id.as_str())
+                {
                     let scoped_channel_id = self
                         .resolve_slash_scope_channel_id(&ctx, component.channel_id)
                         .await
@@ -1242,7 +1197,7 @@ where
                             .create_response(
                                 &ctx.http,
                                 serenity::builder::CreateInteractionResponse::Message(
-                                    serenity::builder::CreateInteractionResponseMessage::new()
+                                    safe_interaction_response_message()
                                         .content(walicord_i18n::CHANNEL_NOT_TRACKED)
                                         .ephemeral(true),
                                 ),
@@ -1257,6 +1212,29 @@ where
                     .await;
             }
             serenity::model::application::Interaction::Modal(ref modal) => {
+                if crate::discord::ledger::is_ledger_modal_id(modal.data.custom_id.as_str()) {
+                    let scoped_channel_id = self
+                        .resolve_slash_scope_channel_id(&ctx, modal.channel_id)
+                        .await
+                        .unwrap_or(modal.channel_id);
+                    if self
+                        .channel_manager
+                        .get_tracked(scoped_channel_id)
+                        .is_none()
+                    {
+                        let _ = modal
+                            .create_response(
+                                &ctx.http,
+                                serenity::builder::CreateInteractionResponse::Message(
+                                    safe_interaction_response_message()
+                                        .content(walicord_i18n::CHANNEL_NOT_TRACKED)
+                                        .ephemeral(true),
+                                ),
+                            )
+                            .await;
+                        return;
+                    }
+                }
                 let _ = self
                     .ledger_poc
                     .handle_modal(&ctx, modal, &self.roster_provider)
@@ -1267,8 +1245,9 @@ where
     }
 
     async fn channel_update(&self, ctx: Context, old: Option<GuildChannel>, new: GuildChannel) {
+        let old_kind = old.as_ref().map(|channel| channel.kind);
         let old_topic = old.as_ref().and_then(|channel| channel.topic.as_deref());
-        match channel_flag_action(old_topic, new.topic.as_deref()) {
+        match channel_flag_action(old_kind, old_topic, new.kind, new.topic.as_deref()) {
             ChannelFlagAction::Track => self.track_channel(&ctx, new.id).await,
             ChannelFlagAction::Untrack => self.untrack_channel(new.id),
             ChannelFlagAction::Keep => {}
@@ -1514,6 +1493,7 @@ where
 mod tests {
     use super::*;
     use crate::{
+        discord::ledger::startup_channel_is_track_target,
         message_cache::CachedMessage,
         test_utils::{MockChannelService, MockRosterProvider},
     };
@@ -1556,6 +1536,73 @@ mod tests {
 
     fn role_expr(role_id: u64) -> MemberSetExpr<'static> {
         MemberSetExpr::new([MemberSetOp::PushRole(RoleId(role_id))])
+    }
+
+    #[test]
+    fn ledger_command_descriptions_use_the_route_scoped_copy() {
+        let commands = serde_json::to_value(ledger_commands()).expect("commands should serialize");
+        let commands = commands
+            .as_array()
+            .expect("commands should be serialized as an array");
+        let descriptions = commands
+            .iter()
+            .map(|command| {
+                (
+                    command["name"].as_str().expect("command name should exist"),
+                    command["description"]
+                        .as_str()
+                        .expect("command description should exist"),
+                )
+            })
+            .collect::<std::collections::HashMap<_, _>>();
+
+        assert_eq!(
+            descriptions.get("panel"),
+            Some(&walicord_i18n::slash_panel_description())
+        );
+        assert_eq!(
+            descriptions.get("expense"),
+            Some(&walicord_i18n::slash_expense_description())
+        );
+        assert_eq!(
+            descriptions.get("review"),
+            Some(&walicord_i18n::slash_review_description())
+        );
+        assert_eq!(
+            descriptions.get("settle"),
+            Some(&walicord_i18n::slash_settle_description())
+        );
+        assert_eq!(
+            descriptions.get("void"),
+            Some(&walicord_i18n::slash_void_description())
+        );
+        assert_eq!(
+            descriptions.get("ledger"),
+            Some(&walicord_i18n::slash_ledger_description())
+        );
+        assert_eq!(
+            walicord_i18n::slash_ledger_refresh_description(),
+            "この親チャンネルの台帳スレッド状態を管理者が再確認します。"
+        );
+    }
+
+    #[test]
+    fn ledger_command_descriptions_stay_within_the_discord_budget() {
+        let descriptions = [
+            walicord_i18n::slash_panel_description(),
+            walicord_i18n::slash_expense_description(),
+            walicord_i18n::slash_review_description(),
+            walicord_i18n::slash_settle_description(),
+            walicord_i18n::slash_void_description(),
+            walicord_i18n::slash_ledger_description(),
+            walicord_i18n::slash_ledger_refresh_description(),
+        ];
+
+        assert!(
+            descriptions
+                .iter()
+                .all(|description| description.chars().count() <= 100)
+        );
     }
 
     fn make_script_with_role_reference_and_command(
@@ -1675,22 +1722,66 @@ mod tests {
     }
 
     #[rstest]
-    #[case::enable_from_none(None, Some("#walicord"), ChannelFlagAction::Track)]
-    #[case::enable_from_unflagged(Some("ops"), Some("ops #walicord"), ChannelFlagAction::Track)]
-    #[case::disable_to_unflagged(Some("ops #walicord"), Some("ops"), ChannelFlagAction::Untrack)]
-    #[case::disable_to_none(Some("ops #walicord"), None, ChannelFlagAction::Untrack)]
-    #[case::keep_when_both_flagged(
+    #[case::enable_from_none(
+        None,
+        None,
+        ChannelType::Text,
+        Some("#walicord"),
+        ChannelFlagAction::Track
+    )]
+    #[case::enable_from_unflagged(
+        Some(ChannelType::Text),
+        Some("ops"),
+        ChannelType::Text,
         Some("ops #walicord"),
+        ChannelFlagAction::Track
+    )]
+    #[case::disable_to_unflagged(
+        Some(ChannelType::Text),
+        Some("ops #walicord"),
+        ChannelType::Text,
+        Some("ops"),
+        ChannelFlagAction::Untrack
+    )]
+    #[case::disable_to_none(
+        Some(ChannelType::Text),
+        Some("ops #walicord"),
+        ChannelType::Text,
+        None,
+        ChannelFlagAction::Untrack
+    )]
+    #[case::disable_when_parent_stops_being_text(
+        Some(ChannelType::Text),
+        Some("ops #walicord"),
+        ChannelType::Voice,
+        Some("ops #walicord"),
+        ChannelFlagAction::Untrack
+    )]
+    #[case::keep_when_both_flagged(
+        Some(ChannelType::Text),
+        Some("ops #walicord"),
+        ChannelType::Text,
         Some("finance #walicord"),
         ChannelFlagAction::Keep
     )]
-    #[case::keep_when_both_unflagged(Some("ops"), Some("finance"), ChannelFlagAction::Keep)]
+    #[case::keep_when_both_unflagged(
+        Some(ChannelType::Text),
+        Some("ops"),
+        ChannelType::Text,
+        Some("finance"),
+        ChannelFlagAction::Keep
+    )]
     fn channel_flag_action_cases(
+        #[case] old_kind: Option<ChannelType>,
         #[case] old_topic: Option<&str>,
+        #[case] new_kind: ChannelType,
         #[case] new_topic: Option<&str>,
         #[case] expected: ChannelFlagAction,
     ) {
-        assert_eq!(channel_flag_action(old_topic, new_topic), expected);
+        assert_eq!(
+            channel_flag_action(old_kind, old_topic, new_kind, new_topic),
+            expected
+        );
     }
 
     #[rstest]

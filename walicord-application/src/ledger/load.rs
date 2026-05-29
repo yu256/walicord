@@ -8,6 +8,8 @@ use super::{
 };
 use walicord_ledger::{LedgerId, LedgerProjectionError, ProjectedLedger};
 
+pub const LEDGER_THREAD_GROWTH_WARNING_THRESHOLD: usize = 4_000;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LedgerReplayError {
     Structure(AppendOrderedLedgerEntriesError),
@@ -28,6 +30,63 @@ impl LedgerProjector {
     ) -> Result<ProjectedLedger, LedgerProjectionError> {
         walicord_ledger::LedgerProjector::replay(&entries.records)
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedLedgerSnapshot {
+    projected: ProjectedLedger,
+    current_head_hash: Option<EntryHash>,
+    canonical_entry_count: usize,
+}
+
+impl VerifiedLedgerSnapshot {
+    pub fn projected(&self) -> &ProjectedLedger {
+        &self.projected
+    }
+
+    pub fn current_head_hash(&self) -> Option<EntryHash> {
+        self.current_head_hash
+    }
+
+    pub fn canonical_entry_count(&self) -> usize {
+        self.canonical_entry_count
+    }
+
+    pub fn should_emit_growth_warning(&self) -> bool {
+        self.canonical_entry_count >= LEDGER_THREAD_GROWTH_WARNING_THRESHOLD
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn verified_snapshot_for_test(
+    projected: ProjectedLedger,
+    current_head_hash: Option<EntryHash>,
+    canonical_entry_count: usize,
+) -> VerifiedLedgerSnapshot {
+    VerifiedLedgerSnapshot {
+        projected,
+        current_head_hash,
+        canonical_entry_count,
+    }
+}
+
+pub fn replay_verified_snapshot<ExternalId>(
+    envelopes: &[VerifiedLedgerStoreEnvelope<ExternalId>],
+) -> Result<VerifiedLedgerSnapshot, LedgerReplayError> {
+    let entries: Vec<LedgerEntry> = envelopes
+        .iter()
+        .map(|envelope| envelope.payload().entry.clone())
+        .collect();
+    let ordered = AppendOrderedLedgerEntries::new(entries).map_err(LedgerReplayError::Structure)?;
+    let projected = LedgerProjector::replay(&ordered).map_err(LedgerReplayError::Projection)?;
+
+    Ok(VerifiedLedgerSnapshot {
+        projected,
+        current_head_hash: envelopes
+            .last()
+            .map(VerifiedLedgerStoreEnvelope::entry_hash),
+        canonical_entry_count: envelopes.len(),
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

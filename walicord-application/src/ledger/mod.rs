@@ -1,4 +1,5 @@
 mod correction;
+mod discord_authoring;
 mod entry;
 mod hash_chain;
 mod load;
@@ -27,6 +28,12 @@ pub use correction::{
     external_correction_source_for_transport_decode, standard_prior_adjustment_correction,
     standard_sealed_entry_correction,
 };
+pub use discord_authoring::{
+    DiscordLedgerEntryError, DiscordLedgerSourceDescriptor, ExpenseAuthoringError,
+    PreviewedSettlementOutcome, RecordableExpenseAuthoring, ResolvedExpenseAuthoringInput,
+    SettlementPreviewError, SettlementRecordError, build_discord_expense_entry,
+    build_discord_void_entry, preview_settlement_from_snapshot, record_previewed_plan_matching,
+};
 pub use entry::{
     AllocationSnapshot, AllocationSnapshotError, AppendOrderedLedgerEntries,
     AppendOrderedLedgerEntriesError, LedgerEffectiveDate, LedgerEffectiveDateError, LedgerEntry,
@@ -48,8 +55,9 @@ pub(crate) use hash_chain::{
 #[cfg(test)]
 pub(crate) use load::load_and_replay_verified_with_custom_digest;
 pub use load::{
-    LedgerLoadError, LedgerProjector, LedgerReplayError, load_and_replay_verified_sha256_v1,
-    replay_entries,
+    LEDGER_THREAD_GROWTH_WARNING_THRESHOLD, LedgerLoadError, LedgerProjector, LedgerReplayError,
+    VerifiedLedgerSnapshot, load_and_replay_verified_sha256_v1, replay_entries,
+    replay_verified_snapshot,
 };
 pub use seal::{
     SealThroughTailError, seal_through_latest_unvoided_expense_or_settlement_entry,

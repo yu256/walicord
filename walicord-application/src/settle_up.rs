@@ -2,7 +2,7 @@ use crate::{
     ledger::{EntryHash, LedgerId},
     ports::SettlementPlanner,
 };
-use std::{borrow::Cow, time::SystemTime};
+use std::{borrow::Cow, num::NonZeroU64, time::SystemTime};
 use walicord_domain::{
     MemberBalances, Money, Settlement, SettlementContext, SettlementRoundingError, Transfer,
     model::MemberId, services::quantize_balances_with_preferred_members,
@@ -238,24 +238,31 @@ impl PreviewedSettlement {
     /// ```text
     /// preview()  -> let previewed = …;
     ///                let binding = PreviewConfirmationBinding::capture(
+    ///                    preview_instance_id,
     ///                    ledger_id,
     ///                    ledger_head_hash,
     ///                    actor_id,
+    ///                    created_at,
     ///                    expires_at,
     ///                    &previewed,
-    ///                );
+    ///                )?;
     ///                external_store.put(preview_id, binding);  // outside this crate
     ///                send_confirm_button_to_user(preview_id);
     ///
     /// confirm(preview_id):
     ///                let stored = external_store.get(preview_id)?;
+    ///                reject_if_superseded(stored.preview_instance_id, current_preview_instance_id)?;
+    ///                reject_if_not_delivered(stored.delivery_state)?;
     ///                reject_if_expired(stored.expires_at)?;
     ///                reject_if_actor_changed(stored.actor_id, current_actor_id)?;
     ///                reject_if_head_changed(stored.ledger_head_hash, current_ledger_head_hash)?;
     ///                let previewed = reconstruct_previewed_settlement(...)?; // app-specific
-    ///                SettleUpPolicy::record_previewed_plan_matching(
+    ///                crate::ledger::record_previewed_plan_matching(
+    ///                    entry_id,
+    ///                    current_actor_id,
     ///                    previewed,
-    ///                    stored.preview_digest,
+    ///                    stored,
+    ///                    source_descriptor,
     ///                )?;
     /// ```
     ///
@@ -281,34 +288,140 @@ impl PreviewedSettlement {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PreviewedSettlementDigest(pub [u8; 32]);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PreviewInstanceId(NonZeroU64);
+
+impl PreviewInstanceId {
+    pub fn new(value: u64) -> Result<Self, PreviewInstanceIdError> {
+        NonZeroU64::new(value)
+            .map(Self)
+            .ok_or(PreviewInstanceIdError::Zero)
+    }
+
+    pub fn get(self) -> u64 {
+        self.0.get()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreviewInstanceIdError {
+    Zero,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreviewDeliveryState {
+    PendingDelivery,
+    Delivered,
+}
+
 /// Cross-request binding that an interaction/event-store layer should persist between
 /// preview and confirm. The digest binds the previewed settlement value; the remaining
 /// fields bind the authority/scope/freshness context that digest matching alone does not
 /// cover.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreviewConfirmationBinding {
-    pub ledger_id: LedgerId,
-    pub ledger_head_hash: EntryHash,
-    pub actor_id: MemberId,
-    pub preview_digest: PreviewedSettlementDigest,
-    pub expires_at: SystemTime,
+    preview_instance_id: PreviewInstanceId,
+    ledger_id: LedgerId,
+    ledger_head_hash: EntryHash,
+    actor_id: MemberId,
+    preview_digest: PreviewedSettlementDigest,
+    created_at: SystemTime,
+    expires_at: SystemTime,
+    delivery_state: PreviewDeliveryState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PreviewBindingError {
+    AlreadyDelivered,
+    NonIncreasingLifetime {
+        created_at: SystemTime,
+        expires_at: SystemTime,
+    },
+    PreviewInstanceMismatch {
+        actual: PreviewInstanceId,
+        expected: PreviewInstanceId,
+    },
 }
 
 impl PreviewConfirmationBinding {
     pub fn capture(
+        preview_instance_id: PreviewInstanceId,
         ledger_id: LedgerId,
         ledger_head_hash: EntryHash,
         actor_id: MemberId,
+        created_at: SystemTime,
         expires_at: SystemTime,
         previewed: &PreviewedSettlement,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, PreviewBindingError> {
+        if expires_at <= created_at {
+            return Err(PreviewBindingError::NonIncreasingLifetime {
+                created_at,
+                expires_at,
+            });
+        }
+        Ok(Self {
+            preview_instance_id,
             ledger_id,
             ledger_head_hash,
             actor_id,
             preview_digest: previewed.digest(),
+            created_at,
             expires_at,
+            delivery_state: PreviewDeliveryState::PendingDelivery,
+        })
+    }
+
+    pub fn mark_delivered(
+        mut self,
+        preview_instance_id: PreviewInstanceId,
+    ) -> Result<Self, PreviewBindingError> {
+        if self.preview_instance_id != preview_instance_id {
+            return Err(PreviewBindingError::PreviewInstanceMismatch {
+                actual: preview_instance_id,
+                expected: self.preview_instance_id,
+            });
         }
+        if self.delivery_state == PreviewDeliveryState::Delivered {
+            return Err(PreviewBindingError::AlreadyDelivered);
+        }
+        self.delivery_state = PreviewDeliveryState::Delivered;
+        Ok(self)
+    }
+
+    pub fn is_delivered(&self) -> bool {
+        self.delivery_state == PreviewDeliveryState::Delivered
+    }
+
+    pub fn preview_instance_id(&self) -> PreviewInstanceId {
+        self.preview_instance_id
+    }
+
+    pub fn ledger_id(&self) -> LedgerId {
+        self.ledger_id
+    }
+
+    pub fn ledger_head_hash(&self) -> EntryHash {
+        self.ledger_head_hash
+    }
+
+    pub fn actor_id(&self) -> MemberId {
+        self.actor_id
+    }
+
+    pub fn preview_digest(&self) -> PreviewedSettlementDigest {
+        self.preview_digest
+    }
+
+    pub fn created_at(&self) -> SystemTime {
+        self.created_at
+    }
+
+    pub fn expires_at(&self) -> SystemTime {
+        self.expires_at
+    }
+
+    pub fn delivery_state(&self) -> PreviewDeliveryState {
+        self.delivery_state
     }
 }
 
@@ -484,10 +597,11 @@ impl SettleUpPolicy {
     /// * preview returns `PreviewedSettlement`; caller persists a
     ///   [`PreviewConfirmationBinding`] under `preview_id`;
     /// * on confirm, caller reloads that binding, re-checks the non-digest fields against
-    ///   the current ledger/actor/expiry state, reconstructs (or otherwise obtains) the
-    ///   `PreviewedSettlement`, and then;
-    /// * `record_previewed_plan_matching(previewed, stored.preview_digest)` records iff
-    ///   the reconstructed value's digest matches what was stored at preview time.
+    ///   the current preview-instance / ledger / actor / expiry state, reconstructs (or
+    ///   otherwise obtains) the `PreviewedSettlement`, and then;
+    /// * [`crate::ledger::record_previewed_plan_matching`] records iff the reconstructed
+    ///   value's digest matches what was stored at preview time and the delivered binding
+    ///   still names the same actor.
     ///
     /// On mismatch the function returns `PreviewDigestMismatch` and does **not** record;
     /// callers must surface this to the user (typically: ask them to re-issue the
@@ -1172,26 +1286,173 @@ mod tests {
             context,
         )
         .expect("preview should succeed");
+        let preview_instance_id = PreviewInstanceId::new(41).expect("instance id should be valid");
+        let created_at =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_699_999_400);
         let expires_at =
             std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
 
         let binding = PreviewConfirmationBinding::capture(
+            preview_instance_id,
             LedgerId(42),
             EntryHash([9; 32]),
             MemberId(7),
+            created_at,
             expires_at,
+            &previewed,
+        )
+        .expect("binding should capture");
+
+        assert_eq!(binding.preview_instance_id(), preview_instance_id);
+        assert_eq!(binding.ledger_id(), LedgerId(42));
+        assert_eq!(binding.ledger_head_hash(), EntryHash([9; 32]));
+        assert_eq!(binding.actor_id(), MemberId(7));
+        assert_eq!(binding.preview_digest(), previewed.digest());
+        assert_eq!(binding.created_at(), created_at);
+        assert_eq!(binding.expires_at(), expires_at);
+        assert_eq!(
+            binding.delivery_state(),
+            PreviewDeliveryState::PendingDelivery
+        );
+    }
+
+    #[test]
+    fn preview_confirmation_binding_rejects_non_increasing_lifetime() {
+        let input = balances([(1, 100), (2, -100)]);
+        let context = SettlementContext::jpy_default();
+        let previewed = SettleUpPolicy::preview(
+            &TwoMemberSquaringPlanner,
+            &input,
+            &[MemberId(1), MemberId(2)],
+            std::iter::empty::<MemberId>(),
+            context,
+        )
+        .expect("preview should succeed");
+        let created_at =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+
+        let actual = PreviewConfirmationBinding::capture(
+            PreviewInstanceId::new(1).expect("instance id should be valid"),
+            LedgerId(42),
+            EntryHash([9; 32]),
+            MemberId(7),
+            created_at,
+            created_at,
             &previewed,
         );
 
         assert_eq!(
-            binding,
-            PreviewConfirmationBinding {
-                ledger_id: LedgerId(42),
-                ledger_head_hash: EntryHash([9; 32]),
-                actor_id: MemberId(7),
-                preview_digest: previewed.digest(),
-                expires_at,
-            }
+            actual,
+            Err(PreviewBindingError::NonIncreasingLifetime {
+                created_at,
+                expires_at: created_at,
+            })
+        );
+    }
+
+    #[test]
+    fn preview_confirmation_binding_marks_matching_instance_delivered() {
+        let input = balances([(1, 100), (2, -100)]);
+        let context = SettlementContext::jpy_default();
+        let previewed = SettleUpPolicy::preview(
+            &TwoMemberSquaringPlanner,
+            &input,
+            &[MemberId(1), MemberId(2)],
+            std::iter::empty::<MemberId>(),
+            context,
+        )
+        .expect("preview should succeed");
+        let preview_instance_id = PreviewInstanceId::new(1).expect("instance id should be valid");
+        let created_at =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_699_999_400);
+        let expires_at =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        let binding = PreviewConfirmationBinding::capture(
+            preview_instance_id,
+            LedgerId(42),
+            EntryHash([9; 32]),
+            MemberId(7),
+            created_at,
+            expires_at,
+            &previewed,
+        )
+        .expect("binding should capture");
+
+        let actual = binding
+            .mark_delivered(preview_instance_id)
+            .expect("matching instance should deliver");
+
+        assert_eq!(actual.delivery_state, PreviewDeliveryState::Delivered);
+        assert!(actual.is_delivered());
+    }
+
+    #[test]
+    fn preview_confirmation_binding_rejects_double_delivery() {
+        let input = balances([(1, 100), (2, -100)]);
+        let context = SettlementContext::jpy_default();
+        let previewed = SettleUpPolicy::preview(
+            &TwoMemberSquaringPlanner,
+            &input,
+            &[MemberId(1), MemberId(2)],
+            std::iter::empty::<MemberId>(),
+            context,
+        )
+        .expect("preview should succeed");
+        let preview_instance_id = PreviewInstanceId::new(1).expect("instance id should be valid");
+        let binding = PreviewConfirmationBinding::capture(
+            preview_instance_id,
+            LedgerId(42),
+            EntryHash([9; 32]),
+            MemberId(7),
+            std::time::SystemTime::UNIX_EPOCH,
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(60),
+            &previewed,
+        )
+        .expect("binding should capture")
+        .mark_delivered(preview_instance_id)
+        .expect("first delivery should succeed");
+
+        let actual = binding.mark_delivered(preview_instance_id);
+
+        assert_eq!(actual, Err(PreviewBindingError::AlreadyDelivered));
+    }
+
+    #[test]
+    fn preview_confirmation_binding_rejects_mismatched_delivery_instance() {
+        let input = balances([(1, 100), (2, -100)]);
+        let context = SettlementContext::jpy_default();
+        let previewed = SettleUpPolicy::preview(
+            &TwoMemberSquaringPlanner,
+            &input,
+            &[MemberId(1), MemberId(2)],
+            std::iter::empty::<MemberId>(),
+            context,
+        )
+        .expect("preview should succeed");
+        let created_at =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_699_999_400);
+        let expires_at =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        let binding = PreviewConfirmationBinding::capture(
+            PreviewInstanceId::new(1).expect("instance id should be valid"),
+            LedgerId(42),
+            EntryHash([9; 32]),
+            MemberId(7),
+            created_at,
+            expires_at,
+            &previewed,
+        )
+        .expect("binding should capture");
+        let actual = binding.mark_delivered(
+            PreviewInstanceId::new(2).expect("mismatched instance id should be valid"),
+        );
+
+        assert_eq!(
+            actual,
+            Err(PreviewBindingError::PreviewInstanceMismatch {
+                actual: PreviewInstanceId::new(2).expect("instance id should be valid"),
+                expected: PreviewInstanceId::new(1).expect("instance id should be valid"),
+            })
         );
     }
 

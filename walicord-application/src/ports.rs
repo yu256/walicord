@@ -1,5 +1,7 @@
-use crate::{Script, error::ProgramParseError};
-use std::collections::HashMap;
+use crate::{
+    Script, error::ProgramParseError, ledger::LedgerEffectiveDate, settle_up::PreviewInstanceId,
+};
+use std::{collections::HashMap, num::NonZeroU64, time::SystemTime};
 use walicord_domain::{
     MemberBalances, Settlement, SettlementContext, SettlementRoundingError,
     model::{MemberId, RoleMembers},
@@ -62,6 +64,38 @@ pub trait SettlementPlanner: Send + Sync {
     ) -> Result<Settlement, SettlementRoundingError>;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct InteractionNonce(NonZeroU64);
+
+impl InteractionNonce {
+    pub fn new(value: u64) -> Result<Self, InteractionNonceError> {
+        NonZeroU64::new(value)
+            .map(Self)
+            .ok_or(InteractionNonceError::Zero)
+    }
+
+    pub fn get(self) -> u64 {
+        self.0.get()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InteractionNonceError {
+    Zero,
+}
+
+pub trait Clock: Send + Sync {
+    fn now(&self) -> SystemTime;
+
+    fn today_business_date(&self) -> LedgerEffectiveDate;
+}
+
+pub trait NonceProvider: Send + Sync {
+    fn next_interaction_nonce(&self) -> InteractionNonce;
+
+    fn next_preview_instance_id(&self) -> PreviewInstanceId;
+}
+
 pub trait MemberDirectory: Send + Sync {
     fn display_name(&self, member_id: MemberId) -> Option<&str>;
 }
@@ -69,5 +103,21 @@ pub trait MemberDirectory: Send + Sync {
 impl MemberDirectory for HashMap<MemberId, smol_str::SmolStr> {
     fn display_name(&self, member_id: MemberId) -> Option<&str> {
         self.get(&member_id).map(smol_str::SmolStr::as_str)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::settle_up::PreviewInstanceIdError;
+
+    #[test]
+    fn interaction_nonce_rejects_zero() {
+        assert_eq!(InteractionNonce::new(0), Err(InteractionNonceError::Zero));
+    }
+
+    #[test]
+    fn preview_instance_id_rejects_zero() {
+        assert_eq!(PreviewInstanceId::new(0), Err(PreviewInstanceIdError::Zero));
     }
 }

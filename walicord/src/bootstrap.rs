@@ -1,6 +1,10 @@
 use crate::{
     channel::ChannelManager,
-    discord::{roster::MemberRosterProvider, service::DiscordChannelService},
+    discord::{
+        ledger::{StartupReadinessFailure, required_gateway_intents, validate_startup_readiness},
+        roster::MemberRosterProvider,
+        service::DiscordChannelService,
+    },
     handler::BotHandler,
     message_cache::MessageCache,
 };
@@ -15,17 +19,48 @@ pub struct AppConfig {
     pub intents: GatewayIntents,
 }
 
-impl AppConfig {
-    pub fn from_env() -> Self {
-        let _ = dotenvy::dotenv();
-        let token = env::var("DISCORD_TOKEN").expect("DISCORD_TOKEN is not set");
-        let intents = GatewayIntents::GUILD_MESSAGES
-            | GatewayIntents::MESSAGE_CONTENT
-            | GatewayIntents::GUILDS
-            | GatewayIntents::GUILD_MEMBERS
-            | GatewayIntents::GUILD_MESSAGE_REACTIONS;
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AppConfigError {
+    MissingToken,
+    MissingOAuthScopes,
+    StartupReadiness(StartupReadinessFailure),
+}
 
-        Self { token, intents }
+impl AppConfig {
+    pub fn default_gateway_intents() -> GatewayIntents {
+        required_gateway_intents()
+    }
+
+    pub fn validate_deployment_readiness<I, S>(
+        oauth_scopes: I,
+        intents: GatewayIntents,
+    ) -> Result<(), StartupReadinessFailure>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        validate_startup_readiness(oauth_scopes, intents)
+    }
+
+    fn declared_oauth_scopes_from_env() -> Result<Vec<String>, AppConfigError> {
+        let declared_scopes =
+            env::var("DISCORD_OAUTH_SCOPES").map_err(|_| AppConfigError::MissingOAuthScopes)?;
+        Ok(declared_scopes
+            .split_whitespace()
+            .map(str::to_owned)
+            .collect())
+    }
+
+    pub fn from_env() -> Result<Self, AppConfigError> {
+        let _ = dotenvy::dotenv();
+        let token = env::var("DISCORD_TOKEN").map_err(|_| AppConfigError::MissingToken)?;
+        let intents = Self::default_gateway_intents();
+        let oauth_scopes = Self::declared_oauth_scopes_from_env()?;
+
+        Self::validate_deployment_readiness(oauth_scopes.iter().map(String::as_str), intents)
+            .map_err(AppConfigError::StartupReadiness)?;
+
+        Ok(Self { token, intents })
     }
 }
 
@@ -63,7 +98,25 @@ pub fn init_logging() {
 pub async fn run() {
     init_logging();
 
-    let config = AppConfig::from_env();
+    let config = match AppConfig::from_env() {
+        Ok(config) => config,
+        Err(AppConfigError::MissingToken) => {
+            tracing::error!("DISCORD_TOKEN is not set");
+            std::process::exit(1);
+        }
+        Err(AppConfigError::MissingOAuthScopes) => {
+            tracing::error!("DISCORD_OAUTH_SCOPES is not set; startup readiness failed closed");
+            std::process::exit(1);
+        }
+        Err(AppConfigError::StartupReadiness(failure)) => {
+            tracing::error!(
+                missing_oauth_scopes = ?failure.missing_oauth_scopes,
+                missing_gateway_intents = ?failure.missing_gateway_intents,
+                "discord-ledger startup readiness failed closed"
+            );
+            std::process::exit(1);
+        }
+    };
 
     let mut client = match AppBuilder::build(config).await {
         Ok(client) => client,
@@ -75,5 +128,44 @@ pub async fn run() {
 
     if let Err(why) = client.start().await {
         tracing::error!("Client error: {:?}", why);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AppConfig;
+    use crate::discord::ledger::{StartupReadinessFailure, required_gateway_intents};
+
+    #[test]
+    fn bootstrap_requests_required_gateway_intents() {
+        assert_eq!(
+            AppConfig::default_gateway_intents(),
+            required_gateway_intents()
+        );
+    }
+
+    #[test]
+    fn bootstrap_readiness_accepts_required_scopes_and_intents() {
+        assert_eq!(
+            AppConfig::validate_deployment_readiness(
+                vec!["bot", "applications.commands"],
+                AppConfig::default_gateway_intents()
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn bootstrap_readiness_fails_closed_when_scopes_are_missing() {
+        assert_eq!(
+            AppConfig::validate_deployment_readiness(
+                vec!["bot"],
+                AppConfig::default_gateway_intents()
+            ),
+            Err(StartupReadinessFailure {
+                missing_oauth_scopes: vec!["applications.commands"],
+                missing_gateway_intents: Vec::new(),
+            })
+        );
     }
 }

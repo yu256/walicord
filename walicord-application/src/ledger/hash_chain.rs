@@ -224,9 +224,10 @@ impl LedgerCanonicalEncoder for DefaultLedgerCanonicalEncoder {
 
 /// Schema v1 canonical encoding. Field order, length prefixes, big-endian integer width,
 /// `Decimal` 16-byte serialization, and option/discriminant byte values are all part of the
-/// v1 contract. Walicord has not deployed a prior ledger chain yet, so `effective_date`
-/// is part of schema v1 instead of forcing a speculative schema v2 split. Schema v1
-/// supports **exactly** hash suite [`LedgerHashSuite::Sha256V1`].
+/// v1 contract. `effective_date` shipped as part of schema v1, so it remains hash-covered
+/// there; later metadata growth like `recorded_at` must stay out of v1 bytes to preserve
+/// continuity with already-persisted canonical attachments. Schema v1 supports **exactly**
+/// hash suite [`LedgerHashSuite::Sha256V1`].
 ///
 /// `Money` values are normalized via [`rust_decimal::Decimal::normalize`] before being
 /// serialized so that any two `Money` values that compare equal as values produce identical
@@ -271,7 +272,8 @@ fn hash_suite_v1_discriminant(suite: LedgerHashSuite) -> u8 {
 ///
 /// 1. add the field to `MetadataV1Hashed` and update [`encode_metadata_v1`] while v1 is
 ///    still unpublished, or
-/// 2. introduce a new schema version once v1 has been deployed.
+/// 2. deliberately exclude it from v1 bytes and/or introduce a new schema version once v1
+///    has been deployed.
 ///
 /// Without this DTO, a forgotten field would silently fall outside the hash without any
 /// compiler signal — that is the exact failure mode this design prevents.
@@ -289,6 +291,7 @@ impl<'a> From<&'a LedgerEntryMetadata> for MetadataV1Hashed<'a> {
             recorded_by,
             source,
             effective_date,
+            recorded_at: _,
             allocation_snapshot,
         } = metadata;
         Self {
@@ -804,6 +807,22 @@ mod schema_v1_tests {
         assert_ne!(
             encode_schema_v1_unwrap(EntryHash([0; 32]), &payload_with_event(1, with_note)),
             encode_schema_v1_unwrap(EntryHash([0; 32]), &payload_with_event(1, without_note)),
+        );
+    }
+
+    #[test]
+    fn schema_v1_ignores_recorded_at_changes() {
+        let mut earlier = payload_with_event(1, expense_event(1, 2, 100));
+        earlier.entry.metadata.recorded_at =
+            Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1));
+
+        let mut later = payload_with_event(1, expense_event(1, 2, 100));
+        later.entry.metadata.recorded_at =
+            Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(2));
+
+        assert_eq!(
+            encode_schema_v1_unwrap(EntryHash([0; 32]), &earlier),
+            encode_schema_v1_unwrap(EntryHash([0; 32]), &later),
         );
     }
 
