@@ -5,6 +5,8 @@ edition = "2024"
 
 [dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+fs2 = "0.4.3"
+thiserror = "2.0.17"
 walicord-application = { path = "../walicord-application" }
 walicord-domain = { path = "../walicord-domain" }
 walicord-parser = { path = "../walicord-parser" }

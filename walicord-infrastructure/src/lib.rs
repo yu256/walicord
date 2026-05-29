@@ -2,10 +2,12 @@
 
 pub mod parser;
 pub mod runtime_clock;
+pub mod runtime_lock;
 pub mod settlement_planner;
 
 pub use parser::WalicordProgramParser;
 pub use runtime_clock::{
     BUSINESS_TIMEZONE_OFFSET_SECONDS, ProcessNonceProvider, SystemClock, business_timezone,
 };
+pub use runtime_lock::{InstanceLock, InstanceLockError, acquire_instance_lock};
 pub use settlement_planner::HighsSettlementPlanner;
