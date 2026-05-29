@@ -18,7 +18,6 @@ use walicord_application::{
             ExpenseSessionKey, ExpenseSessionStage, ExpenseSessionStore, ModalRetryBinding,
             ModalRetryBindingStore, ModalRetryPreserved, VoidSessionStore,
         },
-        observability::LedgerObservability,
         participant_resolution::{ParticipantDrift, RosterSnapshot},
     },
 };
@@ -83,8 +82,7 @@ pub struct LedgerRouterDependencies {
     pub uncertain_writes: Arc<UncertainWriteRegistry>,
     pub planner: Arc<dyn SettlementPlanner>,
     pub canonical_store: Arc<DiscordCanonicalLedgerStore>,
-    pub observability: Arc<dyn LedgerObservability>,
-    pub discord_observability: Arc<dyn DiscordLedgerObservability>,
+    pub observability: Arc<dyn DiscordLedgerObservability>,
 }
 
 /// Object-safe port the router uses to load the verified canonical thread for a

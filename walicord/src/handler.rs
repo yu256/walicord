@@ -1011,7 +1011,6 @@ where
             planner: Arc::new(HighsSettlementPlanner),
             canonical_store,
             observability: Arc::new(crate::discord::ledger::TracingLedgerObservability),
-            discord_observability: Arc::new(crate::discord::ledger::TracingLedgerObservability),
         };
         let router = Arc::new(crate::discord::ledger::LedgerRouter::new(deps));
         if self.ledger_router.set(router).is_err() {

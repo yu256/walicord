@@ -48,7 +48,7 @@ pub enum PermissionAction {
     ReadMessageHistory,
 }
 
-pub trait DiscordLedgerObservability: Send + Sync {
+pub trait DiscordLedgerObservability: LedgerObservability {
     fn emit_discord(&self, event: DiscordLedgerObservabilityEvent);
 }
 
