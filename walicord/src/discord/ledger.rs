@@ -125,6 +125,9 @@ mod route_guard;
 #[path = "ledger/router.rs"]
 mod router;
 #[allow(dead_code)]
+#[path = "ledger/runtime_clock.rs"]
+mod runtime_clock;
+#[allow(dead_code)]
 #[path = "ledger/runtime_lock.rs"]
 mod runtime_lock;
 #[allow(dead_code)]
