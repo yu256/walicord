@@ -3390,6 +3390,7 @@ dependencies = [
 name = "walicord-application"
 version = "0.1.0"
 dependencies = [
+ "dashmap 6.1.0",
  "fxhash",
  "proptest",
  "rstest",

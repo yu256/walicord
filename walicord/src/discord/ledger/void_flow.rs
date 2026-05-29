@@ -2,10 +2,6 @@ use super::{
     projection::{
         ProjectionConsistencyError, VerifiedLedgerEntryView, project_recent_voidable_entries,
     },
-    sessions::{
-        VoidCandidateSelection, VoidSession, VoidSessionConstructionError, VoidSessionKey,
-        VoidSessionStage,
-    },
     store::VerifiedLedgerThreadLoad,
 };
 use walicord_application::{
@@ -13,7 +9,12 @@ use walicord_application::{
     ledger::{
         DiscordLedgerEntryError, DiscordLedgerSourceDescriptor, LedgerCanonicalEncodeError,
         LedgerEntry, LedgerEntryId, LedgerId, UnverifiedLedgerStoreEnvelope,
-        build_discord_void_entry, make_unverified_envelope_sha256_v1,
+        build_discord_void_entry,
+        expense_session::{
+            VoidCandidateSelection, VoidSession, VoidSessionConstructionError, VoidSessionKey,
+            VoidSessionStage,
+        },
+        make_unverified_envelope_sha256_v1,
     },
 };
 use walicord_domain::model::MemberId;

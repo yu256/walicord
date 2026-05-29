@@ -1,3 +1,7 @@
+use crate::{
+    InteractionNonce,
+    ledger::{EntryHash, ExpenseNote, LedgerEffectiveDate, LedgerEntryId, LedgerId},
+};
 use dashmap::DashMap;
 use std::{
     collections::{BTreeMap, HashMap},
@@ -5,10 +9,6 @@ use std::{
     time::{Duration, SystemTime},
 };
 use tokio::sync::Mutex as AsyncMutex;
-use walicord_application::{
-    InteractionNonce,
-    ledger::{EntryHash, ExpenseNote, LedgerEffectiveDate, LedgerEntryId, LedgerId},
-};
 use walicord_domain::{
     Money,
     model::{MemberId, RoleId, Weight},
@@ -845,9 +845,9 @@ impl VoidSessionStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ledger::{LedgerId, ledger_chain_genesis_sha256_v1};
     use rstest::rstest;
     use std::time::UNIX_EPOCH;
-    use walicord_application::ledger::{LedgerId, ledger_chain_genesis_sha256_v1};
 
     fn nonce(value: u64) -> InteractionNonce {
         InteractionNonce::new(value).expect("nonce non-zero")

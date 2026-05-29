@@ -104,9 +104,6 @@ mod observability;
 #[path = "ledger/panel.rs"]
 mod panel;
 #[allow(dead_code)]
-#[path = "ledger/participant_resolution.rs"]
-mod participant_resolution;
-#[allow(dead_code)]
 #[path = "ledger/permissions.rs"]
 mod permissions;
 #[allow(dead_code)]
@@ -133,9 +130,6 @@ mod runtime_clock;
 #[allow(dead_code)]
 #[path = "ledger/runtime_lock.rs"]
 mod runtime_lock;
-#[allow(dead_code)]
-#[path = "ledger/sessions.rs"]
-mod sessions;
 #[allow(dead_code)]
 #[path = "ledger/settle_flow.rs"]
 mod settle_flow;
@@ -180,9 +174,11 @@ pub(crate) use self::{
     preview_store::PreviewStore,
     router::{InteractionDispatch, LedgerRouter, LedgerRouterDependencies},
     runtime_clock::{ProcessNonceProvider, SystemClock},
-    sessions::{ExpenseSessionStore, ModalRetryBindingStore, VoidSessionStore},
     store::{DiscordCanonicalLedgerStore, WriterLineagePolicy},
     write_coordinator::{UncertainWriteRegistry, WriteCoordinator},
+};
+pub(crate) use walicord_application::ledger::expense_session::{
+    ExpenseSessionStore, ModalRetryBindingStore, VoidSessionStore,
 };
 
 pub const LEDGER_ATTACHMENT_FILENAME: &str = "walicord-ledger-entry.json";

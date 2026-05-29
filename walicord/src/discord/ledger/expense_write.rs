@@ -1,17 +1,16 @@
-use super::{
-    participant_resolution::{
-        ParticipantDrift, RosterSnapshot, drift_between_snapshot_and_resolution,
-        resolve_selection_against_roster,
-    },
-    sessions::{ExpenseParticipantSelection, ExpenseSession, ExpenseSessionStage},
-};
 use walicord_application::{
     Clock,
     ledger::{
         DiscordLedgerEntryError, DiscordLedgerSourceDescriptor, EntryHash, ExpenseAuthoringError,
         LedgerCanonicalEncodeError, LedgerEntry, LedgerEntryId, LedgerId, MemberWeight,
         RecordableExpenseAuthoring, ResolvedExpenseAuthoringInput, UnverifiedLedgerStoreEnvelope,
-        build_discord_expense_entry, make_unverified_envelope_sha256_v1,
+        build_discord_expense_entry,
+        expense_session::{ExpenseParticipantSelection, ExpenseSession, ExpenseSessionStage},
+        make_unverified_envelope_sha256_v1,
+        participant_resolution::{
+            ParticipantDrift, RosterSnapshot, drift_between_snapshot_and_resolution,
+            resolve_selection_against_roster,
+        },
     },
 };
 use walicord_domain::model::{MemberId, Weight};
@@ -167,11 +166,6 @@ mod tests {
     use crate::discord::ledger::{
         expense_flow::{bootstrap_expense_session, build_confirmation_for_session},
         expense_modal::{RawExpenseModalSubmission, validate_expense_modal_submission},
-        participant_resolution::RosterSnapshot,
-        sessions::{
-            ExpenseSelectionPhase, ExpenseSelectionState, ExpenseSession, ExpenseSessionKey,
-            ExpenseSessionStage,
-        },
     };
     use std::{
         sync::atomic::{AtomicU64, Ordering},
@@ -179,7 +173,15 @@ mod tests {
     };
     use walicord_application::{
         Clock, InteractionNonce, NonceProvider,
-        ledger::{LedgerEffectiveDate, ledger_chain_genesis_sha256_v1},
+        ledger::{
+            LedgerEffectiveDate,
+            expense_session::{
+                ExpenseSelectionPhase, ExpenseSelectionState, ExpenseSession, ExpenseSessionKey,
+                ExpenseSessionStage,
+            },
+            ledger_chain_genesis_sha256_v1,
+            participant_resolution::RosterSnapshot,
+        },
         settle_up::PreviewInstanceId,
     };
 

@@ -17,6 +17,14 @@ use walicord_application::{
     ledger::{
         DiscordLedgerSourceDescriptor, ExpenseAuthoringError, LedgerEntry, LedgerEntryId, LedgerId,
         MemberWeight, UnverifiedLedgerStoreEnvelope, compute_expense_owed_amounts,
+        expense_session::{
+            ExpenseBasicInfo, ExpenseConfirmationSnapshot, ExpenseDraftSnapshot,
+            ExpenseParticipantSelection, ExpenseSelectionPhase, ExpenseSession,
+            ExpenseSessionConstructionError, ExpenseSessionKey, ExpenseSessionStage,
+            ExpenseSessionStore, ModalRetryBinding, ModalRetryBindingStore, ModalRetryPreserved,
+            VoidSessionStore,
+        },
+        participant_resolution::{ParticipantDrift, RosterSnapshot},
     },
 };
 use walicord_domain::{Money, model::MemberId};
@@ -47,16 +55,10 @@ use super::{
     },
     observability::LedgerObservability,
     panel::LEDGER_PANEL_EXPENSE_ID,
-    participant_resolution::{ParticipantDrift, RosterSnapshot},
     preview_store::PreviewStore,
     response_writer::{rendered_surface_to_message, suppressed_allowed_mentions},
     route_guard::{LedgerInteractionGuardError, guard_ledger_interaction},
     runtime_clock::business_datetime_from_system_time,
-    sessions::{
-        ExpenseParticipantSelection, ExpenseSelectionPhase, ExpenseSessionConstructionError,
-        ExpenseSessionKey, ExpenseSessionStage, ExpenseSessionStore, ModalRetryBinding,
-        ModalRetryBindingStore, ModalRetryPreserved, VoidSessionStore,
-    },
     store::{
         DiscordCanonicalLedgerStore, StoreLoadError, StoreWriteError, VerifiedLedgerThreadLoad,
     },
@@ -700,7 +702,7 @@ impl LedgerRouter {
         &self,
         ctx: &Context,
         component: &ComponentInteraction,
-        session: super::sessions::ExpenseSession,
+        session: ExpenseSession,
         drift: Vec<ParticipantDrift>,
         refreshed: Vec<ExpenseParticipantSelection>,
         defaulted_members: Vec<MemberId>,
@@ -712,13 +714,13 @@ impl LedgerRouter {
             InternalLedgerRouteError::ConfirmationBuild(ConfirmationBuildError::BasicInfoMissing),
         )?;
         let selection = session.draft().selection_state().clone();
-        let next_draft = super::sessions::ExpenseDraftSnapshot::empty()
+        let next_draft = ExpenseDraftSnapshot::empty()
             .with_basic_info(basic_info.clone())
             .with_selection_state(selection)
-            .with_confirmation_snapshot(super::sessions::ExpenseConfirmationSnapshot {
+            .with_confirmation_snapshot(ExpenseConfirmationSnapshot {
                 participants: refreshed.clone(),
             });
-        let refreshed_session = super::sessions::ExpenseSession::new(
+        let refreshed_session = ExpenseSession::new(
             session.key(),
             ExpenseSessionStage::InConfirmation,
             next_draft,
@@ -1481,8 +1483,8 @@ fn render_public_expense_body(
 /// weight, oversize note, etc.) propagates as a typed `ExpenseAuthoringError` rather
 /// than being silently absorbed into a misleading preview.
 fn render_confirmation_body(
-    basic_info: &super::sessions::ExpenseBasicInfo,
-    participants: &[super::sessions::ExpenseParticipantSelection],
+    basic_info: &ExpenseBasicInfo,
+    participants: &[ExpenseParticipantSelection],
     defaulted_members: &[MemberId],
     display_names: &HashMap<MemberId, smol_str::SmolStr>,
 ) -> Result<String, ExpenseAuthoringError> {

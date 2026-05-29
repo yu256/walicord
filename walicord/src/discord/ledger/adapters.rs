@@ -8,11 +8,10 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
 };
-use walicord_application::ledger::LedgerId;
+use walicord_application::ledger::{LedgerId, participant_resolution::RosterSnapshot};
 use walicord_domain::model::{MemberId, RoleId};
 
 use super::{
-    participant_resolution::RosterSnapshot,
     router::{
         LedgerThreadLoader, RouterRosterFetchError, RouterRosterFetcher, RouterRosterSnapshot,
     },

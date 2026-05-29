@@ -1,16 +1,19 @@
-use super::{
-    expense_modal::ValidatedExpenseModalSubmission,
-    participant_resolution::{
-        ParticipantDrift, RosterSnapshot, drift_between_snapshot_and_resolution,
-        resolve_selection_against_roster,
-    },
-    sessions::{
-        ExpenseBasicInfo, ExpenseConfirmationSnapshot, ExpenseDraftSnapshot,
-        ExpenseParticipantSelection, ExpenseSelectionPhase, ExpenseSelectionState, ExpenseSession,
-        ExpenseSessionConstructionError, ExpenseSessionKey, ExpenseSessionStage,
+use super::expense_modal::ValidatedExpenseModalSubmission;
+use walicord_application::{
+    Clock, InteractionNonce, NonceProvider,
+    ledger::{
+        expense_session::{
+            ExpenseBasicInfo, ExpenseConfirmationSnapshot, ExpenseDraftSnapshot,
+            ExpenseParticipantSelection, ExpenseSelectionPhase, ExpenseSelectionState,
+            ExpenseSession, ExpenseSessionConstructionError, ExpenseSessionKey,
+            ExpenseSessionStage,
+        },
+        participant_resolution::{
+            ParticipantDrift, RosterSnapshot, drift_between_snapshot_and_resolution,
+            resolve_selection_against_roster,
+        },
     },
 };
-use walicord_application::{Clock, InteractionNonce, NonceProvider};
 use walicord_domain::model::MemberId;
 
 /// Construct a fresh [`ExpenseSession`] in `InSelection { Payer }` from a validated

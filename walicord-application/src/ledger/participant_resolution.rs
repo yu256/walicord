@@ -1,4 +1,4 @@
-use super::sessions::{
+use super::expense_session::{
     ExpenseConfirmationSnapshot, ExpenseParticipantSelection, ExpenseSelectionState,
 };
 use std::collections::{BTreeMap, BTreeSet};

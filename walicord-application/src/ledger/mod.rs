@@ -1,8 +1,10 @@
 mod correction;
 mod discord_authoring;
 mod entry;
+pub mod expense_session;
 mod hash_chain;
 mod load;
+pub mod participant_resolution;
 mod seal;
 
 pub use walicord_ledger::{
