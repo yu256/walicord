@@ -2660,6 +2660,14 @@ pub fn expense_recorded_message() -> &'static str {
     }
 }
 
+pub fn expense_participants_drifted_cue() -> &'static str {
+    if cfg!(feature = "ja") {
+        "対象者が更新されたため確認内容を更新しました。もう一度「記録する」を押してください。"
+    } else {
+        "Participants changed since you confirmed; the page has been refreshed. Press 記録する again to record."
+    }
+}
+
 pub fn settlement_recorded_message() -> &'static str {
     if cfg!(feature = "ja") {
         "清算を記録しました。"

@@ -14,7 +14,10 @@ use std::{
 };
 use walicord_application::{
     Clock, NonceProvider, SettlementPlanner,
-    ledger::{ExpenseAuthoringError, MemberWeight, compute_expense_owed_amounts},
+    ledger::{
+        DiscordLedgerSourceDescriptor, ExpenseAuthoringError, LedgerEntry, LedgerEntryId, LedgerId,
+        MemberWeight, UnverifiedLedgerStoreEnvelope, compute_expense_owed_amounts,
+    },
 };
 use walicord_domain::{Money, model::MemberId};
 use walicord_i18n as i18n;
@@ -38,19 +41,28 @@ use super::{
         build_expense_modal_response, extract_raw_expense_modal_submission,
         parse_expense_modal_custom_id,
     },
+    expense_write::{
+        ExpenseWriteOrchestrationError, RecordTimeOutcome, build_canonical_envelope,
+        compose_expense_entry,
+    },
     observability::LedgerObservability,
     panel::LEDGER_PANEL_EXPENSE_ID,
-    participant_resolution::RosterSnapshot,
+    participant_resolution::{ParticipantDrift, RosterSnapshot},
     preview_store::PreviewStore,
     response_writer::{rendered_surface_to_message, suppressed_allowed_mentions},
     route_guard::{LedgerInteractionGuardError, guard_ledger_interaction},
+    runtime_clock::business_datetime_from_system_time,
     sessions::{
-        ExpenseSelectionPhase, ExpenseSessionConstructionError, ExpenseSessionKey,
-        ExpenseSessionStage, ExpenseSessionStore, ModalRetryBinding, ModalRetryBindingStore,
-        ModalRetryPreserved, VoidSessionStore,
+        ExpenseParticipantSelection, ExpenseSelectionPhase, ExpenseSessionConstructionError,
+        ExpenseSessionKey, ExpenseSessionStage, ExpenseSessionStore, ModalRetryBinding,
+        ModalRetryBindingStore, ModalRetryPreserved, VoidSessionStore,
     },
-    store::DiscordCanonicalLedgerStore,
-    write_coordinator::{UncertainWriteRegistry, WriteCoordinator},
+    store::{
+        DiscordCanonicalLedgerStore, StoreLoadError, StoreWriteError, VerifiedLedgerThreadLoad,
+    },
+    write_coordinator::{
+        RetainedCanonicalWrite, UncertainWriteRegistry, WriteCoordinator, WriteTargetKey,
+    },
 };
 
 /// Wired dependency graph required to dispatch any Discord ledger interaction. The
@@ -62,6 +74,7 @@ pub struct LedgerRouterDependencies {
     pub nonce_provider: Arc<dyn NonceProvider>,
     pub channels: Arc<ChannelManager>,
     pub roster_fetcher: Arc<dyn RouterRosterFetcher>,
+    pub thread_loader: Arc<dyn LedgerThreadLoader>,
     pub expense_sessions: Arc<ExpenseSessionStore>,
     pub void_sessions: Arc<VoidSessionStore>,
     pub modal_retries: Arc<ModalRetryBindingStore>,
@@ -71,6 +84,19 @@ pub struct LedgerRouterDependencies {
     pub planner: Arc<dyn SettlementPlanner>,
     pub canonical_store: Arc<DiscordCanonicalLedgerStore>,
     pub observability: Arc<dyn LedgerObservability>,
+}
+
+/// Object-safe port the router uses to load the verified canonical thread for a
+/// tracked channel. Wraps `DiscordCanonicalLedgerStore::load_verified_thread`; the
+/// adapter is responsible for choosing the `route_label` and supplying the `ctx`.
+#[async_trait]
+pub trait LedgerThreadLoader: Send + Sync {
+    async fn load(
+        &self,
+        ctx: &Context,
+        canonical_thread_id: ChannelId,
+        ledger_id: LedgerId,
+    ) -> Result<VerifiedLedgerThreadLoad, StoreLoadError>;
 }
 
 /// Roster snapshot the router needs at confirmation rebuild / record time. Combines the
@@ -150,6 +176,14 @@ pub enum InternalLedgerRouteError {
     RosterFetch(#[from] RouterRosterFetchError),
     #[error("expense share computation: {0}")]
     ExpenseAuthoring(#[from] ExpenseAuthoringError),
+    #[error("expense write orchestration: {0}")]
+    ExpenseWriteOrchestration(#[from] ExpenseWriteOrchestrationError),
+    #[error("canonical thread load: {0}")]
+    ThreadLoad(#[from] StoreLoadError),
+    #[error("canonical thread write: {0}")]
+    ThreadWrite(#[from] StoreWriteError),
+    #[error("uncertain write already live for ledger {ledger_id:?}")]
+    UncertainWriteAlreadyLive { ledger_id: LedgerId },
     #[error("expense modal submission missing required fields")]
     ModalSubmissionMissingFields,
     #[error("expense {operation} navigation landed on non-selection stage: {observed_stage:?}")]
@@ -216,6 +250,24 @@ impl From<ExpenseAuthoringError> for LedgerRouteError {
     }
 }
 
+impl From<ExpenseWriteOrchestrationError> for LedgerRouteError {
+    fn from(error: ExpenseWriteOrchestrationError) -> Self {
+        Self::Internal(error.into())
+    }
+}
+
+impl From<StoreLoadError> for LedgerRouteError {
+    fn from(error: StoreLoadError) -> Self {
+        Self::Internal(error.into())
+    }
+}
+
+impl From<StoreWriteError> for LedgerRouteError {
+    fn from(error: StoreWriteError) -> Self {
+        Self::Internal(error.into())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum PostNavigationOperation {
     #[error("forward")]
@@ -249,6 +301,8 @@ pub enum DiscordCallSite {
     ExpenseBasicEditModalCreateResponse,
     #[error("expense confirmation page create_response")]
     ExpenseConfirmationCreateResponse,
+    #[error("expense record success ack")]
+    ExpenseRecordSuccessAck,
 }
 
 pub struct LedgerRouter {
@@ -417,6 +471,10 @@ impl LedgerRouter {
         {
             return self.dispatch_expense_modify_selection(ctx, component).await;
         }
+        if parse_expense_session_button_nonce(custom_id, EXPENSE_RECORD_CUSTOM_ID_PREFIX).is_some()
+        {
+            return self.dispatch_expense_record(ctx, component).await;
+        }
         Ok(InteractionDispatch::Ignored)
     }
 
@@ -528,6 +586,248 @@ impl LedgerRouter {
             .map_err(discord_call_error(
                 DiscordCallSite::ExpenseConfirmationCreateResponse,
             ))?;
+        Ok(InteractionDispatch::Handled)
+    }
+
+    /// Record the confirmation-stage session as a canonical entry. The actor pressed
+    /// 記録する on the confirmation page; the router serializes against the
+    /// per-ledger write lock, re-resolves the selection against the live roster
+    /// (criterion 81), composes a canonical entry + envelope, registers the
+    /// `uncertain_write` retain bytes (criteria 217 / 279), appends via
+    /// `DiscordCanonicalLedgerStore`, and clears the retain on a verified
+    /// read-back.
+    ///
+    /// Drift handling: if the live roster has changed since the actor confirmed
+    /// (criterion 111), the handler rebuilds the confirmation page in place rather
+    /// than appending under stale assumptions.
+    async fn dispatch_expense_record(
+        &self,
+        ctx: &Context,
+        component: &ComponentInteraction,
+    ) -> Result<InteractionDispatch, LedgerRouteError> {
+        let (guild_id, channel_id) = guard_ledger_interaction(
+            component.guild_id,
+            component.channel_id,
+            self.deps.channels.as_ref(),
+        )?;
+        let actor_id = MemberId(component.user.id.get());
+        let key = ExpenseSessionKey::new(guild_id, channel_id, actor_id);
+        let Some(session) = self.deps.expense_sessions.clear(key) else {
+            return self.respond_expense_session_missing(ctx, component).await;
+        };
+        if !matches!(session.stage(), ExpenseSessionStage::InConfirmation) {
+            // Defensive: the record button is only rendered on the confirmation page;
+            // a non-confirmation stage here means a stale cached interaction. Restart
+            // the actor cleanly.
+            self.deps.expense_sessions.replace(session);
+            return self.respond_expense_session_missing(ctx, component).await;
+        }
+
+        let ledger_id = LedgerId(channel_id.get());
+        let write_target = WriteTargetKey::Published(ledger_id);
+
+        // Per-ledger serialization (criterion 53 / 115 / 155 / 182): every canonical
+        // append for this ledger holds the same async mutex for its whole lifecycle.
+        let lock = self.deps.write_coordinator.lock_for(write_target);
+        let _guard = lock.lock().await;
+
+        let load_future = self.deps.thread_loader.load(ctx, channel_id, ledger_id);
+        let roster_future = self.deps.roster_fetcher.fetch(ctx, channel_id);
+        let (load_result, roster_result) = tokio::join!(load_future, roster_future);
+        let snapshot_load = load_result?;
+        let roster_snapshot = roster_result?;
+
+        let next_entry_id = LedgerEntryId(
+            (snapshot_load.snapshot().canonical_entry_count() as u64).saturating_add(1),
+        );
+        let previous_hash = snapshot_load
+            .snapshot()
+            .current_head_hash()
+            .unwrap_or_else(|| {
+                walicord_application::ledger::ledger_chain_genesis_sha256_v1(ledger_id)
+            });
+        let outcome = compose_expense_entry(
+            &session,
+            &roster_snapshot.roster,
+            next_entry_id,
+            DiscordLedgerSourceDescriptor::expense_slash_modal_v1(),
+            actor_id,
+            self.deps.clock.as_ref(),
+        )?;
+
+        match outcome {
+            RecordTimeOutcome::DriftDetected {
+                drift,
+                refreshed,
+                defaulted_members,
+                dropped_overrides: _,
+            } => {
+                self.refresh_confirmation_for_drift(
+                    ctx,
+                    component,
+                    session,
+                    drift,
+                    refreshed,
+                    defaulted_members,
+                    &roster_snapshot.display_names,
+                )
+                .await
+            }
+            RecordTimeOutcome::Ready { entry, .. } => {
+                self.commit_recorded_entry(
+                    ctx,
+                    component,
+                    write_target,
+                    ledger_id,
+                    channel_id,
+                    previous_hash,
+                    entry,
+                    &roster_snapshot.display_names,
+                )
+                .await
+            }
+        }
+    }
+
+    /// Render a fresh confirmation page reflecting the live roster, then leave the
+    /// session in `InConfirmation` so the actor can either press 記録する again (now
+    /// against the refreshed snapshot) or revise their selection.
+    #[allow(clippy::too_many_arguments)]
+    async fn refresh_confirmation_for_drift(
+        &self,
+        ctx: &Context,
+        component: &ComponentInteraction,
+        session: super::sessions::ExpenseSession,
+        drift: Vec<ParticipantDrift>,
+        refreshed: Vec<ExpenseParticipantSelection>,
+        defaulted_members: Vec<MemberId>,
+        display_names: &HashMap<MemberId, smol_str::SmolStr>,
+    ) -> Result<InteractionDispatch, LedgerRouteError> {
+        // Rebuild the confirmation snapshot from the refreshed participants so the
+        // next press observes no drift unless the roster moves again.
+        let basic_info = session.draft().basic_info().cloned().ok_or(
+            InternalLedgerRouteError::ConfirmationBuild(ConfirmationBuildError::BasicInfoMissing),
+        )?;
+        let selection = session.draft().selection_state().clone();
+        let next_draft = super::sessions::ExpenseDraftSnapshot::empty()
+            .with_basic_info(basic_info.clone())
+            .with_selection_state(selection)
+            .with_confirmation_snapshot(super::sessions::ExpenseConfirmationSnapshot {
+                participants: refreshed.clone(),
+            });
+        let refreshed_session = super::sessions::ExpenseSession::new(
+            session.key(),
+            ExpenseSessionStage::InConfirmation,
+            next_draft,
+            session.nonce(),
+            self.deps.clock.now(),
+        )?;
+        let nonce = refreshed_session.nonce();
+        self.deps.expense_sessions.replace(refreshed_session);
+
+        let mut body =
+            render_confirmation_body(&basic_info, &refreshed, &defaulted_members, display_names)?;
+        if !drift.is_empty() {
+            body.push('\n');
+            body.push_str(i18n::expense_participants_drifted_cue());
+        }
+        let components = confirmation_action_rows(nonce);
+
+        let response = CreateInteractionResponse::UpdateMessage(
+            CreateInteractionResponseMessage::new()
+                .ephemeral(true)
+                .allowed_mentions(suppressed_allowed_mentions())
+                .content(body)
+                .components(components),
+        );
+        component
+            .create_response(&ctx.http, response)
+            .await
+            .map_err(discord_call_error(
+                DiscordCallSite::ExpenseConfirmationCreateResponse,
+            ))?;
+        Ok(InteractionDispatch::Handled)
+    }
+
+    /// Build the canonical envelope + attachment, register the retain (set_live), post
+    /// via `append_authoritative`, then clear the retain on a verified read-back.
+    /// Any failure between `set_live` and `clear` leaves the retain Live so lazy retry
+    /// (criterion 217 / 279) can later determine whether the post landed.
+    #[allow(clippy::too_many_arguments)]
+    async fn commit_recorded_entry(
+        &self,
+        ctx: &Context,
+        component: &ComponentInteraction,
+        write_target: WriteTargetKey,
+        ledger_id: LedgerId,
+        canonical_thread_id: ChannelId,
+        previous_hash: walicord_application::ledger::EntryHash,
+        entry: LedgerEntry,
+        display_names: &HashMap<MemberId, smol_str::SmolStr>,
+    ) -> Result<InteractionDispatch, LedgerRouteError> {
+        let envelope: UnverifiedLedgerStoreEnvelope<()> =
+            build_canonical_envelope(ledger_id, previous_hash, entry.clone())?;
+
+        let prepared_body = render_public_expense_body(&entry, ledger_id, display_names)?;
+        let envelope_bytes =
+            super::codec::CanonicalAttachmentCodec::encode_with_pre_self_link_content(
+                &envelope,
+                Some(prepared_body.as_str()),
+            )
+            .map_err(|error| {
+                LedgerRouteError::Internal(InternalLedgerRouteError::ThreadWrite(
+                    StoreWriteError::Prepare(error),
+                ))
+            })?;
+
+        let retained = RetainedCanonicalWrite::new(
+            write_target,
+            &envelope,
+            envelope_bytes,
+            prepared_body.clone(),
+            short_summary_for_entry(&entry),
+        );
+        self.deps.uncertain_writes.set_live(retained).map_err(|_| {
+            LedgerRouteError::Internal(InternalLedgerRouteError::UncertainWriteAlreadyLive {
+                ledger_id,
+            })
+        })?;
+
+        let append_result = self
+            .deps
+            .canonical_store
+            .append_authoritative(ctx, canonical_thread_id, &envelope, prepared_body.as_str())
+            .await;
+        match append_result {
+            Ok(_verified) => {
+                self.deps.uncertain_writes.clear(write_target);
+                self.respond_record_success(ctx, component).await
+            }
+            Err(error) => {
+                // Retain stays Live: a transport error here is exactly the
+                // criterion-217 / 279 case where lazy retry must decide whether the
+                // canonical message actually posted.
+                Err(error.into())
+            }
+        }
+    }
+
+    async fn respond_record_success(
+        &self,
+        ctx: &Context,
+        component: &ComponentInteraction,
+    ) -> Result<InteractionDispatch, LedgerRouteError> {
+        let response = CreateInteractionResponse::UpdateMessage(
+            CreateInteractionResponseMessage::new()
+                .ephemeral(true)
+                .allowed_mentions(suppressed_allowed_mentions())
+                .content(i18n::expense_recorded_message())
+                .components(Vec::new()),
+        );
+        component
+            .create_response(&ctx.http, response)
+            .await
+            .map_err(discord_call_error(DiscordCallSite::ExpenseRecordSuccessAck))?;
         Ok(InteractionDispatch::Handled)
     }
 
@@ -920,6 +1220,7 @@ pub(crate) const EXPENSE_TO_WEIGHTS_CUSTOM_ID_PREFIX: &str = "ledger:expense:to-
 pub(crate) const EXPENSE_TO_CONFIRM_CUSTOM_ID_PREFIX: &str = "ledger:expense:to-confirm:";
 pub(crate) const EXPENSE_MODIFY_SELECTION_CUSTOM_ID_PREFIX: &str =
     "ledger:expense:modify-selection:";
+pub(crate) const EXPENSE_RECORD_CUSTOM_ID_PREFIX: &str = "ledger:expense:record:";
 
 fn step_title_for_phase(phase: &ExpenseSelectionPhase) -> &'static str {
     match phase {
@@ -1016,6 +1317,149 @@ fn step_action_rows_for_phase(
 
 fn format_money_for_modal(money: walicord_domain::Money) -> String {
     money.to_string()
+}
+
+/// Short canonical summary string retained alongside an in-flight write (criterion 217
+/// / 279). The lazy retry scan uses it as a debug breadcrumb; the value must be stable
+/// across the post / read-back / scan cycle so the retain comparison still matches.
+fn short_summary_for_entry(entry: &LedgerEntry) -> String {
+    format!("entry:{}", entry.id.0)
+}
+
+/// Render the public canonical message body for a freshly composed expense entry.
+/// Drives `DiscordLedgerPresenter::render_public_entry` so the rendered string passes
+/// the canonical recovery-shape validation and matches the body that goes into the
+/// hash-protected attachment.
+#[allow(clippy::result_large_err)] // LedgerRouteError is the project's standard error envelope.
+fn render_public_expense_body(
+    entry: &LedgerEntry,
+    ledger_id: LedgerId,
+    display_names: &HashMap<MemberId, smol_str::SmolStr>,
+) -> Result<String, LedgerRouteError> {
+    use walicord_application::ledger::{LedgerEvent, MemberAmount};
+    use walicord_presentation::discord_ledger::{
+        ParticipantShareRow, PublicCanonicalMessageModel, PublicExpenseMessageModel,
+        RecoveryReference, SafeLiteralText,
+    };
+
+    let LedgerEvent::ExpenseRecorded(event) = &entry.event else {
+        // The record path only composes ExpenseRecorded entries; landing here means
+        // compose_expense_entry produced a different event kind, which is a programmer
+        // error rather than a runtime case.
+        unreachable!(
+            "expense record path produced non-expense entry {:?}",
+            entry.id
+        );
+    };
+
+    let paid_by: &[MemberAmount] = event.paid_by();
+    let payer_member_id = paid_by
+        .first()
+        .map(|amount| amount.member_id)
+        .ok_or_else(|| {
+            LedgerRouteError::Internal(InternalLedgerRouteError::ConfirmationBuild(
+                ConfirmationBuildError::PayerNotSelected,
+            ))
+        })?;
+    let total_amount: walicord_domain::Money = paid_by.iter().map(|amount| amount.amount).sum();
+
+    let labels = SurfaceMemberLabels::from_member_names(
+        std::iter::once((
+            payer_member_id,
+            display_names.get(&payer_member_id).map(|s| s.as_str()),
+        ))
+        .chain(event.owed_by().iter().map(|amount| {
+            (
+                amount.member_id,
+                display_names.get(&amount.member_id).map(|s| s.as_str()),
+            )
+        })),
+    );
+
+    let payer_display_name = labels
+        .member(payer_member_id)
+        .map(|label| label.visible().clone())
+        .unwrap_or_else(|| {
+            SafeLiteralText::from_roster_label(
+                &i18n::unknown_user_label(payer_member_id.0).to_string(),
+            )
+            .expect("unknown_user_label is a fixed fallback that always sanitises")
+        });
+
+    let participant_rows: Vec<ParticipantShareRow> = event
+        .owed_by()
+        .iter()
+        .map(|amount| ParticipantShareRow {
+            display_name: labels
+                .member(amount.member_id)
+                .map(|label| label.visible().clone())
+                .unwrap_or_else(|| {
+                    SafeLiteralText::from_roster_label(
+                        &i18n::unknown_user_label(amount.member_id.0).to_string(),
+                    )
+                    .expect("unknown_user_label is a fixed fallback that always sanitises")
+                }),
+            share_amount: format_money_for_modal(amount.amount),
+        })
+        .collect();
+
+    let note = event.note().map(|note| {
+        // ExpenseNote validates canonical form; SafeLiteralText must accept it.
+        SafeLiteralText::from_note(note.as_str())
+            .expect("validated ExpenseNote should always produce a SafeLiteralText")
+    });
+
+    let actor_member_id = entry
+        .metadata
+        .recorded_by
+        .expect("composed entry always records `recorded_by`");
+    let actor_labels = SurfaceMemberLabels::from_member_names(std::iter::once((
+        actor_member_id,
+        display_names.get(&actor_member_id).map(|s| s.as_str()),
+    )));
+    let actor_display_name = actor_labels
+        .member(actor_member_id)
+        .map(|label| label.visible().clone())
+        .unwrap_or_else(|| {
+            SafeLiteralText::from_roster_label(
+                &i18n::unknown_user_label(actor_member_id.0).to_string(),
+            )
+            .expect("unknown_user_label is a fixed fallback that always sanitises")
+        });
+
+    let recorded_at = entry
+        .metadata
+        .recorded_at
+        .expect("composed entry always records `recorded_at`");
+    let effective_date = entry
+        .metadata
+        .effective_date
+        .clone()
+        .expect("composed expense entry always records `effective_date`");
+
+    let model = PublicCanonicalMessageModel::Expense(PublicExpenseMessageModel {
+        entry_id: entry.id,
+        effective_date,
+        payer_display_name,
+        amount: format_money_for_modal(total_amount),
+        participant_rows,
+        note,
+        actor_display_name,
+        recorded_at: business_datetime_from_system_time(recorded_at),
+        // message_link stays None: the self-link enrichment that edits the posted
+        // message to embed its own permalink lives behind `display_drift_guard`
+        // (criterion 209-212) and lands as a follow-up commit.
+        recovery_reference: RecoveryReference {
+            ledger_id_short: format!("{:x}", ledger_id.0),
+            entry_id: entry.id,
+            message_link: None,
+        },
+    });
+
+    let rendered = DiscordLedgerPresenter::render_public_entry(&model).map_err(|error| {
+        LedgerRouteError::Internal(InternalLedgerRouteError::PanelRender(error))
+    })?;
+    Ok(rendered.body().to_owned())
 }
 
 /// Compose the ephemeral confirmation body the actor sees after pressing 確認へ.
@@ -1115,6 +1559,9 @@ fn render_confirmation_body(
 fn confirmation_action_rows(nonce: walicord_application::InteractionNonce) -> Vec<CreateActionRow> {
     vec![
         CreateActionRow::Buttons(vec![
+            CreateButton::new(format!("{EXPENSE_RECORD_CUSTOM_ID_PREFIX}{}", nonce.get()))
+                .label(i18n::expense_record_label())
+                .style(ButtonStyle::Primary),
             CreateButton::new(format!(
                 "{EXPENSE_MODIFY_SELECTION_CUSTOM_ID_PREFIX}{}",
                 nonce.get()
