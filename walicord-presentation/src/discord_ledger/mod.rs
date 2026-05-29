@@ -2,10 +2,16 @@ mod budgets;
 mod expense_confirmation;
 mod member_labels;
 mod pickers;
+mod read_view_builder;
 mod read_view_pagination;
 mod sanitizer;
 mod surfaces;
 mod void_surfaces;
+
+pub use read_view_builder::{
+    balance_adjustment_rows, balance_rows_for_state, participant_names_for_state,
+    preview_transfer_rows, public_participant_rows,
+};
 
 pub use read_view_pagination::{READ_VIEW_ITEMS_PER_PAGE, paginate_read_view_model};
 

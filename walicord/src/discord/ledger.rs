@@ -53,20 +53,22 @@ use walicord_domain::{
 use walicord_i18n as i18n;
 use walicord_infrastructure::HighsSettlementPlanner;
 #[cfg(test)]
-use walicord_presentation::discord_ledger::{PanelButtonStates, PanelSurfaceModel};
+use walicord_presentation::discord_ledger::{BalanceRow, PanelButtonStates, PanelSurfaceModel};
 use walicord_presentation::{
     BusinessDateTime, DiscordLedgerPresenter, SafeLiteralText, SurfaceMemberLabels,
     confirmation_source_disclosure_line,
     discord_ledger::{
-        BalanceAdjustmentSummary, BalanceDirection, BalanceImpactRow, BalanceRow,
+        BalanceAdjustmentSummary, BalanceDirection, BalanceImpactRow,
         ExpenseConfirmationParticipantRow, ExpenseDraftSummary, ExpenseParticipantSourceBadge,
-        LedgerSurfaceSummary, ParticipantShareRow, PublicBalanceAdjustmentMessageModel,
-        PublicCanonicalMessageModel, PublicExpenseMessageModel, PublicSealMessageModel,
-        PublicSettlementMessageModel, PublicVoidMessageModel, ReadViewKind, ReadViewPageModel,
-        ReadViewRoute, ReadViewSectionVisibility, RecoveryContext, RecoveryCta, RecoveryReference,
+        LedgerSurfaceSummary, PublicBalanceAdjustmentMessageModel, PublicCanonicalMessageModel,
+        PublicExpenseMessageModel, PublicSealMessageModel, PublicSettlementMessageModel,
+        PublicVoidMessageModel, ReadViewKind, ReadViewPageModel, ReadViewRoute,
+        ReadViewSectionVisibility, RecoveryContext, RecoveryCta, RecoveryReference,
         RenderedSurface, SealedRangeSummary, TransferRow, VoidCandidateRow, VoidConfirmationRecap,
-        VoidRetargetReason, VoidSurfaceModel, VoidedEntryRow, individual_selection_title,
-        participant_source_help_line, unknown_member_label, validate_message_content,
+        VoidRetargetReason, VoidSurfaceModel, VoidedEntryRow, balance_adjustment_rows,
+        balance_rows_for_state, individual_selection_title, participant_names_for_state,
+        participant_source_help_line, preview_transfer_rows, public_participant_rows,
+        unknown_member_label, validate_message_content,
     },
     truncate_component_label, validate_button_label, validate_component_placeholder,
     validate_custom_id, validate_modal_title, validate_text_input_label,
@@ -8450,144 +8452,6 @@ fn entry_effective_date_for_surface(
         .unwrap_or(effective_date_from_recorded_at(resolved_recorded_at(
             loaded, entry,
         )?)))
-}
-
-fn balance_rows_for_state(state: &LedgerState, labels: &SurfaceMemberLabels) -> Vec<BalanceRow> {
-    let mut rows = state
-        .balances()
-        .iter()
-        .map(|(member_id, amount)| {
-            let direction = if *amount >= Money::ZERO {
-                BalanceDirection::Receive
-            } else {
-                BalanceDirection::Pay
-            };
-            let magnitude = if *amount >= Money::ZERO {
-                *amount
-            } else {
-                -*amount
-            };
-            (
-                *member_id,
-                BalanceRow {
-                    display_name: labels.safe_member_label(*member_id),
-                    amount: magnitude.to_string(),
-                    direction,
-                },
-            )
-        })
-        .collect::<Vec<_>>();
-    rows.sort_by(|(lhs_id, _), (rhs_id, _)| labels.compare_members(*lhs_id, *rhs_id));
-    rows.into_iter().map(|(_, row)| row).collect()
-}
-
-fn participant_names_for_state(
-    state: &LedgerState,
-    labels: &SurfaceMemberLabels,
-) -> Vec<SafeLiteralText> {
-    let mut participants = state
-        .participants()
-        .iter()
-        .copied()
-        .map(|member_id| (member_id, labels.safe_member_label(member_id)))
-        .collect::<Vec<_>>();
-    participants.sort_by(|(lhs_id, _), (rhs_id, _)| labels.compare_members(*lhs_id, *rhs_id));
-    participants.into_iter().map(|(_, label)| label).collect()
-}
-
-fn preview_transfer_rows(
-    previewed: &PreviewedSettlement,
-    labels: &SurfaceMemberLabels,
-) -> Vec<TransferRow> {
-    previewed
-        .plan()
-        .transfers
-        .iter()
-        .map(|transfer| TransferRow {
-            from_display_name: labels.safe_member_label(transfer.from),
-            to_display_name: labels.safe_member_label(transfer.to),
-            amount: transfer.amount.to_string(),
-        })
-        .collect()
-}
-
-fn public_participant_rows(
-    entry: &LedgerEntry,
-    labels: &SurfaceMemberLabels,
-) -> Vec<ParticipantShareRow> {
-    let LedgerEvent::ExpenseRecorded(event) = &entry.event else {
-        return Vec::new();
-    };
-    let owed_by = event
-        .owed_by()
-        .iter()
-        .map(|owed| (owed.member_id, owed.amount))
-        .collect::<HashMap<_, _>>();
-    let mut rows = match &entry.metadata.allocation_snapshot {
-        Some(AllocationSnapshot::Weighted { resolved_weights }) => resolved_weights
-            .iter()
-            .map(|member_weight| {
-                (
-                    member_weight.member_id,
-                    ParticipantShareRow {
-                        display_name: labels.safe_member_label(member_weight.member_id),
-                        share_amount: owed_by
-                            .get(&member_weight.member_id)
-                            .copied()
-                            .unwrap_or(Money::ZERO)
-                            .to_string(),
-                    },
-                )
-            })
-            .collect::<Vec<_>>(),
-        _ => event
-            .owed_by()
-            .iter()
-            .map(|owed| {
-                (
-                    owed.member_id,
-                    ParticipantShareRow {
-                        display_name: labels.safe_member_label(owed.member_id),
-                        share_amount: owed.amount.to_string(),
-                    },
-                )
-            })
-            .collect::<Vec<_>>(),
-    };
-    rows.sort_by(|(lhs_id, _), (rhs_id, _)| labels.compare_members(*lhs_id, *rhs_id));
-    rows.into_iter().map(|(_, row)| row).collect()
-}
-
-fn balance_adjustment_rows(
-    event: &BalanceAdjusted,
-    labels: &SurfaceMemberLabels,
-) -> Vec<BalanceImpactRow> {
-    let mut rows = event
-        .adjustments()
-        .iter()
-        .map(|adjustment| {
-            let direction = if adjustment.amount >= Money::ZERO {
-                BalanceDirection::Receive
-            } else {
-                BalanceDirection::Pay
-            };
-            let magnitude = if adjustment.amount >= Money::ZERO {
-                adjustment.amount
-            } else {
-                -adjustment.amount
-            };
-            (
-                adjustment.member_id,
-                BalanceImpactRow {
-                    display_name: labels.safe_member_label(adjustment.member_id),
-                    amount: magnitude.to_string(),
-                    direction,
-                },
-            )
-        })
-        .collect::<Vec<_>>();
-    rows.sort_by_key(|(member_id, _)| *member_id);
-    rows.into_iter().map(|(_, row)| row).collect()
 }
 
 fn impact_summary_text(rows: &[BalanceImpactRow]) -> String {
