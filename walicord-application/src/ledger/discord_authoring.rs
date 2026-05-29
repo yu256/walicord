@@ -306,7 +306,7 @@ impl RecordableExpenseAuthoring {
             amount: input.amount(),
             owed_by,
             note: input.note().cloned(),
-            effective_date: input.effective_date().clone(),
+            effective_date: *input.effective_date(),
             recorded_by: input.recorded_by(),
             allocation_snapshot,
         })

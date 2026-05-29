@@ -204,7 +204,7 @@ impl LedgerSurfaceSummary {
                 note,
             } => {
                 let mut summary =
-                    i18n::void_candidate_expense_summary(date.as_str(), payer_display_name, amount)
+                    i18n::void_candidate_expense_summary(date, payer_display_name, amount)
                         .to_string();
                 if let Some(note) = note {
                     summary.push(' ');
@@ -226,7 +226,7 @@ impl LedgerSurfaceSummary {
                 additional_transfers,
             } => {
                 let mut summary = i18n::void_candidate_settlement_summary(
-                    date.as_str(),
+                    date,
                     from_display_name,
                     to_display_name,
                     amount,
@@ -242,16 +242,16 @@ impl LedgerSurfaceSummary {
                 date,
                 voider_display_name,
                 ..
-            } => i18n::void_candidate_void_summary(date.as_str(), voider_display_name).to_string(),
+            } => i18n::void_candidate_void_summary(date, voider_display_name).to_string(),
             Self::Sealed {
                 date,
                 actor_display_name,
-            } => i18n::void_candidate_seal_summary(date.as_str(), actor_display_name).to_string(),
+            } => i18n::void_candidate_seal_summary(date, actor_display_name).to_string(),
             Self::BalanceAdjustment {
                 date,
                 impact_summary,
                 ..
-            } => i18n::void_candidate_adjustment_summary(date.as_str(), impact_summary).to_string(),
+            } => i18n::void_candidate_adjustment_summary(date, impact_summary).to_string(),
         }
     }
 
@@ -264,7 +264,7 @@ impl LedgerSurfaceSummary {
                 note,
             } => {
                 let mut summary =
-                    i18n::void_candidate_expense_summary(date.as_str(), payer_display_name, amount)
+                    i18n::void_candidate_expense_summary(date, payer_display_name, amount)
                         .to_string();
                 if let Some(note) = note {
                     summary.push(' ');
@@ -286,7 +286,7 @@ impl LedgerSurfaceSummary {
                 additional_transfers,
             } => {
                 let mut summary = i18n::void_candidate_settlement_summary(
-                    date.as_str(),
+                    date,
                     from_display_name,
                     to_display_name,
                     amount,
@@ -302,17 +302,17 @@ impl LedgerSurfaceSummary {
                 date,
                 voider_display_name,
                 ..
-            } => i18n::void_candidate_void_summary(date.as_str(), voider_display_name).to_string(),
+            } => i18n::void_candidate_void_summary(date, voider_display_name).to_string(),
             Self::Sealed {
                 date,
                 actor_display_name,
-            } => i18n::void_candidate_seal_summary(date.as_str(), actor_display_name).to_string(),
+            } => i18n::void_candidate_seal_summary(date, actor_display_name).to_string(),
             Self::BalanceAdjustment {
                 date,
                 impact_summary,
                 ..
             } => i18n::void_candidate_adjustment_summary(
-                date.as_str(),
+                date,
                 excerpt_with_ellipsis(impact_summary.as_str(), PUBLIC_COMPACT_IMPACT_LIMIT),
             )
             .to_string(),
@@ -351,7 +351,7 @@ impl LedgerSurfaceSummary {
     }
 
     fn render_sealed_through_summary(&self) -> String {
-        format!("{} {}", self.date().as_str(), self.render_sealed_summary())
+        format!("{} {}", self.date(), self.render_sealed_summary())
     }
 
     fn render_confirmation_target(&self) -> String {
@@ -1038,7 +1038,7 @@ impl DiscordLedgerPresenter {
 fn render_public_expense_full(model: &PublicExpenseMessageModel) -> Vec<String> {
     let mut lines = vec![
         i18n::public_expense_header(model.entry_id.0).to_string(),
-        i18n::public_date_line(model.effective_date.as_str()).to_string(),
+        i18n::public_date_line(model.effective_date).to_string(),
         i18n::public_payer_line(&model.payer_display_name).to_string(),
         i18n::public_amount_line(&model.amount).to_string(),
         i18n::public_participants_heading().to_owned(),
@@ -1061,7 +1061,7 @@ fn render_public_expense_full(model: &PublicExpenseMessageModel) -> Vec<String> 
 fn render_public_expense_compact(model: &PublicExpenseMessageModel) -> Vec<String> {
     let mut lines = vec![
         i18n::public_expense_header(model.entry_id.0).to_string(),
-        i18n::public_date_line(model.effective_date.as_str()).to_string(),
+        i18n::public_date_line(model.effective_date).to_string(),
         i18n::public_payer_line(&model.payer_display_name).to_string(),
         i18n::public_amount_line(&model.amount).to_string(),
         i18n::public_participants_heading().to_owned(),
@@ -1082,7 +1082,7 @@ fn render_public_expense_compact(model: &PublicExpenseMessageModel) -> Vec<Strin
 fn render_public_settlement_full(model: &PublicSettlementMessageModel) -> Vec<String> {
     let mut lines = vec![
         i18n::public_settlement_header(model.entry_id.0).to_string(),
-        i18n::public_date_line(model.recorded_date.as_str()).to_string(),
+        i18n::public_date_line(model.recorded_date).to_string(),
         i18n::public_transfer_heading().to_owned(),
     ];
     lines.extend(model.transfers.iter().map(render_transfer_row));
@@ -1095,7 +1095,7 @@ fn render_public_settlement_full(model: &PublicSettlementMessageModel) -> Vec<St
 fn render_public_settlement_compact(model: &PublicSettlementMessageModel) -> Vec<String> {
     let mut lines = vec![
         i18n::public_settlement_header(model.entry_id.0).to_string(),
-        i18n::public_date_line(model.recorded_date.as_str()).to_string(),
+        i18n::public_date_line(model.recorded_date).to_string(),
         i18n::public_transfer_heading().to_owned(),
     ];
     lines.extend(
@@ -1415,7 +1415,7 @@ fn render_sealed_range(sealed_range: Option<&SealedRangeSummary>) -> String {
         |sealed_range| {
             i18n::sealed_range_line(
                 sealed_range.through_entry_id.0,
-                sealed_range.through_summary.date().as_str(),
+                sealed_range.through_summary.date(),
                 sealed_range.through_summary.render_sealed_summary(),
             )
             .to_string()
@@ -1456,7 +1456,7 @@ fn render_void_candidate_line(candidate: &super::void_surfaces::VoidCandidateRow
 
 fn render_void_confirmation_lines(recap: &VoidConfirmationRecap) -> Vec<String> {
     let mut lines = vec![
-        i18n::void_confirm_date_line(recap.summary.date().as_str()).to_string(),
+        i18n::void_confirm_date_line(recap.summary.date()).to_string(),
         i18n::void_confirm_target_line(recap.summary.render_confirmation_target()).to_string(),
         i18n::void_confirm_amount_line(&recap.total_amount).to_string(),
     ];

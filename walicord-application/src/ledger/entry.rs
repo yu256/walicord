@@ -77,26 +77,52 @@ pub enum LedgerSourceCanonicalError {
 
 /// Canonicalized date string attached to an entry's audit metadata.
 ///
-/// The PoC keeps the shape intentionally simple and transport-agnostic: a validated
-/// `YYYY-MM-DD` string that represents the business date the actor chose for the entry,
-/// distinct from Discord transport timestamps.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LedgerEffectiveDate(String);
+/// Business date the actor chose for the entry, stored as a typed `NaiveDate` so
+/// callers neither round-trip through `YYYY-MM-DD` strings nor depend on the rendered
+/// shape. `Display` is the single place that materialises the wire form, and
+/// [`LedgerEffectiveDate::new`] is the only place that accepts that shape from
+/// untrusted input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct LedgerEffectiveDate(chrono::NaiveDate);
 
 impl LedgerEffectiveDate {
-    pub fn new(date: impl Into<String>) -> Result<Self, LedgerEffectiveDateError> {
-        let date = date.into().trim().to_owned();
-        if date.is_empty() {
+    const FORMAT: &'static str = "%Y-%m-%d";
+
+    pub fn new(date: impl AsRef<str>) -> Result<Self, LedgerEffectiveDateError> {
+        let raw = date.as_ref().trim();
+        if raw.is_empty() {
             return Err(LedgerEffectiveDateError::Empty);
         }
-        if !is_valid_iso_date(&date) {
-            return Err(LedgerEffectiveDateError::InvalidFormat);
-        }
-        Ok(Self(date))
+        chrono::NaiveDate::parse_from_str(raw, Self::FORMAT)
+            .map(Self)
+            .map_err(|_| LedgerEffectiveDateError::InvalidFormat)
     }
 
-    pub fn as_str(&self) -> &str {
-        &self.0
+    pub fn from_system_time(recorded_at: std::time::SystemTime) -> Self {
+        use chrono::TimeZone;
+        let recorded_at = chrono::DateTime::<chrono::Utc>::from(recorded_at);
+        let local = crate::business_calendar::business_timezone()
+            .timestamp_opt(
+                recorded_at.timestamp(),
+                recorded_at.timestamp_subsec_nanos(),
+            )
+            .single()
+            .expect("fixed-offset timezone has no fold / gap; single() is total");
+        Self(local.date_naive())
+    }
+
+    pub fn from_naive_date(date: chrono::NaiveDate) -> Self {
+        Self(date)
+    }
+
+    pub fn naive_date(self) -> chrono::NaiveDate {
+        self.0
+    }
+}
+
+impl std::fmt::Display for LedgerEffectiveDate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.format(Self::FORMAT).fmt(f)
     }
 }
 
@@ -106,41 +132,6 @@ pub enum LedgerEffectiveDateError {
     Empty,
     #[error("effective date is not in YYYY-MM-DD format")]
     InvalidFormat,
-}
-
-fn is_valid_iso_date(date: &str) -> bool {
-    let bytes = date.as_bytes();
-    if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
-        return false;
-    }
-    if !bytes
-        .iter()
-        .enumerate()
-        .all(|(idx, byte)| matches!(idx, 4 | 7) || byte.is_ascii_digit())
-    {
-        return false;
-    }
-
-    let parse_part =
-        |range: std::ops::Range<usize>| -> Option<u32> { date.get(range)?.parse().ok() };
-    let year = parse_part(0..4);
-    let month = parse_part(5..7);
-    let day = parse_part(8..10);
-    let (Some(year), Some(month), Some(day)) = (year, month, day) else {
-        return false;
-    };
-    let max_day = match month {
-        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-        4 | 6 | 9 | 11 => 30,
-        2 if is_leap_year(year) => 29,
-        2 => 28,
-        _ => return false,
-    };
-    (1..=max_day).contains(&day)
-}
-
-fn is_leap_year(year: u32) -> bool {
-    (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400)
 }
 
 /// `(member, weight)` pair captured at the time an expense was resolved into amounts. The

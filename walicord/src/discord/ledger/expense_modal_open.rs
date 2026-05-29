@@ -121,7 +121,7 @@ pub fn build_expense_modal_response(
     let date_placeholder = truncate_component_label(i18n::expense_modal_date_placeholder());
     validate_text_input_placeholder(&date_placeholder).map_err(ExpenseModalBuildError::Budget)?;
 
-    let today_value = clock.today_business_date().as_str().to_owned();
+    let today_value = clock.today_business_date().to_string();
     let date_value = prefill.raw_date.clone().unwrap_or(today_value);
 
     let mut amount_input = CreateInputText::new(InputTextStyle::Short, amount_label, AMOUNT_FIELD)

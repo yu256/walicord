@@ -3839,7 +3839,7 @@ impl DiscordLedgerPoc {
             amount: draft.amount,
             participants: selections,
             note: draft.note.clone(),
-            effective_date: draft.effective_date.clone(),
+            effective_date: draft.effective_date,
             recorded_by: MemberId(component.user.id.get()),
         };
         let channel_id = draft.parent_channel_id;
@@ -5381,7 +5381,6 @@ impl DiscordLedgerPoc {
             amount: draft.amount.to_string(),
             effective_date: draft
                 .effective_date
-                .clone()
                 .unwrap_or_else(|| PocSystemClock.today_business_date()),
             note: draft.note.as_deref().and_then(sanitized_note_text),
         }
@@ -5400,7 +5399,7 @@ impl DiscordLedgerPoc {
             amount: draft.amount,
             participants: selections,
             note: draft.note.clone(),
-            effective_date: draft.effective_date.clone(),
+            effective_date: draft.effective_date,
             recorded_by: MemberId(draft.actor_id.get()),
         })
     }
@@ -6249,7 +6248,7 @@ fn expense_modal(
             draft
                 .effective_date
                 .as_ref()
-                .map(|date| date.as_str().to_owned())
+                .map(LedgerEffectiveDate::to_string)
         })
         .unwrap_or_else(|| today_date().format("%Y-%m-%d").to_string());
 
@@ -7650,7 +7649,6 @@ fn build_live_expense_entry(
     let clock = PocSystemClock;
     let effective_date = input
         .effective_date
-        .clone()
         .unwrap_or_else(|| clock.today_business_date());
     let resolved = ResolvedExpenseAuthoringInput::new(
         input.payer,
@@ -7746,7 +7744,7 @@ pub fn build_expense_entry(
         LedgerSourceCanonical::discord_ui(EXPENSE_SOURCE_CANONICAL)
             .map_err(|_| ExpenseEntryBuildError::InvalidSource)?,
     );
-    entry.metadata.effective_date = input.effective_date.clone();
+    entry.metadata.effective_date = input.effective_date;
     Ok(entry)
 }
 
@@ -8132,7 +8130,9 @@ fn render_expense_message(
     );
 
     if let Some(effective_date) = entry.metadata.effective_date.as_ref() {
-        out.push_str(&format!("日付: {}\n", effective_date.as_str()));
+        use std::fmt::Write as _;
+        writeln!(out, "日付: {effective_date}")
+            .expect("String writes via fmt::Write are infallible");
     }
 
     out.push_str("対象:\n");
@@ -8357,22 +8357,6 @@ fn business_datetime_from_system_time(recorded_at: SystemTime) -> BusinessDateTi
     BusinessDateTime::from_system_time(recorded_at)
 }
 
-fn effective_date_from_recorded_at(recorded_at: SystemTime) -> LedgerEffectiveDate {
-    let recorded_at = chrono::DateTime::<Utc>::from(recorded_at);
-    LedgerEffectiveDate::new(
-        business_timezone()
-            .timestamp_opt(
-                recorded_at.timestamp(),
-                recorded_at.timestamp_subsec_nanos(),
-            )
-            .single()
-            .expect("business date should resolve")
-            .format("%Y-%m-%d")
-            .to_string(),
-    )
-    .expect("formatted effective date should stay valid")
-}
-
 fn business_timezone() -> FixedOffset {
     FixedOffset::east_opt(BUSINESS_TIMEZONE_OFFSET_SECONDS)
         .expect("business timezone offset should stay valid")
@@ -8448,8 +8432,7 @@ fn entry_effective_date_for_surface(
     Ok(entry
         .metadata
         .effective_date
-        .clone()
-        .unwrap_or(effective_date_from_recorded_at(resolved_recorded_at(
+        .unwrap_or(LedgerEffectiveDate::from_system_time(resolved_recorded_at(
             loaded, entry,
         )?)))
 }
@@ -8496,7 +8479,7 @@ fn surface_summary_for_entry(
                 return Err(format!("settlement entry #{} has no transfers", entry.id.0));
             };
             Ok(LedgerSurfaceSummary::Settlement {
-                date: effective_date_from_recorded_at(resolved_recorded_at(loaded, entry)?),
+                date: LedgerEffectiveDate::from_system_time(resolved_recorded_at(loaded, entry)?),
                 from_display_name: labels.safe_member_label(first.from),
                 to_display_name: labels.safe_member_label(first.to),
                 amount: first.amount.to_string(),
@@ -8506,19 +8489,19 @@ fn surface_summary_for_entry(
         LedgerEvent::EntryVoided(_) => {
             let recorded_at = resolved_recorded_at(loaded, entry)?;
             Ok(LedgerSurfaceSummary::Void {
-                date: effective_date_from_recorded_at(recorded_at),
+                date: LedgerEffectiveDate::from_system_time(recorded_at),
                 voider_display_name: labels.safe_actor_label(entry),
                 recorded_at: business_datetime_from_system_time(recorded_at),
             })
         }
         LedgerEvent::LedgerHistorySealed(_) => Ok(LedgerSurfaceSummary::Sealed {
-            date: effective_date_from_recorded_at(resolved_recorded_at(loaded, entry)?),
+            date: LedgerEffectiveDate::from_system_time(resolved_recorded_at(loaded, entry)?),
             actor_display_name: labels.safe_actor_label(entry),
         }),
         LedgerEvent::BalanceAdjusted(event) => {
             let impacts = balance_adjustment_rows(event, labels);
             Ok(LedgerSurfaceSummary::BalanceAdjustment {
-                date: effective_date_from_recorded_at(resolved_recorded_at(loaded, entry)?),
+                date: LedgerEffectiveDate::from_system_time(resolved_recorded_at(loaded, entry)?),
                 actor_display_name: labels.safe_actor_label(entry),
                 impact_summary: SafeLiteralText::from_note(&impact_summary_text(&impacts))
                     .expect("impact summary should sanitize"),
@@ -8634,7 +8617,7 @@ fn render_public_entry_message(
         LedgerEvent::NormalizedSettlementPlanRecorded(event) => {
             PublicCanonicalMessageModel::Settlement(PublicSettlementMessageModel {
                 entry_id: entry.id,
-                recorded_date: effective_date_from_recorded_at(resolved_recorded_at(
+                recorded_date: LedgerEffectiveDate::from_system_time(resolved_recorded_at(
                     loaded, entry,
                 )?),
                 transfers: event
@@ -9193,7 +9176,7 @@ impl MetadataDto {
             effective_date: metadata
                 .effective_date
                 .as_ref()
-                .map(|effective_date| effective_date.as_str().to_owned()),
+                .map(LedgerEffectiveDate::to_string),
             recorded_at_unix_ms: metadata
                 .recorded_at
                 .map(system_time_to_unix_ms)

@@ -58,7 +58,7 @@ pub fn build_expense_confirmation_surface(
     });
     let summary = ExpenseDraftSummary {
         amount: basic_info.amount.to_string(),
-        effective_date: basic_info.effective_date.clone(),
+        effective_date: basic_info.effective_date,
         note: summary_note,
     };
 

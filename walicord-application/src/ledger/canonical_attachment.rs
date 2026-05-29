@@ -261,7 +261,7 @@ impl MetadataDto {
             effective_date: metadata
                 .effective_date
                 .as_ref()
-                .map(|effective_date| effective_date.as_str().to_owned()),
+                .map(LedgerEffectiveDate::to_string),
             recorded_at_unix_ms: metadata
                 .recorded_at
                 .map(system_time_to_unix_ms)

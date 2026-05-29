@@ -347,7 +347,7 @@ fn encode_optional_effective_date_v1(
         None => out.push(0),
         Some(effective_date) => {
             out.push(1);
-            encode_string(out, effective_date.as_str())?;
+            encode_display(out, effective_date)?;
         }
     }
     Ok(())
@@ -416,6 +416,27 @@ fn encode_string(out: &mut Vec<u8>, s: &str) -> Result<(), LedgerCanonicalEncode
     let bytes = s.as_bytes();
     out.extend_from_slice(&u32_be_len(bytes.len())?);
     out.extend_from_slice(bytes);
+    Ok(())
+}
+
+fn encode_display(
+    out: &mut Vec<u8>,
+    value: impl std::fmt::Display,
+) -> Result<(), LedgerCanonicalEncodeError> {
+    use std::fmt::Write as _;
+    let prefix_at = out.len();
+    out.extend_from_slice(&[0u8; 4]);
+    let body_at = out.len();
+    struct WriteVec<'a>(&'a mut Vec<u8>);
+    impl std::fmt::Write for WriteVec<'_> {
+        fn write_str(&mut self, s: &str) -> std::fmt::Result {
+            self.0.extend_from_slice(s.as_bytes());
+            Ok(())
+        }
+    }
+    write!(WriteVec(out), "{value}").expect("Vec<u8> writes via fmt::Write are infallible");
+    let len_be = u32_be_len(out.len() - body_at)?;
+    out[prefix_at..body_at].copy_from_slice(&len_be);
     Ok(())
 }
 

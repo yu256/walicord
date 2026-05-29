@@ -952,7 +952,7 @@ impl LedgerRouter {
             .map(|info| ExpenseModalPrefill {
                 raw_amount: Some(format_money_for_modal(info.amount)),
                 raw_note: info.note.as_ref().map(|note| note.as_str().to_owned()),
-                raw_date: Some(info.effective_date.as_str().to_owned()),
+                raw_date: Some(info.effective_date.to_string()),
             })
             .unwrap_or_default();
         self.deps.expense_sessions.replace(session);
@@ -1388,7 +1388,6 @@ fn render_public_expense_body(
     let effective_date = entry
         .metadata
         .effective_date
-        .clone()
         .expect("composed expense entry always records `effective_date`");
 
     let model = PublicCanonicalMessageModel::Expense(PublicExpenseMessageModel {

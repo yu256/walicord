@@ -218,7 +218,7 @@ impl Clock for FixedClock {
     }
 
     fn today_business_date(&self) -> LedgerEffectiveDate {
-        self.today.clone()
+        self.today
     }
 }
 

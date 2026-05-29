@@ -128,7 +128,7 @@ pub fn compose_expense_entry(
             weight: row.weight,
         }),
         basic.note.as_ref().map(|note| note.as_str().to_owned()),
-        basic.effective_date.clone(),
+        basic.effective_date,
         recorded_by,
     )
     .map_err(ExpenseWriteOrchestrationError::Authoring)?;

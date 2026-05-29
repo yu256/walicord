@@ -115,15 +115,10 @@ fn parse_or_default_date(
     if raw.trim().is_empty() {
         return Ok(clock.today_business_date());
     }
-    let today = parse_clock_date(clock)?;
+    let today = clock.today_business_date().naive_date();
     normalize_date_input(raw, today)
-        .and_then(|date| LedgerEffectiveDate::new(date.format("%Y-%m-%d").to_string()).ok())
+        .map(LedgerEffectiveDate::from_naive_date)
         .ok_or(ExpenseModalValidationError::DateMalformed)
-}
-
-fn parse_clock_date(clock: &dyn Clock) -> Result<NaiveDate, ExpenseModalValidationError> {
-    NaiveDate::parse_from_str(clock.today_business_date().as_str(), "%Y-%m-%d")
-        .map_err(|_| ExpenseModalValidationError::DateMalformed)
 }
 
 fn normalize_date_input(raw: &str, today: NaiveDate) -> Option<NaiveDate> {

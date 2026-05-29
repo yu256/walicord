@@ -58,7 +58,7 @@ impl ExpenseDraftSummary {
     pub fn render_lines(&self) -> [String; 3] {
         [
             i18n::expense_draft_amount_line(&self.amount).to_string(),
-            i18n::expense_draft_date_line(self.effective_date.as_str()).to_string(),
+            i18n::expense_draft_date_line(self.effective_date).to_string(),
             i18n::expense_draft_note_line(
                 self.note
                     .as_ref()

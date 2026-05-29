@@ -81,8 +81,7 @@ mod tests {
 
     #[test]
     fn system_clock_today_business_date_is_iso_yyyy_mm_dd() {
-        let actual = SystemClock.today_business_date();
-        let s = actual.as_str();
+        let s = SystemClock.today_business_date().to_string();
         assert_eq!(s.len(), 10);
         assert!(s.as_bytes()[4] == b'-' && s.as_bytes()[7] == b'-');
     }
