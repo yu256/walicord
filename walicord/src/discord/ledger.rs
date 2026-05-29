@@ -74,6 +74,9 @@ use walicord_presentation::{
 };
 
 #[allow(dead_code)]
+#[path = "ledger/adapters.rs"]
+mod adapters;
+#[allow(dead_code)]
 #[path = "ledger/codec.rs"]
 mod codec;
 #[allow(dead_code)]
@@ -169,6 +172,17 @@ pub(crate) use self::{
         ChannelFlagAction, SlashScopeError, channel_flag_action, slash_scope_channel_id,
         startup_track_targets,
     },
+};
+
+pub(crate) use self::{
+    adapters::{DiscordLedgerThreadLoader, DiscordRouterRosterFetcher},
+    observability::TracingLedgerObservability,
+    preview_store::PreviewStore,
+    router::{InteractionDispatch, LedgerRouter, LedgerRouterDependencies},
+    runtime_clock::{ProcessNonceProvider, SystemClock},
+    sessions::{ExpenseSessionStore, ModalRetryBindingStore, VoidSessionStore},
+    store::{DiscordCanonicalLedgerStore, WriterLineagePolicy},
+    write_coordinator::{UncertainWriteRegistry, WriteCoordinator},
 };
 
 pub const LEDGER_ATTACHMENT_FILENAME: &str = "walicord-ledger-entry.json";

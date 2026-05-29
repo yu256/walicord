@@ -182,6 +182,11 @@ where
     RP: RosterProvider,
 {
     ledger_poc: crate::discord::ledger::DiscordLedgerPoc,
+    /// New-pipeline router. Built lazily in `ready` once the bot user id is known
+    /// (required by `WriterLineagePolicy`); `interaction_create` reads through this
+    /// router first and falls back to the legacy `ledger_poc` only when the router
+    /// reports `Ignored` (criterion-13 / 94 fall-through preserved).
+    ledger_router: std::sync::OnceLock<Arc<crate::discord::ledger::LedgerRouter>>,
     message_cache: MessageCache,
     channel_service: CS,
     roster_provider: RP,
@@ -205,6 +210,7 @@ where
             ledger_poc: crate::discord::ledger::DiscordLedgerPoc::new_with_planner(Arc::new(
                 HighsSettlementPlanner,
             )),
+            ledger_router: std::sync::OnceLock::new(),
             message_cache,
             channel_service,
             roster_provider,
@@ -934,6 +940,83 @@ where
             }
         }
     }
+
+    /// Dispatch an incoming interaction through the new-pipeline router. Returns
+    /// `Some(Handled)` when the router took ownership, `Some(Ignored)` when it
+    /// declined (legacy handler should run), and `None` for variants the router
+    /// does not yet observe (autocomplete, etc.). Router errors are logged and
+    /// treated as `Handled` so the actor sees the router's typed error path
+    /// rather than re-entering the legacy handler with half-consumed state.
+    async fn dispatch_through_ledger_router(
+        &self,
+        router: &crate::discord::ledger::LedgerRouter,
+        ctx: &Context,
+        interaction: &serenity::model::application::Interaction,
+    ) -> Option<crate::discord::ledger::InteractionDispatch> {
+        use serenity::model::application::Interaction;
+        let result = match interaction {
+            Interaction::Command(command) => router.handle_command(ctx, command).await,
+            Interaction::Component(component) => router.handle_component(ctx, component).await,
+            Interaction::Modal(modal) => router.handle_modal(ctx, modal).await,
+            _ => return None,
+        };
+        Some(match result {
+            Ok(dispatch) => dispatch,
+            Err(error) => {
+                tracing::error!(error = %error, "ledger router dispatch failed");
+                crate::discord::ledger::InteractionDispatch::Handled
+            }
+        })
+    }
+
+    /// Build the new-pipeline [`LedgerRouter`] now that the bot user id is known
+    /// (required by `WriterLineagePolicy::load`) and store it for `interaction_create`
+    /// to read. Initialization failure is logged and the router stays `None`; the
+    /// legacy `ledger_poc` continues to handle every interaction in that case, so the
+    /// bot keeps serving rather than hard-failing on startup.
+    fn initialize_ledger_router(&self, bot_user_id: serenity::all::UserId) {
+        let writer_lineage = match crate::discord::ledger::WriterLineagePolicy::load(
+            Some(bot_user_id),
+            Some(std::iter::once(bot_user_id)),
+        ) {
+            Ok(policy) => policy,
+            Err(error) => {
+                tracing::error!(
+                    "ledger router writer lineage policy failed to load: {}",
+                    error
+                );
+                return;
+            }
+        };
+        let canonical_store = Arc::new(crate::discord::ledger::DiscordCanonicalLedgerStore::new(
+            writer_lineage,
+        ));
+        let deps = crate::discord::ledger::LedgerRouterDependencies {
+            clock: Arc::new(crate::discord::ledger::SystemClock),
+            nonce_provider: Arc::new(crate::discord::ledger::ProcessNonceProvider::new()),
+            channels: Arc::new(self.channel_manager.clone()),
+            roster_fetcher: Arc::new(crate::discord::ledger::DiscordRouterRosterFetcher::new(
+                self.roster_provider.clone(),
+            )),
+            thread_loader: Arc::new(crate::discord::ledger::DiscordLedgerThreadLoader::new(
+                Arc::clone(&canonical_store),
+                "ledger-router",
+            )),
+            expense_sessions: Arc::new(crate::discord::ledger::ExpenseSessionStore::new()),
+            void_sessions: Arc::new(crate::discord::ledger::VoidSessionStore::new()),
+            modal_retries: Arc::new(crate::discord::ledger::ModalRetryBindingStore::new()),
+            preview_store: Arc::new(crate::discord::ledger::PreviewStore::new()),
+            write_coordinator: Arc::new(crate::discord::ledger::WriteCoordinator::new()),
+            uncertain_writes: Arc::new(crate::discord::ledger::UncertainWriteRegistry::new()),
+            planner: Arc::new(HighsSettlementPlanner),
+            canonical_store,
+            observability: Arc::new(crate::discord::ledger::TracingLedgerObservability),
+        };
+        let router = Arc::new(crate::discord::ledger::LedgerRouter::new(deps));
+        if self.ledger_router.set(router).is_err() {
+            tracing::warn!("ledger router was already initialized; ignoring duplicate ready event");
+        }
+    }
 }
 
 /// Plan for rebuilding channel cache
@@ -1117,6 +1200,7 @@ where
         }
         tracing::info!("Connected as {}", ready.user.name);
         self.initialize_enabled_channels(&ctx, &ready).await;
+        self.initialize_ledger_router(ready.user.id);
 
         use serenity::model::application::Command;
 
@@ -1130,6 +1214,17 @@ where
         ctx: Context,
         interaction: serenity::model::application::Interaction,
     ) {
+        if let Some(router) = self.ledger_router.get()
+            && let Some(dispatch) = self
+                .dispatch_through_ledger_router(router, &ctx, &interaction)
+                .await
+            && matches!(
+                dispatch,
+                crate::discord::ledger::InteractionDispatch::Handled
+            )
+        {
+            return;
+        }
         match interaction {
             serenity::model::application::Interaction::Command(ref command) => {
                 let Ok(scoped_channel_id) = self

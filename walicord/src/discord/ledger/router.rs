@@ -1,7 +1,7 @@
 use serenity::{
     all::{
         ButtonStyle, ChannelId, CommandInteraction, ComponentInteraction, CreateActionRow,
-        CreateButton, CreateInteractionResponse, CreateInteractionResponseMessage,
+        CreateButton, CreateInteractionResponse, CreateInteractionResponseMessage, GuildId,
         ModalInteraction,
     },
     async_trait,
@@ -119,6 +119,7 @@ pub trait RouterRosterFetcher: Send + Sync {
     async fn fetch(
         &self,
         ctx: &Context,
+        guild_id: GuildId,
         channel_id: ChannelId,
     ) -> Result<RouterRosterSnapshot, RouterRosterFetchError>;
 }
@@ -549,7 +550,7 @@ impl LedgerRouter {
         let roster_snapshot = self
             .deps
             .roster_fetcher
-            .fetch(ctx, channel_id)
+            .fetch(ctx, guild_id, channel_id)
             .await
             .map_err(LedgerRouteError::from)?;
 
@@ -632,7 +633,7 @@ impl LedgerRouter {
         let _guard = lock.lock().await;
 
         let load_future = self.deps.thread_loader.load(ctx, channel_id, ledger_id);
-        let roster_future = self.deps.roster_fetcher.fetch(ctx, channel_id);
+        let roster_future = self.deps.roster_fetcher.fetch(ctx, guild_id, channel_id);
         let (load_result, roster_result) = tokio::join!(load_future, roster_future);
         let snapshot_load = load_result?;
         let roster_snapshot = roster_result?;
