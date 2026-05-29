@@ -5,9 +5,12 @@ use serenity::{
 use std::sync::Arc;
 use walicord_application::{Clock, NonceProvider, SettlementPlanner};
 
+use crate::channel::ChannelManager;
+
 use super::{
     observability::LedgerObservability,
     preview_store::PreviewStore,
+    route_guard::{LedgerInteractionGuardError, guard_ledger_interaction},
     sessions::{ExpenseSessionStore, ModalRetryBindingStore, VoidSessionStore},
     store::DiscordCanonicalLedgerStore,
     write_coordinator::{UncertainWriteRegistry, WriteCoordinator},
@@ -20,6 +23,7 @@ use super::{
 pub struct LedgerRouterDependencies {
     pub clock: Arc<dyn Clock>,
     pub nonce_provider: Arc<dyn NonceProvider>,
+    pub channels: Arc<ChannelManager>,
     pub expense_sessions: Arc<ExpenseSessionStore>,
     pub void_sessions: Arc<VoidSessionStore>,
     pub modal_retries: Arc<ModalRetryBindingStore>,
@@ -71,16 +75,34 @@ impl LedgerRouter {
         &self.deps
     }
 
-    /// Slash-command dispatch. Subsequent Step 11 slices wire each supported command
-    /// (`/expense`, `/review`, `/settle`, `/ledger`, `/void`, `/panel`,
-    /// `/ledger-refresh`) here. Returning `Ignored` means the command is not a ledger
-    /// command and `handler.rs` should fall through to the legacy code path.
+    /// Slash-command dispatch. Returns `Ignored` for commands the router does not
+    /// own so the caller can fall through to the legacy non-canonical `/review` /
+    /// DSL record paths preserved by criterion 13 / 94.
     pub async fn handle_command(
         &self,
         _ctx: &Context,
-        _command: &CommandInteraction,
+        command: &CommandInteraction,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
-        Ok(InteractionDispatch::Ignored)
+        match command.data.name.as_str() {
+            "expense" => self.dispatch_expense_command(command).await,
+            _ => Ok(InteractionDispatch::Ignored),
+        }
+    }
+
+    async fn dispatch_expense_command(
+        &self,
+        command: &CommandInteraction,
+    ) -> Result<InteractionDispatch, LedgerRouteError> {
+        let _scope = guard_ledger_interaction(
+            command.guild_id,
+            command.channel_id,
+            self.deps.channels.as_ref(),
+        )
+        .map_err(map_guard_error)?;
+        // The actual modal-open response is wired in the next slice; until then the
+        // route reports Handled so the legacy handler does not also process it once
+        // handler.rs delegates here.
+        Ok(InteractionDispatch::Handled)
     }
 
     /// Component (button / select-menu) dispatch. Subsequent slices wire fixed
@@ -102,6 +124,15 @@ impl LedgerRouter {
         _modal: &ModalInteraction,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
         Ok(InteractionDispatch::Ignored)
+    }
+}
+
+fn map_guard_error(error: LedgerInteractionGuardError) -> LedgerRouteError {
+    match error {
+        LedgerInteractionGuardError::GuildOnly => LedgerRouteError::GuildOnly,
+        LedgerInteractionGuardError::NotInTrackedChannel { .. } => {
+            LedgerRouteError::NotInTrackedChannel
+        }
     }
 }
 

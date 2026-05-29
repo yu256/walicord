@@ -1,5 +1,5 @@
 use crate::channel::ChannelManager;
-use serenity::all::{ChannelId, ChannelType};
+use serenity::all::{ChannelId, ChannelType, GuildId};
 use walicord_i18n as i18n;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,6 +59,37 @@ pub(crate) enum SlashScopeError {
     ThreadWithoutParent(ChannelId),
 }
 
+/// Per-interaction preconditions every ledger route must satisfy before any state
+/// mutation (criteria 164-166 / 132 / 283 / 42).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LedgerInteractionGuardError {
+    /// Interaction has no `guild_id`. Routes return the criterion-164/165/166 message.
+    GuildOnly,
+    /// Channel is not currently tracked by `ChannelManager` (no `#walicord` topic flag
+    /// observed on this guild). Routes return the criterion-42 / 132 wrong-channel
+    /// message.
+    NotInTrackedChannel { observed: ChannelId },
+}
+
+/// Guard a guild-scoped slash / component / modal interaction. Returns the
+/// `(guild_id, channel_id)` pair when the interaction is in-bounds; otherwise returns
+/// a typed reason the route handler can render. The channel argument is whatever
+/// scope the interaction targets — for thread interactions the caller is expected to
+/// pre-resolve the parent via [`slash_scope_channel_id`].
+pub(crate) fn guard_ledger_interaction(
+    guild_id: Option<GuildId>,
+    channel_id: ChannelId,
+    channels: &ChannelManager,
+) -> Result<(GuildId, ChannelId), LedgerInteractionGuardError> {
+    let guild_id = guild_id.ok_or(LedgerInteractionGuardError::GuildOnly)?;
+    if !channels.is_tracked(channel_id) {
+        return Err(LedgerInteractionGuardError::NotInTrackedChannel {
+            observed: channel_id,
+        });
+    }
+    Ok((guild_id, channel_id))
+}
+
 pub(crate) fn slash_scope_channel_id(
     channel_id: ChannelId,
     kind: ChannelType,
@@ -77,8 +108,9 @@ pub(crate) fn slash_scope_channel_id(
 
 #[cfg(test)]
 mod tests {
-    use super::outside_tracked_channel_message;
-    use serenity::all::ChannelId;
+    use super::*;
+    use crate::channel::ChannelManager;
+    use serenity::all::{ChannelId, GuildId};
 
     #[test]
     fn outside_tracked_channel_message_prefers_known_parent_hint() {
@@ -94,5 +126,32 @@ mod tests {
             outside_tracked_channel_message(None),
             "このチャンネルは台帳の対象ではありません。記録用チャンネルで実行してください。わからない場合は管理者に確認してください。"
         );
+    }
+
+    #[test]
+    fn guard_rejects_interaction_without_guild_context() {
+        let channels = ChannelManager::new();
+        let actual = guard_ledger_interaction(None, ChannelId::new(1), &channels);
+        assert_eq!(actual, Err(LedgerInteractionGuardError::GuildOnly));
+    }
+
+    #[test]
+    fn guard_rejects_interaction_in_untracked_channel() {
+        let channels = ChannelManager::new();
+        let actual = guard_ledger_interaction(Some(GuildId::new(1)), ChannelId::new(99), &channels);
+        assert_eq!(
+            actual,
+            Err(LedgerInteractionGuardError::NotInTrackedChannel {
+                observed: ChannelId::new(99)
+            })
+        );
+    }
+
+    #[test]
+    fn guard_accepts_tracked_channel_with_guild_context() {
+        let channels = ChannelManager::new();
+        channels.track(ChannelId::new(42));
+        let actual = guard_ledger_interaction(Some(GuildId::new(1)), ChannelId::new(42), &channels);
+        assert_eq!(actual, Ok((GuildId::new(1), ChannelId::new(42))));
     }
 }
