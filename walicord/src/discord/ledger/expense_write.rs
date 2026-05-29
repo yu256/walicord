@@ -16,28 +16,35 @@ use walicord_application::{
 };
 use walicord_domain::model::{MemberId, Weight};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ExpenseWriteOrchestrationError {
     /// The session is not in `InConfirmation` so it has no payer / confirmation
     /// snapshot to record.
+    #[error("session is not in InConfirmation stage")]
     SessionNotInConfirmation,
     /// `basic_info` was missing despite the session being in confirmation. This is a
     /// programmer error in the orchestration layer; the constructor invariant should
     /// have rejected it.
+    #[error("basic info is missing from the confirmation-stage session draft")]
     BasicInfoMissing,
     /// Payer is no longer in the roster at record time.
+    #[error("payer {payer:?} is no longer in the roster at record time")]
     PayerNotInRoster { payer: MemberId },
     /// The fresh resolution at record time produced no participants.
+    #[error("no resolved participants at record time")]
     NoResolvedParticipants,
     /// Application-level authoring validation rejected the snapshot (e.g. non-positive
     /// amount, all-zero weights, oversize note, etc.). Adapter maps to the matching
     /// criterion message (criteria 3-7, 90, 128, 218 etc.).
-    Authoring(ExpenseAuthoringError),
+    #[error("authoring validation: {0}")]
+    Authoring(#[from] ExpenseAuthoringError),
     /// Application-level entry construction failure (typed audit / metadata error).
-    EntryBuild(DiscordLedgerEntryError),
+    #[error("entry build: {0}")]
+    EntryBuild(#[from] DiscordLedgerEntryError),
     /// Canonical envelope encoding failure; the hash-suite encoding could not produce
     /// bytes for the prepared entry.
-    EnvelopeEncode(LedgerCanonicalEncodeError),
+    #[error("envelope encode: {0}")]
+    EnvelopeEncode(#[from] LedgerCanonicalEncodeError),
 }
 
 /// Two-way outcome of the record-time compose path. Criterion 81 requires append-time

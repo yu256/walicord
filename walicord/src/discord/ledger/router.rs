@@ -87,23 +87,19 @@ pub enum LedgerRouteError {
 
 /// Closed enumeration of every internal failure the router can encounter. Each variant
 /// carries the underlying cause as a typed value (no `format!` at the error site);
-/// the Display impl composes the message at the boundary. Telemetry can match on the
-/// variant to bucket failures without parsing strings.
-///
-/// Plain `impl From<X>` (not thiserror's `#[from]`) is used for the source variants
-/// because the source error types do not yet impl `std::error::Error`; migrating
-/// them is a follow-up commit. The conversions still let call sites use `?` /
-/// `LedgerRouteError::from`.
+/// thiserror's `Display` composes the message at the boundary. `#[from]` on the
+/// single-source variants installs `From` conversions, so call sites use `?` and
+/// `LedgerRouteError::from` rather than dedicated `map_*` helpers.
 #[derive(Debug, thiserror::Error)]
 pub enum InternalLedgerRouteError {
-    #[error("panel render: {0:?}")]
-    PanelRender(RenderBudgetError),
-    #[error("expense modal build: {0:?}")]
-    ExpenseModalBuild(ExpenseModalBuildError),
-    #[error("expense session construction: {0:?}")]
-    SessionConstruction(ExpenseSessionConstructionError),
-    #[error("expense navigation: {0:?}")]
-    Navigation(NavigationError),
+    #[error("panel render: {0}")]
+    PanelRender(#[from] RenderBudgetError),
+    #[error("expense modal build: {0}")]
+    ExpenseModalBuild(#[from] ExpenseModalBuildError),
+    #[error("expense session construction: {0}")]
+    SessionConstruction(#[from] ExpenseSessionConstructionError),
+    #[error("expense navigation: {0}")]
+    Navigation(#[from] NavigationError),
     #[error("expense modal submission missing required fields")]
     ModalSubmissionMissingFields,
     #[error("expense {operation} navigation landed on non-selection stage: {observed_stage:?}")]
@@ -117,30 +113,6 @@ pub enum InternalLedgerRouteError {
         #[source]
         error: serenity::Error,
     },
-}
-
-impl From<RenderBudgetError> for InternalLedgerRouteError {
-    fn from(error: RenderBudgetError) -> Self {
-        Self::PanelRender(error)
-    }
-}
-
-impl From<ExpenseModalBuildError> for InternalLedgerRouteError {
-    fn from(error: ExpenseModalBuildError) -> Self {
-        Self::ExpenseModalBuild(error)
-    }
-}
-
-impl From<ExpenseSessionConstructionError> for InternalLedgerRouteError {
-    fn from(error: ExpenseSessionConstructionError) -> Self {
-        Self::SessionConstruction(error)
-    }
-}
-
-impl From<NavigationError> for InternalLedgerRouteError {
-    fn from(error: NavigationError) -> Self {
-        Self::Navigation(error)
-    }
 }
 
 impl From<LedgerInteractionGuardError> for LedgerRouteError {

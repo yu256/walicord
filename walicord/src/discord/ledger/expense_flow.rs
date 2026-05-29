@@ -70,12 +70,16 @@ pub struct ConfirmationBuildOutcome {
     pub dropped_overrides: Vec<(MemberId, walicord_domain::model::Weight)>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ConfirmationBuildError {
+    #[error("basic info is missing from the session draft")]
     BasicInfoMissing,
+    #[error("no payer is selected in the session")]
     PayerNotSelected,
+    #[error("no resolved participants after roster resolution")]
     NoResolvedParticipants,
-    ConstructionFailed(ExpenseSessionConstructionError),
+    #[error("confirmation-stage session construction failed: {0}")]
+    ConstructionFailed(#[from] ExpenseSessionConstructionError),
 }
 
 /// Resolve the current selection against a fresh roster snapshot and transition the
@@ -159,21 +163,27 @@ pub fn confirmation_payer_and_participants(
     Some((payer, participants))
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum NavigationError {
+    #[error("already at the first selection step (caller should fall back to cancel)")]
     AlreadyAtFirstStep,
+    #[error("session is not in the InSelection stage")]
     NotInSelection,
+    #[error("session is not in the InConfirmation stage")]
     NotInConfirmation,
+    #[error("basic info is missing from the session draft")]
     BasicInfoMissing,
     /// The actor pressed a forward-navigation button whose target phase is not a legal
     /// next step from the current phase (e.g. pressing `重みへ` from `Payer`). The
     /// session has not been mutated; the caller surfaces the criterion-201 cancel cue
     /// or refreshes the current step.
+    #[error("illegal forward selection transition: {from:?} → {to:?}")]
     IllegalForwardTransition {
         from: ExpenseSelectionPhase,
         to: ExpenseSelectionPhase,
     },
-    ConstructionFailed(ExpenseSessionConstructionError),
+    #[error("session construction failed during navigation: {0}")]
+    ConstructionFailed(#[from] ExpenseSessionConstructionError),
 }
 
 /// Walk one selection phase backwards (criterion 200). At the first selection phase,

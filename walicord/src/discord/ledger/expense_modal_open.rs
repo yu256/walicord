@@ -29,9 +29,10 @@ pub struct ExpenseModalPrefill {
     pub raw_date: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ExpenseModalBuildError {
-    Budget(RenderBudgetError),
+    #[error("modal exceeded a Discord render budget: {0}")]
+    Budget(#[from] RenderBudgetError),
 }
 
 /// Result of inspecting a `ModalInteraction.custom_id` to see if it belongs to the

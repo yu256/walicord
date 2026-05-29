@@ -313,21 +313,31 @@ impl RecordableExpenseAuthoring {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ExpenseAuthoringError {
+    #[error("duplicate participant: member {member_id:?}")]
     DuplicateParticipant { member_id: MemberId },
+    #[error("expense has no participants")]
     EmptyParticipants,
+    #[error("invalid amount for expense")]
     InvalidAmount,
+    #[error("invalid note for expense")]
     InvalidNote,
+    #[error("expense note exceeds canonical length cap")]
     NoteTooLong,
+    #[error("expense exceeds the participant cap")]
     TooManyParticipants,
+    #[error("invalid weight configuration (e.g. all zero, negative)")]
     InvalidWeightConfiguration,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum DiscordLedgerEntryError {
-    InvalidSource(LedgerSourceCanonicalError),
+    #[error("invalid ledger source descriptor: {0}")]
+    InvalidSource(#[from] LedgerSourceCanonicalError),
+    #[error("ledger entry construction failed")]
     LedgerConstruction,
+    #[error("wrong source descriptor for this entry kind")]
     WrongSourceDescriptor,
 }
 

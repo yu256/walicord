@@ -69,8 +69,9 @@ impl LedgerSourceCanonical {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum LedgerSourceCanonicalError {
+    #[error("ledger source descriptor is empty")]
     Empty,
 }
 

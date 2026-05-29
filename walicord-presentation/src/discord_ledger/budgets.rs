@@ -11,41 +11,33 @@ pub const DISCORD_ACTION_ROW_LIMIT: usize = 5;
 pub const DISCORD_BUTTONS_PER_ROW_LIMIT: usize = 5;
 pub const DISCORD_SELECT_OPTION_LIMIT: usize = 25;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RenderBudgetError {
-    MessageContentTooLong {
-        actual: usize,
-        limit: usize,
-    },
-    ComponentLabelTooLong {
-        actual: usize,
-        limit: usize,
-    },
-    CustomIdTooLong {
-        actual: usize,
-        limit: usize,
-    },
-    TooManyActionRows {
-        actual: usize,
-        limit: usize,
-    },
-    TooManyButtonsInRow {
-        actual: usize,
-        limit: usize,
-    },
-    TooManySelectOptions {
-        actual: usize,
-        limit: usize,
-    },
+    #[error("message content {actual} chars exceeds discord limit {limit}")]
+    MessageContentTooLong { actual: usize, limit: usize },
+    #[error("component label {actual} chars exceeds discord limit {limit}")]
+    ComponentLabelTooLong { actual: usize, limit: usize },
+    #[error("custom_id {actual} chars exceeds discord limit {limit}")]
+    CustomIdTooLong { actual: usize, limit: usize },
+    #[error("action rows {actual} exceeds discord limit {limit}")]
+    TooManyActionRows { actual: usize, limit: usize },
+    #[error("buttons {actual} in single row exceeds discord limit {limit}")]
+    TooManyButtonsInRow { actual: usize, limit: usize },
+    #[error("select options {actual} exceeds discord limit {limit}")]
+    TooManySelectOptions { actual: usize, limit: usize },
+    #[error(
+        "invalid select value bounds: min_values={min_values}, max_values={max_values}, option_count={option_count}"
+    )]
     InvalidSelectValueBounds {
         min_values: u8,
         max_values: u8,
         option_count: usize,
     },
+    #[error("recovery reference is missing")]
     MissingRecoveryReference,
-    MultipleRecoveryReferences {
-        actual: usize,
-    },
+    #[error("multiple recovery references ({actual}) are not allowed")]
+    MultipleRecoveryReferences { actual: usize },
+    #[error("public surface truncation cue is invalid")]
     InvalidPublicTruncationCue,
 }
 

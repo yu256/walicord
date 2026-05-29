@@ -183,23 +183,20 @@ pub fn ledger_chain_genesis_sha256_v1(ledger_id: LedgerId) -> EntryHash {
     EntryHash(hasher.finalize().into())
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum LedgerCanonicalEncodeError {
-    UnsupportedSchemaVersion {
-        version: SchemaVersion,
-    },
-    UnsupportedHashSuite {
-        suite: LedgerHashSuite,
-    },
+    #[error("unsupported canonical schema version: {version:?}")]
+    UnsupportedSchemaVersion { version: SchemaVersion },
+    #[error("unsupported canonical hash suite: {suite:?}")]
+    UnsupportedHashSuite { suite: LedgerHashSuite },
     /// A length field (collection cardinality or string byte length) does not fit in the
     /// schema's `u32` length prefix. Saturating would let two semantically distinct
     /// payloads collide on canonical bytes once both exceed `u32::MAX`, which would weaken
     /// tamper-evidence at the boundary. Real ledgers will not hit this in practice but the
     /// canonical format is treated as a strict total function: every input either has a
     /// well-defined encoding or fails loudly.
-    LengthOverflow {
-        len: usize,
-    },
+    #[error("canonical length field {len} exceeds u32 schema prefix")]
+    LengthOverflow { len: usize },
 }
 
 /// Default canonical encoder selected automatically by `schema_version`. Crate-private;

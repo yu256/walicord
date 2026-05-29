@@ -188,15 +188,19 @@ impl VoidCandidateSelection {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ExpenseSessionConstructionError {
+    #[error("AwaitingBasicInfo session cannot carry basic info")]
     AwaitingBasicInfoCannotHaveBasicInfo,
+    #[error("InSelection stage requires basic info to be present in the draft")]
     InSelectionRequiresBasicInfo,
+    #[error("InConfirmation stage requires basic info and a confirmation snapshot")]
     InConfirmationRequiresBasicInfoAndSelection,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum VoidSessionConstructionError {
+    #[error("Confirming stage requires a void candidate to be selected")]
     ConfirmingRequiresCandidate,
 }
 
@@ -326,17 +330,21 @@ pub struct ModalRetryBinding {
     expires_at: SystemTime,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ModalRetryBindingError {
+    #[error("modal retry binding not found in store")]
     NotFound,
+    #[error("modal retry binding expired at {expires_at:?} (now {now:?})")]
     Expired {
         now: SystemTime,
         expires_at: SystemTime,
     },
+    #[error("modal retry actor mismatch: observed {actual:?}, expected {expected:?}")]
     ActorMismatch {
         actual: MemberId,
         expected: MemberId,
     },
+    #[error("modal retry channel mismatch: observed {actual:?}, expected {expected:?}")]
     ChannelMismatch {
         actual: ChannelId,
         expected: ChannelId,
@@ -466,8 +474,9 @@ pub struct PagedPickerState {
     selection: Vec<u64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum PagedPickerStateError {
+    #[error("paged picker snapshot is stale: observed {actual:?}, expected {expected:?}")]
     StaleSnapshot {
         actual: PickerSnapshotId,
         expected: PickerSnapshotId,
@@ -533,12 +542,14 @@ pub struct PagedReadViewState {
     route: PagedReadViewRoute,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum PagedReadViewStateError {
+    #[error("paged read view snapshot is stale: observed {actual:?}, expected {expected:?}")]
     StaleSnapshot {
         actual: EntryHash,
         expected: EntryHash,
     },
+    #[error("paged read view actor mismatch: observed {actual:?}, expected {expected:?}")]
     ActorMismatch {
         actual: MemberId,
         expected: MemberId,
@@ -596,13 +607,16 @@ impl PagedReadViewState {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SessionAccessError {
+    #[error("session has expired")]
     Expired,
+    #[error("stale nonce: observed {actual:?}, expected {expected:?}")]
     StaleNonce {
         actual: InteractionNonce,
         expected: InteractionNonce,
     },
+    #[error("session has been superseded: observed {actual:?}, expected {expected:?}")]
     Superseded {
         actual: InteractionNonce,
         expected: InteractionNonce,

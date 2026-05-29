@@ -32,20 +32,26 @@ pub struct ValidatedExpenseModalSubmission {
     pub effective_date: LedgerEffectiveDate,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ExpenseModalValidationError {
     /// Criterion 124: blank amount input. Adapter renders `i18n::expense_amount_blank_message`
     /// (or equivalent) plus the retry CTA.
+    #[error("expense amount is blank")]
     AmountBlank,
     /// Criterion 168: amount has decimal point / fractional part.
+    #[error("expense amount must be an integer (no fractional part)")]
     AmountNonInteger,
     /// Criterion 124 + 90: zero or negative amount.
+    #[error("expense amount must be positive")]
     AmountNonPositive,
     /// Criterion 124: malformed amount that is neither integer nor decimal.
+    #[error("expense amount is malformed")]
     AmountMalformed,
     /// Criterion 204: note exceeds the unicode-scalar cap.
+    #[error("expense note length {length} exceeds maximum {max}")]
     NoteTooLong { length: usize, max: usize },
     /// Criterion 125: malformed date that no supported format matches.
+    #[error("expense effective date is malformed (no supported format matches)")]
     DateMalformed,
 }
 
