@@ -8959,30 +8959,32 @@ fn render_review_surface_pages(
     render_state: &ReadViewRenderState,
 ) -> Result<Vec<ReadViewRenderedPage>, String> {
     let labels = surface_member_labels(member_names);
-    render_read_view_page_models(projection::paginate_read_view_model(ReadViewPageModel {
-        kind: ReadViewKind::Review,
-        route,
-        title: i18n::panel_review_button_label().to_owned(),
-        uncertain_write: render_state.uncertain_write,
-        stale_page: render_state.stale_page,
-        page_indicator: render_state.page_indicator.clone(),
-        snapshot_notice: render_state.snapshot_notice.clone(),
-        route_guidance_lines: Vec::new(),
-        recovery_cta,
-        recovery_url,
-        missing_thread_note: false,
-        balances: balance_rows_for_state(loaded.projected.state(), &labels),
-        transfers: preview_transfer_rows(previewed, &labels),
-        participants: Vec::new(),
-        voided_entries: Vec::new(),
-        sealed_range: None,
-        balance_adjustments: Vec::new(),
-        footer_lines: Vec::new(),
-        visible_sections: ReadViewSectionVisibility::default(),
-        empty_state: None,
-        action_rows: Vec::new(),
-        ephemeral: true,
-    }))
+    render_read_view_page_models(
+        walicord_presentation::discord_ledger::paginate_read_view_model(ReadViewPageModel {
+            kind: ReadViewKind::Review,
+            route,
+            title: i18n::panel_review_button_label().to_owned(),
+            uncertain_write: render_state.uncertain_write,
+            stale_page: render_state.stale_page,
+            page_indicator: render_state.page_indicator.clone(),
+            snapshot_notice: render_state.snapshot_notice.clone(),
+            route_guidance_lines: Vec::new(),
+            recovery_cta,
+            recovery_url,
+            missing_thread_note: false,
+            balances: balance_rows_for_state(loaded.projected.state(), &labels),
+            transfers: preview_transfer_rows(previewed, &labels),
+            participants: Vec::new(),
+            voided_entries: Vec::new(),
+            sealed_range: None,
+            balance_adjustments: Vec::new(),
+            footer_lines: Vec::new(),
+            visible_sections: ReadViewSectionVisibility::default(),
+            empty_state: None,
+            action_rows: Vec::new(),
+            ephemeral: true,
+        }),
+    )
 }
 
 fn render_review_empty_state(
@@ -9071,30 +9073,32 @@ fn render_ledger_surface_pages(
     render_state: &ReadViewRenderState,
 ) -> Result<Vec<ReadViewRenderedPage>, String> {
     let labels = surface_member_labels(member_names);
-    render_read_view_page_models(projection::paginate_read_view_model(ReadViewPageModel {
-        kind: ReadViewKind::Ledger,
-        route,
-        title: i18n::panel_ledger_button_label().to_owned(),
-        uncertain_write: render_state.uncertain_write,
-        stale_page: render_state.stale_page,
-        page_indicator: render_state.page_indicator.clone(),
-        snapshot_notice: render_state.snapshot_notice.clone(),
-        route_guidance_lines: Vec::new(),
-        recovery_cta: RecoveryCta::None,
-        recovery_url: None,
-        missing_thread_note: false,
-        balances: balance_rows_for_state(loaded.projected.state(), &labels),
-        transfers: Vec::new(),
-        participants: participant_names_for_state(loaded.projected.state(), &labels),
-        voided_entries: voided_rows_for_loaded(loaded, &labels)?,
-        sealed_range: sealed_range_summary_for_loaded(loaded, &labels)?,
-        balance_adjustments: adjustment_summaries_for_loaded(loaded, &labels),
-        footer_lines: Vec::new(),
-        visible_sections: ReadViewSectionVisibility::default(),
-        empty_state: None,
-        action_rows: Vec::new(),
-        ephemeral: true,
-    }))
+    render_read_view_page_models(
+        walicord_presentation::discord_ledger::paginate_read_view_model(ReadViewPageModel {
+            kind: ReadViewKind::Ledger,
+            route,
+            title: i18n::panel_ledger_button_label().to_owned(),
+            uncertain_write: render_state.uncertain_write,
+            stale_page: render_state.stale_page,
+            page_indicator: render_state.page_indicator.clone(),
+            snapshot_notice: render_state.snapshot_notice.clone(),
+            route_guidance_lines: Vec::new(),
+            recovery_cta: RecoveryCta::None,
+            recovery_url: None,
+            missing_thread_note: false,
+            balances: balance_rows_for_state(loaded.projected.state(), &labels),
+            transfers: Vec::new(),
+            participants: participant_names_for_state(loaded.projected.state(), &labels),
+            voided_entries: voided_rows_for_loaded(loaded, &labels)?,
+            sealed_range: sealed_range_summary_for_loaded(loaded, &labels)?,
+            balance_adjustments: adjustment_summaries_for_loaded(loaded, &labels),
+            footer_lines: Vec::new(),
+            visible_sections: ReadViewSectionVisibility::default(),
+            empty_state: None,
+            action_rows: Vec::new(),
+            ephemeral: true,
+        }),
+    )
 }
 
 fn render_ledger_empty_state(
@@ -12649,8 +12653,8 @@ mod tests {
 
     #[test]
     fn review_pagination_keeps_instruction_guidance_and_recovery_cta_on_later_pages() {
-        let pages =
-            render_read_view_page_models(projection::paginate_read_view_model(ReadViewPageModel {
+        let pages = render_read_view_page_models(
+            walicord_presentation::discord_ledger::paginate_read_view_model(ReadViewPageModel {
                 kind: ReadViewKind::Review,
                 route: ReadViewRoute::ReviewThread,
                 title: i18n::panel_review_button_label().to_owned(),
@@ -12694,8 +12698,9 @@ mod tests {
                 empty_state: None,
                 action_rows: Vec::new(),
                 ephemeral: true,
-            }))
-            .expect("review pages should render");
+            }),
+        )
+        .expect("review pages should render");
 
         assert_eq!(pages.len(), 2);
         assert!(
@@ -12717,8 +12722,8 @@ mod tests {
 
     #[test]
     fn ledger_pagination_keeps_required_empty_sections_visible_on_later_pages() {
-        let pages =
-            render_read_view_page_models(projection::paginate_read_view_model(ReadViewPageModel {
+        let pages = render_read_view_page_models(
+            walicord_presentation::discord_ledger::paginate_read_view_model(ReadViewPageModel {
                 kind: ReadViewKind::Ledger,
                 route: ReadViewRoute::LedgerCommand,
                 title: i18n::panel_ledger_button_label().to_owned(),
@@ -12753,8 +12758,9 @@ mod tests {
                 empty_state: None,
                 action_rows: Vec::new(),
                 ephemeral: true,
-            }))
-            .expect("ledger pages should render");
+            }),
+        )
+        .expect("ledger pages should render");
 
         assert_eq!(pages.len(), 2);
         assert!(pages[1].body.contains("取り消し済み\n取り消し済みなし"));
@@ -12764,8 +12770,8 @@ mod tests {
 
     #[test]
     fn paged_non_empty_ledger_with_zero_balances_keeps_zero_balance_guidance() {
-        let pages =
-            render_read_view_page_models(projection::paginate_read_view_model(ReadViewPageModel {
+        let pages = render_read_view_page_models(
+            walicord_presentation::discord_ledger::paginate_read_view_model(ReadViewPageModel {
                 kind: ReadViewKind::Ledger,
                 route: ReadViewRoute::LedgerCommand,
                 title: i18n::panel_ledger_button_label().to_owned(),
@@ -12793,8 +12799,9 @@ mod tests {
                 empty_state: None,
                 action_rows: Vec::new(),
                 ephemeral: true,
-            }))
-            .expect("ledger pages should render");
+            }),
+        )
+        .expect("ledger pages should render");
 
         assert_eq!(pages.len(), 2);
         assert!(
