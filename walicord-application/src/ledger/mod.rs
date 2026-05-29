@@ -14,6 +14,7 @@ pub mod participant_resolution;
 pub mod preview_store;
 pub mod projection;
 pub mod read_singleflight;
+pub mod read_view_session;
 mod seal;
 pub mod settle_flow;
 pub mod void_flow;
