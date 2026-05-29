@@ -1,5 +1,6 @@
 use crate::channel::ChannelManager;
 use serenity::all::{ChannelId, ChannelType, GuildId};
+use walicord_application::ledger::LedgerId;
 use walicord_i18n as i18n;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,23 +72,63 @@ pub(crate) enum LedgerInteractionGuardError {
     NotInTrackedChannel { observed: ChannelId },
 }
 
-/// Guard a guild-scoped slash / component / modal interaction. Returns the
-/// `(guild_id, channel_id)` pair when the interaction is in-bounds; otherwise returns
+/// Proof that an incoming interaction satisfied the preconditions (guild context +
+/// tracked channel). Construction is private to this module: holding a value of
+/// this type is only possible via [`guard_ledger_interaction`], so downstream code
+/// cannot fabricate a scope that bypasses the checks.
+///
+/// `ledger_id()` is the **only** identifier downstream application-layer code uses
+/// — session keys, write coordinator targets, etc. take `LedgerId`. `guild_id()` /
+/// `channel_id()` stay accessible because the adapter still needs them to call
+/// serenity APIs (`roster.display_names_for_guild`, `channel.send_message`, …), but
+/// session-key construction is structurally type-safe: passing a `ChannelId` where
+/// `LedgerId` is expected fails to compile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LedgerInteractionScope {
+    guild_id: GuildId,
+    channel_id: ChannelId,
+    ledger_id: LedgerId,
+}
+
+impl LedgerInteractionScope {
+    pub(crate) fn guild_id(&self) -> GuildId {
+        self.guild_id
+    }
+    pub(crate) fn channel_id(&self) -> ChannelId {
+        self.channel_id
+    }
+    pub(crate) fn ledger_id(&self) -> LedgerId {
+        self.ledger_id
+    }
+}
+
+/// Guard a guild-scoped slash / component / modal interaction. Returns the typed
+/// [`LedgerInteractionScope`] when the interaction is in-bounds; otherwise returns
 /// a typed reason the route handler can render. The channel argument is whatever
 /// scope the interaction targets — for thread interactions the caller is expected to
 /// pre-resolve the parent via [`slash_scope_channel_id`].
+///
+/// The `(GuildId, ChannelId) → LedgerId` mapping is performed exactly once here so
+/// the application layer (sessions, preview store, write coordinator targets) never
+/// sees Discord-side identifiers. Adding alternative mappings (e.g. routing two
+/// channels to the same ledger) means changing this function; the rest of the
+/// router does not need to know.
 pub(crate) fn guard_ledger_interaction(
     guild_id: Option<GuildId>,
     channel_id: ChannelId,
     channels: &ChannelManager,
-) -> Result<(GuildId, ChannelId), LedgerInteractionGuardError> {
+) -> Result<LedgerInteractionScope, LedgerInteractionGuardError> {
     let guild_id = guild_id.ok_or(LedgerInteractionGuardError::GuildOnly)?;
     if !channels.is_tracked(channel_id) {
         return Err(LedgerInteractionGuardError::NotInTrackedChannel {
             observed: channel_id,
         });
     }
-    Ok((guild_id, channel_id))
+    Ok(LedgerInteractionScope {
+        guild_id,
+        channel_id,
+        ledger_id: LedgerId(channel_id.get()),
+    })
 }
 
 pub(crate) fn slash_scope_channel_id(
@@ -151,7 +192,12 @@ mod tests {
     fn guard_accepts_tracked_channel_with_guild_context() {
         let channels = ChannelManager::new();
         channels.track(ChannelId::new(42));
-        let actual = guard_ledger_interaction(Some(GuildId::new(1)), ChannelId::new(42), &channels);
-        assert_eq!(actual, Ok((GuildId::new(1), ChannelId::new(42))));
+
+        let scope = guard_ledger_interaction(Some(GuildId::new(1)), ChannelId::new(42), &channels)
+            .expect("guard should accept tracked channel with guild context");
+
+        assert_eq!(scope.guild_id(), GuildId::new(1));
+        assert_eq!(scope.channel_id(), ChannelId::new(42));
+        assert_eq!(scope.ledger_id(), LedgerId(42));
     }
 }

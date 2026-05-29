@@ -173,7 +173,6 @@ mod tests {
             ExpenseSessionStage,
         },
     };
-    use serenity::all::{ChannelId, GuildId};
     use std::{
         sync::atomic::{AtomicU64, Ordering},
         time::{Duration, SystemTime, UNIX_EPOCH},
@@ -215,7 +214,7 @@ mod tests {
     }
 
     fn key(actor: u64) -> ExpenseSessionKey {
-        ExpenseSessionKey::new(GuildId::new(1), ChannelId::new(2), MemberId(actor))
+        ExpenseSessionKey::new(LedgerId(42), MemberId(actor))
     }
 
     fn roster_with(members: &[u64]) -> RosterSnapshot {

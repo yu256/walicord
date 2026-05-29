@@ -1,5 +1,4 @@
 use dashmap::DashMap;
-use serenity::all::{ChannelId, GuildId};
 use std::{
     collections::{BTreeMap, HashMap},
     sync::{Arc, Mutex},
@@ -8,7 +7,7 @@ use std::{
 use tokio::sync::Mutex as AsyncMutex;
 use walicord_application::{
     InteractionNonce,
-    ledger::{EntryHash, ExpenseNote, LedgerEffectiveDate, LedgerEntryId},
+    ledger::{EntryHash, ExpenseNote, LedgerEffectiveDate, LedgerEntryId, LedgerId},
 };
 use walicord_domain::{
     Money,
@@ -19,27 +18,26 @@ pub const EXPENSE_SESSION_TTL: Duration = Duration::from_secs(10 * 60);
 pub const VOID_SESSION_TTL: Duration = Duration::from_secs(10 * 60);
 pub const MODAL_RETRY_TTL: Duration = Duration::from_secs(10 * 60);
 
+/// Identity for an in-progress expense draft. Keyed by `(LedgerId, MemberId)` rather
+/// than the Discord-side `(GuildId, ChannelId, MemberId)` triple so the application
+/// layer never has to import serenity types. The adapter is responsible for
+/// translating `(GuildId, ChannelId)` → `LedgerId` at the interaction boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ExpenseSessionKey {
-    guild_id: GuildId,
-    channel_id: ChannelId,
+    ledger_id: LedgerId,
     actor_id: MemberId,
 }
 
 impl ExpenseSessionKey {
-    pub fn new(guild_id: GuildId, channel_id: ChannelId, actor_id: MemberId) -> Self {
+    pub fn new(ledger_id: LedgerId, actor_id: MemberId) -> Self {
         Self {
-            guild_id,
-            channel_id,
+            ledger_id,
             actor_id,
         }
     }
 
-    pub fn guild_id(self) -> GuildId {
-        self.guild_id
-    }
-    pub fn channel_id(self) -> ChannelId {
-        self.channel_id
+    pub fn ledger_id(self) -> LedgerId {
+        self.ledger_id
     }
     pub fn actor_id(self) -> MemberId {
         self.actor_id
@@ -48,25 +46,20 @@ impl ExpenseSessionKey {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct VoidSessionKey {
-    guild_id: GuildId,
-    channel_id: ChannelId,
+    ledger_id: LedgerId,
     actor_id: MemberId,
 }
 
 impl VoidSessionKey {
-    pub fn new(guild_id: GuildId, channel_id: ChannelId, actor_id: MemberId) -> Self {
+    pub fn new(ledger_id: LedgerId, actor_id: MemberId) -> Self {
         Self {
-            guild_id,
-            channel_id,
+            ledger_id,
             actor_id,
         }
     }
 
-    pub fn guild_id(self) -> GuildId {
-        self.guild_id
-    }
-    pub fn channel_id(self) -> ChannelId {
-        self.channel_id
+    pub fn ledger_id(self) -> LedgerId {
+        self.ledger_id
     }
     pub fn actor_id(self) -> MemberId {
         self.actor_id
@@ -320,11 +313,15 @@ pub struct ModalRetryPreserved {
 /// [`ModalRetryBindingStore::try_consume`] removing the binding from the store on the
 /// first successful consume — the type itself does not carry a `consumed` flag because
 /// such a flag would be bypassable by cloning the binding outside the store.
+///
+/// Scope is bound to `(LedgerId, MemberId)` rather than `(ChannelId, MemberId)` so the
+/// application layer stays free of serenity types; the adapter is responsible for
+/// translating Discord identifiers to `LedgerId` at the interaction boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModalRetryBinding {
     binding_nonce: InteractionNonce,
     actor_id: MemberId,
-    channel_id: ChannelId,
+    ledger_id: LedgerId,
     preserved: ModalRetryPreserved,
     created_at: SystemTime,
     expires_at: SystemTime,
@@ -344,10 +341,10 @@ pub enum ModalRetryBindingError {
         actual: MemberId,
         expected: MemberId,
     },
-    #[error("modal retry channel mismatch: observed {actual:?}, expected {expected:?}")]
-    ChannelMismatch {
-        actual: ChannelId,
-        expected: ChannelId,
+    #[error("modal retry ledger mismatch: observed {actual:?}, expected {expected:?}")]
+    LedgerMismatch {
+        actual: LedgerId,
+        expected: LedgerId,
     },
 }
 
@@ -355,14 +352,14 @@ impl ModalRetryBinding {
     pub fn capture(
         binding_nonce: InteractionNonce,
         actor_id: MemberId,
-        channel_id: ChannelId,
+        ledger_id: LedgerId,
         preserved: ModalRetryPreserved,
         created_at: SystemTime,
     ) -> Self {
         Self {
             binding_nonce,
             actor_id,
-            channel_id,
+            ledger_id,
             preserved,
             created_at,
             expires_at: created_at + MODAL_RETRY_TTL,
@@ -375,8 +372,8 @@ impl ModalRetryBinding {
     pub fn actor_id(&self) -> MemberId {
         self.actor_id
     }
-    pub fn channel_id(&self) -> ChannelId {
-        self.channel_id
+    pub fn ledger_id(&self) -> LedgerId {
+        self.ledger_id
     }
     pub fn preserved(&self) -> &ModalRetryPreserved {
         &self.preserved
@@ -420,7 +417,7 @@ impl ModalRetryBindingStore {
         &self,
         binding_nonce: InteractionNonce,
         actor_id: MemberId,
-        channel_id: ChannelId,
+        ledger_id: LedgerId,
         now: SystemTime,
     ) -> Result<ModalRetryPreserved, ModalRetryBindingError> {
         let mut guard = self
@@ -441,10 +438,10 @@ impl ModalRetryBindingStore {
                 expected: binding.actor_id,
             });
         }
-        if binding.channel_id != channel_id {
-            return Err(ModalRetryBindingError::ChannelMismatch {
-                actual: channel_id,
-                expected: binding.channel_id,
+        if binding.ledger_id != ledger_id {
+            return Err(ModalRetryBindingError::LedgerMismatch {
+                actual: ledger_id,
+                expected: binding.ledger_id,
             });
         }
         let binding = guard
@@ -857,11 +854,11 @@ mod tests {
     }
 
     fn expense_key() -> ExpenseSessionKey {
-        ExpenseSessionKey::new(GuildId::new(1), ChannelId::new(2), MemberId(3))
+        ExpenseSessionKey::new(LedgerId(42), MemberId(3))
     }
 
     fn void_key() -> VoidSessionKey {
-        VoidSessionKey::new(GuildId::new(1), ChannelId::new(2), MemberId(3))
+        VoidSessionKey::new(LedgerId(42), MemberId(3))
     }
 
     fn entry_hash() -> EntryHash {
@@ -1223,12 +1220,14 @@ mod tests {
         }
     }
 
+    const RETRY_LEDGER_ID: LedgerId = LedgerId(42);
+
     #[test]
     fn modal_retry_binding_expires_at_is_creation_plus_ten_minutes() {
         let binding = ModalRetryBinding::capture(
             nonce(1),
             MemberId(3),
-            ChannelId::new(2),
+            RETRY_LEDGER_ID,
             preserved(),
             UNIX_EPOCH,
         );
@@ -1240,7 +1239,7 @@ mod tests {
         store.store(ModalRetryBinding::capture(
             nonce(1),
             MemberId(3),
-            ChannelId::new(2),
+            RETRY_LEDGER_ID,
             preserved(),
             UNIX_EPOCH,
         ));
@@ -1261,7 +1260,7 @@ mod tests {
         #[case] expected: Result<ModalRetryPreserved, ModalRetryBindingError>,
     ) {
         let store = fresh_modal_retry_store();
-        let actual = store.try_consume(nonce(1), MemberId(3), ChannelId::new(2), now);
+        let actual = store.try_consume(nonce(1), MemberId(3), RETRY_LEDGER_ID, now);
         assert_eq!(actual, expected);
     }
 
@@ -1272,13 +1271,13 @@ mod tests {
         let first = store.try_consume(
             nonce(1),
             MemberId(3),
-            ChannelId::new(2),
+            RETRY_LEDGER_ID,
             UNIX_EPOCH + Duration::from_secs(1),
         );
         let second = store.try_consume(
             nonce(1),
             MemberId(3),
-            ChannelId::new(2),
+            RETRY_LEDGER_ID,
             UNIX_EPOCH + Duration::from_secs(2),
         );
 
@@ -1289,17 +1288,17 @@ mod tests {
     #[rstest]
     #[case::wrong_actor(
         MemberId(999),
-        ChannelId::new(2),
+        RETRY_LEDGER_ID,
         Err(ModalRetryBindingError::ActorMismatch { actual: MemberId(999), expected: MemberId(3) }),
     )]
-    #[case::wrong_channel(
+    #[case::wrong_ledger(
         MemberId(3),
-        ChannelId::new(999),
-        Err(ModalRetryBindingError::ChannelMismatch { actual: ChannelId::new(999), expected: ChannelId::new(2) }),
+        LedgerId(999),
+        Err(ModalRetryBindingError::LedgerMismatch { actual: LedgerId(999), expected: RETRY_LEDGER_ID }),
     )]
-    fn modal_retry_store_try_consume_enforces_actor_and_channel(
+    fn modal_retry_store_try_consume_enforces_actor_and_ledger(
         #[case] actor: MemberId,
-        #[case] channel: ChannelId,
+        #[case] ledger_id: LedgerId,
         #[case] expected: Result<ModalRetryPreserved, ModalRetryBindingError>,
     ) {
         let store = fresh_modal_retry_store();
@@ -1307,7 +1306,7 @@ mod tests {
         let actual = store.try_consume(
             nonce(1),
             actor,
-            channel,
+            ledger_id,
             UNIX_EPOCH + Duration::from_secs(60),
         );
 
@@ -1320,7 +1319,7 @@ mod tests {
         let actual = store.try_consume(
             nonce(1),
             MemberId(3),
-            ChannelId::new(2),
+            RETRY_LEDGER_ID,
             UNIX_EPOCH + Duration::from_secs(1),
         );
         assert_eq!(actual, Err(ModalRetryBindingError::NotFound));

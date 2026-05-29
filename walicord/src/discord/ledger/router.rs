@@ -488,13 +488,13 @@ impl LedgerRouter {
         component: &ComponentInteraction,
         target: ExpenseSelectionPhase,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
-        let (guild_id, channel_id) = guard_ledger_interaction(
+        let scope = guard_ledger_interaction(
             component.guild_id,
             component.channel_id,
             self.deps.channels.as_ref(),
         )
         .map_err(LedgerRouteError::from)?;
-        let key = ExpenseSessionKey::new(guild_id, channel_id, MemberId(component.user.id.get()));
+        let key = ExpenseSessionKey::new(scope.ledger_id(), MemberId(component.user.id.get()));
         let Some(current) = self.deps.expense_sessions.clear(key) else {
             return self.respond_expense_session_missing(ctx, component).await;
         };
@@ -537,12 +537,12 @@ impl LedgerRouter {
         ctx: &Context,
         component: &ComponentInteraction,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
-        let (guild_id, channel_id) = guard_ledger_interaction(
+        let scope = guard_ledger_interaction(
             component.guild_id,
             component.channel_id,
             self.deps.channels.as_ref(),
         )?;
-        let key = ExpenseSessionKey::new(guild_id, channel_id, MemberId(component.user.id.get()));
+        let key = ExpenseSessionKey::new(scope.ledger_id(), MemberId(component.user.id.get()));
         let Some(current) = self.deps.expense_sessions.clear(key) else {
             return self.respond_expense_session_missing(ctx, component).await;
         };
@@ -550,7 +550,7 @@ impl LedgerRouter {
         let roster_snapshot = self
             .deps
             .roster_fetcher
-            .fetch(ctx, guild_id, channel_id)
+            .fetch(ctx, scope.guild_id(), scope.channel_id())
             .await
             .map_err(LedgerRouteError::from)?;
 
@@ -606,13 +606,15 @@ impl LedgerRouter {
         ctx: &Context,
         component: &ComponentInteraction,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
-        let (guild_id, channel_id) = guard_ledger_interaction(
+        let scope = guard_ledger_interaction(
             component.guild_id,
             component.channel_id,
             self.deps.channels.as_ref(),
         )?;
+        let guild_id = scope.guild_id();
+        let channel_id = scope.channel_id();
         let actor_id = MemberId(component.user.id.get());
-        let key = ExpenseSessionKey::new(guild_id, channel_id, actor_id);
+        let key = ExpenseSessionKey::new(scope.ledger_id(), actor_id);
         let Some(session) = self.deps.expense_sessions.clear(key) else {
             return self.respond_expense_session_missing(ctx, component).await;
         };
@@ -841,12 +843,12 @@ impl LedgerRouter {
         ctx: &Context,
         component: &ComponentInteraction,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
-        let (guild_id, channel_id) = guard_ledger_interaction(
+        let scope = guard_ledger_interaction(
             component.guild_id,
             component.channel_id,
             self.deps.channels.as_ref(),
         )?;
-        let key = ExpenseSessionKey::new(guild_id, channel_id, MemberId(component.user.id.get()));
+        let key = ExpenseSessionKey::new(scope.ledger_id(), MemberId(component.user.id.get()));
         let Some(current) = self.deps.expense_sessions.clear(key) else {
             return self.respond_expense_session_missing(ctx, component).await;
         };
@@ -864,13 +866,13 @@ impl LedgerRouter {
         ctx: &Context,
         component: &ComponentInteraction,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
-        let (guild_id, channel_id) = guard_ledger_interaction(
+        let scope = guard_ledger_interaction(
             component.guild_id,
             component.channel_id,
             self.deps.channels.as_ref(),
         )
         .map_err(LedgerRouteError::from)?;
-        let key = ExpenseSessionKey::new(guild_id, channel_id, MemberId(component.user.id.get()));
+        let key = ExpenseSessionKey::new(scope.ledger_id(), MemberId(component.user.id.get()));
         let Some(current) = self.deps.expense_sessions.clear(key) else {
             return self.respond_expense_session_missing(ctx, component).await;
         };
@@ -922,13 +924,13 @@ impl LedgerRouter {
         ctx: &Context,
         component: &ComponentInteraction,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
-        let (guild_id, channel_id) = guard_ledger_interaction(
+        let scope = guard_ledger_interaction(
             component.guild_id,
             component.channel_id,
             self.deps.channels.as_ref(),
         )
         .map_err(LedgerRouteError::from)?;
-        let key = ExpenseSessionKey::new(guild_id, channel_id, MemberId(component.user.id.get()));
+        let key = ExpenseSessionKey::new(scope.ledger_id(), MemberId(component.user.id.get()));
         let Some(session) = self.deps.expense_sessions.clear(key) else {
             return self.respond_expense_session_missing(ctx, component).await;
         };
@@ -961,13 +963,13 @@ impl LedgerRouter {
         ctx: &Context,
         component: &ComponentInteraction,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
-        let (guild_id, channel_id) = guard_ledger_interaction(
+        let scope = guard_ledger_interaction(
             component.guild_id,
             component.channel_id,
             self.deps.channels.as_ref(),
         )
         .map_err(LedgerRouteError::from)?;
-        let key = ExpenseSessionKey::new(guild_id, channel_id, MemberId(component.user.id.get()));
+        let key = ExpenseSessionKey::new(scope.ledger_id(), MemberId(component.user.id.get()));
         let Some(current) = self.deps.expense_sessions.clear(key) else {
             return self.respond_expense_session_missing(ctx, component).await;
         };
@@ -1021,13 +1023,13 @@ impl LedgerRouter {
         ctx: &Context,
         component: &ComponentInteraction,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
-        let (guild_id, channel_id) = guard_ledger_interaction(
+        let scope = guard_ledger_interaction(
             component.guild_id,
             component.channel_id,
             self.deps.channels.as_ref(),
         )
         .map_err(LedgerRouteError::from)?;
-        let key = ExpenseSessionKey::new(guild_id, channel_id, MemberId(component.user.id.get()));
+        let key = ExpenseSessionKey::new(scope.ledger_id(), MemberId(component.user.id.get()));
         self.deps.expense_sessions.clear(key);
         let response = CreateInteractionResponse::UpdateMessage(
             CreateInteractionResponseMessage::new()
@@ -1099,12 +1101,13 @@ impl LedgerRouter {
         ctx: &Context,
         modal: &ModalInteraction,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
-        let (guild_id, channel_id) = guard_ledger_interaction(
+        let scope = guard_ledger_interaction(
             modal.guild_id,
             modal.channel_id,
             self.deps.channels.as_ref(),
         )
         .map_err(LedgerRouteError::from)?;
+        let guild_id = scope.guild_id();
 
         let raw = extract_raw_expense_modal_submission(modal)
             .ok_or(InternalLedgerRouteError::ModalSubmissionMissingFields)?;
@@ -1116,13 +1119,12 @@ impl LedgerRouter {
                     raw_note: raw.raw_note.clone(),
                     raw_date: raw.raw_date.clone(),
                 };
-                self.respond_with_retry_modal(ctx, modal, channel_id, preserved, error)
+                self.respond_with_retry_modal(ctx, modal, scope.ledger_id(), preserved, error)
                     .await
             }
             Ok(validated) => {
                 let _ = guild_id;
-                let key =
-                    ExpenseSessionKey::new(guild_id, channel_id, MemberId(modal.user.id.get()));
+                let key = ExpenseSessionKey::new(scope.ledger_id(), MemberId(modal.user.id.get()));
                 let (session, nonce) = bootstrap_expense_session(
                     key,
                     validated,
@@ -1140,7 +1142,7 @@ impl LedgerRouter {
         &self,
         ctx: &Context,
         modal: &ModalInteraction,
-        channel_id: serenity::all::ChannelId,
+        ledger_id: LedgerId,
         preserved: ModalRetryPreserved,
         validation_error: ExpenseModalValidationError,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
@@ -1152,7 +1154,7 @@ impl LedgerRouter {
         let binding = ModalRetryBinding::capture(
             binding_nonce,
             actor,
-            channel_id,
+            ledger_id,
             preserved.clone(),
             self.deps.clock.now(),
         );

@@ -381,7 +381,6 @@ mod tests {
     use crate::discord::ledger::expense_modal::{
         RawExpenseModalSubmission, validate_expense_modal_submission,
     };
-    use serenity::all::{ChannelId, GuildId};
     use std::{
         sync::atomic::{AtomicU64, Ordering},
         time::{Duration, SystemTime, UNIX_EPOCH},
@@ -435,7 +434,7 @@ mod tests {
     }
 
     fn key() -> ExpenseSessionKey {
-        ExpenseSessionKey::new(GuildId::new(1), ChannelId::new(2), MemberId(42))
+        ExpenseSessionKey::new(walicord_application::ledger::LedgerId(42), MemberId(42))
     }
 
     #[test]
