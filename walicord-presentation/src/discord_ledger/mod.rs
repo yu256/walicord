@@ -9,8 +9,9 @@ mod surfaces;
 mod void_surfaces;
 
 pub use read_view_builder::{
-    balance_adjustment_rows, balance_rows_for_state, participant_names_for_state,
-    preview_transfer_rows, public_participant_rows,
+    ReadViewBuildError, balance_adjustment_rows, balance_adjustment_summaries,
+    balance_rows_for_state, participant_names_for_state, preview_transfer_rows,
+    public_participant_rows, sealed_range_summary, summary_for_view, voided_entry_rows,
 };
 
 pub use read_view_pagination::{READ_VIEW_ITEMS_PER_PAGE, paginate_read_view_model};
