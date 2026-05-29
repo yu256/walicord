@@ -25,38 +25,14 @@ impl InstanceLock {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum InstanceLockError {
-    EnsureLockDir(io::Error),
-    OpenLockFile(io::Error),
-    AcquireExclusive(io::Error),
-}
-
-impl std::fmt::Display for InstanceLockError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::EnsureLockDir(error) => {
-                write!(f, "ロック用ディレクトリを作成できませんでした: {error}")
-            }
-            Self::OpenLockFile(error) => write!(f, "ロックファイルを開けませんでした: {error}"),
-            Self::AcquireExclusive(error) => {
-                write!(
-                    f,
-                    "起動時のインスタンスロックを取得できませんでした: {error}"
-                )
-            }
-        }
-    }
-}
-
-impl std::error::Error for InstanceLockError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::EnsureLockDir(error)
-            | Self::OpenLockFile(error)
-            | Self::AcquireExclusive(error) => Some(error),
-        }
-    }
+    #[error("ロック用ディレクトリを作成できませんでした: {0}")]
+    EnsureLockDir(#[source] io::Error),
+    #[error("ロックファイルを開けませんでした: {0}")]
+    OpenLockFile(#[source] io::Error),
+    #[error("起動時のインスタンスロックを取得できませんでした: {0}")]
+    AcquireExclusive(#[source] io::Error),
 }
 
 pub fn acquire_instance_lock(path: PathBuf) -> Result<InstanceLock, InstanceLockError> {

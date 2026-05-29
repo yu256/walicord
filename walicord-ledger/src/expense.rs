@@ -24,8 +24,9 @@ impl ExpenseNote {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ExpenseNoteError {
+    #[error("expense note is empty")]
     Empty,
 }
 
@@ -79,13 +80,13 @@ impl ExpenseRecorded {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ExpenseRecordedError {
+    #[error("expense has no participants")]
     EmptyParticipants,
-    NonPositiveAmount {
-        member_id: MemberId,
-        amount: Money,
-    },
+    #[error("non-positive amount for member {member_id:?}: {amount:?}")]
+    NonPositiveAmount { member_id: MemberId, amount: Money },
+    #[error("paid total {paid_total:?} does not equal owed total {owed_total:?}")]
     Imbalanced {
         paid_total: Money,
         owed_total: Money,

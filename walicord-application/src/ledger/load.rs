@@ -10,10 +10,12 @@ use walicord_ledger::{LedgerId, LedgerProjectionError, ProjectedLedger};
 
 pub const LEDGER_THREAD_GROWTH_WARNING_THRESHOLD: usize = 4_000;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum LedgerReplayError {
-    Structure(AppendOrderedLedgerEntriesError),
-    Projection(LedgerProjectionError),
+    #[error("ledger structure: {0}")]
+    Structure(#[from] AppendOrderedLedgerEntriesError),
+    #[error("ledger projection: {0}")]
+    Projection(#[from] LedgerProjectionError),
 }
 
 pub fn replay_entries(entries: Vec<LedgerEntry>) -> Result<ProjectedLedger, LedgerReplayError> {
@@ -89,11 +91,14 @@ pub fn replay_verified_snapshot<ExternalId>(
     })
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum LedgerLoadError {
-    ChainVerification(ChainPositionError),
-    Structure(AppendOrderedLedgerEntriesError),
-    Projection(LedgerProjectionError),
+    #[error("chain verification: {0}")]
+    ChainVerification(#[from] ChainPositionError),
+    #[error("ledger structure: {0}")]
+    Structure(#[from] AppendOrderedLedgerEntriesError),
+    #[error("ledger projection: {0}")]
+    Projection(#[from] LedgerProjectionError),
 }
 
 /// Production load pipeline pinned to schema v1 + SHA-256 (the only suite supported by

@@ -32,20 +32,24 @@ pub enum PreviewAttemptOutcome {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum PreviewAttemptError {
     /// The verified snapshot has no head hash — this happens only for a fresh empty
     /// ledger; the preview path should not be invoked there per criterion 113 / 118.
+    #[error("snapshot has no ledger head; preview path was invoked on a fresh ledger")]
     MissingLedgerHead,
     /// Replanning the snapshot failed (validation/quantization/etc.).
-    Settlement(SettlementPreviewError),
+    #[error("settlement preview: {0}")]
+    Settlement(#[from] SettlementPreviewError),
     /// Preview binding capture rejected the proposed creation/expiry (e.g. expires_at
     /// <= created_at). This is a programmer/clock error and should be impossible if
     /// the application-owned defaults are used.
-    BindingCapture(PreviewBindingError),
+    #[error("preview binding capture: {0}")]
+    BindingCapture(#[from] PreviewBindingError),
     /// Preview store rejected the replace (e.g. CommitInProgress for the same key).
     /// Caller surfaces criterion-104 rerun guidance.
-    Store(PreviewStoreError),
+    #[error("preview store: {0}")]
+    Store(#[from] PreviewStoreError),
 }
 
 /// Compose a settlement preview from a verified snapshot and persist it in the preview
@@ -121,28 +125,34 @@ pub fn mark_preview_delivered(
         .ok_or(PreviewStoreError::NotFound)
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum SettleAttemptError {
     /// No preview is currently stored for this actor on this ledger; the actor must
     /// run `/review` first (criterion 136).
+    #[error("no preview is stored for this actor on this ledger; run /review first")]
     NoPreviewStored,
     /// The preview binding's `ledger_head_hash` does not match the live snapshot
     /// head, meaning the ledger advanced since preview (criterion 18).
+    #[error("ledger head is stale (stored: {stored_head:?}, observed: {observed_head:?})")]
     StaleHead {
         stored_head: EntryHash,
         observed_head: Option<EntryHash>,
     },
     /// `now >= expires_at` — preview lapsed (criterion 160).
+    #[error("preview expired (now: {now:?}, expires_at: {expires_at:?})")]
     Expired {
         now: SystemTime,
         expires_at: SystemTime,
     },
     /// Underlying preview-store rejection (commit in progress, instance mismatch, etc.).
-    Store(PreviewStoreError),
+    #[error("preview store: {0}")]
+    Store(#[from] PreviewStoreError),
     /// Settlement validation / digest check / etc. failed at application layer.
-    Record(SettlementRecordError),
+    #[error("settlement record: {0}")]
+    Record(#[from] SettlementRecordError),
     /// Encoding the resulting envelope failed.
-    EnvelopeEncode(LedgerCanonicalEncodeError),
+    #[error("settlement envelope encode: {0}")]
+    EnvelopeEncode(#[from] LedgerCanonicalEncodeError),
 }
 
 /// Result of `/settle` composition. `RecordableEntry` carries the canonical settlement

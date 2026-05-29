@@ -105,18 +105,23 @@ pub enum PreviewStoreTransition {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum PreviewStoreError {
+    #[error("preview not found in store")]
     NotFound,
+    #[error("preview commit is in progress (preview_instance_id: {preview_instance_id:?})")]
     CommitInProgress {
         preview_instance_id: PreviewInstanceId,
     },
+    #[error("preview instance mismatch (actual: {actual:?}, expected: {expected:?})")]
     InstanceMismatch {
         actual: PreviewInstanceId,
         expected: PreviewInstanceId,
     },
+    #[error("preview is not in CommitInProgress state")]
     NotInProgress,
-    Binding(walicord_application::PreviewBindingError),
+    #[error("preview binding: {0}")]
+    Binding(#[from] walicord_application::PreviewBindingError),
 }
 
 pub struct PreviewStore {

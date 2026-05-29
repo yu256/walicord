@@ -22,28 +22,25 @@ use walicord_ledger::{NormalizedSettlementPlanRecorded, NormalizedSettlementPlan
 /// balance integrity, settle-member completion, or zero-sum invariants.
 pub struct SettleUpPolicy;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SettleUpError {
     /// Quantization or solver-level failure surfaced by the planner adapter.
-    Rounding(SettlementRoundingError),
+    #[error("settlement rounding: {0}")]
+    Rounding(#[from] SettlementRoundingError),
     /// Application-level validation rejected the planner's output. Indicates a planner
     /// bug; the result is never applied.
+    #[error("planner output invalid: {0}")]
     PlanInvalid(SettlementPlanValidationError),
     /// The digest of the previewed value passed to `record_previewed_plan_matching`
     /// does not match the expected digest the caller supplied. Indicates that the
     /// previewed value the user confirmed is not the value being recorded — either the
     /// in-memory `PreviewedSettlement` was mutated, or a different preview is being
     /// committed under the wrong preview-id binding. Either case is unsafe to record.
+    #[error("preview digest mismatch (expected: {expected:?}, actual: {actual:?})")]
     PreviewDigestMismatch {
         expected: PreviewedSettlementDigest,
         actual: PreviewedSettlementDigest,
     },
-}
-
-impl From<SettlementRoundingError> for SettleUpError {
-    fn from(err: SettlementRoundingError) -> Self {
-        SettleUpError::Rounding(err)
-    }
 }
 
 impl From<SettleUpError> for crate::error::SettlementOptimizationError {
@@ -63,20 +60,25 @@ impl From<SettleUpError> for crate::error::SettlementOptimizationError {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SettlementPlanValidationError {
     /// A transfer references a member that did not appear in the balances passed to the
     /// planner.
+    #[error("plan references unknown member {member:?}")]
     UnknownMember { member: MemberId },
     /// A transfer where `from == to`, which the planner has no business producing.
+    #[error("self transfer for member {member:?}")]
     SelfTransfer { member: MemberId },
     /// A transfer with non-positive amount.
+    #[error("non-positive transfer amount: {amount:?}")]
     NonPositiveTransfer { amount: Money },
     /// `from` was not a debtor (negative balance) at the start of the batch — the planner
     /// emitted a transfer in the wrong direction.
+    #[error("member {member:?} is not a debtor (balance: {balance:?})")]
     NotADebtor { member: MemberId, balance: Money },
     /// `to` was not a creditor (positive balance) at the start of the batch — the planner
     /// emitted a transfer in the wrong direction.
+    #[error("member {member:?} is not a creditor (balance: {balance:?})")]
     NotACreditor { member: MemberId, balance: Money },
     /// A transfer's amount exceeds the debtor's remaining debt at the moment the
     /// transfer would be applied. Without this check, a planner that emits a chain of
@@ -85,6 +87,9 @@ pub enum SettlementPlanValidationError {
     /// individually plausible. The replay-side projector enforces the same invariant
     /// (`SettlementTransferOverpaysDebt`); rejecting here keeps the application's commit
     /// boundary in lockstep with the ledger projector.
+    #[error(
+        "transfer overpays debt of member {member:?} (remaining debt: {remaining_debt:?}, transfer: {transfer_amount:?})"
+    )]
     TransferOverpaysDebt {
         member: MemberId,
         remaining_debt: Money,
@@ -92,6 +97,9 @@ pub enum SettlementPlanValidationError {
     },
     /// A transfer's amount exceeds the creditor's remaining credit at the moment the
     /// transfer would be applied — the mirror of `TransferOverpaysDebt`.
+    #[error(
+        "transfer overpays credit of member {member:?} (remaining credit: {remaining_credit:?}, transfer: {transfer_amount:?})"
+    )]
     TransferOverpaysCredit {
         member: MemberId,
         remaining_credit: Money,
@@ -99,14 +107,17 @@ pub enum SettlementPlanValidationError {
     },
     /// The planner's `new_balances` does not match `input_balances` after applying the
     /// returned transfers; one or more members differ.
+    #[error("new balance mismatch for member {member:?}: expected {expected:?}, actual {actual:?}")]
     NewBalancesMismatch {
         member: MemberId,
         expected: Money,
         actual: Money,
     },
     /// A member listed as a settle target did not reach zero in `new_balances`.
+    #[error("settle target member {member:?} did not reach zero (balance: {balance:?})")]
     SettleMemberNotZero { member: MemberId, balance: Money },
     /// `new_balances` does not preserve the zero-sum invariant.
+    #[error("zero-sum violation (residual total: {total:?})")]
     ZeroSumViolation { total: Money },
     /// A non-empty plan passed all per-transfer / balance checks but still cannot be
     /// turned into a `NormalizedSettlementPlanRecorded` ledger event. The application
@@ -116,6 +127,7 @@ pub enum SettlementPlanValidationError {
     /// event with no further coercion. Without this gate the application checks and
     /// event-side checks could drift, letting a plan be "accepted at the boundary but
     /// rejected when written" — exactly the inconsistency that breaks audit guarantees.
+    #[error("plan is not representable as a ledger event: {detail}")]
     NotRepresentableAsLedgerEvent {
         detail: NormalizedSettlementPlanRecordedError,
     },
@@ -303,8 +315,9 @@ impl PreviewInstanceId {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum PreviewInstanceIdError {
+    #[error("preview instance id must be non-zero")]
     Zero,
 }
 
@@ -330,13 +343,18 @@ pub struct PreviewConfirmationBinding {
     delivery_state: PreviewDeliveryState,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum PreviewBindingError {
+    #[error("preview confirmation binding is already delivered")]
     AlreadyDelivered,
+    #[error(
+        "preview lifetime is non-increasing (created_at: {created_at:?}, expires_at: {expires_at:?})"
+    )]
     NonIncreasingLifetime {
         created_at: SystemTime,
         expires_at: SystemTime,
     },
+    #[error("preview instance mismatch: observed {actual:?}, expected {expected:?}")]
     PreviewInstanceMismatch {
         actual: PreviewInstanceId,
         expected: PreviewInstanceId,

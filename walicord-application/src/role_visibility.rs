@@ -23,7 +23,10 @@ pub struct RoleVisibilityWarning {
     pub excluded_members: usize,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "role {role_id:?} at line {line} resolves to zero visible members ({excluded_members} excluded)"
+)]
 pub struct FilteredEmptyRoleParseError {
     pub role_id: RoleId,
     pub line: usize,

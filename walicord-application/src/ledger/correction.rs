@@ -4,28 +4,25 @@ use walicord_ledger::{
     BalanceAdjustment, BalanceAdjustmentSource, LedgerEntryId, ProjectedEntryKind, ProjectedLedger,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum StandardSealedEntryCorrectionError {
     /// `related_entry` is not present in the supplied `ProjectedLedger`'s entry index. It is
     /// either an unknown id or a marker entry (`LedgerHistorySealed`, `EntryVoided`,
     /// `BalanceAdjusted`) that has no event-payload participants.
-    RelatedEntryNotApplied {
-        related_entry: LedgerEntryId,
-    },
+    #[error("related entry {related_entry:?} is not applied / not an expense or settlement")]
+    RelatedEntryNotApplied { related_entry: LedgerEntryId },
     /// `related_entry` exists but was voided by a later `EntryVoided` event.
-    RelatedEntryVoided {
-        related_entry: LedgerEntryId,
-    },
+    #[error("related entry {related_entry:?} has been voided")]
+    RelatedEntryVoided { related_entry: LedgerEntryId },
     /// `related_entry` exists but has not yet been sealed — this helper is for sealed-entry
     /// corrections only; unsealed entries should be amended via `EntryVoided` plus a new
     /// `ExpenseRecorded` / `NormalizedSettlementPlanRecorded`.
-    RelatedEntryNotSealed {
-        related_entry: LedgerEntryId,
-    },
-    NonParticipantMember {
-        member_id: MemberId,
-    },
-    Adjustment(BalanceAdjustedError),
+    #[error("related entry {related_entry:?} has not been sealed yet")]
+    RelatedEntryNotSealed { related_entry: LedgerEntryId },
+    #[error("adjustment member {member_id:?} is not a participant of the related entry")]
+    NonParticipantMember { member_id: MemberId },
+    #[error("balance adjustment: {0}")]
+    Adjustment(#[from] BalanceAdjustedError),
 }
 
 /// Builds a `BalanceAdjusted` event for the standard sealed-entry correction flow.
@@ -83,40 +80,36 @@ pub fn standard_sealed_entry_correction(
     .map_err(StandardSealedEntryCorrectionError::Adjustment)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum StandardPriorAdjustmentCorrectionError {
     /// `related_adjustment_entry` is not present in the supplied `ProjectedLedger`'s entry
     /// index — it is either an unknown id or a marker entry that has no entry-info.
-    RelatedEntryNotApplied {
-        related_entry: LedgerEntryId,
-    },
+    #[error("related entry {related_entry:?} is not applied in the projection")]
+    RelatedEntryNotApplied { related_entry: LedgerEntryId },
     /// `related_adjustment_entry` is in the index but is not a prior `BalanceAdjusted`
     /// entry. `PriorAdjustmentCorrection` only accepts another `BalanceAdjusted` as its
     /// target; for expense / settlement transfer entries, use
     /// [`standard_sealed_entry_correction`] instead.
-    RelatedEntryNotAdjustment {
-        related_entry: LedgerEntryId,
-    },
+    #[error("related entry {related_entry:?} is not a BalanceAdjusted entry")]
+    RelatedEntryNotAdjustment { related_entry: LedgerEntryId },
     /// The related prior adjustment is itself voided. The initial model does not allow
     /// voiding `BalanceAdjusted`, so this should not be observable today, but the helper
     /// rejects defensively for forward compatibility.
-    RelatedEntryVoided {
-        related_entry: LedgerEntryId,
-    },
+    #[error("related prior adjustment {related_entry:?} has been voided")]
+    RelatedEntryVoided { related_entry: LedgerEntryId },
     /// The related prior adjustment has not been sealed yet. Standard prior-adjustment
     /// correction is for fixing mistakes in already-sealed adjustments; if the prior
     /// adjustment is unsealed, the model has no first-class flow yet — surface the error
     /// rather than silently producing a `BalanceAdjusted` that core projection would
     /// reject.
-    RelatedEntryNotSealed {
-        related_entry: LedgerEntryId,
-    },
+    #[error("related prior adjustment {related_entry:?} has not been sealed yet")]
+    RelatedEntryNotSealed { related_entry: LedgerEntryId },
     /// At least one adjustment member is not a participant of the prior adjustment, so
     /// the correction does not match the audit scope of the original adjustment.
-    NonParticipantMember {
-        member_id: MemberId,
-    },
-    Adjustment(BalanceAdjustedError),
+    #[error("adjustment member {member_id:?} is not a participant of the prior adjustment")]
+    NonParticipantMember { member_id: MemberId },
+    #[error("balance adjustment: {0}")]
+    Adjustment(#[from] BalanceAdjustedError),
 }
 
 /// Builds a `BalanceAdjusted` event whose source is
@@ -187,14 +180,16 @@ pub fn standard_prior_adjustment_correction(
     .map_err(StandardPriorAdjustmentCorrectionError::Adjustment)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum AdminExternalBalanceCorrectionError {
     /// `BalanceAdjusted` requires a sealed history segment to exist; the projector enforces
     /// this on replay (`BalanceAdjustmentWithoutSealedHistory`). Admin flows must surface
     /// the same precondition at command-construction time so the operator sees a clear
     /// reason for the refusal instead of producing an event that fails replay.
+    #[error("admin correction requires preceding sealed history")]
     NoSealedHistory,
-    Adjustment(BalanceAdjustedError),
+    #[error("balance adjustment: {0}")]
+    Adjustment(#[from] BalanceAdjustedError),
 }
 
 /// Builds a `BalanceAdjusted` event whose source is

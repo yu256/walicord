@@ -341,15 +341,20 @@ pub enum DiscordLedgerEntryError {
     WrongSourceDescriptor,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SettlementRecordError {
+    #[error("settlement actor mismatch: observed {actual:?}, expected {expected:?}")]
     ActorMismatch {
         actual: MemberId,
         expected: MemberId,
     },
-    InvalidSource(LedgerSourceCanonicalError),
-    Preview(SettleUpError),
+    #[error("invalid ledger source descriptor: {0}")]
+    InvalidSource(#[from] LedgerSourceCanonicalError),
+    #[error("settle-up preview rejected the record attempt: {0}")]
+    Preview(#[from] SettleUpError),
+    #[error("preview has not been marked delivered yet")]
     PreviewNotDelivered,
+    #[error("wrong source descriptor for settlement record")]
     WrongSourceDescriptor,
 }
 
@@ -365,17 +370,14 @@ pub enum PreviewedSettlementOutcome {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SettlementPreviewError {
+    #[error("ledger snapshot is missing its head hash")]
     MissingHeadHash,
-    Preview(SettleUpError),
+    #[error("settle-up preview rejected: {0}")]
+    Preview(#[from] SettleUpError),
+    #[error("preview lifetime overflowed (created_at: {created_at:?})")]
     PreviewLifetimeOverflow { created_at: SystemTime },
-}
-
-impl From<SettleUpError> for SettlementPreviewError {
-    fn from(value: SettleUpError) -> Self {
-        Self::Preview(value)
-    }
 }
 
 pub fn preview_settlement_from_snapshot(

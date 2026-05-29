@@ -3415,6 +3415,7 @@ dependencies = [
  "sha2 0.11.0",
  "smallvec",
  "smol_str",
+ "thiserror 2.0.17",
  "tracing",
 ]
 
@@ -3438,6 +3439,7 @@ dependencies = [
 name = "walicord-ledger"
 version = "0.1.0"
 dependencies = [
+ "thiserror 2.0.17",
  "walicord-domain",
 ]
 

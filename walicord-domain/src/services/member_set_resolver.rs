@@ -2,18 +2,18 @@ use crate::model::{MemberId, MemberSet, MemberSetExpr, RoleId, RoleMembers};
 use fxhash::{FxHashMap, FxHashSet};
 use std::sync::OnceLock;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum MemberSetResolutionError<'a> {
-    UndefinedGroup {
-        name: &'a str,
-    },
-    UndefinedRole {
-        id: RoleId,
-    },
+    #[error("undefined group `{name}`")]
+    UndefinedGroup { name: &'a str },
+    #[error("undefined role `{id:?}`")]
+    UndefinedRole { id: RoleId },
+    #[error("member set expression is too large: members={member_count}, max={max_supported}")]
     ExpressionTooLarge {
         member_count: usize,
         max_supported: usize,
     },
+    #[error("invalid member set expression")]
     InvalidExpression,
 }
 

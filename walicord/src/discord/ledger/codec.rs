@@ -658,79 +658,56 @@ impl BalanceAdjustmentSourceDto {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum AttachmentCodecError {
+    #[error("system clock error")]
     Clock,
-    JsonEncode(serde_json::Error),
-    JsonDecode(serde_json::Error),
+    #[error("failed to encode canonical attachment: {0}")]
+    JsonEncode(#[source] serde_json::Error),
+    #[error("failed to decode canonical attachment: {0}")]
+    JsonDecode(#[source] serde_json::Error),
+    #[error("failed to read authoritative attachment: {0}")]
     UnreadableAttachment(String),
+    #[error("unsupported canonical attachment version: {0}")]
     UnsupportedTransportVersion(u32),
+    #[error("unknown canonical schema version: {version}{}", entry_id.map(|id| format!(" at entry {}", id.0)).unwrap_or_default())]
     UnknownSchemaVersion {
         version: u32,
         entry_id: Option<LedgerEntryId>,
     },
+    #[error("unknown ledger event variant: {kind} at entry {}", entry_id.0)]
     UnknownEventVariant {
         kind: String,
         entry_id: LedgerEntryId,
     },
+    #[error("invalid hash length")]
     InvalidHashLength,
+    #[error("invalid hash hex")]
     InvalidHashHex,
+    #[error("invalid money value")]
     InvalidMoney,
+    #[error("invalid source kind: {0}")]
     InvalidSourceKind(String),
+    #[error("invalid source")]
     InvalidSource,
+    #[error("invalid effective date")]
     InvalidEffectiveDate,
+    #[error("invalid recorded_at timestamp")]
     InvalidRecordedAt,
+    #[error("invalid allocation snapshot")]
     InvalidAllocationSnapshot,
+    #[error("invalid note")]
     InvalidNote,
+    #[error("invalid expense event")]
     InvalidExpenseEvent,
+    #[error("invalid settlement event")]
     InvalidSettlementEvent,
+    #[error("invalid adjustment reason")]
     InvalidAdjustmentReason,
+    #[error("invalid adjustment event")]
     InvalidAdjustmentEvent,
+    #[error("invalid hash suite: {0}")]
     InvalidHashSuite(String),
-}
-
-impl std::fmt::Display for AttachmentCodecError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Clock => write!(f, "system clock error"),
-            Self::JsonEncode(error) => write!(f, "failed to encode canonical attachment: {error}"),
-            Self::JsonDecode(error) => write!(f, "failed to decode canonical attachment: {error}"),
-            Self::UnreadableAttachment(error) => {
-                write!(f, "failed to read authoritative attachment: {error}")
-            }
-            Self::UnsupportedTransportVersion(version) => {
-                write!(f, "unsupported canonical attachment version: {version}")
-            }
-            Self::UnknownSchemaVersion { version, entry_id } => {
-                write!(f, "unknown canonical schema version: {version}")?;
-                if let Some(entry_id) = entry_id {
-                    write!(f, " at entry {}", entry_id.0)?;
-                }
-                Ok(())
-            }
-            Self::UnknownEventVariant { kind, entry_id } => {
-                write!(
-                    f,
-                    "unknown ledger event variant: {kind} at entry {}",
-                    entry_id.0
-                )
-            }
-            Self::InvalidHashLength => write!(f, "invalid hash length"),
-            Self::InvalidHashHex => write!(f, "invalid hash hex"),
-            Self::InvalidMoney => write!(f, "invalid money value"),
-            Self::InvalidSourceKind(kind) => write!(f, "invalid source kind: {kind}"),
-            Self::InvalidSource => write!(f, "invalid source"),
-            Self::InvalidEffectiveDate => write!(f, "invalid effective date"),
-            Self::InvalidRecordedAt => write!(f, "invalid recorded_at timestamp"),
-            Self::InvalidAllocationSnapshot => write!(f, "invalid allocation snapshot"),
-            Self::InvalidNote => write!(f, "invalid note"),
-            Self::InvalidExpenseEvent => write!(f, "invalid expense event"),
-            Self::InvalidSettlementEvent => write!(f, "invalid settlement event"),
-            Self::InvalidAdjustmentReason => write!(f, "invalid adjustment reason"),
-            Self::InvalidAdjustmentEvent => write!(f, "invalid adjustment event"),
-            Self::InvalidHashSuite(suite) => write!(f, "invalid hash suite: {suite}"),
-        }
-    }
 }
 
 fn pre_self_link_content_sha256(content: &str) -> String {
@@ -742,8 +719,6 @@ fn pre_self_link_content_sha256(content: &str) -> String {
     }
     out
 }
-
-impl std::error::Error for AttachmentCodecError {}
 
 impl AttachmentCodecError {
     pub fn failing_entry_id(&self) -> Option<LedgerEntryId> {

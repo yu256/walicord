@@ -15,28 +15,37 @@ pub enum ExpectedElement {
     Unknown,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SyntaxErrorKind {
+    #[error("parse failure (attempted: {attempted_form:?}, expected: {expected:?}) near {near}")]
     ParseFailure {
         attempted_form: Option<&'static str>,
         expected: ExpectedElement,
         near: String,
     },
-    TrailingInput {
-        text: String,
-    },
+    #[error("trailing input after statement: {text}")]
+    TrailingInput { text: String },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ProgramParseError<'a> {
+    #[error("failed to evaluate group `{name}` at line {line}")]
     FailedToEvaluateGroup { name: Cow<'a, str>, line: usize },
+    #[error("undefined group `{name}` at line {line}")]
     UndefinedGroup { name: Cow<'a, str>, line: usize },
+    #[error("undefined role id {id} at line {line}")]
     UndefinedRole { id: u64, line: usize },
+    #[error("undefined member id {id} at line {line}")]
     UndefinedMember { id: u64, line: usize },
+    #[error("syntax error at line {line}: {kind}")]
     SyntaxError { line: usize, kind: SyntaxErrorKind },
+    #[error("missing context for implicit author at line {line}")]
     MissingContextForImplicitAuthor { line: usize },
+    #[error("invalid amount expression at line {line}: {detail}")]
     InvalidAmountExpression { line: usize, detail: String },
+    #[error("all-zero weights at line {line}")]
     AllZeroWeights { line: usize },
+    #[error("weighted reference outside payee at line {line}")]
     WeightedReferenceOutsidePayee { line: usize },
 }
 
@@ -59,36 +68,40 @@ impl<'a> From<ProgramBuildError<'a>> for ProgramParseError<'a> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SettlementOptimizationError {
+    #[error("settlement is imbalanced (residual: {0})")]
     ImbalancedTotal(i64),
-    InvalidGrid {
-        g1: i64,
-        g2: i64,
-    },
-    ModelTooLarge {
-        edge_count: usize,
-        max_edges: usize,
-    },
+    #[error("invalid grid parameters: g1={g1}, g2={g2}")]
+    InvalidGrid { g1: i64, g2: i64 },
+    #[error("settlement model too large: edges={edge_count}, max={max_edges}")]
+    ModelTooLarge { edge_count: usize, max_edges: usize },
+    #[error("settlement has no feasible solution")]
     NoSolution,
+    #[error("rounded transfers are inconsistent with constraints")]
     RoundingMismatch,
-    QuantizationImbalancedTotal {
-        total: walicord_domain::Money,
-    },
+    #[error("quantization imbalanced total (residual: {total:?})")]
+    QuantizationImbalancedTotal { total: walicord_domain::Money },
+    #[error("quantization adjustment count is invalid")]
     QuantizationInvalidAdjustmentCount,
+    #[error("insufficient candidates for quantization adjustment")]
     QuantizationInsufficientCandidates,
+    #[error("zero-sum invariant violated after quantization")]
     QuantizationZeroSumInvariantViolation,
+    #[error("quantized units are not integral")]
     QuantizationNonIntegral,
+    #[error("quantized units are out of integer range")]
     QuantizationOutOfRange,
-    QuantizationUnsupportedScale {
-        scale: u32,
-        max_supported: u32,
-    },
+    #[error("unsupported quantization scale: scale={scale}, max_supported={max_supported}")]
+    QuantizationUnsupportedScale { scale: u32, max_supported: u32 },
+    #[error("weight overflow during settlement")]
     WeightOverflow,
+    #[error("total weight is zero")]
     ZeroTotalWeight,
     /// The settlement planner returned a result that violated an application-level
     /// invariant (unknown member, wrong direction, mismatched new_balances, settle
     /// member not zeroed, zero-sum violation). Surfaced by `SettleUpPolicy::settle`.
+    #[error("planner output invalid: {detail}")]
     PlannerOutputInvalid {
         detail: crate::settle_up::SettlementPlanValidationError,
     },
@@ -97,15 +110,18 @@ pub enum SettlementOptimizationError {
     /// internal-bug failure: the value the user confirmed differs from the value being
     /// recorded, which is unsafe regardless of cause. The digests are preserved here for
     /// logs / audit trails even though end-user presentation intentionally stays generic.
+    #[error("preview digest mismatch (expected: {expected:?}, actual: {actual:?})")]
     PreviewDigestMismatch {
         expected: crate::settle_up::PreviewedSettlementDigest,
         actual: crate::settle_up::PreviewedSettlementDigest,
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum BalanceCalculationError {
+    #[error("weight overflow during balance calculation")]
     WeightOverflow,
+    #[error("total weight is zero")]
     ZeroTotalWeight,
 }
 

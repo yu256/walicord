@@ -19,11 +19,14 @@ pub struct AppConfig {
     pub intents: GatewayIntents,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum AppConfigError {
+    #[error("Discord bot token is missing from configuration")]
     MissingToken,
+    #[error("required OAuth scopes are missing from the bot install")]
     MissingOAuthScopes,
-    StartupReadiness(StartupReadinessFailure),
+    #[error("startup readiness validation failed: {0}")]
+    StartupReadiness(#[from] StartupReadinessFailure),
 }
 
 impl AppConfig {

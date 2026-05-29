@@ -71,19 +71,18 @@ impl NormalizedSettlementPlanRecorded {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum NormalizedSettlementPlanRecordedError {
+    #[error("settlement plan has no transfers")]
     EmptyTransfers,
+    #[error("invalid transfer: {from:?} -> {to:?} amount {amount:?}")]
     InvalidTransfer {
         from: MemberId,
         to: MemberId,
         amount: Money,
     },
-    OpposingTransferPair {
-        from: MemberId,
-        to: MemberId,
-    },
-    OverlappingTransferMember {
-        member_id: MemberId,
-    },
+    #[error("opposing transfer pair: {from:?} <-> {to:?}")]
+    OpposingTransferPair { from: MemberId, to: MemberId },
+    #[error("transfers overlap on member {member_id:?}")]
+    OverlappingTransferMember { member_id: MemberId },
 }

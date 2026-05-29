@@ -100,9 +100,11 @@ impl LedgerEffectiveDate {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum LedgerEffectiveDateError {
+    #[error("effective date is empty")]
     Empty,
+    #[error("effective date is not in YYYY-MM-DD format")]
     InvalidFormat,
 }
 
@@ -218,9 +220,11 @@ impl AllocationSnapshot {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum AllocationSnapshotError {
+    #[error("allocation snapshot has no weights")]
     EmptyWeights,
+    #[error("allocation snapshot has duplicate member {member_id:?}")]
     DuplicateMember { member_id: MemberId },
 }
 
@@ -291,8 +295,9 @@ impl From<NonExpenseLedgerEvent> for LedgerEvent {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum LedgerEntryConstructionError {
+    #[error("LegacyUnknown allocation snapshot must use the legacy expense constructor")]
     LegacyUnknownRequiresLegacyExpenseConstructor,
 }
 
@@ -366,31 +371,24 @@ impl LedgerEntry {
 
 /// Errors returned by [`AppendOrderedLedgerEntries::new`]. Wraps the ledger crate's
 /// structural validation and adds application-level metadata-coherence checks.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum AppendOrderedLedgerEntriesError {
-    Structure(LedgerStructureError),
+    #[error("ledger structure: {0}")]
+    Structure(#[from] LedgerStructureError),
     /// `LedgerEntryMetadata::allocation_snapshot` is set on an entry whose event is not
     /// `ExpenseRecorded`. Allocation snapshots only describe how an expense was split,
     /// so attaching one to a settlement / void / seal / adjustment entry would be
     /// incoherent metadata that the hash chain would otherwise faithfully record forever.
-    AllocationSnapshotOnNonExpenseEntry {
-        entry_id: LedgerEntryId,
-    },
+    #[error("allocation snapshot attached to non-expense entry {entry_id:?}")]
+    AllocationSnapshotOnNonExpenseEntry { entry_id: LedgerEntryId },
     /// `LedgerEntryMetadata::allocation_snapshot` is `None` on an `ExpenseRecorded`
     /// entry. Newly written expenses must record the structured allocation (`Even` /
     /// `Weighted`) via [`LedgerEntry::expense`]; legacy chains where the allocation cannot
     /// be reconstructed should use
     /// [`LedgerEntry::legacy_expense_without_allocation_snapshot`] so the absence is
     /// recorded explicitly rather than silently missing.
-    MissingAllocationSnapshotOnExpense {
-        entry_id: LedgerEntryId,
-    },
-}
-
-impl From<LedgerStructureError> for AppendOrderedLedgerEntriesError {
-    fn from(err: LedgerStructureError) -> Self {
-        Self::Structure(err)
-    }
+    #[error("expense entry {entry_id:?} is missing its allocation snapshot")]
+    MissingAllocationSnapshotOnExpense { entry_id: LedgerEntryId },
 }
 
 #[derive(Debug, Clone, PartialEq)]

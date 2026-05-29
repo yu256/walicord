@@ -313,10 +313,13 @@ pub struct StatementWithLine<'a> {
     pub statement: Statement<'a>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ProgramBuildError<'a> {
+    #[error("undefined group `{name}` at line {line}")]
     UndefinedGroup { name: Cow<'a, str>, line: usize },
+    #[error("undefined role `{id:?}` at line {line}")]
     UndefinedRole { id: RoleId, line: usize },
+    #[error("failed to evaluate group `{name}` at line {line}")]
     FailedToEvaluateGroup { name: &'a str, line: usize },
 }
 
@@ -341,23 +344,31 @@ pub enum AmountOp {
     Div,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum AmountError {
+    #[error("amount is out of range")]
     Overflow,
+    #[error("division by zero")]
     DivisionByZero,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum BalanceError {
+    #[error("weight overflow during balance computation")]
     WeightOverflow,
+    #[error("total weight is zero")]
     ZeroTotalWeight,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum SplitError {
+    #[error("split target has zero recipients")]
     ZeroRecipients,
+    #[error("split ratios are empty")]
     EmptyRatios,
+    #[error("sum of split ratios is zero")]
     ZeroTotalRatio,
+    #[error("weight overflow during split")]
     WeightOverflow,
 }
 
@@ -643,15 +654,6 @@ fn checked_div(lhs: Decimal, rhs: Decimal) -> Result<Decimal, AmountError> {
         return Err(AmountError::DivisionByZero);
     }
     lhs.checked_div(rhs).ok_or(AmountError::Overflow)
-}
-
-impl fmt::Display for AmountError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            AmountError::Overflow => write!(f, "amount is out of range"),
-            AmountError::DivisionByZero => write!(f, "division by zero"),
-        }
-    }
 }
 
 impl fmt::Display for Money {

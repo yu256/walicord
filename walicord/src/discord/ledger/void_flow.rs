@@ -23,9 +23,10 @@ use walicord_domain::model::MemberId;
 /// path (criterion 106).
 pub const VOID_CANDIDATE_WINDOW: usize = 20;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum VoidCandidateEnumerationError {
-    Projection(ProjectionConsistencyError),
+    #[error("projection consistency: {0}")]
+    Projection(#[from] ProjectionConsistencyError),
 }
 
 /// Enumerate the latest-20 voidable entries on the verified canonical thread; this is
@@ -39,11 +40,14 @@ pub fn enumerate_void_candidates(
         .map_err(VoidCandidateEnumerationError::Projection)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum VoidSessionBootstrapError {
+    #[error("no voidable candidates in the latest window")]
     NoVoidableCandidates,
-    Projection(ProjectionConsistencyError),
-    ConstructionFailed(VoidSessionConstructionError),
+    #[error("projection consistency: {0}")]
+    Projection(#[from] ProjectionConsistencyError),
+    #[error("void session construction failed: {0}")]
+    ConstructionFailed(#[from] VoidSessionConstructionError),
 }
 
 /// Construct a fresh `VoidSession` in `SelectingCandidate` from the latest voidable
@@ -78,11 +82,14 @@ pub fn bootstrap_void_session(
     Ok((session, nonce, candidates))
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum VoidConfirmTransitionError {
+    #[error("void session is not in SelectingCandidate")]
     NotInSelection,
+    #[error("void candidate {target_entry_id:?} is no longer in the voidable window")]
     CandidateNotFound { target_entry_id: LedgerEntryId },
-    ConstructionFailed(VoidSessionConstructionError),
+    #[error("void session construction failed: {0}")]
+    ConstructionFailed(#[from] VoidSessionConstructionError),
 }
 
 /// Advance a `SelectingCandidate` session to `Confirming` once the actor selects a
@@ -115,12 +122,16 @@ pub fn transition_to_confirm(
     .map_err(VoidConfirmTransitionError::ConstructionFailed)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum VoidComposeError {
+    #[error("void session is not in Confirming")]
     SessionNotConfirming,
+    #[error("void target {target_entry_id:?} is no longer voidable")]
     TargetNoLongerVoidable { target_entry_id: LedgerEntryId },
-    EntryBuild(DiscordLedgerEntryError),
-    EnvelopeEncode(LedgerCanonicalEncodeError),
+    #[error("void entry build: {0}")]
+    EntryBuild(#[from] DiscordLedgerEntryError),
+    #[error("void envelope encode: {0}")]
+    EnvelopeEncode(#[from] LedgerCanonicalEncodeError),
 }
 
 /// Build the canonical void entry + envelope from a confirmation-stage session against

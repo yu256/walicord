@@ -1,13 +1,15 @@
 use walicord_ledger::{LedgerHistorySealed, ProjectedLedger};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SealThroughTailError {
     /// The projection has no entries at all to seal through.
+    #[error("ledger projection is empty; nothing to seal")]
     EmptyLedger,
     /// The selected tail is already inside the existing sealed range, so there is no new
     /// range to seal. Only `seal_through_latest_unvoided_expense_or_settlement_entry` can
     /// produce this; ordinary `seal_through_tail` always advances because the tail itself
     /// is by definition not inside the prior sealed range.
+    #[error("ledger tail is already sealed; nothing new to cover")]
     AlreadySealed,
 }
 

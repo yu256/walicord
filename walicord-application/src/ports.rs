@@ -79,8 +79,9 @@ impl InteractionNonce {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum InteractionNonceError {
+    #[error("interaction nonce must be non-zero")]
     Zero,
 }
 

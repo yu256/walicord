@@ -201,16 +201,16 @@ pub enum ExpectedElement {
     Unknown,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SyntaxErrorKind {
+    #[error("parse failure (attempted: {attempted_form:?}, expected: {expected:?}) near {near}")]
     ParseFailure {
         attempted_form: Option<&'static str>,
         expected: ExpectedElement,
         near: String,
     },
-    TrailingInput {
-        text: String,
-    },
+    #[error("trailing input after statement: {text}")]
+    TrailingInput { text: String },
 }
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
@@ -219,7 +219,7 @@ pub enum ParseError {
     UndefinedMember { id: u64, line: usize },
     #[error("Undefined group '{name}' at line {line}.")]
     UndefinedGroup { name: String, line: usize },
-    #[error("Syntax error at line {line}: {kind:?}")]
+    #[error("Syntax error at line {line}: {kind}")]
     SyntaxError { line: usize, kind: SyntaxErrorKind },
 }
 

@@ -290,7 +290,10 @@ pub(crate) fn ledger_refresh_command() -> CreateCommand {
     CreateCommand::new("ledger-refresh").description(i18n::slash_ledger_refresh_description())
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "startup readiness failed: missing oauth_scopes={missing_oauth_scopes:?}, missing gateway_intents={missing_gateway_intents:?}"
+)]
 pub(crate) struct StartupReadinessFailure {
     pub missing_oauth_scopes: Vec<&'static str>,
     pub missing_gateway_intents: Vec<&'static str>,

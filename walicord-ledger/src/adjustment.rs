@@ -27,8 +27,9 @@ impl AdjustmentReason {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum AdjustmentReasonError {
+    #[error("adjustment reason is empty")]
     Empty,
 }
 
@@ -150,10 +151,14 @@ impl BalanceAdjusted {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum BalanceAdjustedError {
+    #[error("balance adjustment has no entries")]
     EmptyAdjustments,
+    #[error("zero amount for member {member_id:?}")]
     ZeroAmount { member_id: MemberId },
+    #[error("member {member_id:?} adjustments cancel out to zero")]
     CancelledOutAdjustment { member_id: MemberId },
+    #[error("balance adjustment is imbalanced (residual: {total:?})")]
     Imbalanced { total: Money },
 }

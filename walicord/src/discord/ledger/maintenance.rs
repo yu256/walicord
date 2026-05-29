@@ -53,27 +53,36 @@ pub struct OlderThanTwentyReplacement {
     pub replacement_recorded_by: MemberId,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum MaintenanceValidationError {
     /// Target was within the latest-20 voidable window; operators must use the normal
     /// `/void` UI for those (criterion 289).
+    #[error(
+        "target entry {target_entry_id:?} is inside the latest {window} voidable window; use /void instead"
+    )]
     TargetInsideWindow {
         target_entry_id: LedgerEntryId,
         window: usize,
     },
     /// Target entry is not present in the canonical thread.
+    #[error("target entry {target_entry_id:?} is not present in the canonical thread")]
     TargetNotInLedger { target_entry_id: LedgerEntryId },
     /// Target entry was already voided.
+    #[error("target entry {target_entry_id:?} was already voided")]
     TargetAlreadyVoided { target_entry_id: LedgerEntryId },
     /// Target entry is inside sealed history but this command requires unsealed.
+    #[error("target entry {target_entry_id:?} is inside sealed history")]
     TargetSealed { target_entry_id: LedgerEntryId },
     /// Damaged-thread replacement cannot reuse the retired ledger's parent channel
     /// (criterion 199: same-parent dual thread forbidden).
+    #[error("damaged-thread replacement cannot reuse the retired thread's parent channel")]
     SameParentDualThread,
     /// Duplicate-resolution must list at least one retired thread.
+    #[error("duplicate-resolution requires at least one retired thread")]
     DuplicateResolutionEmpty,
     /// The authoritative thread the operator chose to keep is not among the observed
     /// duplicate candidates.
+    #[error("authoritative thread is not among the observed duplicate candidates")]
     AuthoritativeNotAmongCandidates,
 }
 

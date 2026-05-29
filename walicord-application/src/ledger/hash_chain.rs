@@ -522,20 +522,24 @@ fn encode_balance_adjustment_source(out: &mut Vec<u8>, source: &BalanceAdjustmen
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum LedgerHashChainError {
+    #[error("previous hash mismatch: expected {expected:?}, declared {declared:?}")]
     PreviousHashMismatch {
         expected: EntryHash,
         declared: EntryHash,
     },
+    #[error("entry hash mismatch: computed {computed:?}, declared {declared:?}")]
     EntryHashMismatch {
         computed: EntryHash,
         declared: EntryHash,
     },
-    Encoding(LedgerCanonicalEncodeError),
+    #[error("encoding failure: {0}")]
+    Encoding(#[from] LedgerCanonicalEncodeError),
     /// The digest implementation declares a different `LedgerHashSuite` than the payload's
     /// declared suite. Indicates that the wrong digest is being used to verify this chain
     /// (or the payload was rewritten to claim a different suite).
+    #[error("hash suite mismatch: expected {expected:?}, declared {declared:?}")]
     HashSuiteMismatch {
         expected: LedgerHashSuite,
         declared: LedgerHashSuite,
@@ -544,6 +548,7 @@ pub enum LedgerHashChainError {
     /// to validate. Surfaced when chain-internal invariants would still pass — i.e. the
     /// envelope was a valid record on *some* ledger, but not on this one — so silent
     /// cross-ledger replay attempts cannot succeed.
+    #[error("ledger id mismatch: expected {expected:?}, declared {declared:?}")]
     LedgerIdMismatch {
         expected: LedgerId,
         declared: LedgerId,
@@ -610,9 +615,11 @@ where
     Ok(VerifiedLedgerStoreEnvelope(unverified))
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("chain verification failed at position {position}: {error}")]
 pub struct ChainPositionError {
     pub position: usize,
+    #[source]
     pub error: LedgerHashChainError,
 }
 

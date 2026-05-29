@@ -91,40 +91,56 @@ impl SettlementContext {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum AtomicUnitConversionError {
+    #[error("value is not integral after quantization")]
     NonIntegral,
+    #[error("value is out of the supported integer range")]
     OutOfRange,
+    #[error("unsupported scale: scale={scale}, max_supported={max_supported}")]
     UnsupportedScale { scale: u32, max_supported: u32 },
 }
 
 /// Errors that can occur during settlement quantization.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum SettlementRoundingError {
     /// The total sum of balances exceeds the epsilon tolerance.
     /// This indicates data corruption or calculation errors.
+    #[error("total balance is imbalanced (residual: {0:?})")]
     ImbalancedTotal(Money),
     /// V_int or adjustment_count could not be converted to a valid integer.
+    #[error("invalid adjustment count after quantization")]
     InvalidAdjustmentCount,
     /// Not enough candidates available for adjustment distribution.
     ///
     /// Kept for backward compatibility with application-layer error mapping.
+    #[error("insufficient candidates for adjustment distribution")]
     InsufficientCandidates,
     /// Internal invariant violation: quantized balances failed to restore exact zero-sum.
+    #[error("zero-sum invariant violated after quantization")]
     ZeroSumInvariantViolation,
     /// Quantized units could not be represented as integral values.
+    #[error("quantized units are not integral")]
     NonIntegral,
     /// Settlement context scale is not supported by decimal precision constraints.
+    #[error("unsupported settlement scale: scale={scale}, max_supported={max_supported}")]
     UnsupportedScale { scale: u32, max_supported: u32 },
     /// Transfer-construction solver failed to find a feasible lexicographic solution.
+    #[error("transfer construction found no feasible solution")]
     TransferConstructionNoSolution,
     /// Transfer-construction received invalid grid parameters.
+    #[error("transfer construction received invalid grid parameters: g1={g1}, g2={g2}")]
     TransferConstructionInvalidGrid { g1: i64, g2: i64 },
     /// Transfer-construction model exceeded operational lexicographic edge budget.
+    #[error(
+        "transfer construction model exceeded edge budget: edges={edge_count}, max={max_edges}"
+    )]
     TransferConstructionModelTooLarge { edge_count: usize, max_edges: usize },
     /// Transfer-construction solver produced rounded transfers inconsistent with constraints.
+    #[error("transfer construction produced rounded transfers inconsistent with constraints")]
     TransferConstructionRoundingMismatch,
     /// Transfer-construction received imbalanced input despite zero-sum quantization contract.
+    #[error("transfer construction received imbalanced input (residual: {0})")]
     TransferConstructionImbalancedTotal(i64),
 }
 

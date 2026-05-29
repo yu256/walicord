@@ -116,9 +116,11 @@ pub enum UncertainWriteResolution {
     Abandoned,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum CanonicalWriteError {
+    #[error("canonical bootstrap timed out")]
     BootstrapTimeout,
+    #[error("no retained state for this write target")]
     NoRetainedState,
 }
 
@@ -148,17 +150,21 @@ pub enum ScanCompleteness {
 
 /// Distinguishes a transition that genuinely captures new retain state from one that
 /// would silently clobber an existing retain. `set_live` rejects the latter.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SetLiveError {
     /// The target already has a Live retain whose retained payload differs from the
     /// incoming retain. Per criteria 217 / 279 / 287, the original retained envelope
     /// must remain authoritative for retry; a different envelope cannot replace it.
+    #[error(
+        "target already has a different Live retain (existing: {existing_entry_id:?}, incoming: {incoming_entry_id:?})"
+    )]
     AlreadyLiveWithDifferentRetain {
         existing_entry_id: LedgerEntryId,
         incoming_entry_id: LedgerEntryId,
     },
     /// The target is currently Abandoned. A fresh write path must explicitly `clear`
     /// the abandoned state before starting a new retain.
+    #[error("target retain is Abandoned; clear it before setting Live again")]
     AlreadyAbandoned,
 }
 
