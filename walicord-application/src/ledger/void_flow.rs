@@ -1,5 +1,4 @@
-use super::store::VerifiedLedgerThreadLoad;
-use walicord_application::{
+use crate::{
     Clock, InteractionNonce, NonceProvider,
     ledger::{
         DiscordLedgerEntryError, DiscordLedgerSourceDescriptor, LedgerCanonicalEncodeError,
@@ -11,7 +10,8 @@ use walicord_application::{
         },
         make_unverified_envelope_sha256_v1,
         projection::{
-            ProjectionConsistencyError, VerifiedLedgerEntryView, project_recent_voidable_entries,
+            ProjectionConsistencyError, VerifiedLedgerEntryView, VerifiedLedgerThreadLoad,
+            project_recent_voidable_entries,
         },
     },
 };
@@ -32,8 +32,8 @@ pub enum VoidCandidateEnumerationError {
 /// the candidate set that `/void` / panel `取り消し` shows the actor. Entries older
 /// than the window are intentionally excluded — the criterion-106 operator-handoff
 /// path is responsible for them.
-pub fn enumerate_void_candidates(
-    load: &VerifiedLedgerThreadLoad,
+pub fn enumerate_void_candidates<ExternalId>(
+    load: &VerifiedLedgerThreadLoad<ExternalId>,
 ) -> Result<Vec<VerifiedLedgerEntryView>, VoidCandidateEnumerationError> {
     project_recent_voidable_entries(load, VOID_CANDIDATE_WINDOW)
         .map_err(VoidCandidateEnumerationError::Projection)
@@ -53,9 +53,9 @@ pub enum VoidSessionBootstrapError {
 /// window. Returns `NoVoidableCandidates` if the window is empty so the caller can
 /// surface the criterion-119 empty-state message (or criterion-106 older-than-window
 /// handoff guidance, depending on context).
-pub fn bootstrap_void_session(
+pub fn bootstrap_void_session<ExternalId>(
     key: VoidSessionKey,
-    load: &VerifiedLedgerThreadLoad,
+    load: &VerifiedLedgerThreadLoad<ExternalId>,
     clock: &dyn Clock,
     nonce_provider: &dyn NonceProvider,
 ) -> Result<(VoidSession, InteractionNonce, Vec<VerifiedLedgerEntryView>), VoidSessionBootstrapError>
@@ -136,9 +136,9 @@ pub enum VoidComposeError {
 /// Build the canonical void entry + envelope from a confirmation-stage session against
 /// the live verified snapshot. The function re-validates that the target is still in
 /// the voidable window at record time (criterion 112).
-pub fn compose_void_entry(
+pub fn compose_void_entry<ExternalId>(
     session: &VoidSession,
-    load: &VerifiedLedgerThreadLoad,
+    load: &VerifiedLedgerThreadLoad<ExternalId>,
     ledger_id: LedgerId,
     actor_id: MemberId,
     new_entry_id: LedgerEntryId,
@@ -180,9 +180,6 @@ pub fn compose_void_entry(
 #[cfg(test)]
 mod tests {
     use super::*;
-    // No standalone tests here yet — the underlying projection helpers already cover
-    // window selection, voided/sealed exclusion, and settlement candidacy via
-    // `project_recent_voidable_entries` tests in projection.rs.
 
     #[test]
     fn void_candidate_window_matches_required_criterion_value() {

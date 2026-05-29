@@ -118,9 +118,6 @@ mod runtime_lock;
 #[allow(dead_code)]
 #[path = "ledger/store.rs"]
 mod store;
-#[allow(dead_code)]
-#[path = "ledger/void_flow.rs"]
-mod void_flow;
 
 #[cfg(test)]
 pub(crate) use self::{

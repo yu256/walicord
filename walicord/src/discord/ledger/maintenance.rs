@@ -1,9 +1,10 @@
 use walicord_application::ledger::{
     LedgerEntryId, LedgerId, projection::project_recent_voidable_entries,
+    void_flow::VOID_CANDIDATE_WINDOW,
 };
 use walicord_domain::model::MemberId;
 
-use super::{store::VerifiedLedgerThreadLoad, void_flow::VOID_CANDIDATE_WINDOW};
+use super::store::VerifiedLedgerThreadLoad;
 
 /// Closed set of operator-only maintenance commands required by criteria 235, 244,
 /// 267-269, 274, 288-291. Each variant intentionally captures its full input so the

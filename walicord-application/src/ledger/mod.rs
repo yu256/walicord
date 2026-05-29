@@ -13,6 +13,7 @@ pub mod preview_store;
 pub mod projection;
 mod seal;
 pub mod settle_flow;
+pub mod void_flow;
 pub mod write_coordinator;
 
 pub use walicord_ledger::{
