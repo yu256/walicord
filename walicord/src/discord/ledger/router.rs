@@ -25,8 +25,10 @@ use walicord_domain::model::MemberId;
 use walicord_i18n as i18n;
 use walicord_presentation::discord_ledger::{
     BusinessDateTime, DiscordLedgerPresenter, ExpenseConfirmationButtonIds,
-    ExpenseSelectionStepButtonIds, PanelButtonStates, PanelSurfaceModel, RenderBudgetError,
-    SurfaceMemberLabels, build_expense_confirmation_surface, build_expense_selection_step_surface,
+    ExpenseSelectionStepButtonIds, LedgerPageInputs, PanelButtonStates, PanelSurfaceModel,
+    ReadViewBuildError, ReadViewPageModel, ReadViewRoute, RenderBudgetError, SurfaceMemberLabels,
+    build_expense_confirmation_surface, build_expense_selection_step_surface,
+    build_ledger_empty_page_model, build_ledger_page_model, paginate_read_view_model,
 };
 
 use crate::channel::ChannelManager;
@@ -58,6 +60,8 @@ use walicord_application::ledger::{
         compose_expense_entry,
     },
     preview_store::PreviewStore,
+    projection::project_verified_entries,
+    read_view_session::{ReadViewSession, ReadViewSessionKey, ReadViewSessionStore},
     write_coordinator::{
         RetainedCanonicalWrite, UncertainWriteRegistry, WriteCoordinator, WriteTargetKey,
     },
@@ -77,6 +81,7 @@ pub struct LedgerRouterDependencies {
     pub void_sessions: Arc<VoidSessionStore>,
     pub modal_retries: Arc<ModalRetryBindingStore>,
     pub preview_store: Arc<PreviewStore>,
+    pub read_view_sessions: Arc<ReadViewSessionStore<ReadViewPageModel>>,
     pub write_coordinator: Arc<WriteCoordinator>,
     pub uncertain_writes: Arc<UncertainWriteRegistry>,
     pub planner: Arc<dyn SettlementPlanner>,
@@ -181,6 +186,10 @@ pub enum InternalLedgerRouteError {
     ThreadLoad(#[from] StoreLoadError),
     #[error("canonical thread write: {0}")]
     ThreadWrite(#[from] StoreWriteError),
+    #[error("projection consistency: {0}")]
+    Projection(#[from] walicord_application::ledger::projection::ProjectionConsistencyError),
+    #[error("read view build: {0}")]
+    ReadViewBuild(#[from] ReadViewBuildError),
     #[error("uncertain write already live for ledger {ledger_id:?}")]
     UncertainWriteAlreadyLive { ledger_id: LedgerId },
     #[error("expense modal submission missing required fields")]
@@ -267,6 +276,26 @@ impl From<StoreWriteError> for LedgerRouteError {
     }
 }
 
+impl From<walicord_application::ledger::projection::ProjectionConsistencyError>
+    for LedgerRouteError
+{
+    fn from(error: walicord_application::ledger::projection::ProjectionConsistencyError) -> Self {
+        Self::Internal(error.into())
+    }
+}
+
+impl From<ReadViewBuildError> for LedgerRouteError {
+    fn from(error: ReadViewBuildError) -> Self {
+        Self::Internal(error.into())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReadViewNavigation {
+    Previous,
+    Next,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum PostNavigationOperation {
     #[error("forward")]
@@ -302,6 +331,12 @@ pub enum DiscordCallSite {
     ExpenseConfirmationCreateResponse,
     #[error("expense record success ack")]
     ExpenseRecordSuccessAck,
+    #[error("ledger defer ephemeral")]
+    LedgerDeferEphemeral,
+    #[error("ledger edit response")]
+    LedgerEditResponse,
+    #[error("read view nav update_response")]
+    ReadViewNavUpdateResponse,
 }
 
 pub struct LedgerRouter {
@@ -328,6 +363,7 @@ impl LedgerRouter {
         match command.data.name.as_str() {
             "expense" => self.dispatch_expense_command(ctx, command).await,
             "panel" => self.dispatch_panel_command(ctx, command).await,
+            "ledger" => self.dispatch_ledger_command(ctx, command).await,
             _ => Ok(InteractionDispatch::Ignored),
         }
     }
@@ -396,6 +432,100 @@ impl LedgerRouter {
             .map_err(discord_call_error(
                 DiscordCallSite::ExpenseModalCreateResponse,
             ))?;
+        Ok(InteractionDispatch::Handled)
+    }
+
+    async fn dispatch_ledger_command(
+        &self,
+        ctx: &Context,
+        command: &CommandInteraction,
+    ) -> Result<InteractionDispatch, LedgerRouteError> {
+        let scope = match guard_ledger_interaction(
+            command.guild_id,
+            command.channel_id,
+            self.deps.channels.as_ref(),
+        ) {
+            Ok(scope) => scope,
+            Err(LedgerInteractionGuardError::NotInTrackedChannel { .. }) => {
+                return Ok(InteractionDispatch::Ignored);
+            }
+            Err(error) => return Err(LedgerRouteError::from(error)),
+        };
+
+        command
+            .defer_ephemeral(&ctx.http)
+            .await
+            .map_err(discord_call_error(DiscordCallSite::LedgerDeferEphemeral))?;
+
+        let load = self
+            .deps
+            .thread_loader
+            .load(ctx, scope.channel_id(), scope.ledger_id())
+            .await?;
+
+        let roster = self
+            .deps
+            .roster_fetcher
+            .fetch(ctx, scope.guild_id(), scope.channel_id())
+            .await?;
+        let labels = SurfaceMemberLabels::from_member_names(
+            roster
+                .display_names
+                .iter()
+                .map(|(member_id, name)| (*member_id, Some(name.as_str()))),
+        );
+
+        let views = project_verified_entries(&load).map_err(LedgerRouteError::from)?;
+
+        let pages = if views.is_empty() {
+            vec![build_ledger_empty_page_model(
+                ReadViewRoute::LedgerCommand,
+                false,
+            )]
+        } else {
+            let model = build_ledger_page_model(LedgerPageInputs {
+                route: ReadViewRoute::LedgerCommand,
+                views: &views,
+                state: load.snapshot().projected().state(),
+                labels: &labels,
+                ledger_id: scope.ledger_id(),
+                uncertain_write: false,
+            })?;
+            paginate_read_view_model(model)
+        };
+
+        let nonce = self.deps.nonce_provider.next_interaction_nonce();
+        let actor_id = MemberId(command.user.id.get());
+        let session = ReadViewSession::new(
+            ReadViewSessionKey {
+                ledger_id: scope.ledger_id(),
+                actor_id,
+            },
+            nonce,
+            pages.clone(),
+            self.deps.clock.now(),
+        );
+        let total_pages = pages.len();
+        self.deps.read_view_sessions.replace(session);
+
+        let rendered = DiscordLedgerPresenter::render_read_view_page(&pages[0])
+            .map_err(LedgerRouteError::from)?;
+        let (body, mut components) = rendered_surface_to_message(rendered);
+        if total_pages > 1 {
+            components.push(read_view_navigation_row(nonce, 0, total_pages));
+        }
+
+        command
+            .edit_response(
+                &ctx.http,
+                serenity::all::EditInteractionResponse::new()
+                    .content(body)
+                    .components(components)
+                    .allowed_mentions(suppressed_allowed_mentions()),
+            )
+            .await
+            .map_err(discord_call_error(DiscordCallSite::LedgerEditResponse))?;
+
         Ok(InteractionDispatch::Handled)
     }
 
@@ -474,7 +604,81 @@ impl LedgerRouter {
         {
             return self.dispatch_expense_record(ctx, component).await;
         }
+        if let Some(nonce) =
+            parse_expense_session_button_nonce(custom_id, READ_VIEW_PREV_CUSTOM_ID_PREFIX)
+        {
+            return self
+                .dispatch_read_view_navigate(ctx, component, nonce, ReadViewNavigation::Previous)
+                .await;
+        }
+        if let Some(nonce) =
+            parse_expense_session_button_nonce(custom_id, READ_VIEW_NEXT_CUSTOM_ID_PREFIX)
+        {
+            return self
+                .dispatch_read_view_navigate(ctx, component, nonce, ReadViewNavigation::Next)
+                .await;
+        }
         Ok(InteractionDispatch::Ignored)
+    }
+
+    async fn dispatch_read_view_navigate(
+        &self,
+        ctx: &Context,
+        component: &ComponentInteraction,
+        nonce: walicord_application::InteractionNonce,
+        direction: ReadViewNavigation,
+    ) -> Result<InteractionDispatch, LedgerRouteError> {
+        let scope = guard_ledger_interaction(
+            component.guild_id,
+            component.channel_id,
+            self.deps.channels.as_ref(),
+        )
+        .map_err(LedgerRouteError::from)?;
+        let actor_id = MemberId(component.user.id.get());
+
+        let key = ReadViewSessionKey {
+            ledger_id: scope.ledger_id(),
+            actor_id,
+        };
+        let now = self.deps.clock.now();
+        let session_opt = self
+            .deps
+            .read_view_sessions
+            .access(key, nonce, now)
+            .unwrap_or_default();
+        let Some(mut session) = session_opt else {
+            return Ok(InteractionDispatch::Handled);
+        };
+
+        let _moved = match direction {
+            ReadViewNavigation::Previous => session.retreat(now),
+            ReadViewNavigation::Next => session.advance(now),
+        };
+        let index = session.current_index();
+        let total_pages = session.page_count();
+        let rendered = DiscordLedgerPresenter::render_read_view_page(session.current_page())
+            .map_err(LedgerRouteError::from)?;
+        let (body, mut components) = rendered_surface_to_message(rendered);
+        if total_pages > 1 {
+            components.push(read_view_navigation_row(nonce, index, total_pages));
+        }
+        self.deps.read_view_sessions.replace(session);
+
+        component
+            .create_response(
+                &ctx.http,
+                CreateInteractionResponse::UpdateMessage(
+                    CreateInteractionResponseMessage::new()
+                        .content(body)
+                        .components(components)
+                        .allowed_mentions(suppressed_allowed_mentions()),
+                ),
+            )
+            .await
+            .map_err(discord_call_error(
+                DiscordCallSite::ReadViewNavUpdateResponse,
+            ))?;
+        Ok(InteractionDispatch::Handled)
     }
 
     /// Apply a legal forward selection-wizard transition, persist the new session,
@@ -1236,6 +1440,27 @@ pub(crate) const EXPENSE_TO_CONFIRM_CUSTOM_ID_PREFIX: &str = "ledger:expense:to-
 pub(crate) const EXPENSE_MODIFY_SELECTION_CUSTOM_ID_PREFIX: &str =
     "ledger:expense:modify-selection:";
 pub(crate) const EXPENSE_RECORD_CUSTOM_ID_PREFIX: &str = "ledger:expense:record:";
+pub(crate) const READ_VIEW_PREV_CUSTOM_ID_PREFIX: &str = "ledger:read-view:prev:";
+pub(crate) const READ_VIEW_NEXT_CUSTOM_ID_PREFIX: &str = "ledger:read-view:next:";
+
+fn read_view_navigation_row(
+    nonce: walicord_application::InteractionNonce,
+    current_index: usize,
+    total_pages: usize,
+) -> serenity::all::CreateActionRow {
+    use serenity::all::{ButtonStyle, CreateActionRow, CreateButton};
+    let n = nonce.get();
+    CreateActionRow::Buttons(vec![
+        CreateButton::new(format!("{READ_VIEW_PREV_CUSTOM_ID_PREFIX}{n}"))
+            .label(walicord_i18n::picker_previous_page_label())
+            .style(ButtonStyle::Secondary)
+            .disabled(current_index == 0),
+        CreateButton::new(format!("{READ_VIEW_NEXT_CUSTOM_ID_PREFIX}{n}"))
+            .label(walicord_i18n::picker_next_page_label())
+            .style(ButtonStyle::Secondary)
+            .disabled(current_index + 1 >= total_pages),
+    ])
+}
 
 /// Build the custom_id strings for every button the selection wizard can show. The
 /// adapter owns the custom_id format (Discord component identity); the presentation

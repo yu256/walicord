@@ -1010,6 +1010,9 @@ where
             void_sessions: Arc::new(crate::discord::ledger::VoidSessionStore::new()),
             modal_retries: Arc::new(crate::discord::ledger::ModalRetryBindingStore::new()),
             preview_store: Arc::new(crate::discord::ledger::PreviewStore::new()),
+            read_view_sessions: Arc::new(
+                walicord_application::ledger::read_view_session::ReadViewSessionStore::new(),
+            ),
             write_coordinator: Arc::new(crate::discord::ledger::WriteCoordinator::new()),
             uncertain_writes: Arc::new(crate::discord::ledger::UncertainWriteRegistry::new()),
             planner: Arc::new(HighsSettlementPlanner),
