@@ -1,5 +1,8 @@
 use serenity::{
-    all::{CreateActionRow, CreateInputText, CreateModal, InputTextStyle},
+    all::{
+        ActionRowComponent, CreateActionRow, CreateInputText, CreateModal, InputTextStyle,
+        ModalInteraction,
+    },
     builder::CreateInteractionResponse,
 };
 use walicord_application::{Clock, InteractionNonce};
@@ -8,6 +11,8 @@ use walicord_presentation::discord_ledger::{
     RenderBudgetError, truncate_component_label, validate_custom_id, validate_modal_title,
     validate_text_input_label, validate_text_input_placeholder,
 };
+
+use super::expense_modal::RawExpenseModalSubmission;
 
 pub const EXPENSE_MODAL_CUSTOM_ID_PREFIX: &str = "ledger:expense:new:";
 const AMOUNT_FIELD: &str = "amount";
@@ -27,6 +32,60 @@ pub struct ExpenseModalPrefill {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExpenseModalBuildError {
     Budget(RenderBudgetError),
+}
+
+/// Result of inspecting a `ModalInteraction.custom_id` to see if it belongs to the
+/// expense-new modal family. Returns the carried interaction nonce when the prefix
+/// matches; the router uses this to confirm the modal is the one we opened and to
+/// detect stale-nonce re-submits per criterion 167.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExpenseModalCustomIdMatch {
+    Match { nonce: InteractionNonce },
+    Stale,
+    NoMatch,
+}
+
+pub fn parse_expense_modal_custom_id(custom_id: &str) -> ExpenseModalCustomIdMatch {
+    let Some(remainder) = custom_id.strip_prefix(EXPENSE_MODAL_CUSTOM_ID_PREFIX) else {
+        return ExpenseModalCustomIdMatch::NoMatch;
+    };
+    let Ok(parsed) = remainder.parse::<u64>() else {
+        return ExpenseModalCustomIdMatch::Stale;
+    };
+    match InteractionNonce::new(parsed) {
+        Ok(nonce) => ExpenseModalCustomIdMatch::Match { nonce },
+        Err(_) => ExpenseModalCustomIdMatch::Stale,
+    }
+}
+
+/// Extract the raw amount / note / date strings from a Discord modal submission so
+/// the application-layer validator can run. Returns `None` only if the modal
+/// somehow shipped without the expected fields, which is a Discord-side malformation;
+/// the router maps that to a generic internal error.
+pub fn extract_raw_expense_modal_submission(
+    modal: &ModalInteraction,
+) -> Option<RawExpenseModalSubmission> {
+    let mut amount = None;
+    let mut note = None;
+    let mut date = None;
+    for row in &modal.data.components {
+        for component in &row.components {
+            if let ActionRowComponent::InputText(input) = component {
+                let value = input.value.clone().unwrap_or_default();
+                match input.custom_id.as_str() {
+                    AMOUNT_FIELD => amount = Some(value),
+                    NOTE_FIELD => note = Some(value),
+                    DATE_FIELD => date = Some(value),
+                    _ => {}
+                }
+            }
+        }
+    }
+    Some(RawExpenseModalSubmission {
+        raw_amount: amount?,
+        raw_note: note.unwrap_or_default(),
+        raw_date: date.unwrap_or_default(),
+    })
 }
 
 /// Build the expense modal `CreateInteractionResponse` for `/expense` and the panel
@@ -157,5 +216,33 @@ mod tests {
             },
         );
         assert!(actual.is_ok());
+    }
+
+    #[test]
+    fn parse_custom_id_recovers_nonce_when_prefix_matches() {
+        let actual =
+            parse_expense_modal_custom_id(&format!("{EXPENSE_MODAL_CUSTOM_ID_PREFIX}{}", 42));
+        assert_eq!(
+            actual,
+            ExpenseModalCustomIdMatch::Match { nonce: nonce(42) }
+        );
+    }
+
+    #[test]
+    fn parse_custom_id_returns_no_match_when_prefix_differs() {
+        let actual = parse_expense_modal_custom_id("settle:something:1");
+        assert_eq!(actual, ExpenseModalCustomIdMatch::NoMatch);
+    }
+
+    #[test]
+    fn parse_custom_id_returns_stale_for_non_numeric_remainder() {
+        let actual = parse_expense_modal_custom_id(&format!("{EXPENSE_MODAL_CUSTOM_ID_PREFIX}abc"));
+        assert_eq!(actual, ExpenseModalCustomIdMatch::Stale);
+    }
+
+    #[test]
+    fn parse_custom_id_returns_stale_for_zero_nonce() {
+        let actual = parse_expense_modal_custom_id(&format!("{EXPENSE_MODAL_CUSTOM_ID_PREFIX}0"));
+        assert_eq!(actual, ExpenseModalCustomIdMatch::Stale);
     }
 }
