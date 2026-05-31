@@ -47,7 +47,10 @@ use super::{
         parse_expense_modal_custom_id,
     },
     observability::DiscordLedgerObservability,
-    panel::LEDGER_PANEL_EXPENSE_ID,
+    panel::{
+        LEDGER_PANEL_EXPENSE_ID, LEDGER_PANEL_LEDGER_ID, LEDGER_PANEL_REVIEW_ID,
+        LEDGER_PANEL_VOID_ID,
+    },
     response_writer::{rendered_surface_to_message, suppressed_allowed_mentions},
     route_guard::{LedgerInteractionGuardError, guard_ledger_interaction},
     store::{
@@ -376,6 +379,77 @@ enum ReadViewNavigation {
     Next,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PanelLauncher {
+    Expense,
+    Review,
+    Ledger,
+    Void,
+}
+
+fn panel_launcher(custom_id: &str) -> Option<PanelLauncher> {
+    match custom_id {
+        LEDGER_PANEL_EXPENSE_ID => Some(PanelLauncher::Expense),
+        LEDGER_PANEL_REVIEW_ID => Some(PanelLauncher::Review),
+        LEDGER_PANEL_LEDGER_ID => Some(PanelLauncher::Ledger),
+        LEDGER_PANEL_VOID_ID => Some(PanelLauncher::Void),
+        _ => None,
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum DeferredEphemeralInteraction<'a> {
+    Command(&'a CommandInteraction),
+    Component(&'a ComponentInteraction),
+}
+
+impl DeferredEphemeralInteraction<'_> {
+    fn user_id(&self) -> serenity::all::UserId {
+        match self {
+            Self::Command(command) => command.user.id,
+            Self::Component(component) => component.user.id,
+        }
+    }
+
+    async fn defer(&self, ctx: &Context, site: DiscordCallSite) -> Result<(), LedgerRouteError> {
+        match self {
+            Self::Command(command) => command
+                .defer_ephemeral(&ctx.http)
+                .await
+                .map_err(discord_call_error(site))?,
+            Self::Component(component) => component
+                .create_response(
+                    &ctx.http,
+                    CreateInteractionResponse::Defer(
+                        CreateInteractionResponseMessage::new().ephemeral(true),
+                    ),
+                )
+                .await
+                .map_err(discord_call_error(site))?,
+        }
+        Ok(())
+    }
+
+    async fn edit(
+        &self,
+        ctx: &Context,
+        content: impl Into<String>,
+        components: Vec<serenity::all::CreateActionRow>,
+        site: DiscordCallSite,
+    ) -> Result<InteractionDispatch, LedgerRouteError> {
+        let response = serenity::all::EditInteractionResponse::new()
+            .content(content)
+            .components(components)
+            .allowed_mentions(suppressed_allowed_mentions());
+        match self {
+            Self::Command(command) => command.edit_response(&ctx.http, response).await,
+            Self::Component(component) => component.edit_response(&ctx.http, response).await,
+        }
+        .map_err(discord_call_error(site))?;
+        Ok(InteractionDispatch::Handled)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum PostNavigationOperation {
     #[error("forward")]
@@ -522,12 +596,25 @@ impl LedgerRouter {
             }
             Err(error) => return Err(LedgerRouteError::from(error)),
         };
+        self.dispatch_review(
+            ctx,
+            scope,
+            DeferredEphemeralInteraction::Command(command),
+            ReadViewRoute::ReviewThread,
+        )
+        .await
+    }
 
-        command
-            .defer_ephemeral(&ctx.http)
-            .await
-            .map_err(discord_call_error(DiscordCallSite::ReviewDeferEphemeral))?;
-
+    async fn dispatch_review(
+        &self,
+        ctx: &Context,
+        scope: super::route_guard::LedgerInteractionScope,
+        interaction: DeferredEphemeralInteraction<'_>,
+        route: ReadViewRoute,
+    ) -> Result<InteractionDispatch, LedgerRouteError> {
+        interaction
+            .defer(ctx, DiscordCallSite::ReviewDeferEphemeral)
+            .await?;
         let load = self
             .deps
             .thread_loader
@@ -545,10 +632,9 @@ impl LedgerRouter {
                 .map(|(member_id, name)| (*member_id, Some(name.as_str()))),
         );
         let views = project_verified_entries(&load).map_err(LedgerRouteError::from)?;
-        let route = ReadViewRoute::ReviewThread;
 
         let mut stored_preview_instance_id = None;
-        let key = PreviewStoreKey::new(scope.ledger_id(), MemberId(command.user.id.get()));
+        let key = PreviewStoreKey::new(scope.ledger_id(), MemberId(interaction.user_id().get()));
         let prior_preview_instance_id = self
             .deps
             .preview_store
@@ -566,7 +652,7 @@ impl LedgerRouter {
             }
             vec![build_review_empty_page_model(route, false, None)]
         } else {
-            let actor_id = MemberId(command.user.id.get());
+            let actor_id = MemberId(interaction.user_id().get());
             match compose_and_store_preview(
                 load.snapshot(),
                 scope.ledger_id(),
@@ -591,11 +677,11 @@ impl LedgerRouter {
                         }) => uncertain_write_block_message(false, true),
                         _ => i18n::review_render_failed_message().to_owned(),
                     };
-                    return self
-                        .edit_command_response(
+                    return interaction
+                        .edit(
                             ctx,
-                            command,
                             message,
+                            Vec::new(),
                             DiscordCallSite::ReviewEditResponse,
                         )
                         .await;
@@ -634,7 +720,7 @@ impl LedgerRouter {
         };
 
         let nonce = self.deps.nonce_provider.next_interaction_nonce();
-        let actor_id = MemberId(command.user.id.get());
+        let actor_id = MemberId(interaction.user_id().get());
         self.deps.read_view_sessions.replace(ReadViewSession::new(
             ReadViewSessionKey {
                 ledger_id: scope.ledger_id(),
@@ -652,16 +738,9 @@ impl LedgerRouter {
         if total_pages > 1 {
             components.push(read_view_navigation_row(nonce, 0, total_pages));
         }
-        command
-            .edit_response(
-                &ctx.http,
-                serenity::all::EditInteractionResponse::new()
-                    .content(body)
-                    .components(components)
-                    .allowed_mentions(suppressed_allowed_mentions()),
-            )
-            .await
-            .map_err(discord_call_error(DiscordCallSite::ReviewEditResponse))?;
+        interaction
+            .edit(ctx, body, components, DiscordCallSite::ReviewEditResponse)
+            .await?;
 
         if let Some(preview_instance_id) = stored_preview_instance_id {
             mark_preview_delivered(self.deps.preview_store.as_ref(), key, preview_instance_id)?;
@@ -887,23 +966,30 @@ impl LedgerRouter {
             }
             Err(error) => return Err(LedgerRouteError::from(error)),
         };
-
-        command
-            .defer_ephemeral(&ctx.http)
+        self.dispatch_void(ctx, scope, DeferredEphemeralInteraction::Command(command))
             .await
-            .map_err(discord_call_error(DiscordCallSite::VoidDeferEphemeral))?;
+    }
 
+    async fn dispatch_void(
+        &self,
+        ctx: &Context,
+        scope: super::route_guard::LedgerInteractionScope,
+        interaction: DeferredEphemeralInteraction<'_>,
+    ) -> Result<InteractionDispatch, LedgerRouteError> {
+        interaction
+            .defer(ctx, DiscordCallSite::VoidDeferEphemeral)
+            .await?;
         if self
             .deps
             .uncertain_writes
             .current(scope.ledger_id())
             .is_some()
         {
-            return self
-                .edit_command_response(
+            return interaction
+                .edit(
                     ctx,
-                    command,
                     uncertain_write_block_message(false, false),
+                    Vec::new(),
                     DiscordCallSite::VoidEditResponse,
                 )
                 .await;
@@ -916,15 +1002,15 @@ impl LedgerRouter {
             .await?;
         if load.snapshot().canonical_entry_count() == 0 {
             return self
-                .edit_command_with_void_model(
+                .edit_initial_void_model(
                     ctx,
-                    command,
+                    interaction,
                     VoidSurfaceModel::empty(i18n::panel_void_button_label(), Vec::new(), true),
                 )
                 .await;
         }
 
-        let actor_id = MemberId(command.user.id.get());
+        let actor_id = MemberId(interaction.user_id().get());
         let key = VoidSessionKey::new(scope.ledger_id(), actor_id);
         let (session, nonce, candidates) = match bootstrap_void_session(
             key,
@@ -935,9 +1021,9 @@ impl LedgerRouter {
             Ok(outcome) => outcome,
             Err(VoidSessionBootstrapError::NoVoidableCandidates) => {
                 return self
-                    .edit_command_with_void_model(
+                    .edit_initial_void_model(
                         ctx,
-                        command,
+                        interaction,
                         VoidSurfaceModel::no_candidates(
                             i18n::panel_void_button_label(),
                             Vec::new(),
@@ -963,9 +1049,9 @@ impl LedgerRouter {
         let rows = void_candidate_rows(&candidates, &labels, scope.ledger_id())?;
         let action_rows = void_selection_action_rows(nonce, &candidates, &labels);
         self.deps.void_sessions.replace(session);
-        self.edit_command_with_void_model(
+        self.edit_initial_void_model(
             ctx,
-            command,
+            interaction,
             VoidSurfaceModel::selection(i18n::panel_void_button_label(), rows, action_rows, true),
         )
         .await
@@ -1015,12 +1101,25 @@ impl LedgerRouter {
             }
             Err(error) => return Err(LedgerRouteError::from(error)),
         };
+        self.dispatch_ledger(
+            ctx,
+            scope,
+            DeferredEphemeralInteraction::Command(command),
+            ReadViewRoute::LedgerCommand,
+        )
+        .await
+    }
 
-        command
-            .defer_ephemeral(&ctx.http)
-            .await
-            .map_err(discord_call_error(DiscordCallSite::LedgerDeferEphemeral))?;
-
+    async fn dispatch_ledger(
+        &self,
+        ctx: &Context,
+        scope: super::route_guard::LedgerInteractionScope,
+        interaction: DeferredEphemeralInteraction<'_>,
+        route: ReadViewRoute,
+    ) -> Result<InteractionDispatch, LedgerRouteError> {
+        interaction
+            .defer(ctx, DiscordCallSite::LedgerDeferEphemeral)
+            .await?;
         let load = self
             .deps
             .thread_loader
@@ -1042,13 +1141,10 @@ impl LedgerRouter {
         let views = project_verified_entries(&load).map_err(LedgerRouteError::from)?;
 
         let pages = if views.is_empty() {
-            vec![build_ledger_empty_page_model(
-                ReadViewRoute::LedgerCommand,
-                false,
-            )]
+            vec![build_ledger_empty_page_model(route, false)]
         } else {
             let model = build_ledger_page_model(LedgerPageInputs {
-                route: ReadViewRoute::LedgerCommand,
+                route,
                 views: &views,
                 state: load.snapshot().projected().state(),
                 labels: &labels,
@@ -1059,7 +1155,7 @@ impl LedgerRouter {
         };
 
         let nonce = self.deps.nonce_provider.next_interaction_nonce();
-        let actor_id = MemberId(command.user.id.get());
+        let actor_id = MemberId(interaction.user_id().get());
         let session = ReadViewSession::new(
             ReadViewSessionKey {
                 ledger_id: scope.ledger_id(),
@@ -1079,18 +1175,9 @@ impl LedgerRouter {
             components.push(read_view_navigation_row(nonce, 0, total_pages));
         }
 
-        command
-            .edit_response(
-                &ctx.http,
-                serenity::all::EditInteractionResponse::new()
-                    .content(body)
-                    .components(components)
-                    .allowed_mentions(suppressed_allowed_mentions()),
-            )
+        interaction
+            .edit(ctx, body, components, DiscordCallSite::LedgerEditResponse)
             .await
-            .map_err(discord_call_error(DiscordCallSite::LedgerEditResponse))?;
-
-        Ok(InteractionDispatch::Handled)
     }
 
     /// Component (button / select-menu) dispatch. Handles the panel launcher and the
@@ -1101,8 +1188,20 @@ impl LedgerRouter {
         ctx: &Context,
         component: &ComponentInteraction,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
-        if component.data.custom_id == LEDGER_PANEL_EXPENSE_ID {
-            return self.dispatch_panel_expense_launcher(ctx, component).await;
+        match panel_launcher(&component.data.custom_id) {
+            Some(PanelLauncher::Expense) => {
+                return self.dispatch_panel_expense_launcher(ctx, component).await;
+            }
+            Some(PanelLauncher::Review) => {
+                return self.dispatch_panel_review_launcher(ctx, component).await;
+            }
+            Some(PanelLauncher::Ledger) => {
+                return self.dispatch_panel_ledger_launcher(ctx, component).await;
+            }
+            Some(PanelLauncher::Void) => {
+                return self.dispatch_panel_void_launcher(ctx, component).await;
+            }
+            None => {}
         }
         let custom_id = component.data.custom_id.as_str();
         if parse_expense_session_button_nonce(custom_id, EXPENSE_CANCEL_CUSTOM_ID_PREFIX).is_some()
@@ -2175,6 +2274,62 @@ impl LedgerRouter {
         Ok(InteractionDispatch::Handled)
     }
 
+    async fn dispatch_panel_review_launcher(
+        &self,
+        ctx: &Context,
+        component: &ComponentInteraction,
+    ) -> Result<InteractionDispatch, LedgerRouteError> {
+        let scope = guard_ledger_interaction(
+            component.guild_id,
+            component.channel_id,
+            self.deps.channels.as_ref(),
+        )?;
+        self.dispatch_review(
+            ctx,
+            scope,
+            DeferredEphemeralInteraction::Component(component),
+            ReadViewRoute::ReviewParent,
+        )
+        .await
+    }
+
+    async fn dispatch_panel_ledger_launcher(
+        &self,
+        ctx: &Context,
+        component: &ComponentInteraction,
+    ) -> Result<InteractionDispatch, LedgerRouteError> {
+        let scope = guard_ledger_interaction(
+            component.guild_id,
+            component.channel_id,
+            self.deps.channels.as_ref(),
+        )?;
+        self.dispatch_ledger(
+            ctx,
+            scope,
+            DeferredEphemeralInteraction::Component(component),
+            ReadViewRoute::LedgerPanel,
+        )
+        .await
+    }
+
+    async fn dispatch_panel_void_launcher(
+        &self,
+        ctx: &Context,
+        component: &ComponentInteraction,
+    ) -> Result<InteractionDispatch, LedgerRouteError> {
+        let scope = guard_ledger_interaction(
+            component.guild_id,
+            component.channel_id,
+            self.deps.channels.as_ref(),
+        )?;
+        self.dispatch_void(
+            ctx,
+            scope,
+            DeferredEphemeralInteraction::Component(component),
+        )
+        .await
+    }
+
     /// Modal submission dispatch. Currently handles the expense-new modal; weight
     /// editor and retry modals are added in subsequent slices.
     pub async fn handle_modal(
@@ -2324,26 +2479,18 @@ impl LedgerRouter {
         Ok(InteractionDispatch::Handled)
     }
 
-    async fn edit_command_with_void_model(
+    async fn edit_initial_void_model(
         &self,
         ctx: &Context,
-        command: &CommandInteraction,
+        interaction: DeferredEphemeralInteraction<'_>,
         model: VoidSurfaceModel,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
         let rendered =
             DiscordLedgerPresenter::render_void_flow(&model).map_err(LedgerRouteError::from)?;
         let (body, components) = rendered_surface_to_message(rendered);
-        command
-            .edit_response(
-                &ctx.http,
-                serenity::all::EditInteractionResponse::new()
-                    .content(body)
-                    .components(components)
-                    .allowed_mentions(suppressed_allowed_mentions()),
-            )
+        interaction
+            .edit(ctx, body, components, DiscordCallSite::VoidEditResponse)
             .await
-            .map_err(discord_call_error(DiscordCallSite::VoidEditResponse))?;
-        Ok(InteractionDispatch::Handled)
     }
 
     async fn update_component_with_void_model(
@@ -3204,6 +3351,19 @@ mod tests {
     #[test]
     fn dispatch_outcomes_distinguish_handled_from_ignored() {
         assert_ne!(InteractionDispatch::Handled, InteractionDispatch::Ignored);
+    }
+
+    #[rstest]
+    #[case::expense(LEDGER_PANEL_EXPENSE_ID, Some(PanelLauncher::Expense))]
+    #[case::review(LEDGER_PANEL_REVIEW_ID, Some(PanelLauncher::Review))]
+    #[case::ledger(LEDGER_PANEL_LEDGER_ID, Some(PanelLauncher::Ledger))]
+    #[case::void(LEDGER_PANEL_VOID_ID, Some(PanelLauncher::Void))]
+    #[case::unrelated("ledger:other", None)]
+    fn panel_launcher_recognizes_owned_component_ids(
+        #[case] custom_id: &str,
+        #[case] expected: Option<PanelLauncher>,
+    ) {
+        assert_eq!(panel_launcher(custom_id), expected);
     }
 
     #[test]
