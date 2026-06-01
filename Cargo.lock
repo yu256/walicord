@@ -3357,17 +3357,13 @@ name = "walicord"
 version = "2.5.0"
 dependencies = [
  "arcstr",
- "chrono",
  "dashmap 6.1.0",
  "dotenvy",
- "fs2",
  "futures",
  "indexmap",
  "insta",
  "resvg",
  "rstest",
- "rust_decimal",
- "serde",
  "serde_json",
  "serenity",
  "sha2 0.10.9",

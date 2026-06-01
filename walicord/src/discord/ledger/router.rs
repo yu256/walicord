@@ -195,6 +195,8 @@ pub enum LedgerRouteError {
     GuildOnly,
     #[error("interaction targets an untracked channel")]
     NotInTrackedChannel,
+    #[error("settlement confirmation requires a ledger thread")]
+    SettleThreadOnly,
     #[error("permission denied: {0}")]
     Permission(Cow<'static, str>),
     #[error("internal failure: {0}")]
@@ -206,6 +208,7 @@ impl LedgerRouteError {
         match self {
             Self::GuildOnly => i18n::guild_only_command_message(),
             Self::NotInTrackedChannel => i18n::CHANNEL_NOT_TRACKED,
+            Self::SettleThreadOnly => i18n::settlement_thread_only_message(),
             Self::Permission(message) => message,
             Self::Internal(InternalLedgerRouteError::ThreadLookup(LocatorError::Fetch {
                 ..
@@ -695,9 +698,7 @@ impl LedgerRouter {
         }
     }
 
-    /// Slash-command dispatch. Returns `Ignored` for commands the router does not
-    /// own so the caller can fall through to the legacy non-canonical `/review` /
-    /// DSL record paths preserved by criterion 13 / 94.
+    /// Slash-command dispatch. Returns `Ignored` for commands the router does not own.
     pub async fn handle_command(
         &self,
         ctx: &Context,
@@ -934,12 +935,12 @@ impl LedgerRouter {
         {
             Ok(scope) => scope,
             Err(LedgerInteractionGuardError::NotInTrackedChannel { .. }) => {
-                return Ok(InteractionDispatch::Ignored);
+                return Err(LedgerRouteError::NotInTrackedChannel);
             }
             Err(error) => return Err(LedgerRouteError::from(error)),
         };
         if !scope.is_thread_interaction() {
-            return Ok(InteractionDispatch::Ignored);
+            return Err(LedgerRouteError::SettleThreadOnly);
         }
 
         command
@@ -1137,7 +1138,7 @@ impl LedgerRouter {
         {
             Ok(scope) => scope,
             Err(LedgerInteractionGuardError::NotInTrackedChannel { .. }) => {
-                return Ok(InteractionDispatch::Ignored);
+                return Err(LedgerRouteError::NotInTrackedChannel);
             }
             Err(error) => return Err(LedgerRouteError::from(error)),
         };
@@ -1266,7 +1267,7 @@ impl LedgerRouter {
         {
             Ok(scope) => scope,
             Err(LedgerInteractionGuardError::NotInTrackedChannel { .. }) => {
-                return Ok(InteractionDispatch::Ignored);
+                return Err(LedgerRouteError::NotInTrackedChannel);
             }
             Err(error) => return Err(LedgerRouteError::from(error)),
         };
@@ -1350,9 +1351,7 @@ impl LedgerRouter {
             .await
     }
 
-    /// Component (button / select-menu) dispatch. Handles the panel launcher and the
-    /// session-scoped selection wizard navigation; the picker select menus and the
-    /// final `record` write button are wired in follow-up commits.
+    /// Component (button / select-menu) dispatch for every ledger-owned custom id.
     pub async fn handle_component(
         &self,
         ctx: &Context,
@@ -2282,10 +2281,6 @@ impl LedgerRouter {
         .await
     }
 
-    /// Render the chrome (title + Back/Cancel + phase-specific buttons) for a selection
-    /// phase. The picker select menus and the confirmation summary are added in a
-    /// follow-up commit; this scaffolds the navigation so the actor can walk the wizard
-    /// end-to-end without falling through to the legacy code path.
     async fn respond_with_step_body(
         &self,
         ctx: &Context,
@@ -2532,10 +2527,7 @@ impl LedgerRouter {
                 self.dispatch_expense_modal_submit(ctx, modal).await
             }
             ExpenseModalCustomIdMatch::Stale => {
-                // Stale-nonce expense modal — silently treat as Handled to suppress the
-                // legacy fallback; the renderer will be replaced with the criterion-167
-                // stale message in a follow-up slice once the modal-retry binding store
-                // is wired.
+                // A stale bot-owned modal must not be reinterpreted by another handler.
                 Ok(InteractionDispatch::Handled)
             }
             ExpenseModalCustomIdMatch::NoMatch => Ok(InteractionDispatch::Ignored),
@@ -3119,9 +3111,7 @@ fn render_public_expense_body(
         note,
         actor_display_name,
         recorded_at: BusinessDateTime::from_system_time(recorded_at),
-        // message_link stays None: the self-link enrichment that edits the posted
-        // message to embed its own permalink lives behind `display_drift_guard`
-        // (criterion 209-212) and lands as a follow-up commit.
+        // The permalink only exists after the canonical message has been posted.
         recovery_reference: RecoveryReference {
             ledger_id_short: format!("{ledger_id:x}"),
             entry_id: entry.id,
@@ -3566,9 +3556,10 @@ mod tests {
 
     #[test]
     fn route_error_variants_can_be_pattern_matched_distinctly() {
-        let cases: [LedgerRouteError; 4] = [
+        let cases: [LedgerRouteError; 5] = [
             LedgerRouteError::GuildOnly,
             LedgerRouteError::NotInTrackedChannel,
+            LedgerRouteError::SettleThreadOnly,
             LedgerRouteError::Permission(Cow::Borrowed("denied")),
             InternalLedgerRouteError::ModalSubmissionMissingFields.into(),
         ];
@@ -3576,10 +3567,28 @@ mod tests {
             match error {
                 LedgerRouteError::GuildOnly => {}
                 LedgerRouteError::NotInTrackedChannel => {}
+                LedgerRouteError::SettleThreadOnly => {}
                 LedgerRouteError::Permission(detail) => assert!(!detail.is_empty()),
                 LedgerRouteError::Internal(_) => {}
             }
         }
+    }
+
+    #[rstest]
+    #[case::guild_only(
+        LedgerRouteError::GuildOnly,
+        walicord_i18n::guild_only_command_message()
+    )]
+    #[case::untracked(
+        LedgerRouteError::NotInTrackedChannel,
+        walicord_i18n::CHANNEL_NOT_TRACKED
+    )]
+    #[case::settle_parent(
+        LedgerRouteError::SettleThreadOnly,
+        walicord_i18n::settlement_thread_only_message()
+    )]
+    fn route_error_maps_to_user_message(#[case] error: LedgerRouteError, #[case] expected: &str) {
+        assert_eq!(error.user_message(), expected);
     }
 
     #[test]

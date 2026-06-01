@@ -79,16 +79,6 @@ impl LedgerIdIssuer {
     }
 }
 
-#[cfg(feature = "legacy-discord-ledger")]
-pub mod legacy_discord_ledger {
-    use super::LedgerId;
-    use std::num::NonZeroU64;
-
-    pub fn ledger_id_from_channel_id(value: NonZeroU64) -> LedgerId {
-        LedgerId(value)
-    }
-}
-
 fn mix(salt: u64, counter: u64) -> u64 {
     salt.wrapping_add(counter).wrapping_mul(0x9E3779B97F4A7C15)
 }

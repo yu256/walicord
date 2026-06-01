@@ -181,6 +181,14 @@ pub fn slash_settle_description() -> &'static str {
     }
 }
 
+pub fn settlement_thread_only_message() -> &'static str {
+    if cfg!(feature = "ja") {
+        "/settle は台帳スレッドで実行してください。"
+    } else {
+        "Run /settle in the ledger thread."
+    }
+}
+
 pub fn slash_void_description() -> &'static str {
     if cfg!(feature = "ja") {
         "このチャンネルで最近の記録を取り消します。"

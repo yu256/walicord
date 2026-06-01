@@ -22,8 +22,6 @@ pub use projection::{
 };
 #[cfg(feature = "canonical-attachment-codec")]
 pub use record::CanonicalLedgerId;
-#[cfg(feature = "legacy-discord-ledger")]
-pub use record::legacy_discord_ledger;
 #[cfg(feature = "test-fixtures")]
 pub use record::test_fixtures;
 pub use record::{

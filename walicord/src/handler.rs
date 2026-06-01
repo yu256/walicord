@@ -103,13 +103,6 @@ struct SlashQueryInput<'a> {
     command_name: &'a str,
 }
 
-fn is_ledger_poc_command(command_name: &str) -> bool {
-    matches!(
-        command_name,
-        "panel" | "expense" | "review" | "settle" | "void" | "ledger"
-    )
-}
-
 fn format_program_parse_error_reply(
     error: ProgramParseError<'_>,
     diagnostics: &RoleVisibilityDiagnostics,
@@ -181,11 +174,7 @@ where
     CS: ChannelService,
     RP: RosterProvider,
 {
-    ledger_poc: crate::discord::ledger::DiscordLedgerPoc,
-    /// New-pipeline router. Built lazily in `ready` once the bot user id is known
-    /// (required by `WriterLineagePolicy`); `interaction_create` reads through this
-    /// router first and falls back to the legacy `ledger_poc` only when the router
-    /// reports `Ignored` (criterion-13 / 94 fall-through preserved).
+    /// Built lazily in `ready` once the bot user id is known.
     ledger_router: std::sync::OnceLock<Arc<crate::discord::ledger::LedgerRouter>>,
     message_cache: MessageCache,
     channel_service: CS,
@@ -207,9 +196,6 @@ where
         channel_manager: ChannelManager,
     ) -> Self {
         Self {
-            ledger_poc: crate::discord::ledger::DiscordLedgerPoc::new_with_planner(Arc::new(
-                HighsSettlementPlanner,
-            )),
             ledger_router: std::sync::OnceLock::new(),
             message_cache,
             channel_service,
@@ -941,12 +927,10 @@ where
         }
     }
 
-    /// Dispatch an incoming interaction through the new-pipeline router. Returns
+    /// Dispatch an incoming interaction through the ledger router. Returns
     /// `Some(Handled)` when the router took ownership, `Some(Ignored)` when it
-    /// declined (legacy handler should run), and `None` for variants the router
-    /// does not yet observe (autocomplete, etc.). Router errors are logged and
-    /// treated as `Handled` so the actor sees the router's typed error path
-    /// rather than re-entering the legacy handler with half-consumed state.
+    /// declined, and `None` for variants the router does not observe. Router errors
+    /// are logged and treated as `Handled` so the actor sees the typed error path.
     async fn dispatch_through_ledger_router(
         &self,
         router: &crate::discord::ledger::LedgerRouter,
@@ -1032,29 +1016,17 @@ where
         }
     }
 
-    /// Build the new-pipeline [`LedgerRouter`] now that the bot user id is known
-    /// (required by `WriterLineagePolicy::load`) and store it for `interaction_create`
-    /// to read. Initialization failure is logged and the router stays `None`; the
-    /// legacy `ledger_poc` continues to handle every interaction in that case, so the
-    /// bot keeps serving rather than hard-failing on startup.
+    /// Build the [`LedgerRouter`] now that the bot user id is known.
     fn initialize_ledger_router(
         &self,
         bot_user_id: serenity::all::UserId,
         http: Arc<serenity::http::Http>,
     ) {
-        let writer_lineage = match crate::discord::ledger::WriterLineagePolicy::load(
+        let writer_lineage = crate::discord::ledger::WriterLineagePolicy::load(
             Some(bot_user_id),
             Some(std::iter::once(bot_user_id)),
-        ) {
-            Ok(policy) => policy,
-            Err(error) => {
-                tracing::error!(
-                    "ledger router writer lineage policy failed to load: {}",
-                    error
-                );
-                return;
-            }
-        };
+        )
+        .expect("active writer is included in the configured lineage");
         let observability: Arc<
             dyn walicord_application::ledger::observability::LedgerObservability,
         > = Arc::new(crate::discord::ledger::TracingLedgerObservability);
@@ -1271,13 +1243,6 @@ where
     }
 
     async fn ready(&self, ctx: Context, ready: Ready) {
-        if let Err(error) = self.ledger_poc.ensure_single_process_runtime().await {
-            tracing::error!(
-                "discord ledger PoC requires single-process deployment; startup lock failed: {}",
-                error
-            );
-            std::process::exit(1);
-        }
         tracing::info!("Connected as {}", ready.user.name);
         self.initialize_enabled_channels(&ctx, &ready).await;
         self.initialize_ledger_router(ready.user.id, Arc::clone(&ctx.http));
@@ -1294,128 +1259,19 @@ where
         ctx: Context,
         interaction: serenity::model::application::Interaction,
     ) {
-        if let Some(router) = self.ledger_router.get()
-            && let Some(dispatch) = self
-                .dispatch_through_ledger_router(router, &ctx, &interaction)
-                .await
-            && matches!(
-                dispatch,
-                crate::discord::ledger::InteractionDispatch::Handled
-            )
-        {
+        let Some(router) = self.ledger_router.get() else {
+            tracing::error!("ledger router is not initialized");
+            return;
+        };
+        if matches!(
+            self.dispatch_through_ledger_router(router, &ctx, &interaction)
+                .await,
+            Some(crate::discord::ledger::InteractionDispatch::Handled)
+        ) {
             return;
         }
-        match interaction {
-            serenity::model::application::Interaction::Command(ref command) => {
-                let Ok(scoped_channel_id) = self
-                    .resolve_slash_scope_channel_id(&ctx, command.channel_id)
-                    .await
-                else {
-                    return;
-                };
-                let ledger_command_in_tracked_scope =
-                    is_ledger_poc_command(command.data.name.as_str())
-                        && self
-                            .channel_manager
-                            .get_tracked(scoped_channel_id)
-                            .is_some();
-                if command.data.name == "review" {
-                    if ledger_command_in_tracked_scope
-                        && self
-                            .ledger_poc
-                            .handle_review_command(&ctx, command, &self.roster_provider)
-                            .await
-                    {
-                        return;
-                    }
-                    self.handle_slash_command_with_defer(&ctx, command, false)
-                        .await;
-                    return;
-                }
-                if is_ledger_poc_command(command.data.name.as_str())
-                    && !ledger_command_in_tracked_scope
-                {
-                    let _ = command
-                        .create_response(
-                            &ctx.http,
-                            serenity::builder::CreateInteractionResponse::Message(
-                                safe_interaction_response_message()
-                                    .content(walicord_i18n::CHANNEL_NOT_TRACKED)
-                                    .ephemeral(true),
-                            ),
-                        )
-                        .await;
-                    return;
-                }
-                if self
-                    .ledger_poc
-                    .handle_command(&ctx, command, &self.roster_provider)
-                    .await
-                {
-                    return;
-                }
-                self.handle_slash_command(&ctx, command).await;
-            }
-            serenity::model::application::Interaction::Component(ref component) => {
-                if crate::discord::ledger::is_ledger_component_id(component.data.custom_id.as_str())
-                {
-                    let scoped_channel_id = self
-                        .resolve_slash_scope_channel_id(&ctx, component.channel_id)
-                        .await
-                        .unwrap_or(component.channel_id);
-                    if self
-                        .channel_manager
-                        .get_tracked(scoped_channel_id)
-                        .is_none()
-                    {
-                        let _ = component
-                            .create_response(
-                                &ctx.http,
-                                serenity::builder::CreateInteractionResponse::Message(
-                                    safe_interaction_response_message()
-                                        .content(walicord_i18n::CHANNEL_NOT_TRACKED)
-                                        .ephemeral(true),
-                                ),
-                            )
-                            .await;
-                        return;
-                    }
-                }
-                let _ = self
-                    .ledger_poc
-                    .handle_component(&ctx, component, &self.roster_provider)
-                    .await;
-            }
-            serenity::model::application::Interaction::Modal(ref modal) => {
-                if crate::discord::ledger::is_ledger_modal_id(modal.data.custom_id.as_str()) {
-                    let scoped_channel_id = self
-                        .resolve_slash_scope_channel_id(&ctx, modal.channel_id)
-                        .await
-                        .unwrap_or(modal.channel_id);
-                    if self
-                        .channel_manager
-                        .get_tracked(scoped_channel_id)
-                        .is_none()
-                    {
-                        let _ = modal
-                            .create_response(
-                                &ctx.http,
-                                serenity::builder::CreateInteractionResponse::Message(
-                                    safe_interaction_response_message()
-                                        .content(walicord_i18n::CHANNEL_NOT_TRACKED)
-                                        .ephemeral(true),
-                                ),
-                            )
-                            .await;
-                        return;
-                    }
-                }
-                let _ = self
-                    .ledger_poc
-                    .handle_modal(&ctx, modal, &self.roster_provider)
-                    .await;
-            }
-            _ => {}
+        if let serenity::model::application::Interaction::Command(ref command) = interaction {
+            self.handle_slash_command(&ctx, command).await;
         }
     }
 
@@ -1885,15 +1741,6 @@ mod tests {
             slash_scope_channel_id(channel_id, kind, parent_id),
             expected
         );
-    }
-
-    #[rstest]
-    #[case("panel", true)]
-    #[case("expense", true)]
-    #[case("review", true)]
-    #[case("variables", false)]
-    fn is_ledger_poc_command_cases(#[case] command_name: &str, #[case] expected: bool) {
-        assert_eq!(is_ledger_poc_command(command_name), expected);
     }
 
     #[rstest]

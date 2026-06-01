@@ -84,15 +84,6 @@ impl std::fmt::Display for InteractionNonce {
     }
 }
 
-#[cfg(feature = "legacy-discord-ledger")]
-pub mod legacy_discord_ledger {
-    use super::InteractionNonce;
-
-    pub fn interaction_nonce_u64(nonce: InteractionNonce) -> u64 {
-        nonce.0.get()
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum InteractionNonceError {
     #[error("interaction nonce must be non-zero")]

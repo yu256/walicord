@@ -5,11 +5,10 @@ edition = "2024"
 license = "MIT"
 
 [dependencies]
-walicord-application = { path = "../walicord-application", features = ["legacy-discord-ledger"] }
+walicord-application = { path = "../walicord-application" }
 walicord-domain = { path = "../walicord-domain" }
 walicord-infrastructure = { path = "../walicord-infrastructure", default-features = false }
 walicord-i18n = { path = "../walicord-i18n" }
-walicord-ledger = { path = "../walicord-ledger", features = ["canonical-attachment-codec", "legacy-discord-ledger"] }
 walicord-parser = { path = "../walicord-parser" }
 walicord-presentation = { path = "../walicord-presentation" }
 serenity = { version = "0.12.5", features = ["client", "gateway", "model", "framework", "standard_framework", "rustls_backend"] }
@@ -27,17 +26,13 @@ futures = "0.3.31"
 smallvec = "1.15.1"
 arcstr = "1.2.0"
 smol_str = "0.3.5"
-serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-rust_decimal = "1.36.0"
-fs2 = "0.4.3"
-chrono = { version = "0.4", features = ["clock"] }
 sha2 = "0.10"
 
 [dev-dependencies]
 insta = "1"
 rstest = "0.26.1"
-walicord-ledger = { path = "../walicord-ledger", features = ["canonical-attachment-codec", "legacy-discord-ledger", "test-fixtures"] }
+walicord-ledger = { path = "../walicord-ledger", features = ["test-fixtures"] }
 
 [features]
 default = ["ja"]

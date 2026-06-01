@@ -10,7 +10,6 @@ walicord-domain = { path = "../walicord-domain" }
 
 [features]
 canonical-attachment-codec = ["dep:serde"]
-legacy-discord-ledger = []
 test-fixtures = []
 
 [lints]
