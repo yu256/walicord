@@ -167,7 +167,14 @@ pub(crate) fn render_panel_post_message_for_locator_state(
         Some(CanonicalThreadLocatorState::ReadyNoThread { .. }) => {
             render_panel_post_message(None, bootstrap_uncertain_write)
         }
-        Some(CanonicalThreadLocatorState::ReadyBound(binding)) => render_panel_post_message(
+        Some(CanonicalThreadLocatorState::ReadyEmptyThread {
+            canonical_thread_id,
+            ..
+        }) => render_panel_post_message(Some(*canonical_thread_id), bootstrap_uncertain_write),
+        Some(
+            CanonicalThreadLocatorState::Provisioned(binding)
+            | CanonicalThreadLocatorState::ReadyBound(binding),
+        ) => render_panel_post_message(
             Some(binding.canonical_thread_id()),
             bootstrap_uncertain_write,
         ),
@@ -342,6 +349,7 @@ mod tests {
         let ready = CanonicalThreadLocatorState::ReadyBound(CanonicalThreadBinding::new(
             tracked_parent,
             ChannelId::new(77),
+            walicord_ledger::test_fixtures::ledger_id(88),
         ));
 
         assert_eq!(

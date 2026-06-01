@@ -1,3 +1,4 @@
+use dashmap::DashMap;
 use serenity::{
     all::{
         ChannelId, CommandInteraction, ComponentInteraction, ComponentInteractionDataKind,
@@ -7,17 +8,18 @@ use serenity::{
     prelude::Context,
 };
 use std::{borrow::Cow, collections::HashMap, sync::Arc};
+use tokio::sync::Mutex;
 use walicord_application::{
-    Clock, NonceProvider, SettlementPlanner,
+    Clock, LedgerIdProvider, NonceProvider, SettlementPlanner,
     ledger::{
         DiscordLedgerSourceDescriptor, ExpenseAuthoringError, LedgerEntry, LedgerEntryId, LedgerId,
         UnverifiedLedgerStoreEnvelope,
         expense_session::{
-            ExpenseConfirmationSnapshot, ExpenseDraftSnapshot, ExpenseParticipantSelection,
-            ExpenseSelectionPhase, ExpenseSession, ExpenseSessionConstructionError,
-            ExpenseSessionKey, ExpenseSessionStage, ExpenseSessionStore, ModalRetryBinding,
-            ModalRetryBindingStore, ModalRetryPreserved, SessionAccessError, VoidSession,
-            VoidSessionKey, VoidSessionStage, VoidSessionStore,
+            ExpenseConfirmationSnapshot, ExpenseDraftScopeId, ExpenseDraftSnapshot,
+            ExpenseParticipantSelection, ExpenseSelectionPhase, ExpenseSession,
+            ExpenseSessionConstructionError, ExpenseSessionKey, ExpenseSessionStage,
+            ExpenseSessionStore, ModalRetryBinding, ModalRetryBindingStore, ModalRetryPreserved,
+            SessionAccessError, VoidSession, VoidSessionKey, VoidSessionStage, VoidSessionStore,
         },
         participant_resolution::{ParticipantDrift, RosterSnapshot},
     },
@@ -26,13 +28,12 @@ use walicord_domain::model::MemberId;
 use walicord_i18n as i18n;
 use walicord_presentation::discord_ledger::{
     BusinessDateTime, DiscordLedgerPresenter, ExpenseConfirmationButtonIds,
-    ExpenseSelectionStepButtonIds, LedgerPageInputs, PanelButtonStates, PanelSurfaceModel,
-    PublicCanonicalMessageModel, PublicSettlementMessageModel, PublicVoidMessageModel,
-    ReadViewBuildError, ReadViewPageModel, ReadViewRoute, RecoveryCta, RecoveryReference,
-    RenderBudgetError, SurfaceActionRow, SurfaceButton, SurfaceInteractiveButtonStyle,
-    SurfaceMemberLabels, SurfaceSelectMenu, SurfaceSelectOption, TransferRow, VoidCandidateRow,
-    VoidConfirmationRecap, VoidRetargetReason, VoidSurfaceModel,
-    build_expense_confirmation_surface, build_expense_selection_step_surface,
+    ExpenseSelectionStepButtonIds, LedgerPageInputs, PublicCanonicalMessageModel,
+    PublicSettlementMessageModel, PublicVoidMessageModel, ReadViewBuildError, ReadViewPageModel,
+    ReadViewRoute, RecoveryCta, RecoveryReference, RenderBudgetError, SurfaceActionRow,
+    SurfaceButton, SurfaceInteractiveButtonStyle, SurfaceMemberLabels, SurfaceSelectMenu,
+    SurfaceSelectOption, TransferRow, VoidCandidateRow, VoidConfirmationRecap, VoidRetargetReason,
+    VoidSurfaceModel, build_expense_confirmation_surface, build_expense_selection_step_surface,
     build_ledger_empty_page_model, build_ledger_page_model, build_review_empty_page_model,
     build_review_no_transfers_page_model, build_review_page_model, paginate_read_view_model,
     summary_for_view,
@@ -41,18 +42,25 @@ use walicord_presentation::discord_ledger::{
 use crate::channel::ChannelManager;
 
 use super::{
+    adapters::DiscordCanonicalThreadLocator,
     expense_modal_open::{
         ExpenseModalBuildError, ExpenseModalCustomIdMatch, ExpenseModalPrefill,
         build_expense_modal_response, extract_raw_expense_modal_submission,
         parse_expense_modal_custom_id,
     },
+    locator::{
+        CanonicalThreadBinding, CanonicalThreadLocatorState, LocatorError, TrackedParentKey,
+    },
     observability::DiscordLedgerObservability,
     panel::{
         LEDGER_PANEL_EXPENSE_ID, LEDGER_PANEL_LEDGER_ID, LEDGER_PANEL_REVIEW_ID,
-        LEDGER_PANEL_VOID_ID,
+        LEDGER_PANEL_VOID_ID, render_panel_post_message_for_locator_state,
     },
     response_writer::{rendered_surface_to_message, suppressed_allowed_mentions},
-    route_guard::{LedgerInteractionGuardError, guard_ledger_interaction},
+    route_guard::{
+        LedgerInteractionGuardError, LedgerInteractionScope,
+        guard_ledger_interaction_resolving_parent,
+    },
     store::{
         DiscordCanonicalLedgerStore, StoreLoadError, StoreWriteError, VerifiedLedgerThreadLoad,
     },
@@ -69,7 +77,10 @@ use walicord_application::ledger::{
         ExpenseWriteOrchestrationError, RecordTimeOutcome, build_canonical_envelope,
         compose_expense_entry,
     },
-    preview_store::{PreviewStore, PreviewStoreError, PreviewStoreKey, PreviewStoreTransition},
+    preview_store::{
+        PreviewCommitGuard, PreviewStore, PreviewStoreError, PreviewStoreKey,
+        PreviewStoreTransition,
+    },
     projection::{VerifiedLedgerEntryView, project_verified_entries},
     read_view_session::{ReadViewSession, ReadViewSessionKey, ReadViewSessionStore},
     settle_flow::{
@@ -93,9 +104,12 @@ use walicord_application::ledger::{
 pub struct LedgerRouterDependencies {
     pub clock: Arc<dyn Clock>,
     pub nonce_provider: Arc<dyn NonceProvider>,
+    pub ledger_id_provider: Arc<dyn LedgerIdProvider>,
     pub channels: Arc<ChannelManager>,
     pub roster_fetcher: Arc<dyn RouterRosterFetcher>,
     pub thread_loader: Arc<dyn LedgerThreadLoader>,
+    pub locator: Arc<DiscordCanonicalThreadLocator>,
+    pub thread_creator: Arc<dyn LedgerCanonicalThreadCreator>,
     pub expense_sessions: Arc<ExpenseSessionStore>,
     pub void_sessions: Arc<VoidSessionStore>,
     pub modal_retries: Arc<ModalRetryBindingStore>,
@@ -119,6 +133,15 @@ pub trait LedgerThreadLoader: Send + Sync {
         canonical_thread_id: ChannelId,
         ledger_id: LedgerId,
     ) -> Result<VerifiedLedgerThreadLoad, StoreLoadError>;
+}
+
+#[async_trait]
+pub trait LedgerCanonicalThreadCreator: Send + Sync {
+    async fn create(
+        &self,
+        ctx: &Context,
+        tracked_parent_channel_id: ChannelId,
+    ) -> Result<ChannelId, serenity::Error>;
 }
 
 /// Roster snapshot the router needs at confirmation rebuild / record time. Combines the
@@ -178,6 +201,32 @@ pub enum LedgerRouteError {
     Internal(#[from] InternalLedgerRouteError),
 }
 
+impl LedgerRouteError {
+    pub fn user_message(&self) -> &str {
+        match self {
+            Self::GuildOnly => i18n::guild_only_command_message(),
+            Self::NotInTrackedChannel => i18n::CHANNEL_NOT_TRACKED,
+            Self::Permission(message) => message,
+            Self::Internal(InternalLedgerRouteError::ThreadLookup(LocatorError::Fetch {
+                ..
+            }))
+            | Self::Internal(InternalLedgerRouteError::ThreadLoad(StoreLoadError::Fetch(_))) => {
+                i18n::ledger_retryable_load_message()
+            }
+            Self::Internal(InternalLedgerRouteError::ThreadLookup(LocatorError::Permission {
+                ..
+            }))
+            | Self::Internal(InternalLedgerRouteError::ThreadLoad(StoreLoadError::Permission(_))) => {
+                i18n::ledger_permission_failed_message()
+            }
+            Self::Internal(InternalLedgerRouteError::ExistingLedgerNotReady) => {
+                i18n::ledger_thread_prepare_failed_message()
+            }
+            Self::Internal(_) => i18n::ledger_thread_prepare_failed_message(),
+        }
+    }
+}
+
 /// Closed enumeration of every internal failure the router can encounter. Each variant
 /// carries the underlying cause as a typed value (no `format!` at the error site);
 /// thiserror's `Display` composes the message at the boundary. `#[from]` on the
@@ -203,6 +252,15 @@ pub enum InternalLedgerRouteError {
     ExpenseWriteOrchestration(#[from] ExpenseWriteOrchestrationError),
     #[error("canonical thread load: {0}")]
     ThreadLoad(#[from] StoreLoadError),
+    #[error("canonical thread lookup: {0}")]
+    ThreadLookup(#[from] LocatorError),
+    #[error("canonical thread lookup did not resolve an existing ledger")]
+    ExistingLedgerNotReady,
+    #[error("interaction channel scope lookup failed for {observed}: {message}")]
+    ChannelScopeLookup {
+        observed: ChannelId,
+        message: String,
+    },
     #[error("canonical thread write: {0}")]
     ThreadWrite(#[from] StoreWriteError),
     #[error("projection consistency: {0}")]
@@ -247,6 +305,9 @@ impl From<LedgerInteractionGuardError> for LedgerRouteError {
         match error {
             LedgerInteractionGuardError::GuildOnly => Self::GuildOnly,
             LedgerInteractionGuardError::NotInTrackedChannel { .. } => Self::NotInTrackedChannel,
+            LedgerInteractionGuardError::ChannelScopeLookup { observed, message } => {
+                Self::Internal(InternalLedgerRouteError::ChannelScopeLookup { observed, message })
+            }
         }
     }
 }
@@ -349,6 +410,12 @@ impl From<ExpenseWriteOrchestrationError> for LedgerRouteError {
 
 impl From<StoreLoadError> for LedgerRouteError {
     fn from(error: StoreLoadError) -> Self {
+        Self::Internal(error.into())
+    }
+}
+
+impl From<LocatorError> for LedgerRouteError {
+    fn from(error: LocatorError) -> Self {
         Self::Internal(error.into())
     }
 }
@@ -485,6 +552,10 @@ pub enum DiscordCallSite {
     ExpenseConfirmationCreateResponse,
     #[error("expense record success ack")]
     ExpenseRecordSuccessAck,
+    #[error("expense uncertain-write reply")]
+    ExpenseUncertainWriteReply,
+    #[error("canonical thread create")]
+    CanonicalThreadCreate,
     #[error("ledger defer ephemeral")]
     LedgerDeferEphemeral,
     #[error("ledger edit response")]
@@ -511,15 +582,117 @@ pub enum DiscordCallSite {
 
 pub struct LedgerRouter {
     deps: LedgerRouterDependencies,
+    bootstrap_locks: DashMap<TrackedParentKey, Arc<Mutex<()>>>,
 }
 
 impl LedgerRouter {
     pub fn new(deps: LedgerRouterDependencies) -> Self {
-        Self { deps }
+        Self {
+            deps,
+            bootstrap_locks: DashMap::new(),
+        }
     }
 
     pub fn deps(&self) -> &LedgerRouterDependencies {
         &self.deps
+    }
+
+    async fn guard_scope(
+        &self,
+        ctx: &Context,
+        guild_id: Option<GuildId>,
+        interaction_channel_id: ChannelId,
+    ) -> Result<LedgerInteractionScope, LedgerInteractionGuardError> {
+        guard_ledger_interaction_resolving_parent(
+            ctx,
+            guild_id,
+            interaction_channel_id,
+            self.deps.channels.as_ref(),
+        )
+        .await
+    }
+
+    async fn resolve_existing_ledger(
+        &self,
+        ctx: &Context,
+        scope: super::route_guard::LedgerInteractionScope,
+    ) -> Result<CanonicalThreadBinding, LedgerRouteError> {
+        match self
+            .deps
+            .locator
+            .resolve(ctx, scope.tracked_parent())
+            .await?
+        {
+            CanonicalThreadLocatorState::Provisioned(binding)
+            | CanonicalThreadLocatorState::ReadyBound(binding) => Ok(binding),
+            CanonicalThreadLocatorState::ReadyNoThread { .. }
+            | CanonicalThreadLocatorState::ReadyEmptyThread { .. }
+            | CanonicalThreadLocatorState::DuplicateBlocked { .. }
+            | CanonicalThreadLocatorState::DamagedBlocked { .. } => Err(
+                LedgerRouteError::Internal(InternalLedgerRouteError::ExistingLedgerNotReady),
+            ),
+        }
+    }
+
+    async fn resolve_or_bootstrap_expense_ledger(
+        &self,
+        ctx: &Context,
+        scope: super::route_guard::LedgerInteractionScope,
+    ) -> Result<CanonicalThreadBinding, LedgerRouteError> {
+        let tracked_parent = scope.tracked_parent();
+        if let Some(binding) = self
+            .deps
+            .locator
+            .cached(tracked_parent)
+            .and_then(|state| state.binding())
+        {
+            return Ok(binding);
+        }
+        let lock = self
+            .bootstrap_locks
+            .entry(tracked_parent)
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone();
+        let _guard = lock.lock().await;
+        if let Some(binding) = self
+            .deps
+            .locator
+            .cached(tracked_parent)
+            .and_then(|state| state.binding())
+        {
+            return Ok(binding);
+        }
+        match self.deps.locator.refresh(ctx, tracked_parent).await? {
+            CanonicalThreadLocatorState::ReadyBound(binding) => Ok(binding),
+            CanonicalThreadLocatorState::Provisioned(binding) => Ok(binding),
+            CanonicalThreadLocatorState::ReadyEmptyThread {
+                canonical_thread_id,
+                ..
+            } => {
+                let ledger_id = self.deps.ledger_id_provider.next_ledger_id();
+                let binding =
+                    CanonicalThreadBinding::new(tracked_parent, canonical_thread_id, ledger_id);
+                self.deps.locator.replace_with_provisioned_binding(binding);
+                Ok(binding)
+            }
+            CanonicalThreadLocatorState::ReadyNoThread { .. } => {
+                let ledger_id = self.deps.ledger_id_provider.next_ledger_id();
+                let canonical_thread_id = self
+                    .deps
+                    .thread_creator
+                    .create(ctx, scope.channel_id())
+                    .await
+                    .map_err(discord_call_error(DiscordCallSite::CanonicalThreadCreate))?;
+                let binding =
+                    CanonicalThreadBinding::new(tracked_parent, canonical_thread_id, ledger_id);
+                self.deps.locator.replace_with_provisioned_binding(binding);
+                Ok(binding)
+            }
+            CanonicalThreadLocatorState::DuplicateBlocked { .. }
+            | CanonicalThreadLocatorState::DamagedBlocked { .. } => Err(
+                LedgerRouteError::Internal(InternalLedgerRouteError::ExistingLedgerNotReady),
+            ),
+        }
     }
 
     /// Slash-command dispatch. Returns `Ignored` for commands the router does not
@@ -550,23 +723,20 @@ impl LedgerRouter {
         ctx: &Context,
         command: &CommandInteraction,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
-        let _scope = guard_ledger_interaction(
-            command.guild_id,
-            command.channel_id,
-            self.deps.channels.as_ref(),
-        )
-        .map_err(LedgerRouteError::from)?;
-
-        let model = PanelSurfaceModel {
-            thread_cue: walicord_i18n::panel_thread_cue_pending().to_owned(),
-            status_line: None,
-            button_states: PanelButtonStates::default(),
-            ephemeral: false,
-        };
-        let rendered = DiscordLedgerPresenter::render_panel(&model).map_err(|error| {
-            LedgerRouteError::Internal(InternalLedgerRouteError::PanelRender(error))
-        })?;
-        let (body, components) = rendered_surface_to_message(rendered);
+        let scope = self
+            .guard_scope(ctx, command.guild_id, command.channel_id)
+            .await
+            .map_err(LedgerRouteError::from)?;
+        let locator_state = self
+            .deps
+            .locator
+            .refresh(ctx, scope.tracked_parent())
+            .await?;
+        let (body, components) =
+            match render_panel_post_message_for_locator_state(Some(&locator_state), false) {
+                Ok(rendered) => rendered,
+                Err(message) => message.into_parts(),
+            };
         let response = CreateInteractionResponse::Message(
             CreateInteractionResponseMessage::new()
                 .content(body)
@@ -585,17 +755,19 @@ impl LedgerRouter {
         ctx: &Context,
         command: &CommandInteraction,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
-        let scope = match guard_ledger_interaction(
-            command.guild_id,
-            command.channel_id,
-            self.deps.channels.as_ref(),
-        ) {
+        let scope = match self
+            .guard_scope(ctx, command.guild_id, command.channel_id)
+            .await
+        {
             Ok(scope) => scope,
             Err(LedgerInteractionGuardError::NotInTrackedChannel { .. }) => {
                 return Ok(InteractionDispatch::Ignored);
             }
             Err(error) => return Err(LedgerRouteError::from(error)),
         };
+        if !scope.is_thread_interaction() {
+            return Ok(InteractionDispatch::Ignored);
+        }
         self.dispatch_review(
             ctx,
             scope,
@@ -615,10 +787,12 @@ impl LedgerRouter {
         interaction
             .defer(ctx, DiscordCallSite::ReviewDeferEphemeral)
             .await?;
+        let binding = self.resolve_existing_ledger(ctx, scope).await?;
+        let ledger_id = binding.ledger_id();
         let load = self
             .deps
             .thread_loader
-            .load(ctx, scope.channel_id(), scope.ledger_id())
+            .load(ctx, binding.canonical_thread_id(), ledger_id)
             .await?;
         let roster = self
             .deps
@@ -634,7 +808,7 @@ impl LedgerRouter {
         let views = project_verified_entries(&load).map_err(LedgerRouteError::from)?;
 
         let mut stored_preview_instance_id = None;
-        let key = PreviewStoreKey::new(scope.ledger_id(), MemberId(interaction.user_id().get()));
+        let key = PreviewStoreKey::new(ledger_id, MemberId(interaction.user_id().get()));
         let prior_preview_instance_id = self
             .deps
             .preview_store
@@ -655,7 +829,7 @@ impl LedgerRouter {
             let actor_id = MemberId(interaction.user_id().get());
             match compose_and_store_preview(
                 load.snapshot(),
-                scope.ledger_id(),
+                ledger_id,
                 actor_id,
                 self.deps.planner.as_ref(),
                 self.deps.clock.as_ref(),
@@ -723,7 +897,7 @@ impl LedgerRouter {
         let actor_id = MemberId(interaction.user_id().get());
         self.deps.read_view_sessions.replace(ReadViewSession::new(
             ReadViewSessionKey {
-                ledger_id: scope.ledger_id(),
+                ledger_id,
                 actor_id,
             },
             nonce,
@@ -754,24 +928,27 @@ impl LedgerRouter {
         ctx: &Context,
         command: &CommandInteraction,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
-        let scope = match guard_ledger_interaction(
-            command.guild_id,
-            command.channel_id,
-            self.deps.channels.as_ref(),
-        ) {
+        let scope = match self
+            .guard_scope(ctx, command.guild_id, command.channel_id)
+            .await
+        {
             Ok(scope) => scope,
             Err(LedgerInteractionGuardError::NotInTrackedChannel { .. }) => {
                 return Ok(InteractionDispatch::Ignored);
             }
             Err(error) => return Err(LedgerRouteError::from(error)),
         };
+        if !scope.is_thread_interaction() {
+            return Ok(InteractionDispatch::Ignored);
+        }
 
         command
             .defer_ephemeral(&ctx.http)
             .await
             .map_err(discord_call_error(DiscordCallSite::SettleDeferEphemeral))?;
 
-        let ledger_id = scope.ledger_id();
+        let binding = self.resolve_existing_ledger(ctx, scope).await?;
+        let ledger_id = binding.ledger_id();
         let actor_id = MemberId(command.user.id.get());
         let key = PreviewStoreKey::new(ledger_id, actor_id);
         if self.deps.uncertain_writes.current(ledger_id).is_some() {
@@ -787,11 +964,21 @@ impl LedgerRouter {
 
         let lock = self.deps.write_coordinator.lock_for(ledger_id);
         let _guard = lock.lock().await;
+        if self.deps.uncertain_writes.current(ledger_id).is_some() {
+            return self
+                .edit_command_response(
+                    ctx,
+                    command,
+                    uncertain_write_block_message(false, true),
+                    DiscordCallSite::SettleEditResponse,
+                )
+                .await;
+        }
 
         let load = self
             .deps
             .thread_loader
-            .load(ctx, scope.channel_id(), ledger_id)
+            .load(ctx, binding.canonical_thread_id(), ledger_id)
             .await?;
         let next_entry_id =
             LedgerEntryId((load.snapshot().canonical_entry_count() as u64).saturating_add(1));
@@ -810,22 +997,6 @@ impl LedgerRouter {
                 )
                 .await;
         };
-        if let Err(error) = self.deps.preview_store.transition(
-            key,
-            PreviewStoreTransition::BeginCommit {
-                preview_instance_id,
-            },
-        ) {
-            return self
-                .edit_command_response(
-                    ctx,
-                    command,
-                    settle_attempt_error_message(&SettleAttemptError::Store(error)),
-                    DiscordCallSite::SettleEditResponse,
-                )
-                .await;
-        }
-
         let outcome = match compose_settlement_entry_from_preview(
             load.snapshot(),
             ledger_id,
@@ -844,13 +1015,6 @@ impl LedgerRouter {
                             preview_instance_id,
                         },
                     );
-                } else {
-                    let _ = self.deps.preview_store.transition(
-                        key,
-                        PreviewStoreTransition::AbortCommit {
-                            preview_instance_id,
-                        },
-                    );
                 }
                 return self
                     .edit_command_response(
@@ -866,7 +1030,7 @@ impl LedgerRouter {
         let SettleAttemptOutcome::RecordableEntry { entry, envelope } = outcome else {
             self.deps.preview_store.transition(
                 key,
-                PreviewStoreTransition::FinishCommit {
+                PreviewStoreTransition::ClearMatching {
                     preview_instance_id,
                 },
             )?;
@@ -904,26 +1068,44 @@ impl LedgerRouter {
             prepared_body.clone(),
             short_summary_for_entry(&entry),
         );
-        self.deps.uncertain_writes.set_live(retained).map_err(|_| {
-            LedgerRouteError::Internal(InternalLedgerRouteError::UncertainWriteAlreadyLive {
-                ledger_id,
-            })
-        })?;
+        let preview_commit = match PreviewCommitGuard::begin(
+            self.deps.preview_store.as_ref(),
+            key,
+            preview_instance_id,
+        ) {
+            Ok(preview_commit) => preview_commit,
+            Err(error) => {
+                return self
+                    .edit_command_response(
+                        ctx,
+                        command,
+                        settle_attempt_error_message(&SettleAttemptError::Store(error)),
+                        DiscordCallSite::SettleEditResponse,
+                    )
+                    .await;
+            }
+        };
+        if self.deps.uncertain_writes.set_live(retained).is_err() {
+            return Err(LedgerRouteError::Internal(
+                InternalLedgerRouteError::UncertainWriteAlreadyLive { ledger_id },
+            ));
+        }
 
         let append_result = self
             .deps
             .canonical_store
-            .append_authoritative(ctx, scope.channel_id(), &envelope, prepared_body.as_str())
+            .append_authoritative(
+                ctx,
+                binding.canonical_thread_id(),
+                &envelope,
+                prepared_body.as_str(),
+            )
             .await;
         match append_result {
             Ok(_verified) => {
+                self.deps.locator.replace_with_ready_binding(binding);
                 self.deps.uncertain_writes.clear(ledger_id);
-                self.deps.preview_store.transition(
-                    key,
-                    PreviewStoreTransition::FinishCommit {
-                        preview_instance_id,
-                    },
-                )?;
+                preview_commit.finish()?;
                 self.edit_command_response(
                     ctx,
                     command,
@@ -933,12 +1115,6 @@ impl LedgerRouter {
                 .await
             }
             Err(_error) => {
-                let _ = self.deps.preview_store.transition(
-                    key,
-                    PreviewStoreTransition::AbortCommit {
-                        preview_instance_id,
-                    },
-                );
                 self.edit_command_response(
                     ctx,
                     command,
@@ -955,11 +1131,10 @@ impl LedgerRouter {
         ctx: &Context,
         command: &CommandInteraction,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
-        let scope = match guard_ledger_interaction(
-            command.guild_id,
-            command.channel_id,
-            self.deps.channels.as_ref(),
-        ) {
+        let scope = match self
+            .guard_scope(ctx, command.guild_id, command.channel_id)
+            .await
+        {
             Ok(scope) => scope,
             Err(LedgerInteractionGuardError::NotInTrackedChannel { .. }) => {
                 return Ok(InteractionDispatch::Ignored);
@@ -979,12 +1154,9 @@ impl LedgerRouter {
         interaction
             .defer(ctx, DiscordCallSite::VoidDeferEphemeral)
             .await?;
-        if self
-            .deps
-            .uncertain_writes
-            .current(scope.ledger_id())
-            .is_some()
-        {
+        let binding = self.resolve_existing_ledger(ctx, scope).await?;
+        let ledger_id = binding.ledger_id();
+        if self.deps.uncertain_writes.current(ledger_id).is_some() {
             return interaction
                 .edit(
                     ctx,
@@ -998,7 +1170,7 @@ impl LedgerRouter {
         let load = self
             .deps
             .thread_loader
-            .load(ctx, scope.channel_id(), scope.ledger_id())
+            .load(ctx, binding.canonical_thread_id(), ledger_id)
             .await?;
         if load.snapshot().canonical_entry_count() == 0 {
             return self
@@ -1011,7 +1183,7 @@ impl LedgerRouter {
         }
 
         let actor_id = MemberId(interaction.user_id().get());
-        let key = VoidSessionKey::new(scope.ledger_id(), actor_id);
+        let key = VoidSessionKey::new(ledger_id, actor_id);
         let (session, nonce, candidates) = match bootstrap_void_session(
             key,
             &load,
@@ -1046,7 +1218,7 @@ impl LedgerRouter {
                 .iter()
                 .map(|(member_id, name)| (*member_id, Some(name.as_str()))),
         );
-        let rows = void_candidate_rows(&candidates, &labels, scope.ledger_id())?;
+        let rows = void_candidate_rows(&candidates, &labels, ledger_id)?;
         let action_rows = void_selection_action_rows(nonce, &candidates, &labels);
         self.deps.void_sessions.replace(session);
         self.edit_initial_void_model(
@@ -1062,12 +1234,10 @@ impl LedgerRouter {
         ctx: &Context,
         command: &CommandInteraction,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
-        let _scope = guard_ledger_interaction(
-            command.guild_id,
-            command.channel_id,
-            self.deps.channels.as_ref(),
-        )
-        .map_err(LedgerRouteError::from)?;
+        let _scope = self
+            .guard_scope(ctx, command.guild_id, command.channel_id)
+            .await
+            .map_err(LedgerRouteError::from)?;
 
         let nonce = self.deps.nonce_provider.next_interaction_nonce();
         let response = build_expense_modal_response(
@@ -1090,11 +1260,10 @@ impl LedgerRouter {
         ctx: &Context,
         command: &CommandInteraction,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
-        let scope = match guard_ledger_interaction(
-            command.guild_id,
-            command.channel_id,
-            self.deps.channels.as_ref(),
-        ) {
+        let scope = match self
+            .guard_scope(ctx, command.guild_id, command.channel_id)
+            .await
+        {
             Ok(scope) => scope,
             Err(LedgerInteractionGuardError::NotInTrackedChannel { .. }) => {
                 return Ok(InteractionDispatch::Ignored);
@@ -1120,10 +1289,11 @@ impl LedgerRouter {
         interaction
             .defer(ctx, DiscordCallSite::LedgerDeferEphemeral)
             .await?;
+        let binding = self.resolve_existing_ledger(ctx, scope).await?;
         let load = self
             .deps
             .thread_loader
-            .load(ctx, scope.channel_id(), scope.ledger_id())
+            .load(ctx, binding.canonical_thread_id(), binding.ledger_id())
             .await?;
 
         let roster = self
@@ -1148,7 +1318,7 @@ impl LedgerRouter {
                 views: &views,
                 state: load.snapshot().projected().state(),
                 labels: &labels,
-                ledger_id: scope.ledger_id(),
+                ledger_id: binding.ledger_id(),
                 uncertain_write: false,
             })?;
             paginate_read_view_model(model)
@@ -1158,7 +1328,7 @@ impl LedgerRouter {
         let actor_id = MemberId(interaction.user_id().get());
         let session = ReadViewSession::new(
             ReadViewSessionKey {
-                ledger_id: scope.ledger_id(),
+                ledger_id: binding.ledger_id(),
                 actor_id,
             },
             nonce,
@@ -1311,16 +1481,15 @@ impl LedgerRouter {
         nonce: walicord_application::InteractionNonce,
         direction: ReadViewNavigation,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
-        let scope = guard_ledger_interaction(
-            component.guild_id,
-            component.channel_id,
-            self.deps.channels.as_ref(),
-        )
-        .map_err(LedgerRouteError::from)?;
+        let scope = self
+            .guard_scope(ctx, component.guild_id, component.channel_id)
+            .await
+            .map_err(LedgerRouteError::from)?;
+        let binding = self.resolve_existing_ledger(ctx, scope).await?;
         let actor_id = MemberId(component.user.id.get());
 
         let key = ReadViewSessionKey {
-            ledger_id: scope.ledger_id(),
+            ledger_id: binding.ledger_id(),
             actor_id,
         };
         let now = self.deps.clock.now();
@@ -1370,12 +1539,12 @@ impl LedgerRouter {
         component: &ComponentInteraction,
         nonce: walicord_application::InteractionNonce,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
-        let scope = guard_ledger_interaction(
-            component.guild_id,
-            component.channel_id,
-            self.deps.channels.as_ref(),
-        )?;
-        let key = VoidSessionKey::new(scope.ledger_id(), MemberId(component.user.id.get()));
+        let scope = self
+            .guard_scope(ctx, component.guild_id, component.channel_id)
+            .await?;
+        let binding = self.resolve_existing_ledger(ctx, scope).await?;
+        let ledger_id = binding.ledger_id();
+        let key = VoidSessionKey::new(ledger_id, MemberId(component.user.id.get()));
         let Some(session) = self
             .void_session_or_stale_update(ctx, component, key, nonce)
             .await?
@@ -1389,7 +1558,8 @@ impl LedgerRouter {
                     component,
                     scope.guild_id(),
                     scope.channel_id(),
-                    scope.ledger_id(),
+                    binding.canonical_thread_id(),
+                    ledger_id,
                     session,
                     VoidSelectionRenderKind::MissingSelection,
                 )
@@ -1399,7 +1569,7 @@ impl LedgerRouter {
         let load = self
             .deps
             .thread_loader
-            .load(ctx, scope.channel_id(), scope.ledger_id())
+            .load(ctx, binding.canonical_thread_id(), ledger_id)
             .await?;
         let candidates = enumerate_void_candidates(&load)?;
         match transition_to_confirm(
@@ -1424,12 +1594,8 @@ impl LedgerRouter {
                     .iter()
                     .find(|view| view.entry().id == target_entry_id)
                     .expect("transition_to_confirm verified target is present");
-                let model = void_confirmation_model(
-                    target,
-                    &labels,
-                    scope.ledger_id(),
-                    next_session.nonce(),
-                )?;
+                let model =
+                    void_confirmation_model(target, &labels, ledger_id, next_session.nonce())?;
                 self.deps.void_sessions.replace(next_session);
                 self.update_component_with_void_model(ctx, component, model)
                     .await
@@ -1440,7 +1606,8 @@ impl LedgerRouter {
                     component,
                     scope.guild_id(),
                     scope.channel_id(),
-                    scope.ledger_id(),
+                    binding.canonical_thread_id(),
+                    ledger_id,
                     session,
                     VoidSelectionRenderKind::StaleTarget(
                         VoidRetargetReason::ExcludedFromCandidates,
@@ -1458,12 +1625,11 @@ impl LedgerRouter {
         component: &ComponentInteraction,
         nonce: walicord_application::InteractionNonce,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
-        let scope = guard_ledger_interaction(
-            component.guild_id,
-            component.channel_id,
-            self.deps.channels.as_ref(),
-        )?;
-        let key = VoidSessionKey::new(scope.ledger_id(), MemberId(component.user.id.get()));
+        let scope = self
+            .guard_scope(ctx, component.guild_id, component.channel_id)
+            .await?;
+        let binding = self.resolve_existing_ledger(ctx, scope).await?;
+        let key = VoidSessionKey::new(binding.ledger_id(), MemberId(component.user.id.get()));
         let Some(session) = self
             .void_session_or_stale_update(ctx, component, key, nonce)
             .await?
@@ -1475,7 +1641,8 @@ impl LedgerRouter {
             component,
             scope.guild_id(),
             scope.channel_id(),
-            scope.ledger_id(),
+            binding.canonical_thread_id(),
+            binding.ledger_id(),
             session,
             VoidSelectionRenderKind::Normal,
         )
@@ -1488,12 +1655,11 @@ impl LedgerRouter {
         component: &ComponentInteraction,
         nonce: walicord_application::InteractionNonce,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
-        let scope = guard_ledger_interaction(
-            component.guild_id,
-            component.channel_id,
-            self.deps.channels.as_ref(),
-        )?;
-        let key = VoidSessionKey::new(scope.ledger_id(), MemberId(component.user.id.get()));
+        let scope = self
+            .guard_scope(ctx, component.guild_id, component.channel_id)
+            .await?;
+        let binding = self.resolve_existing_ledger(ctx, scope).await?;
+        let key = VoidSessionKey::new(binding.ledger_id(), MemberId(component.user.id.get()));
         let Some(_session) = self
             .void_session_or_stale_update(ctx, component, key, nonce)
             .await?
@@ -1517,13 +1683,13 @@ impl LedgerRouter {
         component: &ComponentInteraction,
         nonce: walicord_application::InteractionNonce,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
-        let scope = guard_ledger_interaction(
-            component.guild_id,
-            component.channel_id,
-            self.deps.channels.as_ref(),
-        )?;
+        let scope = self
+            .guard_scope(ctx, component.guild_id, component.channel_id)
+            .await?;
+        let binding = self.resolve_existing_ledger(ctx, scope).await?;
+        let ledger_id = binding.ledger_id();
         let actor_id = MemberId(component.user.id.get());
-        let key = VoidSessionKey::new(scope.ledger_id(), actor_id);
+        let key = VoidSessionKey::new(ledger_id, actor_id);
         let Some(session) = self
             .void_session_or_stale_update(ctx, component, key, nonce)
             .await?
@@ -1546,12 +1712,7 @@ impl LedgerRouter {
             .await
             .map_err(discord_call_error(DiscordCallSite::VoidDeferComponent))?;
 
-        if self
-            .deps
-            .uncertain_writes
-            .current(scope.ledger_id())
-            .is_some()
-        {
+        if self.deps.uncertain_writes.current(ledger_id).is_some() {
             return self
                 .edit_component_response(
                     ctx,
@@ -1562,12 +1723,22 @@ impl LedgerRouter {
                 .await;
         }
 
-        let lock = self.deps.write_coordinator.lock_for(scope.ledger_id());
+        let lock = self.deps.write_coordinator.lock_for(ledger_id);
         let _guard = lock.lock().await;
+        if self.deps.uncertain_writes.current(ledger_id).is_some() {
+            return self
+                .edit_component_response(
+                    ctx,
+                    component,
+                    uncertain_write_block_message(true, false),
+                    DiscordCallSite::VoidEditResponse,
+                )
+                .await;
+        }
         let load = self
             .deps
             .thread_loader
-            .load(ctx, scope.channel_id(), scope.ledger_id())
+            .load(ctx, binding.canonical_thread_id(), ledger_id)
             .await?;
         let next_entry_id =
             LedgerEntryId((load.snapshot().canonical_entry_count() as u64).saturating_add(1));
@@ -1592,7 +1763,7 @@ impl LedgerRouter {
         let (entry, envelope) = compose_void_entry(
             &session,
             &load,
-            scope.ledger_id(),
+            ledger_id,
             actor_id,
             next_entry_id,
             DiscordLedgerSourceDescriptor::void_parent_v1(),
@@ -1609,8 +1780,7 @@ impl LedgerRouter {
                 .iter()
                 .map(|(member_id, name)| (*member_id, Some(name.as_str()))),
         );
-        let prepared_body =
-            render_public_void_body(&entry, &target_view, scope.ledger_id(), &labels)?;
+        let prepared_body = render_public_void_body(&entry, &target_view, ledger_id, &labels)?;
         let envelope_bytes =
             walicord_application::ledger::canonical_attachment::CanonicalAttachmentCodec::encode_with_pre_self_link_content(
                 &envelope,
@@ -1622,7 +1792,7 @@ impl LedgerRouter {
                 ))
             })?;
         let retained = RetainedCanonicalWrite::new(
-            scope.ledger_id(),
+            ledger_id,
             &envelope,
             envelope_bytes,
             prepared_body.clone(),
@@ -1630,25 +1800,31 @@ impl LedgerRouter {
         );
         self.deps.uncertain_writes.set_live(retained).map_err(|_| {
             LedgerRouteError::Internal(InternalLedgerRouteError::UncertainWriteAlreadyLive {
-                ledger_id: scope.ledger_id(),
+                ledger_id,
             })
         })?;
 
         match self
             .deps
             .canonical_store
-            .append_authoritative(ctx, scope.channel_id(), &envelope, prepared_body.as_str())
+            .append_authoritative(
+                ctx,
+                binding.canonical_thread_id(),
+                &envelope,
+                prepared_body.as_str(),
+            )
             .await
         {
             Ok(_verified) => {
-                self.deps.uncertain_writes.clear(scope.ledger_id());
+                self.deps.locator.replace_with_ready_binding(binding);
+                self.deps.uncertain_writes.clear(ledger_id);
                 self.deps.void_sessions.clear(key);
                 self.edit_component_with_void_model(
                     ctx,
                     component,
                     VoidSurfaceModel::success(
                         i18n::void_success_title(),
-                        format!("<#{}>", scope.channel_id().get()),
+                        format!("<#{}>", binding.canonical_thread_id().get()),
                         Vec::new(),
                         true,
                     ),
@@ -1676,13 +1852,14 @@ impl LedgerRouter {
         component: &ComponentInteraction,
         target: ExpenseSelectionPhase,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
-        let scope = guard_ledger_interaction(
-            component.guild_id,
-            component.channel_id,
-            self.deps.channels.as_ref(),
-        )
-        .map_err(LedgerRouteError::from)?;
-        let key = ExpenseSessionKey::new(scope.ledger_id(), MemberId(component.user.id.get()));
+        let scope = self
+            .guard_scope(ctx, component.guild_id, component.channel_id)
+            .await
+            .map_err(LedgerRouteError::from)?;
+        let key = ExpenseSessionKey::new(
+            scope.expense_draft_scope_id(),
+            MemberId(component.user.id.get()),
+        );
         let Some(current) = self.deps.expense_sessions.clear(key) else {
             return self.respond_expense_session_missing(ctx, component).await;
         };
@@ -1725,12 +1902,13 @@ impl LedgerRouter {
         ctx: &Context,
         component: &ComponentInteraction,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
-        let scope = guard_ledger_interaction(
-            component.guild_id,
-            component.channel_id,
-            self.deps.channels.as_ref(),
-        )?;
-        let key = ExpenseSessionKey::new(scope.ledger_id(), MemberId(component.user.id.get()));
+        let scope = self
+            .guard_scope(ctx, component.guild_id, component.channel_id)
+            .await?;
+        let key = ExpenseSessionKey::new(
+            scope.expense_draft_scope_id(),
+            MemberId(component.user.id.get()),
+        );
         let Some(current) = self.deps.expense_sessions.clear(key) else {
             return self.respond_expense_session_missing(ctx, component).await;
         };
@@ -1797,15 +1975,13 @@ impl LedgerRouter {
         ctx: &Context,
         component: &ComponentInteraction,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
-        let scope = guard_ledger_interaction(
-            component.guild_id,
-            component.channel_id,
-            self.deps.channels.as_ref(),
-        )?;
+        let scope = self
+            .guard_scope(ctx, component.guild_id, component.channel_id)
+            .await?;
         let guild_id = scope.guild_id();
         let channel_id = scope.channel_id();
         let actor_id = MemberId(component.user.id.get());
-        let key = ExpenseSessionKey::new(scope.ledger_id(), actor_id);
+        let key = ExpenseSessionKey::new(scope.expense_draft_scope_id(), actor_id);
         let Some(session) = self.deps.expense_sessions.clear(key) else {
             return self.respond_expense_session_missing(ctx, component).await;
         };
@@ -1817,15 +1993,31 @@ impl LedgerRouter {
             return self.respond_expense_session_missing(ctx, component).await;
         }
 
-        let ledger_id = LedgerId(channel_id.get());
+        let binding = self.resolve_or_bootstrap_expense_ledger(ctx, scope).await?;
+        let ledger_id = binding.ledger_id();
+        let canonical_thread_id = binding.canonical_thread_id();
         let write_target = ledger_id;
 
         // Per-ledger serialization (criterion 53 / 115 / 155 / 182): every canonical
         // append for this ledger holds the same async mutex for its whole lifecycle.
         let lock = self.deps.write_coordinator.lock_for(write_target);
         let _guard = lock.lock().await;
+        if self.deps.uncertain_writes.current(write_target).is_some() {
+            self.deps.expense_sessions.replace(session);
+            return self
+                .reply_component_ephemeral(
+                    ctx,
+                    component,
+                    uncertain_write_block_message(true, false),
+                    DiscordCallSite::ExpenseUncertainWriteReply,
+                )
+                .await;
+        }
 
-        let load_future = self.deps.thread_loader.load(ctx, channel_id, ledger_id);
+        let load_future = self
+            .deps
+            .thread_loader
+            .load(ctx, canonical_thread_id, ledger_id);
         let roster_future = self.deps.roster_fetcher.fetch(ctx, guild_id, channel_id);
         let (load_result, roster_result) = tokio::join!(load_future, roster_future);
         let snapshot_load = load_result?;
@@ -1872,8 +2064,7 @@ impl LedgerRouter {
                     ctx,
                     component,
                     write_target,
-                    ledger_id,
-                    channel_id,
+                    binding,
                     previous_hash,
                     entry,
                     &roster_snapshot.display_names,
@@ -1960,12 +2151,13 @@ impl LedgerRouter {
         ctx: &Context,
         component: &ComponentInteraction,
         write_target: WriteTargetKey,
-        ledger_id: LedgerId,
-        canonical_thread_id: ChannelId,
+        binding: CanonicalThreadBinding,
         previous_hash: walicord_application::ledger::EntryHash,
         entry: LedgerEntry,
         display_names: &HashMap<MemberId, smol_str::SmolStr>,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
+        let ledger_id = binding.ledger_id();
+        let canonical_thread_id = binding.canonical_thread_id();
         let envelope: UnverifiedLedgerStoreEnvelope<()> =
             build_canonical_envelope(ledger_id, previous_hash, entry.clone())?;
 
@@ -2001,6 +2193,7 @@ impl LedgerRouter {
             .await;
         match append_result {
             Ok(_verified) => {
+                self.deps.locator.replace_with_ready_binding(binding);
                 self.deps.uncertain_writes.clear(write_target);
                 self.respond_record_success(ctx, component).await
             }
@@ -2041,12 +2234,13 @@ impl LedgerRouter {
         ctx: &Context,
         component: &ComponentInteraction,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
-        let scope = guard_ledger_interaction(
-            component.guild_id,
-            component.channel_id,
-            self.deps.channels.as_ref(),
-        )?;
-        let key = ExpenseSessionKey::new(scope.ledger_id(), MemberId(component.user.id.get()));
+        let scope = self
+            .guard_scope(ctx, component.guild_id, component.channel_id)
+            .await?;
+        let key = ExpenseSessionKey::new(
+            scope.expense_draft_scope_id(),
+            MemberId(component.user.id.get()),
+        );
         let Some(current) = self.deps.expense_sessions.clear(key) else {
             return self.respond_expense_session_missing(ctx, component).await;
         };
@@ -2064,13 +2258,14 @@ impl LedgerRouter {
         ctx: &Context,
         component: &ComponentInteraction,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
-        let scope = guard_ledger_interaction(
-            component.guild_id,
-            component.channel_id,
-            self.deps.channels.as_ref(),
-        )
-        .map_err(LedgerRouteError::from)?;
-        let key = ExpenseSessionKey::new(scope.ledger_id(), MemberId(component.user.id.get()));
+        let scope = self
+            .guard_scope(ctx, component.guild_id, component.channel_id)
+            .await
+            .map_err(LedgerRouteError::from)?;
+        let key = ExpenseSessionKey::new(
+            scope.expense_draft_scope_id(),
+            MemberId(component.user.id.get()),
+        );
         let Some(current) = self.deps.expense_sessions.clear(key) else {
             return self.respond_expense_session_missing(ctx, component).await;
         };
@@ -2124,13 +2319,14 @@ impl LedgerRouter {
         ctx: &Context,
         component: &ComponentInteraction,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
-        let scope = guard_ledger_interaction(
-            component.guild_id,
-            component.channel_id,
-            self.deps.channels.as_ref(),
-        )
-        .map_err(LedgerRouteError::from)?;
-        let key = ExpenseSessionKey::new(scope.ledger_id(), MemberId(component.user.id.get()));
+        let scope = self
+            .guard_scope(ctx, component.guild_id, component.channel_id)
+            .await
+            .map_err(LedgerRouteError::from)?;
+        let key = ExpenseSessionKey::new(
+            scope.expense_draft_scope_id(),
+            MemberId(component.user.id.get()),
+        );
         let Some(session) = self.deps.expense_sessions.clear(key) else {
             return self.respond_expense_session_missing(ctx, component).await;
         };
@@ -2163,13 +2359,14 @@ impl LedgerRouter {
         ctx: &Context,
         component: &ComponentInteraction,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
-        let scope = guard_ledger_interaction(
-            component.guild_id,
-            component.channel_id,
-            self.deps.channels.as_ref(),
-        )
-        .map_err(LedgerRouteError::from)?;
-        let key = ExpenseSessionKey::new(scope.ledger_id(), MemberId(component.user.id.get()));
+        let scope = self
+            .guard_scope(ctx, component.guild_id, component.channel_id)
+            .await
+            .map_err(LedgerRouteError::from)?;
+        let key = ExpenseSessionKey::new(
+            scope.expense_draft_scope_id(),
+            MemberId(component.user.id.get()),
+        );
         let Some(current) = self.deps.expense_sessions.clear(key) else {
             return self.respond_expense_session_missing(ctx, component).await;
         };
@@ -2223,13 +2420,14 @@ impl LedgerRouter {
         ctx: &Context,
         component: &ComponentInteraction,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
-        let scope = guard_ledger_interaction(
-            component.guild_id,
-            component.channel_id,
-            self.deps.channels.as_ref(),
-        )
-        .map_err(LedgerRouteError::from)?;
-        let key = ExpenseSessionKey::new(scope.ledger_id(), MemberId(component.user.id.get()));
+        let scope = self
+            .guard_scope(ctx, component.guild_id, component.channel_id)
+            .await
+            .map_err(LedgerRouteError::from)?;
+        let key = ExpenseSessionKey::new(
+            scope.expense_draft_scope_id(),
+            MemberId(component.user.id.get()),
+        );
         self.deps.expense_sessions.clear(key);
         let response = CreateInteractionResponse::UpdateMessage(
             CreateInteractionResponseMessage::new()
@@ -2252,12 +2450,10 @@ impl LedgerRouter {
         ctx: &Context,
         component: &ComponentInteraction,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
-        let _scope = guard_ledger_interaction(
-            component.guild_id,
-            component.channel_id,
-            self.deps.channels.as_ref(),
-        )
-        .map_err(LedgerRouteError::from)?;
+        let _scope = self
+            .guard_scope(ctx, component.guild_id, component.channel_id)
+            .await
+            .map_err(LedgerRouteError::from)?;
         let nonce = self.deps.nonce_provider.next_interaction_nonce();
         let response = build_expense_modal_response(
             self.deps.clock.as_ref(),
@@ -2279,11 +2475,9 @@ impl LedgerRouter {
         ctx: &Context,
         component: &ComponentInteraction,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
-        let scope = guard_ledger_interaction(
-            component.guild_id,
-            component.channel_id,
-            self.deps.channels.as_ref(),
-        )?;
+        let scope = self
+            .guard_scope(ctx, component.guild_id, component.channel_id)
+            .await?;
         self.dispatch_review(
             ctx,
             scope,
@@ -2298,11 +2492,9 @@ impl LedgerRouter {
         ctx: &Context,
         component: &ComponentInteraction,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
-        let scope = guard_ledger_interaction(
-            component.guild_id,
-            component.channel_id,
-            self.deps.channels.as_ref(),
-        )?;
+        let scope = self
+            .guard_scope(ctx, component.guild_id, component.channel_id)
+            .await?;
         self.dispatch_ledger(
             ctx,
             scope,
@@ -2317,11 +2509,9 @@ impl LedgerRouter {
         ctx: &Context,
         component: &ComponentInteraction,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
-        let scope = guard_ledger_interaction(
-            component.guild_id,
-            component.channel_id,
-            self.deps.channels.as_ref(),
-        )?;
+        let scope = self
+            .guard_scope(ctx, component.guild_id, component.channel_id)
+            .await?;
         self.dispatch_void(
             ctx,
             scope,
@@ -2357,12 +2547,10 @@ impl LedgerRouter {
         ctx: &Context,
         modal: &ModalInteraction,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
-        let scope = guard_ledger_interaction(
-            modal.guild_id,
-            modal.channel_id,
-            self.deps.channels.as_ref(),
-        )
-        .map_err(LedgerRouteError::from)?;
+        let scope = self
+            .guard_scope(ctx, modal.guild_id, modal.channel_id)
+            .await
+            .map_err(LedgerRouteError::from)?;
         let guild_id = scope.guild_id();
 
         let raw = extract_raw_expense_modal_submission(modal)
@@ -2375,12 +2563,21 @@ impl LedgerRouter {
                     raw_note: raw.raw_note.clone(),
                     raw_date: raw.raw_date.clone(),
                 };
-                self.respond_with_retry_modal(ctx, modal, scope.ledger_id(), preserved, error)
-                    .await
+                self.respond_with_retry_modal(
+                    ctx,
+                    modal,
+                    scope.expense_draft_scope_id(),
+                    preserved,
+                    error,
+                )
+                .await
             }
             Ok(validated) => {
                 let _ = guild_id;
-                let key = ExpenseSessionKey::new(scope.ledger_id(), MemberId(modal.user.id.get()));
+                let key = ExpenseSessionKey::new(
+                    scope.expense_draft_scope_id(),
+                    MemberId(modal.user.id.get()),
+                );
                 let (session, nonce) = bootstrap_expense_session(
                     key,
                     validated,
@@ -2398,7 +2595,7 @@ impl LedgerRouter {
         &self,
         ctx: &Context,
         modal: &ModalInteraction,
-        ledger_id: LedgerId,
+        draft_scope_id: ExpenseDraftScopeId,
         preserved: ModalRetryPreserved,
         validation_error: ExpenseModalValidationError,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
@@ -2410,7 +2607,7 @@ impl LedgerRouter {
         let binding = ModalRetryBinding::capture(
             binding_nonce,
             actor,
-            ledger_id,
+            draft_scope_id,
             preserved.clone(),
             self.deps.clock.now(),
         );
@@ -2638,7 +2835,8 @@ impl LedgerRouter {
         ctx: &Context,
         component: &ComponentInteraction,
         guild_id: GuildId,
-        channel_id: ChannelId,
+        tracked_parent_channel_id: ChannelId,
+        canonical_thread_id: ChannelId,
         ledger_id: LedgerId,
         session: VoidSession,
         render_kind: VoidSelectionRenderKind,
@@ -2646,7 +2844,7 @@ impl LedgerRouter {
         let load = self
             .deps
             .thread_loader
-            .load(ctx, channel_id, ledger_id)
+            .load(ctx, canonical_thread_id, ledger_id)
             .await?;
         let candidates = enumerate_void_candidates(&load)?;
         if candidates.is_empty() {
@@ -2666,7 +2864,7 @@ impl LedgerRouter {
         let roster = self
             .deps
             .roster_fetcher
-            .fetch(ctx, guild_id, channel_id)
+            .fetch(ctx, guild_id, tracked_parent_channel_id)
             .await?;
         let labels = SurfaceMemberLabels::from_member_names(
             roster
@@ -2746,7 +2944,7 @@ fn read_view_navigation_row(
     total_pages: usize,
 ) -> serenity::all::CreateActionRow {
     use serenity::all::{ButtonStyle, CreateActionRow, CreateButton};
-    let n = nonce.get();
+    let n = nonce;
     CreateActionRow::Buttons(vec![
         CreateButton::new(format!("{READ_VIEW_PREV_CUSTOM_ID_PREFIX}{n}"))
             .label(walicord_i18n::picker_previous_page_label())
@@ -2765,7 +2963,7 @@ fn read_view_navigation_row(
 fn build_selection_step_button_ids(
     nonce: walicord_application::InteractionNonce,
 ) -> ExpenseSelectionStepButtonIds {
-    let n = nonce.get();
+    let n = nonce;
     ExpenseSelectionStepButtonIds {
         to_participants: format!("{EXPENSE_TO_PARTICIPANTS_CUSTOM_ID_PREFIX}{n}"),
         source_individual: format!("{EXPENSE_SOURCE_INDIVIDUAL_CUSTOM_ID_PREFIX}{n}"),
@@ -2782,7 +2980,7 @@ fn build_selection_step_button_ids(
 fn build_confirmation_button_ids(
     nonce: walicord_application::InteractionNonce,
 ) -> ExpenseConfirmationButtonIds {
-    let n = nonce.get();
+    let n = nonce;
     ExpenseConfirmationButtonIds {
         record: format!("{EXPENSE_RECORD_CUSTOM_ID_PREFIX}{n}"),
         modify_selection: format!("{EXPENSE_MODIFY_SELECTION_CUSTOM_ID_PREFIX}{n}"),
@@ -2925,7 +3123,7 @@ fn render_public_expense_body(
         // message to embed its own permalink lives behind `display_drift_guard`
         // (criterion 209-212) and lands as a follow-up commit.
         recovery_reference: RecoveryReference {
-            ledger_id_short: format!("{:x}", ledger_id.0),
+            ledger_id_short: format!("{ledger_id:x}"),
             entry_id: entry.id,
             message_link: None,
         },
@@ -2995,7 +3193,7 @@ fn render_public_settlement_body(
         actor_display_name,
         recorded_at: BusinessDateTime::from_system_time(recorded_at),
         recovery_reference: RecoveryReference {
-            ledger_id_short: format!("{:08x}", ledger_id.0),
+            ledger_id_short: format!("{ledger_id:08x}"),
             entry_id: entry.id,
             message_link: None,
         },
@@ -3090,7 +3288,7 @@ fn void_recovery_reference(
     ledger_id: LedgerId,
 ) -> RecoveryReference {
     RecoveryReference {
-        ledger_id_short: format!("{:08x}", ledger_id.0),
+        ledger_id_short: format!("{ledger_id:08x}"),
         entry_id: view.entry().id,
         message_link: Some(view.message_link().to_owned()),
     }
@@ -3101,7 +3299,7 @@ fn void_selection_action_rows(
     candidates: &[VerifiedLedgerEntryView],
     labels: &SurfaceMemberLabels,
 ) -> Vec<SurfaceActionRow> {
-    let n = nonce.get();
+    let n = nonce;
     vec![SurfaceActionRow::Select(SurfaceSelectMenu {
         custom_id: format!("{VOID_PICK_CUSTOM_ID_PREFIX}{n}"),
         placeholder: Some(i18n::void_select_placeholder().to_owned()),
@@ -3123,7 +3321,7 @@ fn void_selection_action_rows(
 fn void_confirmation_action_rows(
     nonce: walicord_application::InteractionNonce,
 ) -> Vec<SurfaceActionRow> {
-    let n = nonce.get();
+    let n = nonce;
     vec![SurfaceActionRow::Buttons(vec![
         SurfaceButton::Interactive {
             label: i18n::void_confirm_label().to_owned(),
@@ -3261,7 +3459,7 @@ fn render_public_void_body(
         original_summary: summary_for_view(target, labels)?,
         recorded_at: BusinessDateTime::from_system_time(recorded_at),
         recovery_reference: RecoveryReference {
-            ledger_id_short: format!("{:08x}", ledger_id.0),
+            ledger_id_short: format!("{ledger_id:08x}"),
             entry_id: entry.id,
             message_link: None,
         },
@@ -3418,7 +3616,7 @@ mod tests {
     )]
     #[case::stale_head(
         SettleAttemptError::StaleHead {
-            stored_head: ledger_chain_genesis_sha256_v1(LedgerId(1)),
+            stored_head: ledger_chain_genesis_sha256_v1(walicord_ledger::test_fixtures::ledger_id(1)),
             observed_head: None,
         },
         i18n::stale_settlement_preview_message()
@@ -3452,7 +3650,7 @@ mod tests {
     #[rstest]
     #[case::stale_head(
         SettleAttemptError::StaleHead {
-            stored_head: ledger_chain_genesis_sha256_v1(LedgerId(1)),
+            stored_head: ledger_chain_genesis_sha256_v1(walicord_ledger::test_fixtures::ledger_id(1)),
             observed_head: None,
         },
         ExpectedClearPolicy::Clear

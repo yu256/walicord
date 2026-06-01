@@ -1,7 +1,12 @@
 use crate::channel::ChannelManager;
-use serenity::all::{ChannelId, ChannelType, GuildId};
-use walicord_application::ledger::LedgerId;
+use serenity::{
+    all::{ChannelId, ChannelType, GuildId},
+    prelude::Context,
+};
+use walicord_application::ledger::expense_session::ExpenseDraftScopeId;
 use walicord_i18n as i18n;
+
+use super::locator::TrackedParentKey;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ChannelFlagAction {
@@ -48,7 +53,7 @@ pub(crate) fn outside_tracked_channel_message(
         .map(|channel_id| {
             format!(
                 "{}",
-                i18n::outside_tracked_channel_message_with_hint(format!("<#{}>", channel_id.get()))
+                i18n::outside_tracked_channel_message_with_hint(format_args!("<#{channel_id}>"))
             )
         })
         .unwrap_or_else(|| i18n::outside_tracked_channel_message_generic().to_owned())
@@ -70,6 +75,12 @@ pub(crate) enum LedgerInteractionGuardError {
     /// observed on this guild). Routes return the criterion-42 / 132 wrong-channel
     /// message.
     NotInTrackedChannel { observed: ChannelId },
+    /// Parent resolution must fail closed: otherwise a thread interaction could be
+    /// checked against the wrong tracked scope.
+    ChannelScopeLookup {
+        observed: ChannelId,
+        message: String,
+    },
 }
 
 /// Proof that an incoming interaction satisfied the preconditions (guild context +
@@ -77,17 +88,13 @@ pub(crate) enum LedgerInteractionGuardError {
 /// this type is only possible via [`guard_ledger_interaction`], so downstream code
 /// cannot fabricate a scope that bypasses the checks.
 ///
-/// `ledger_id()` is the **only** identifier downstream application-layer code uses
-/// — session keys, write coordinator targets, etc. take `LedgerId`. `guild_id()` /
-/// `channel_id()` stay accessible because the adapter still needs them to call
-/// serenity APIs (`roster.display_names_for_guild`, `channel.send_message`, …), but
-/// session-key construction is structurally type-safe: passing a `ChannelId` where
-/// `LedgerId` is expected fails to compile.
+/// Aggregate identity is deliberately absent: the locator resolves an existing
+/// canonical thread, or the expense bootstrap path issues a fresh `LedgerId`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct LedgerInteractionScope {
     guild_id: GuildId,
-    channel_id: ChannelId,
-    ledger_id: LedgerId,
+    interaction_channel_id: ChannelId,
+    tracked_parent_channel_id: ChannelId,
 }
 
 impl LedgerInteractionScope {
@@ -95,10 +102,20 @@ impl LedgerInteractionScope {
         self.guild_id
     }
     pub(crate) fn channel_id(&self) -> ChannelId {
-        self.channel_id
+        self.tracked_parent_channel_id
     }
-    pub(crate) fn ledger_id(&self) -> LedgerId {
-        self.ledger_id
+    pub(crate) fn interaction_channel_id(&self) -> ChannelId {
+        self.interaction_channel_id
+    }
+    pub(crate) fn is_thread_interaction(&self) -> bool {
+        self.interaction_channel_id != self.tracked_parent_channel_id
+    }
+    pub(crate) fn expense_draft_scope_id(&self) -> ExpenseDraftScopeId {
+        ExpenseDraftScopeId::new(self.tracked_parent_channel_id.get())
+            .expect("serenity channel IDs are always non-zero")
+    }
+    pub(crate) fn tracked_parent(&self) -> TrackedParentKey {
+        TrackedParentKey::from_guarded_parent(self.guild_id, self.tracked_parent_channel_id)
     }
 }
 
@@ -108,11 +125,6 @@ impl LedgerInteractionScope {
 /// scope the interaction targets — for thread interactions the caller is expected to
 /// pre-resolve the parent via [`slash_scope_channel_id`].
 ///
-/// The `(GuildId, ChannelId) → LedgerId` mapping is performed exactly once here so
-/// the application layer (sessions, preview store, write coordinator targets) never
-/// sees Discord-side identifiers. Adding alternative mappings (e.g. routing two
-/// channels to the same ledger) means changing this function; the rest of the
-/// router does not need to know.
 pub(crate) fn guard_ledger_interaction(
     guild_id: Option<GuildId>,
     channel_id: ChannelId,
@@ -126,8 +138,42 @@ pub(crate) fn guard_ledger_interaction(
     }
     Ok(LedgerInteractionScope {
         guild_id,
-        channel_id,
-        ledger_id: LedgerId(channel_id.get()),
+        interaction_channel_id: channel_id,
+        tracked_parent_channel_id: channel_id,
+    })
+}
+
+pub(crate) async fn guard_ledger_interaction_resolving_parent(
+    ctx: &Context,
+    guild_id: Option<GuildId>,
+    interaction_channel_id: ChannelId,
+    channels: &ChannelManager,
+) -> Result<LedgerInteractionScope, LedgerInteractionGuardError> {
+    let guild_id = guild_id.ok_or(LedgerInteractionGuardError::GuildOnly)?;
+    let channel = interaction_channel_id
+        .to_channel(&ctx.http)
+        .await
+        .map_err(|error| LedgerInteractionGuardError::ChannelScopeLookup {
+            observed: interaction_channel_id,
+            message: error.to_string(),
+        })?;
+    let tracked_parent_channel_id = match channel.guild() {
+        Some(channel) => slash_scope_channel_id(channel.id, channel.kind, channel.parent_id)
+            .map_err(|error| LedgerInteractionGuardError::ChannelScopeLookup {
+                observed: interaction_channel_id,
+                message: error.to_string(),
+            })?,
+        None => interaction_channel_id,
+    };
+    if !channels.is_tracked(tracked_parent_channel_id) {
+        return Err(LedgerInteractionGuardError::NotInTrackedChannel {
+            observed: interaction_channel_id,
+        });
+    }
+    Ok(LedgerInteractionScope {
+        guild_id,
+        interaction_channel_id,
+        tracked_parent_channel_id,
     })
 }
 
@@ -198,6 +244,9 @@ mod tests {
 
         assert_eq!(scope.guild_id(), GuildId::new(1));
         assert_eq!(scope.channel_id(), ChannelId::new(42));
-        assert_eq!(scope.ledger_id(), LedgerId(42));
+        assert_eq!(
+            scope.tracked_parent(),
+            TrackedParentKey::from_guarded_parent(GuildId::new(1), ChannelId::new(42))
+        );
     }
 }

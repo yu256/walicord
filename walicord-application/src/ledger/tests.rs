@@ -289,8 +289,10 @@ fn append_ordered_entries_preserve_application_metadata() {
 
 #[test]
 fn replay_verified_snapshot_reports_entry_count_and_head_hash() {
-    let (snapshot, last_hash) =
-        verified_snapshot_from_entries(LedgerId(77), vec![expense_entry(1, 1, 2, 100)]);
+    let (snapshot, last_hash) = verified_snapshot_from_entries(
+        walicord_ledger::test_fixtures::ledger_id(77),
+        vec![expense_entry(1, 1, 2, 100)],
+    );
 
     assert_eq!(snapshot.canonical_entry_count(), 1);
     assert_eq!(snapshot.current_head_hash(), last_hash);
@@ -302,7 +304,8 @@ fn replay_verified_snapshot_reports_entry_count_and_head_hash() {
 
 #[test]
 fn replay_verified_snapshot_keeps_empty_history_without_head_hash() {
-    let (snapshot, last_hash) = verified_snapshot_from_entries(LedgerId(77), vec![]);
+    let (snapshot, last_hash) =
+        verified_snapshot_from_entries(walicord_ledger::test_fixtures::ledger_id(77), vec![]);
 
     assert_eq!(snapshot.canonical_entry_count(), 0);
     assert_eq!(snapshot.current_head_hash(), None);
@@ -340,7 +343,8 @@ fn replay_verified_snapshot_emits_growth_warning_at_threshold() {
 
 #[test]
 fn preview_settlement_from_snapshot_returns_no_transfers_needed() {
-    let (snapshot, _) = verified_snapshot_from_entries(LedgerId(77), vec![]);
+    let (snapshot, _) =
+        verified_snapshot_from_entries(walicord_ledger::test_fixtures::ledger_id(77), vec![]);
     let clock = FixedClock {
         now: SystemTime::UNIX_EPOCH + Duration::from_secs(120),
         today: LedgerEffectiveDate::new("2026-05-01").expect("date should parse"),
@@ -354,9 +358,10 @@ fn preview_settlement_from_snapshot_returns_no_transfers_needed() {
 
 #[test]
 fn preview_settlement_from_snapshot_returns_recordable_preview_with_binding_context() {
-    let (snapshot, Some(last_hash)) =
-        verified_snapshot_from_entries(LedgerId(77), vec![expense_entry(1, 1, 2, 100)])
-    else {
+    let (snapshot, Some(last_hash)) = verified_snapshot_from_entries(
+        walicord_ledger::test_fixtures::ledger_id(77),
+        vec![expense_entry(1, 1, 2, 100)],
+    ) else {
         panic!("expected a non-empty snapshot");
     };
     let created_at = SystemTime::UNIX_EPOCH + Duration::from_secs(120);
@@ -420,9 +425,10 @@ fn preview_settlement_from_snapshot_rejects_recordable_preview_without_head_hash
 
 #[test]
 fn preview_settlement_from_snapshot_rejects_preview_lifetime_overflow() {
-    let (snapshot, Some(_)) =
-        verified_snapshot_from_entries(LedgerId(77), vec![expense_entry(1, 1, 2, 100)])
-    else {
+    let (snapshot, Some(_)) = verified_snapshot_from_entries(
+        walicord_ledger::test_fixtures::ledger_id(77),
+        vec![expense_entry(1, 1, 2, 100)],
+    ) else {
         panic!("expected a non-empty snapshot");
     };
     let created_at = latest_system_time();
@@ -708,7 +714,7 @@ fn discord_expense_authoring_uses_normalized_note_for_hash_identity() {
         .expect("discord expense entry should build")
     };
 
-    let ledger_id = LedgerId(77);
+    let ledger_id = walicord_ledger::test_fixtures::ledger_id(77);
     let previous_hash = ledger_chain_genesis_sha256_v1(ledger_id);
     let normalized_hash =
         make_unverified_envelope_sha256_v1(ledger_id, previous_hash, (), build_entry(1, " lunch "))
@@ -889,7 +895,7 @@ fn discord_settlement_recording_requires_delivered_binding() {
     let previewed = previewed_settlement();
     let binding = PreviewConfirmationBinding::capture(
         PreviewInstanceId::new(1).expect("instance id should be valid"),
-        LedgerId(42),
+        walicord_ledger::test_fixtures::ledger_id(42),
         EntryHash([9; 32]),
         MemberId(9),
         std::time::SystemTime::UNIX_EPOCH,
@@ -915,7 +921,7 @@ fn discord_settlement_recording_rejects_actor_mismatch() {
     let previewed = previewed_settlement();
     let binding = PreviewConfirmationBinding::capture(
         PreviewInstanceId::new(1).expect("instance id should be valid"),
-        LedgerId(42),
+        walicord_ledger::test_fixtures::ledger_id(42),
         EntryHash([9; 32]),
         MemberId(9),
         std::time::SystemTime::UNIX_EPOCH,
@@ -949,7 +955,7 @@ fn discord_settlement_recording_rejects_wrong_source_descriptor() {
     let previewed = previewed_settlement();
     let binding = PreviewConfirmationBinding::capture(
         PreviewInstanceId::new(1).expect("instance id should be valid"),
-        LedgerId(42),
+        walicord_ledger::test_fixtures::ledger_id(42),
         EntryHash([9; 32]),
         MemberId(9),
         std::time::SystemTime::UNIX_EPOCH,
@@ -980,7 +986,7 @@ fn discord_settlement_recording_surfaces_preview_digest_mismatch() {
     let actual_digest = previewed_b.digest();
     let binding = PreviewConfirmationBinding::capture(
         PreviewInstanceId::new(1).expect("instance id should be valid"),
-        LedgerId(42),
+        walicord_ledger::test_fixtures::ledger_id(42),
         EntryHash([9; 32]),
         MemberId(9),
         std::time::SystemTime::UNIX_EPOCH,
@@ -1023,7 +1029,7 @@ fn discord_settlement_recording_returns_none_when_preview_has_no_recordable_even
     .expect("preview should build");
     let binding = PreviewConfirmationBinding::capture(
         PreviewInstanceId::new(1).expect("instance id should be valid"),
-        LedgerId(42),
+        walicord_ledger::test_fixtures::ledger_id(42),
         EntryHash([9; 32]),
         MemberId(9),
         std::time::SystemTime::UNIX_EPOCH,
@@ -1051,7 +1057,7 @@ fn discord_settlement_recording_builds_entry_from_matching_preview() {
     let previewed = previewed_settlement();
     let binding = PreviewConfirmationBinding::capture(
         PreviewInstanceId::new(1).expect("instance id should be valid"),
-        LedgerId(42),
+        walicord_ledger::test_fixtures::ledger_id(42),
         EntryHash([9; 32]),
         MemberId(9),
         std::time::SystemTime::UNIX_EPOCH,
@@ -1660,7 +1666,7 @@ impl LedgerDigest for ByteSensitiveDigest {
 
 fn payload(version: u32) -> HashedLedgerPayload {
     HashedLedgerPayload {
-        ledger_id: LedgerId(0),
+        ledger_id: walicord_ledger::test_fixtures::ledger_id(1),
         schema_version: SchemaVersion(version),
         hash_suite: LedgerHashSuite::Sha256V1,
         entry: expense_entry(1, 1, 2, 100),
@@ -1684,8 +1690,14 @@ fn verify_envelope_returns_verified_when_hashes_match() {
         payload: payload(1),
     };
 
-    let verified = verify_envelope(unverified, LedgerId(0), previous, &encoder, &digest)
-        .expect("envelope should verify");
+    let verified = verify_envelope(
+        unverified,
+        walicord_ledger::test_fixtures::ledger_id(1),
+        previous,
+        &encoder,
+        &digest,
+    )
+    .expect("envelope should verify");
 
     assert_eq!(verified.entry_hash(), computed);
     assert_eq!(verified.previous_hash(), previous);
@@ -1705,7 +1717,7 @@ fn verify_envelope_rejects_mismatched_previous_hash() {
 
     let actual = verify_envelope(
         unverified,
-        LedgerId(0),
+        walicord_ledger::test_fixtures::ledger_id(1),
         EntryHash([0; 32]),
         &encoder,
         &digest,
@@ -1733,7 +1745,7 @@ fn verify_envelope_rejects_recomputed_entry_hash_mismatch() {
 
     let actual = verify_envelope(
         unverified,
-        LedgerId(0),
+        walicord_ledger::test_fixtures::ledger_id(1),
         EntryHash([0; 32]),
         &encoder,
         &digest,
@@ -1758,7 +1770,7 @@ fn verify_envelopes_in_append_order_chains_each_entry_hash_to_the_next_previous_
             entry_hash: EntryHash([1; 32]),
             external_id: "first",
             payload: HashedLedgerPayload {
-                ledger_id: LedgerId(0),
+                ledger_id: walicord_ledger::test_fixtures::ledger_id(1),
                 schema_version: SchemaVersion(1),
                 hash_suite: LedgerHashSuite::Sha256V1,
                 entry: balanced_entry(1, 1, 2),
@@ -1769,7 +1781,7 @@ fn verify_envelopes_in_append_order_chains_each_entry_hash_to_the_next_previous_
             entry_hash: EntryHash([2; 32]),
             external_id: "second",
             payload: HashedLedgerPayload {
-                ledger_id: LedgerId(0),
+                ledger_id: walicord_ledger::test_fixtures::ledger_id(1),
                 schema_version: SchemaVersion(1),
                 hash_suite: LedgerHashSuite::Sha256V1,
                 entry: balanced_entry(2, 3, 4),
@@ -1779,7 +1791,7 @@ fn verify_envelopes_in_append_order_chains_each_entry_hash_to_the_next_previous_
 
     let verified = verify_envelopes_in_append_order(
         envelopes,
-        LedgerId(0),
+        walicord_ledger::test_fixtures::ledger_id(1),
         EntryHash([0; 32]),
         &encoder,
         &digest,
@@ -1801,7 +1813,7 @@ fn verify_envelopes_in_append_order_reports_position_of_first_failing_envelope()
             entry_hash: EntryHash([1; 32]),
             external_id: (),
             payload: HashedLedgerPayload {
-                ledger_id: LedgerId(0),
+                ledger_id: walicord_ledger::test_fixtures::ledger_id(1),
                 schema_version: SchemaVersion(1),
                 hash_suite: LedgerHashSuite::Sha256V1,
                 entry: balanced_entry(1, 1, 2),
@@ -1812,7 +1824,7 @@ fn verify_envelopes_in_append_order_reports_position_of_first_failing_envelope()
             entry_hash: EntryHash([2; 32]),
             external_id: (),
             payload: HashedLedgerPayload {
-                ledger_id: LedgerId(0),
+                ledger_id: walicord_ledger::test_fixtures::ledger_id(1),
                 schema_version: SchemaVersion(1),
                 hash_suite: LedgerHashSuite::Sha256V1,
                 entry: balanced_entry(2, 3, 4),
@@ -1822,7 +1834,7 @@ fn verify_envelopes_in_append_order_reports_position_of_first_failing_envelope()
 
     let actual = verify_envelopes_in_append_order(
         envelopes,
-        LedgerId(0),
+        walicord_ledger::test_fixtures::ledger_id(1),
         EntryHash([0; 32]),
         &encoder,
         &digest,
@@ -1850,7 +1862,7 @@ fn load_and_replay_verified_runs_the_full_pipeline() {
             entry_hash: EntryHash([1; 32]),
             external_id: "msg-1",
             payload: HashedLedgerPayload {
-                ledger_id: LedgerId(0),
+                ledger_id: walicord_ledger::test_fixtures::ledger_id(1),
                 schema_version: SchemaVersion(1),
                 hash_suite: LedgerHashSuite::Sha256V1,
                 entry: balanced_entry(1, 1, 2),
@@ -1861,7 +1873,7 @@ fn load_and_replay_verified_runs_the_full_pipeline() {
             entry_hash: EntryHash([2; 32]),
             external_id: "msg-2",
             payload: HashedLedgerPayload {
-                ledger_id: LedgerId(0),
+                ledger_id: walicord_ledger::test_fixtures::ledger_id(1),
                 schema_version: SchemaVersion(1),
                 hash_suite: LedgerHashSuite::Sha256V1,
                 entry: balanced_entry(2, 2, 1),
@@ -1871,7 +1883,7 @@ fn load_and_replay_verified_runs_the_full_pipeline() {
 
     let (verified, projected) = load_and_replay_verified_with_custom_digest(
         envelopes,
-        LedgerId(0),
+        walicord_ledger::test_fixtures::ledger_id(1),
         EntryHash([0; 32]),
         &encoder,
         &digest,
@@ -1892,7 +1904,7 @@ fn load_and_replay_verified_propagates_chain_failures() {
         entry_hash: EntryHash([42; 32]),
         external_id: (),
         payload: HashedLedgerPayload {
-            ledger_id: LedgerId(0),
+            ledger_id: walicord_ledger::test_fixtures::ledger_id(1),
             schema_version: SchemaVersion(1),
             hash_suite: LedgerHashSuite::Sha256V1,
             entry: balanced_entry(1, 1, 2),
@@ -1901,7 +1913,7 @@ fn load_and_replay_verified_propagates_chain_failures() {
 
     let actual = load_and_replay_verified_with_custom_digest(
         envelopes,
-        LedgerId(0),
+        walicord_ledger::test_fixtures::ledger_id(1),
         EntryHash([0; 32]),
         &encoder,
         &digest,
@@ -1929,7 +1941,7 @@ fn load_and_replay_verified_propagates_structure_failures_from_inner_replay() {
         entry_hash: EntryHash([1; 32]),
         external_id: (),
         payload: HashedLedgerPayload {
-            ledger_id: LedgerId(0),
+            ledger_id: walicord_ledger::test_fixtures::ledger_id(1),
             schema_version: SchemaVersion(1),
             hash_suite: LedgerHashSuite::Sha256V1,
             entry,
@@ -1938,7 +1950,7 @@ fn load_and_replay_verified_propagates_structure_failures_from_inner_replay() {
 
     let actual = load_and_replay_verified_with_custom_digest(
         envelopes,
-        LedgerId(0),
+        walicord_ledger::test_fixtures::ledger_id(1),
         EntryHash([0; 32]),
         &encoder,
         &digest,
@@ -1963,7 +1975,7 @@ fn load_and_replay_verified_sha256_v1_round_trips_real_sha256_envelopes() {
     use super::Sha256V1Digest;
     let encoder = DefaultLedgerCanonicalEncoder;
     let digest = Sha256V1Digest;
-    let ledger_id = LedgerId(0);
+    let ledger_id = walicord_ledger::test_fixtures::ledger_id(1);
     let chain_genesis = ledger_chain_genesis_sha256_v1(ledger_id);
 
     let payload_one = HashedLedgerPayload {
@@ -2054,7 +2066,7 @@ fn verify_envelope_with_byte_sensitive_digest_rejects_tampered_prefix() {
 
     let actual = verify_envelope(
         unverified,
-        LedgerId(0),
+        walicord_ledger::test_fixtures::ledger_id(1),
         EntryHash([42; 32]),
         &encoder,
         &digest,
@@ -2083,7 +2095,7 @@ fn verify_envelope_propagates_canonical_encoder_failure() {
 
     let actual = verify_envelope(
         unverified,
-        LedgerId(0),
+        walicord_ledger::test_fixtures::ledger_id(1),
         EntryHash([0; 32]),
         &encoder,
         &digest,

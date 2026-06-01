@@ -385,6 +385,7 @@ mod tests {
         ledger::{
             ExpenseNote, LedgerEffectiveDate,
             expense_modal::{RawExpenseModalSubmission, validate_expense_modal_submission},
+            expense_session::ExpenseDraftScopeId,
         },
         settle_up::PreviewInstanceId,
     };
@@ -437,7 +438,10 @@ mod tests {
     }
 
     fn key() -> ExpenseSessionKey {
-        ExpenseSessionKey::new(crate::ledger::LedgerId(42), MemberId(42))
+        ExpenseSessionKey::new(
+            ExpenseDraftScopeId::new(42).expect("draft scope should be non-zero"),
+            MemberId(42),
+        )
     }
 
     #[test]

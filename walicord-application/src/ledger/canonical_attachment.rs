@@ -2,7 +2,7 @@ use crate::ledger::{
     AllocationSnapshot, BalanceAdjusted, BalanceAdjustment, BalanceAdjustmentSource, EntryHash,
     EntryVoided, ExpenseNote, ExpenseRecorded, HashedLedgerPayload, LedgerEffectiveDate,
     LedgerEntry, LedgerEntryId, LedgerEntryMetadata, LedgerEvent, LedgerHashSuite,
-    LedgerHistorySealed, LedgerId, LedgerSourceCanonical, LedgerSourceCanonicalKind, MemberAmount,
+    LedgerHistorySealed, LedgerSourceCanonical, LedgerSourceCanonicalKind, MemberAmount,
     MemberWeight, NormalizedSettlementPlanRecorded, SchemaVersion, UnverifiedLedgerStoreEnvelope,
     external_correction_source_for_transport_decode,
 };
@@ -17,6 +17,7 @@ use walicord_domain::{
     Money, Transfer,
     model::{MemberId, Weight},
 };
+use walicord_ledger::CanonicalLedgerId;
 
 const ATTACHMENT_SCHEMA_VERSION: u32 = 1;
 
@@ -155,7 +156,7 @@ impl RawEnvelopeDto {
 
 #[derive(Debug, Serialize, Deserialize)]
 struct PayloadDto {
-    ledger_id: u64,
+    ledger_id: CanonicalLedgerId,
     schema_version: u32,
     hash_suite: String,
     entry: EntryDto,
@@ -164,7 +165,7 @@ struct PayloadDto {
 impl PayloadDto {
     fn from_payload(payload: &HashedLedgerPayload) -> Result<Self, AttachmentCodecError> {
         Ok(Self {
-            ledger_id: payload.ledger_id.0,
+            ledger_id: payload.ledger_id.into(),
             schema_version: payload.schema_version.0,
             hash_suite: hash_suite_name(payload.hash_suite).into(),
             entry: EntryDto::from_entry(&payload.entry)?,
@@ -174,7 +175,7 @@ impl PayloadDto {
 
 #[derive(Debug, Deserialize)]
 struct RawPayloadDto {
-    ledger_id: u64,
+    ledger_id: CanonicalLedgerId,
     schema_version: u32,
     hash_suite: String,
     entry: serde_json::Value,
@@ -195,7 +196,7 @@ impl RawPayloadDto {
             serde_json::from_value(self.entry).map_err(AttachmentCodecError::JsonDecode)?;
 
         Ok(HashedLedgerPayload {
-            ledger_id: LedgerId(self.ledger_id),
+            ledger_id: self.ledger_id.into(),
             schema_version: SchemaVersion(self.schema_version),
             hash_suite: parse_hash_suite(&self.hash_suite)?,
             entry: entry.into_entry()?,
@@ -826,8 +827,8 @@ mod tests {
         let mut entry = expense_entry();
         entry.metadata.recorded_at = Some(UNIX_EPOCH + std::time::Duration::from_secs(42));
         let envelope = make_unverified_envelope_sha256_v1(
-            LedgerId(77),
-            ledger_chain_genesis_sha256_v1(LedgerId(77)),
+            walicord_ledger::test_fixtures::ledger_id(77),
+            ledger_chain_genesis_sha256_v1(walicord_ledger::test_fixtures::ledger_id(77)),
             (),
             entry.clone(),
         )
@@ -848,8 +849,8 @@ mod tests {
     fn canonical_attachment_decode_uses_transport_fallback_shape_for_legacy_metadata() {
         let entry = expense_entry();
         let envelope = make_unverified_envelope_sha256_v1(
-            LedgerId(77),
-            ledger_chain_genesis_sha256_v1(LedgerId(77)),
+            walicord_ledger::test_fixtures::ledger_id(77),
+            ledger_chain_genesis_sha256_v1(walicord_ledger::test_fixtures::ledger_id(77)),
             (),
             entry,
         )
@@ -875,8 +876,8 @@ mod tests {
     fn canonical_attachment_encode_omits_recorded_at_when_metadata_does_not_have_it() {
         let entry = expense_entry();
         let envelope = make_unverified_envelope_sha256_v1(
-            LedgerId(77),
-            ledger_chain_genesis_sha256_v1(LedgerId(77)),
+            walicord_ledger::test_fixtures::ledger_id(77),
+            ledger_chain_genesis_sha256_v1(walicord_ledger::test_fixtures::ledger_id(77)),
             (),
             entry,
         )
@@ -897,7 +898,7 @@ mod tests {
 
     #[test]
     fn canonical_attachment_replays_through_v1_load_path() {
-        let ledger_id = LedgerId(77);
+        let ledger_id = walicord_ledger::test_fixtures::ledger_id(77);
         let entry = expense_entry();
         let envelope = make_unverified_envelope_sha256_v1(
             ledger_id,
@@ -925,8 +926,8 @@ mod tests {
     fn decode_rejects_unknown_transport_version() {
         let entry = expense_entry();
         let envelope = make_unverified_envelope_sha256_v1(
-            LedgerId(77),
-            ledger_chain_genesis_sha256_v1(LedgerId(77)),
+            walicord_ledger::test_fixtures::ledger_id(77),
+            ledger_chain_genesis_sha256_v1(walicord_ledger::test_fixtures::ledger_id(77)),
             (),
             entry,
         )
@@ -948,11 +949,34 @@ mod tests {
     }
 
     #[test]
+    fn decode_rejects_zero_ledger_id() {
+        let entry = expense_entry();
+        let envelope = make_unverified_envelope_sha256_v1(
+            walicord_ledger::test_fixtures::ledger_id(77),
+            ledger_chain_genesis_sha256_v1(walicord_ledger::test_fixtures::ledger_id(77)),
+            (),
+            entry,
+        )
+        .expect("envelope should build");
+        let encoded =
+            CanonicalAttachmentCodec::encode(&envelope).expect("attachment should encode");
+        let mut value: Value = serde_json::from_slice(&encoded).expect("json should parse");
+        value["envelope"]["payload"]["ledger_id"] = Value::from(0_u64);
+
+        let actual = CanonicalAttachmentCodec::decode(
+            &serde_json::to_vec(&value).expect("json should serialize"),
+            123_u64,
+        );
+
+        assert!(matches!(actual, Err(AttachmentCodecError::JsonDecode(_))));
+    }
+
+    #[test]
     fn decode_rejects_unknown_schema_version() {
         let entry = expense_entry();
         let envelope = make_unverified_envelope_sha256_v1(
-            LedgerId(77),
-            ledger_chain_genesis_sha256_v1(LedgerId(77)),
+            walicord_ledger::test_fixtures::ledger_id(77),
+            ledger_chain_genesis_sha256_v1(walicord_ledger::test_fixtures::ledger_id(77)),
             (),
             entry,
         )
@@ -980,8 +1004,8 @@ mod tests {
     fn decode_rejects_unknown_schema_version_before_future_entry_shape_decode() {
         let entry = expense_entry();
         let envelope = make_unverified_envelope_sha256_v1(
-            LedgerId(77),
-            ledger_chain_genesis_sha256_v1(LedgerId(77)),
+            walicord_ledger::test_fixtures::ledger_id(77),
+            ledger_chain_genesis_sha256_v1(walicord_ledger::test_fixtures::ledger_id(77)),
             (),
             entry,
         )
@@ -1010,8 +1034,8 @@ mod tests {
     fn decode_rejects_unknown_event_variant() {
         let entry = expense_entry();
         let envelope = make_unverified_envelope_sha256_v1(
-            LedgerId(77),
-            ledger_chain_genesis_sha256_v1(LedgerId(77)),
+            walicord_ledger::test_fixtures::ledger_id(77),
+            ledger_chain_genesis_sha256_v1(walicord_ledger::test_fixtures::ledger_id(77)),
             (),
             entry,
         )
@@ -1037,8 +1061,8 @@ mod tests {
     fn decode_rejects_unknown_hash_suite() {
         let entry = expense_entry();
         let envelope = make_unverified_envelope_sha256_v1(
-            LedgerId(77),
-            ledger_chain_genesis_sha256_v1(LedgerId(77)),
+            walicord_ledger::test_fixtures::ledger_id(77),
+            ledger_chain_genesis_sha256_v1(walicord_ledger::test_fixtures::ledger_id(77)),
             (),
             entry,
         )

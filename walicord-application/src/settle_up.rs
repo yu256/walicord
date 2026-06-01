@@ -309,10 +309,6 @@ impl PreviewInstanceId {
             .map(Self)
             .ok_or(PreviewInstanceIdError::Zero)
     }
-
-    pub fn get(self) -> u64 {
-        self.0.get()
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -1312,7 +1308,7 @@ mod tests {
 
         let binding = PreviewConfirmationBinding::capture(
             preview_instance_id,
-            LedgerId(42),
+            walicord_ledger::test_fixtures::ledger_id(42),
             EntryHash([9; 32]),
             MemberId(7),
             created_at,
@@ -1322,7 +1318,10 @@ mod tests {
         .expect("binding should capture");
 
         assert_eq!(binding.preview_instance_id(), preview_instance_id);
-        assert_eq!(binding.ledger_id(), LedgerId(42));
+        assert_eq!(
+            binding.ledger_id(),
+            walicord_ledger::test_fixtures::ledger_id(42)
+        );
         assert_eq!(binding.ledger_head_hash(), EntryHash([9; 32]));
         assert_eq!(binding.actor_id(), MemberId(7));
         assert_eq!(binding.preview_digest(), previewed.digest());
@@ -1351,7 +1350,7 @@ mod tests {
 
         let actual = PreviewConfirmationBinding::capture(
             PreviewInstanceId::new(1).expect("instance id should be valid"),
-            LedgerId(42),
+            walicord_ledger::test_fixtures::ledger_id(42),
             EntryHash([9; 32]),
             MemberId(7),
             created_at,
@@ -1387,7 +1386,7 @@ mod tests {
             std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
         let binding = PreviewConfirmationBinding::capture(
             preview_instance_id,
-            LedgerId(42),
+            walicord_ledger::test_fixtures::ledger_id(42),
             EntryHash([9; 32]),
             MemberId(7),
             created_at,
@@ -1419,7 +1418,7 @@ mod tests {
         let preview_instance_id = PreviewInstanceId::new(1).expect("instance id should be valid");
         let binding = PreviewConfirmationBinding::capture(
             preview_instance_id,
-            LedgerId(42),
+            walicord_ledger::test_fixtures::ledger_id(42),
             EntryHash([9; 32]),
             MemberId(7),
             std::time::SystemTime::UNIX_EPOCH,
@@ -1453,7 +1452,7 @@ mod tests {
             std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
         let binding = PreviewConfirmationBinding::capture(
             PreviewInstanceId::new(1).expect("instance id should be valid"),
-            LedgerId(42),
+            walicord_ledger::test_fixtures::ledger_id(42),
             EntryHash([9; 32]),
             MemberId(7),
             created_at,

@@ -20,7 +20,15 @@ pub use projection::{
     EntryAppendPosition, LedgerProjector, LedgerState, ProjectedEntryIndex, ProjectedEntryInfo,
     ProjectedEntryKind, ProjectedLedger, SealedHistory,
 };
-pub use record::{AppendOrderedLedgerRecords, LedgerEntryId, LedgerId, LedgerRecord};
+#[cfg(feature = "canonical-attachment-codec")]
+pub use record::CanonicalLedgerId;
+#[cfg(feature = "legacy-discord-ledger")]
+pub use record::legacy_discord_ledger;
+#[cfg(feature = "test-fixtures")]
+pub use record::test_fixtures;
+pub use record::{
+    AppendOrderedLedgerRecords, LedgerEntryId, LedgerId, LedgerIdIssuer, LedgerRecord,
+};
 pub use settlement::{NormalizedSettlementPlanRecorded, NormalizedSettlementPlanRecordedError};
 
 #[cfg(test)]

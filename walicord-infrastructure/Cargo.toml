@@ -6,9 +6,11 @@ edition = "2024"
 [dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 fs2 = "0.4.3"
+getrandom = "0.3.4"
 thiserror = "2.0.17"
 walicord-application = { path = "../walicord-application" }
 walicord-domain = { path = "../walicord-domain" }
+walicord-ledger = { path = "../walicord-ledger" }
 walicord-parser = { path = "../walicord-parser" }
 walicord-transfer-construction = { path = "../walicord-transfer-construction", default-features = false }
 

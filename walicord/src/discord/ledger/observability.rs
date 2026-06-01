@@ -63,7 +63,7 @@ impl LedgerObservability for TracingLedgerObservability {
             } => {
                 tracing::warn!(
                     event = "ledger_thread_growth_warning",
-                    ledger_id = ledger_id.0,
+                    ledger_id = %ledger_id,
                     canonical_entry_count = entry_count,
                     "canonical ledger thread exceeded growth warning threshold"
                 );
@@ -76,7 +76,7 @@ impl LedgerObservability for TracingLedgerObservability {
             } => {
                 tracing::warn!(
                     event = "ledger_load_slow_warning",
-                    ledger_id = ledger_id.0,
+                    ledger_id = %ledger_id,
                     route = route_label,
                     elapsed_secs = elapsed.as_secs(),
                     fetched_entry_count,
@@ -91,7 +91,7 @@ impl LedgerObservability for TracingLedgerObservability {
             } => {
                 tracing::error!(
                     event = "ledger_load_timeout",
-                    ledger_id = ledger_id.0,
+                    ledger_id = %ledger_id,
                     route = route_label,
                     elapsed_secs = elapsed.as_secs(),
                     fetched_entry_count,
@@ -186,7 +186,7 @@ mod tests {
     use walicord_application::ledger::observability::LEDGER_GROWTH_WARNING_THRESHOLD;
 
     fn ledger() -> LedgerId {
-        LedgerId(77)
+        walicord_ledger::test_fixtures::ledger_id(77)
     }
 
     #[test]

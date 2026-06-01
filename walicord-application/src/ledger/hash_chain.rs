@@ -179,7 +179,7 @@ pub fn ledger_chain_genesis_sha256_v1(ledger_id: LedgerId) -> EntryHash {
 
     let mut hasher = Sha256::new();
     hasher.update(b"walicord:ledger-chain-genesis:sha256-v1");
-    hasher.update(ledger_id.0.to_be_bytes());
+    ledger_id.with_canonical_bytes(|bytes| hasher.update(bytes));
     EntryHash(hasher.finalize().into())
 }
 
@@ -249,7 +249,9 @@ fn encode_schema_v1(
     out.extend_from_slice(&previous_hash.0);
     out.push(hash_suite_v1_discriminant(payload.hash_suite));
     out.extend_from_slice(&payload.schema_version.0.to_be_bytes());
-    out.extend_from_slice(&payload.ledger_id.0.to_be_bytes());
+    payload
+        .ledger_id
+        .with_canonical_bytes(|bytes| out.extend_from_slice(bytes));
     out.extend_from_slice(&payload.entry.id.0.to_be_bytes());
     encode_metadata_v1(&mut out, &payload.entry.metadata)?;
     encode_event_v1(&mut out, &payload.entry.event)?;
@@ -740,7 +742,7 @@ mod schema_v1_tests {
 
     fn payload_with_event(id: u64, event: LedgerEvent) -> HashedLedgerPayload {
         HashedLedgerPayload {
-            ledger_id: LedgerId(0),
+            ledger_id: walicord_ledger::test_fixtures::ledger_id(1),
             schema_version: SchemaVersion(1),
             hash_suite: LedgerHashSuite::Sha256V1,
             entry: match event {
@@ -1193,12 +1195,15 @@ mod schema_v1_tests {
 
     #[test]
     fn ledger_chain_genesis_sha256_v1_is_deterministic_and_ledger_bound() {
-        let ledger_zero_a = ledger_chain_genesis_sha256_v1(LedgerId(0));
-        let ledger_zero_b = ledger_chain_genesis_sha256_v1(LedgerId(0));
-        let ledger_one = ledger_chain_genesis_sha256_v1(LedgerId(1));
+        let ledger_one_a =
+            ledger_chain_genesis_sha256_v1(walicord_ledger::test_fixtures::ledger_id(1));
+        let ledger_one_b =
+            ledger_chain_genesis_sha256_v1(walicord_ledger::test_fixtures::ledger_id(1));
+        let ledger_two =
+            ledger_chain_genesis_sha256_v1(walicord_ledger::test_fixtures::ledger_id(2));
 
-        assert_eq!(ledger_zero_a, ledger_zero_b);
-        assert_ne!(ledger_zero_a, ledger_one);
+        assert_eq!(ledger_one_a, ledger_one_b);
+        assert_ne!(ledger_one_a, ledger_two);
     }
 
     #[test]
@@ -1207,7 +1212,7 @@ mod schema_v1_tests {
         // `LedgerCanonicalEncoder` to the caller — verifying that the round-trip works
         // through the public surface is the regression check for "adapters cannot drift
         // on canonical bytes".
-        let ledger_id = LedgerId(0);
+        let ledger_id = walicord_ledger::test_fixtures::ledger_id(1);
         let payload = payload_with_event(1, expense_event(1, 2, 100));
         let previous = ledger_chain_genesis_sha256_v1(ledger_id);
         let bytes = encode_schema_v1_unwrap(previous, &payload);
@@ -1226,15 +1231,15 @@ mod schema_v1_tests {
 
     #[test]
     fn verify_envelope_sha256_v1_rejects_envelope_from_a_different_ledger() {
-        // Cross-ledger replay protection: the envelope's payload claims `LedgerId(7)` but
-        // the verifier is asked to validate it as part of `LedgerId(42)`. Even though the
+        // Cross-ledger replay protection: the envelope's payload claims ledger 7 but
+        // the verifier is asked to validate it as part of ledger 42. Even though the
         // entry_hash is correctly computed for ledger 7, verification must refuse to
         // promote it to a verified envelope on ledger 42 — this is the structural
         // guarantee that an envelope copied from another ledger cannot pass verification
         // here even when its internal previous_hash/entry_hash relationships are
         // individually consistent.
         let payload = HashedLedgerPayload {
-            ledger_id: LedgerId(7),
+            ledger_id: walicord_ledger::test_fixtures::ledger_id(7),
             schema_version: SchemaVersion(1),
             hash_suite: LedgerHashSuite::Sha256V1,
             entry: LedgerEntry::expense(
@@ -1244,7 +1249,7 @@ mod schema_v1_tests {
             )
             .expect("authored expense should accept an explicit structured snapshot"),
         };
-        let previous = ledger_chain_genesis_sha256_v1(LedgerId(7));
+        let previous = ledger_chain_genesis_sha256_v1(walicord_ledger::test_fixtures::ledger_id(7));
         let bytes = encode_schema_v1_unwrap(previous, &payload);
         let entry_hash = Sha256V1Digest.digest(&bytes);
 
@@ -1255,13 +1260,14 @@ mod schema_v1_tests {
             payload,
         };
 
-        let actual = verify_envelope_sha256_v1(unverified, LedgerId(42));
+        let actual =
+            verify_envelope_sha256_v1(unverified, walicord_ledger::test_fixtures::ledger_id(42));
 
         assert_eq!(
             actual,
             Err(LedgerHashChainError::LedgerIdMismatch {
-                expected: LedgerId(42),
-                declared: LedgerId(7),
+                expected: walicord_ledger::test_fixtures::ledger_id(42),
+                declared: walicord_ledger::test_fixtures::ledger_id(7),
             })
         );
     }
@@ -1281,7 +1287,7 @@ mod schema_v1_tests {
         };
         let verified = verify_envelope(
             unverified,
-            LedgerId(0),
+            walicord_ledger::test_fixtures::ledger_id(1),
             previous,
             &DefaultLedgerCanonicalEncoder,
             &Sha256V1Digest,

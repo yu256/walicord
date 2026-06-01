@@ -274,7 +274,7 @@ pub fn voided_entry_rows(
                 voided_at: BusinessDateTime::from_system_time(view.recorded_at()),
                 original_summary: summary_for_view(target, labels)?,
                 recovery_reference: RecoveryReference {
-                    ledger_id_short: format!("{:08x}", ledger_id.0),
+                    ledger_id_short: format!("{ledger_id:08x}"),
                     entry_id: view.entry().id,
                     message_link: Some(view.message_link().to_owned()),
                 },

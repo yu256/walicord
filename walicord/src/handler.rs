@@ -964,9 +964,72 @@ where
             Ok(dispatch) => dispatch,
             Err(error) => {
                 tracing::error!(error = %error, "ledger router dispatch failed");
+                self.respond_to_ledger_router_error(ctx, interaction, error.user_message())
+                    .await;
                 crate::discord::ledger::InteractionDispatch::Handled
             }
         })
+    }
+
+    async fn respond_to_ledger_router_error(
+        &self,
+        ctx: &Context,
+        interaction: &serenity::model::application::Interaction,
+        message: &str,
+    ) {
+        use serenity::{builder::CreateInteractionResponse, model::application::Interaction};
+
+        match interaction {
+            Interaction::Command(command) => {
+                if command
+                    .edit_response(&ctx.http, safe_edit_interaction_response().content(message))
+                    .await
+                    .is_err()
+                {
+                    let _ = command
+                        .create_response(
+                            &ctx.http,
+                            CreateInteractionResponse::Message(
+                                safe_interaction_response_message()
+                                    .content(message)
+                                    .ephemeral(true),
+                            ),
+                        )
+                        .await;
+                }
+            }
+            Interaction::Component(component) => {
+                if component
+                    .create_response(
+                        &ctx.http,
+                        CreateInteractionResponse::Message(
+                            safe_interaction_response_message()
+                                .content(message)
+                                .ephemeral(true),
+                        ),
+                    )
+                    .await
+                    .is_err()
+                {
+                    let _ = component
+                        .edit_response(&ctx.http, safe_edit_interaction_response().content(message))
+                        .await;
+                }
+            }
+            Interaction::Modal(modal) => {
+                let _ = modal
+                    .create_response(
+                        &ctx.http,
+                        CreateInteractionResponse::Message(
+                            safe_interaction_response_message()
+                                .content(message)
+                                .ephemeral(true),
+                        ),
+                    )
+                    .await;
+            }
+            _ => {}
+        }
     }
 
     /// Build the new-pipeline [`LedgerRouter`] now that the bot user id is known
@@ -974,7 +1037,11 @@ where
     /// to read. Initialization failure is logged and the router stays `None`; the
     /// legacy `ledger_poc` continues to handle every interaction in that case, so the
     /// bot keeps serving rather than hard-failing on startup.
-    fn initialize_ledger_router(&self, bot_user_id: serenity::all::UserId) {
+    fn initialize_ledger_router(
+        &self,
+        bot_user_id: serenity::all::UserId,
+        http: Arc<serenity::http::Http>,
+    ) {
         let writer_lineage = match crate::discord::ledger::WriterLineagePolicy::load(
             Some(bot_user_id),
             Some(std::iter::once(bot_user_id)),
@@ -998,6 +1065,7 @@ where
         let deps = crate::discord::ledger::LedgerRouterDependencies {
             clock: Arc::new(crate::discord::ledger::SystemClock),
             nonce_provider: Arc::new(crate::discord::ledger::ProcessNonceProvider::new()),
+            ledger_id_provider: Arc::new(crate::discord::ledger::ProcessNonceProvider::new()),
             channels: Arc::new(self.channel_manager.clone()),
             roster_fetcher: Arc::new(crate::discord::ledger::DiscordRouterRosterFetcher::new(
                 self.roster_provider.clone(),
@@ -1006,6 +1074,11 @@ where
                 Arc::clone(&canonical_store),
                 "ledger-router",
             )),
+            locator: Arc::new(crate::discord::ledger::discord_canonical_thread_locator(
+                Arc::clone(&canonical_store),
+                http,
+            )),
+            thread_creator: Arc::new(crate::discord::ledger::DiscordLedgerCanonicalThreadCreator),
             expense_sessions: Arc::new(crate::discord::ledger::ExpenseSessionStore::new()),
             void_sessions: Arc::new(crate::discord::ledger::VoidSessionStore::new()),
             modal_retries: Arc::new(crate::discord::ledger::ModalRetryBindingStore::new()),
@@ -1207,7 +1280,7 @@ where
         }
         tracing::info!("Connected as {}", ready.user.name);
         self.initialize_enabled_channels(&ctx, &ready).await;
-        self.initialize_ledger_router(ready.user.id);
+        self.initialize_ledger_router(ready.user.id, Arc::clone(&ctx.http));
 
         use serenity::model::application::Command;
 

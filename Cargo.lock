@@ -3378,10 +3378,12 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "url",
  "walicord-application",
  "walicord-domain",
  "walicord-i18n",
  "walicord-infrastructure",
+ "walicord-ledger",
  "walicord-parser",
  "walicord-presentation",
 ]
@@ -3433,11 +3435,13 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "fs2",
+ "getrandom 0.3.4",
  "proptest",
  "rstest",
  "thiserror 2.0.17",
  "walicord-application",
  "walicord-domain",
+ "walicord-ledger",
  "walicord-parser",
  "walicord-transfer-construction",
 ]
@@ -3446,6 +3450,7 @@ dependencies = [
 name = "walicord-ledger"
 version = "0.1.0"
 dependencies = [
+ "serde",
  "thiserror 2.0.17",
  "walicord-domain",
 ]

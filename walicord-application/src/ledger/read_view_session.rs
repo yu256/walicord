@@ -166,7 +166,7 @@ mod tests {
 
     fn key() -> ReadViewSessionKey {
         ReadViewSessionKey {
-            ledger_id: LedgerId(7),
+            ledger_id: walicord_ledger::test_fixtures::ledger_id(7),
             actor_id: MemberId(11),
         }
     }

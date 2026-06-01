@@ -216,18 +216,16 @@ pub(crate) fn recovery_reference_components(
             CreateButton::new_link(thread_link.clone()).label(i18n::open_ledger_thread_label()),
         ])],
         LocatorRecoveryReference::Channel {
-            parent_channel_link: Some(parent_channel_link),
+            channel_link: Some(channel_link),
             ..
         } => vec![CreateActionRow::Buttons(vec![
-            CreateButton::new_link(parent_channel_link.clone())
-                .label(i18n::open_parent_channel_label()),
+            CreateButton::new_link(channel_link.clone()).label(i18n::open_parent_channel_label()),
         ])],
         LocatorRecoveryReference::Ledger {
             thread_link: None, ..
         }
         | LocatorRecoveryReference::Channel {
-            parent_channel_link: None,
-            ..
+            channel_link: None, ..
         } => Vec::new(),
     }
 }

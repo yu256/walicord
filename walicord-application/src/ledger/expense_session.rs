@@ -5,6 +5,7 @@ use crate::{
 use dashmap::DashMap;
 use std::{
     collections::{BTreeMap, HashMap},
+    num::NonZeroU64,
     sync::{Arc, Mutex},
     time::{Duration, SystemTime},
 };
@@ -18,26 +19,42 @@ pub const EXPENSE_SESSION_TTL: Duration = Duration::from_secs(10 * 60);
 pub const VOID_SESSION_TTL: Duration = Duration::from_secs(10 * 60);
 pub const MODAL_RETRY_TTL: Duration = Duration::from_secs(10 * 60);
 
-/// Identity for an in-progress expense draft. Keyed by `(LedgerId, MemberId)` rather
-/// than the Discord-side `(GuildId, ChannelId, MemberId)` triple so the application
-/// layer never has to import serenity types. The adapter is responsible for
-/// translating `(GuildId, ChannelId)` → `LedgerId` at the interaction boundary.
+/// Adapter-issued scope for an in-progress expense draft. A draft can exist before its
+/// first canonical ledger thread, so this is intentionally distinct from [`LedgerId`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ExpenseDraftScopeId(NonZeroU64);
+
+impl ExpenseDraftScopeId {
+    pub fn new(value: u64) -> Result<Self, ExpenseDraftScopeIdError> {
+        NonZeroU64::new(value)
+            .map(Self)
+            .ok_or(ExpenseDraftScopeIdError::Zero)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum ExpenseDraftScopeIdError {
+    #[error("expense draft scope id must be non-zero")]
+    Zero,
+}
+
+/// Identity for an in-progress expense draft.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ExpenseSessionKey {
-    ledger_id: LedgerId,
+    draft_scope_id: ExpenseDraftScopeId,
     actor_id: MemberId,
 }
 
 impl ExpenseSessionKey {
-    pub fn new(ledger_id: LedgerId, actor_id: MemberId) -> Self {
+    pub fn new(draft_scope_id: ExpenseDraftScopeId, actor_id: MemberId) -> Self {
         Self {
-            ledger_id,
+            draft_scope_id,
             actor_id,
         }
     }
 
-    pub fn ledger_id(self) -> LedgerId {
-        self.ledger_id
+    pub fn draft_scope_id(self) -> ExpenseDraftScopeId {
+        self.draft_scope_id
     }
     pub fn actor_id(self) -> MemberId {
         self.actor_id
@@ -314,14 +331,12 @@ pub struct ModalRetryPreserved {
 /// first successful consume — the type itself does not carry a `consumed` flag because
 /// such a flag would be bypassable by cloning the binding outside the store.
 ///
-/// Scope is bound to `(LedgerId, MemberId)` rather than `(ChannelId, MemberId)` so the
-/// application layer stays free of serenity types; the adapter is responsible for
-/// translating Discord identifiers to `LedgerId` at the interaction boundary.
+/// Scope is bound to the expense draft independently of canonical ledger creation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModalRetryBinding {
     binding_nonce: InteractionNonce,
     actor_id: MemberId,
-    ledger_id: LedgerId,
+    draft_scope_id: ExpenseDraftScopeId,
     preserved: ModalRetryPreserved,
     created_at: SystemTime,
     expires_at: SystemTime,
@@ -341,10 +356,10 @@ pub enum ModalRetryBindingError {
         actual: MemberId,
         expected: MemberId,
     },
-    #[error("modal retry ledger mismatch: observed {actual:?}, expected {expected:?}")]
-    LedgerMismatch {
-        actual: LedgerId,
-        expected: LedgerId,
+    #[error("modal retry draft scope mismatch: observed {actual:?}, expected {expected:?}")]
+    DraftScopeMismatch {
+        actual: ExpenseDraftScopeId,
+        expected: ExpenseDraftScopeId,
     },
 }
 
@@ -352,14 +367,14 @@ impl ModalRetryBinding {
     pub fn capture(
         binding_nonce: InteractionNonce,
         actor_id: MemberId,
-        ledger_id: LedgerId,
+        draft_scope_id: ExpenseDraftScopeId,
         preserved: ModalRetryPreserved,
         created_at: SystemTime,
     ) -> Self {
         Self {
             binding_nonce,
             actor_id,
-            ledger_id,
+            draft_scope_id,
             preserved,
             created_at,
             expires_at: created_at + MODAL_RETRY_TTL,
@@ -372,8 +387,8 @@ impl ModalRetryBinding {
     pub fn actor_id(&self) -> MemberId {
         self.actor_id
     }
-    pub fn ledger_id(&self) -> LedgerId {
-        self.ledger_id
+    pub fn draft_scope_id(&self) -> ExpenseDraftScopeId {
+        self.draft_scope_id
     }
     pub fn preserved(&self) -> &ModalRetryPreserved {
         &self.preserved
@@ -417,7 +432,7 @@ impl ModalRetryBindingStore {
         &self,
         binding_nonce: InteractionNonce,
         actor_id: MemberId,
-        ledger_id: LedgerId,
+        draft_scope_id: ExpenseDraftScopeId,
         now: SystemTime,
     ) -> Result<ModalRetryPreserved, ModalRetryBindingError> {
         let mut guard = self
@@ -438,10 +453,10 @@ impl ModalRetryBindingStore {
                 expected: binding.actor_id,
             });
         }
-        if binding.ledger_id != ledger_id {
-            return Err(ModalRetryBindingError::LedgerMismatch {
-                actual: ledger_id,
-                expected: binding.ledger_id,
+        if binding.draft_scope_id != draft_scope_id {
+            return Err(ModalRetryBindingError::DraftScopeMismatch {
+                actual: draft_scope_id,
+                expected: binding.draft_scope_id,
             });
         }
         let binding = guard
@@ -457,9 +472,6 @@ pub struct PickerSnapshotId(u64);
 impl PickerSnapshotId {
     pub fn new(value: u64) -> Self {
         Self(value)
-    }
-    pub fn get(self) -> u64 {
-        self.0
     }
 }
 
@@ -845,7 +857,7 @@ impl VoidSessionStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ledger::{LedgerId, ledger_chain_genesis_sha256_v1};
+    use crate::ledger::ledger_chain_genesis_sha256_v1;
     use rstest::rstest;
     use std::time::UNIX_EPOCH;
 
@@ -853,16 +865,28 @@ mod tests {
         InteractionNonce::new(value).expect("nonce non-zero")
     }
 
+    #[test]
+    fn expense_draft_scope_rejects_zero() {
+        assert_eq!(
+            ExpenseDraftScopeId::new(0),
+            Err(ExpenseDraftScopeIdError::Zero)
+        );
+    }
+
     fn expense_key() -> ExpenseSessionKey {
-        ExpenseSessionKey::new(LedgerId(42), MemberId(3))
+        ExpenseSessionKey::new(draft_scope(42), MemberId(3))
+    }
+
+    fn draft_scope(value: u64) -> ExpenseDraftScopeId {
+        ExpenseDraftScopeId::new(value).expect("draft scope should be non-zero")
     }
 
     fn void_key() -> VoidSessionKey {
-        VoidSessionKey::new(LedgerId(42), MemberId(3))
+        VoidSessionKey::new(walicord_ledger::test_fixtures::ledger_id(42), MemberId(3))
     }
 
     fn entry_hash() -> EntryHash {
-        ledger_chain_genesis_sha256_v1(LedgerId(77))
+        ledger_chain_genesis_sha256_v1(walicord_ledger::test_fixtures::ledger_id(77))
     }
 
     fn basic_info() -> ExpenseBasicInfo {
@@ -1220,14 +1244,12 @@ mod tests {
         }
     }
 
-    const RETRY_LEDGER_ID: LedgerId = LedgerId(42);
-
     #[test]
     fn modal_retry_binding_expires_at_is_creation_plus_ten_minutes() {
         let binding = ModalRetryBinding::capture(
             nonce(1),
             MemberId(3),
-            RETRY_LEDGER_ID,
+            draft_scope(42),
             preserved(),
             UNIX_EPOCH,
         );
@@ -1239,7 +1261,7 @@ mod tests {
         store.store(ModalRetryBinding::capture(
             nonce(1),
             MemberId(3),
-            RETRY_LEDGER_ID,
+            draft_scope(42),
             preserved(),
             UNIX_EPOCH,
         ));
@@ -1260,7 +1282,7 @@ mod tests {
         #[case] expected: Result<ModalRetryPreserved, ModalRetryBindingError>,
     ) {
         let store = fresh_modal_retry_store();
-        let actual = store.try_consume(nonce(1), MemberId(3), RETRY_LEDGER_ID, now);
+        let actual = store.try_consume(nonce(1), MemberId(3), draft_scope(42), now);
         assert_eq!(actual, expected);
     }
 
@@ -1271,13 +1293,13 @@ mod tests {
         let first = store.try_consume(
             nonce(1),
             MemberId(3),
-            RETRY_LEDGER_ID,
+            draft_scope(42),
             UNIX_EPOCH + Duration::from_secs(1),
         );
         let second = store.try_consume(
             nonce(1),
             MemberId(3),
-            RETRY_LEDGER_ID,
+            draft_scope(42),
             UNIX_EPOCH + Duration::from_secs(2),
         );
 
@@ -1288,17 +1310,17 @@ mod tests {
     #[rstest]
     #[case::wrong_actor(
         MemberId(999),
-        RETRY_LEDGER_ID,
+        draft_scope(42),
         Err(ModalRetryBindingError::ActorMismatch { actual: MemberId(999), expected: MemberId(3) }),
     )]
-    #[case::wrong_ledger(
+    #[case::wrong_draft_scope(
         MemberId(3),
-        LedgerId(999),
-        Err(ModalRetryBindingError::LedgerMismatch { actual: LedgerId(999), expected: RETRY_LEDGER_ID }),
+        draft_scope(999),
+        Err(ModalRetryBindingError::DraftScopeMismatch { actual: draft_scope(999), expected: draft_scope(42) }),
     )]
-    fn modal_retry_store_try_consume_enforces_actor_and_ledger(
+    fn modal_retry_store_try_consume_enforces_actor_and_draft_scope(
         #[case] actor: MemberId,
-        #[case] ledger_id: LedgerId,
+        #[case] draft_scope_id: ExpenseDraftScopeId,
         #[case] expected: Result<ModalRetryPreserved, ModalRetryBindingError>,
     ) {
         let store = fresh_modal_retry_store();
@@ -1306,7 +1328,7 @@ mod tests {
         let actual = store.try_consume(
             nonce(1),
             actor,
-            ledger_id,
+            draft_scope_id,
             UNIX_EPOCH + Duration::from_secs(60),
         );
 
@@ -1319,7 +1341,7 @@ mod tests {
         let actual = store.try_consume(
             nonce(1),
             MemberId(3),
-            RETRY_LEDGER_ID,
+            draft_scope(42),
             UNIX_EPOCH + Duration::from_secs(1),
         );
         assert_eq!(actual, Err(ModalRetryBindingError::NotFound));
@@ -1346,10 +1368,10 @@ mod tests {
     #[rstest]
     #[case::matching_snapshot(entry_hash(), Ok(()))]
     #[case::stale_snapshot(
-        ledger_chain_genesis_sha256_v1(LedgerId(99)),
+        ledger_chain_genesis_sha256_v1(walicord_ledger::test_fixtures::ledger_id(99)),
         Err(PagedReadViewStateError::StaleSnapshot {
             actual: entry_hash(),
-            expected: ledger_chain_genesis_sha256_v1(LedgerId(99)),
+            expected: ledger_chain_genesis_sha256_v1(walicord_ledger::test_fixtures::ledger_id(99)),
         }),
     )]
     fn paged_read_view_state_require_snapshot_rejects_stale_pages(

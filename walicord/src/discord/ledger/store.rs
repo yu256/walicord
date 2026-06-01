@@ -1,6 +1,7 @@
 use super::{LEDGER_ATTACHMENT_FILENAME, fetch_all_channel_messages};
 use serenity::{
     all::{ChannelId, GuildId, Message, MessageId, UserId},
+    http::Http,
     prelude::Context,
 };
 use sha2::{Digest as _, Sha256};
@@ -85,7 +86,7 @@ impl CanonicalMessageRecord {
 }
 
 fn recovery_reference_ledger_id_short(ledger_id: LedgerId) -> String {
-    format!("{:08x}", ledger_id.0)
+    format!("{ledger_id:08x}")
 }
 
 fn expected_canonical_message_prefixes(entry: &LedgerEntry) -> Vec<String> {
@@ -583,6 +584,35 @@ impl DiscordCanonicalLedgerStore {
         .await
     }
 
+    pub async fn load_verified_thread_discovering_id(
+        &self,
+        http: &Http,
+        canonical_thread_id: ChannelId,
+    ) -> Result<Option<(LedgerId, VerifiedLedgerThreadLoad)>, StoreLoadError> {
+        let messages = fetch_all_channel_messages_with_http(http, canonical_thread_id)
+            .await
+            .map_err(classify_thread_fetch_error)?;
+        let pending_records: Vec<PendingCanonicalMessageRecord> = messages
+            .into_iter()
+            .map(pending_canonical_message_record)
+            .filter(PendingCanonicalMessageRecord::should_validate_writer_lineage)
+            .collect();
+        self.writer_lineage
+            .validate_records(&pending_records)
+            .map_err(StoreLoadError::WriterLineage)?;
+
+        let mut records = Vec::with_capacity(pending_records.len());
+        for record in pending_records {
+            records.push(download_canonical_message_record(record).await?);
+        }
+        let Some(ledger_id) = discover_ledger_id_from_records(&records)? else {
+            return Ok(None);
+        };
+        let load =
+            self.load_verified_thread_from_records(canonical_thread_id, ledger_id, records)?;
+        Ok(Some((ledger_id, load)))
+    }
+
     fn load_verified_thread_from_records(
         &self,
         canonical_thread_id: ChannelId,
@@ -720,6 +750,64 @@ impl DiscordCanonicalLedgerStore {
     }
 }
 
+async fn fetch_all_channel_messages_with_http(
+    http: &Http,
+    channel_id: ChannelId,
+) -> serenity::Result<Vec<Message>> {
+    use serenity::builder::GetMessages;
+
+    let mut all_messages = Vec::new();
+    let mut last_message_id = None;
+    loop {
+        let mut builder = GetMessages::new().limit(100);
+        if let Some(before) = last_message_id {
+            builder = builder.before(before);
+        }
+        let messages = channel_id.messages(http, builder).await?;
+        if messages.is_empty() {
+            break;
+        }
+        last_message_id = messages.last().map(|message| message.id);
+        all_messages.extend(messages);
+    }
+    all_messages.reverse();
+    Ok(all_messages)
+}
+
+fn discover_ledger_id_from_records(
+    records: &[CanonicalMessageRecord],
+) -> Result<Option<LedgerId>, StoreLoadError> {
+    let Some(record) = records.first() else {
+        return Ok(None);
+    };
+    let authoritative: Vec<&CanonicalAttachmentCandidate> = record
+        .attachments
+        .iter()
+        .filter(|attachment| attachment.filename == LEDGER_ATTACHMENT_FILENAME)
+        .collect();
+    if record.attachments.len() != 1 || authoritative.len() != 1 {
+        return Err(StoreLoadError::AttachmentCardinality {
+            message_id: record.message_id,
+            total_attachments: record.attachments.len(),
+            authoritative_attachments: authoritative.len(),
+        });
+    }
+    let attachment = authoritative[0];
+    if attachment.size_bytes > MAX_AUTHORITATIVE_ATTACHMENT_BYTES {
+        return Err(StoreLoadError::OversizeAttachment {
+            message_id: record.message_id,
+            size_bytes: attachment.size_bytes,
+        });
+    }
+    let decoded = CanonicalAttachmentCodec::decode(&attachment.bytes, record.message_id).map_err(
+        |error| StoreLoadError::Decode {
+            message_id: record.message_id,
+            error,
+        },
+    )?;
+    Ok(Some(decoded.payload.ledger_id))
+}
+
 #[derive(Debug, Clone)]
 struct CanonicalMessageRecord {
     message_id: MessageId,
@@ -819,6 +907,23 @@ fn pending_canonical_message_record(message: Message) -> PendingCanonicalMessage
     }
 }
 
+fn validate_authoritative_attachment_url(
+    message_id: MessageId,
+    attachment_url: &str,
+) -> Result<(), StoreLoadError> {
+    let parsed = url::Url::parse(attachment_url).map_err(|error| StoreLoadError::Decode {
+        message_id,
+        error: AttachmentCodecError::UnreadableAttachment(error.to_string()),
+    })?;
+    if matches!(parsed.scheme(), "http" | "https") && parsed.has_host() {
+        return Ok(());
+    }
+    Err(StoreLoadError::Decode {
+        message_id,
+        error: AttachmentCodecError::UnreadableAttachment(attachment_url.to_owned()),
+    })
+}
+
 async fn download_canonical_message_record(
     record: PendingCanonicalMessageRecord,
 ) -> Result<CanonicalMessageRecord, StoreLoadError> {
@@ -836,9 +941,14 @@ async fn download_canonical_message_record(
             && attachment.filename == LEDGER_ATTACHMENT_FILENAME
             && attachment.size_bytes <= MAX_AUTHORITATIVE_ATTACHMENT_BYTES;
         let bytes = if should_download {
-            attachment
+            let authoritative_attachment = attachment
                 .authoritative_attachment
-                .expect("authoritative attachment should remain available until download")
+                .expect("authoritative attachment should remain available until download");
+            validate_authoritative_attachment_url(
+                record.message_id,
+                &authoritative_attachment.url,
+            )?;
+            authoritative_attachment
                 .download()
                 .await
                 .map_err(|error| unreadable_attachment_error(record.message_id, error))?
@@ -920,16 +1030,13 @@ fn classify_thread_fetch_error(error: serenity::Error) -> StoreLoadError {
 }
 
 fn classify_attachment_fetch_status(
-    message_id: MessageId,
+    _message_id: MessageId,
     status_code: Option<serenity::http::StatusCode>,
     error_text: String,
 ) -> StoreLoadError {
-    match classify_fetch_status(status_code, error_text.clone()) {
-        StoreLoadError::Permission(_) => StoreLoadError::Permission(error_text),
-        StoreLoadError::Fetch(_) => StoreLoadError::Decode {
-            message_id,
-            error: AttachmentCodecError::UnreadableAttachment(error_text),
-        },
+    match classify_fetch_status(status_code, error_text) {
+        StoreLoadError::Permission(message) => StoreLoadError::Permission(message),
+        StoreLoadError::Fetch(message) => StoreLoadError::Fetch(message),
         _ => unreachable!("attachment fetch status should classify as fetch or permission"),
     }
 }
@@ -1089,7 +1196,7 @@ use super::observability::CapturingLedgerObservability;
 pub(super) fn verified_thread_load_for_test(
     entries: Vec<walicord_application::ledger::LedgerEntry>,
 ) -> VerifiedLedgerThreadLoad {
-    let ledger_id = LedgerId(77);
+    let ledger_id = walicord_ledger::test_fixtures::ledger_id(77);
     let channel_id = ChannelId::new(77);
     let mut previous_hash = walicord_application::ledger::ledger_chain_genesis_sha256_v1(ledger_id);
     let mut records = Vec::with_capacity(entries.len());
@@ -1241,6 +1348,25 @@ mod tests {
         }
     }
 
+    #[test]
+    fn ledger_id_discovery_uses_canonical_attachment_instead_of_thread_id() {
+        let ledger_id = walicord_ledger::test_fixtures::ledger_id(77);
+        let envelope = make_unverified_envelope_sha256_v1(
+            ledger_id,
+            ledger_chain_genesis_sha256_v1(ledger_id),
+            (),
+            expense_entry(1, 1, &[(1, 100)]),
+        )
+        .expect("envelope should build");
+        let bytes = CanonicalAttachmentCodec::encode(&envelope).expect("attachment should encode");
+        let records = vec![canonical_record(1, 900, 500, 42, 1, bytes)];
+
+        assert!(matches!(
+            discover_ledger_id_from_records(&records),
+            Ok(Some(actual)) if actual == ledger_id
+        ));
+    }
+
     fn unrelated_attachment_record(
         message_id: u64,
         author_id: u64,
@@ -1293,7 +1419,7 @@ mod tests {
     }
 
     fn encode_entries_as_records(entries: Vec<LedgerEntry>) -> Vec<CanonicalMessageRecord> {
-        let ledger_id = LedgerId(77);
+        let ledger_id = walicord_ledger::test_fixtures::ledger_id(77);
         let channel_id = ChannelId::new(77);
         let mut previous_hash = ledger_chain_genesis_sha256_v1(ledger_id);
         let mut records = Vec::with_capacity(entries.len());
@@ -1427,13 +1553,7 @@ mod tests {
         let other = classify_attachment_fetch_status(MessageId::new(1), None, "other".to_owned());
 
         assert!(matches!(forbidden, StoreLoadError::Permission(_)));
-        assert!(matches!(
-            other,
-            StoreLoadError::Decode {
-                message_id,
-                error: AttachmentCodecError::UnreadableAttachment(_),
-            } if message_id == MessageId::new(1)
-        ));
+        assert!(matches!(other, StoreLoadError::Fetch(_)));
     }
 
     #[test]
@@ -1509,7 +1629,11 @@ mod tests {
         ]);
 
         let actual = store()
-            .load_verified_thread_from_records(ChannelId::new(77), LedgerId(77), records)
+            .load_verified_thread_from_records(
+                ChannelId::new(77),
+                walicord_ledger::test_fixtures::ledger_id(77),
+                records,
+            )
             .expect("load should succeed");
 
         assert_eq!(actual.snapshot().canonical_entry_count(), 2);
@@ -1528,7 +1652,7 @@ mod tests {
     fn load_verified_thread_rejects_missing_authoritative_attachment() {
         let actual = store().load_verified_thread_from_records(
             ChannelId::new(77),
-            LedgerId(77),
+            walicord_ledger::test_fixtures::ledger_id(77),
             vec![unrelated_attachment_record(1, 900, 77)],
         );
 
@@ -1560,7 +1684,7 @@ mod tests {
 
         let actual = store().load_verified_thread_from_records(
             ChannelId::new(77),
-            LedgerId(77),
+            walicord_ledger::test_fixtures::ledger_id(77),
             vec![record],
         );
 
@@ -1592,7 +1716,7 @@ mod tests {
 
         let actual = store().load_verified_thread_from_records(
             ChannelId::new(77),
-            LedgerId(77),
+            walicord_ledger::test_fixtures::ledger_id(77),
             vec![record],
         );
 
@@ -1617,7 +1741,7 @@ mod tests {
 
         let actual = store().load_verified_thread_from_records(
             ChannelId::new(77),
-            LedgerId(77),
+            walicord_ledger::test_fixtures::ledger_id(77),
             vec![record],
         );
 
@@ -1637,8 +1761,11 @@ mod tests {
             encode_entries_as_records(vec![expense_entry(1, 1, &[(1, 5_000), (2, 5_000)])]);
         records[0].author_id = UserId::new(901);
 
-        let actual =
-            store().load_verified_thread_from_records(ChannelId::new(77), LedgerId(77), records);
+        let actual = store().load_verified_thread_from_records(
+            ChannelId::new(77),
+            walicord_ledger::test_fixtures::ledger_id(77),
+            records,
+        );
 
         assert!(matches!(
             actual,
@@ -1655,8 +1782,11 @@ mod tests {
             encode_entries_as_records(vec![expense_entry(1, 1, &[(1, 5_000), (2, 5_000)])]);
         records[0].webhook_id = Some(7);
 
-        let actual =
-            store().load_verified_thread_from_records(ChannelId::new(77), LedgerId(77), records);
+        let actual = store().load_verified_thread_from_records(
+            ChannelId::new(77),
+            walicord_ledger::test_fixtures::ledger_id(77),
+            records,
+        );
 
         assert!(matches!(
             actual,
@@ -1674,8 +1804,11 @@ mod tests {
         ]);
         records[0].author_id = UserId::new(800);
 
-        let actual =
-            store().load_verified_thread_from_records(ChannelId::new(77), LedgerId(77), records);
+        let actual = store().load_verified_thread_from_records(
+            ChannelId::new(77),
+            walicord_ledger::test_fixtures::ledger_id(77),
+            records,
+        );
 
         assert_eq!(
             actual
@@ -1696,8 +1829,11 @@ mod tests {
             user_authored_authoritative_record(99, 77, records[0].attachments[0].bytes.clone());
         records.insert(1, user_authored);
 
-        let actual =
-            store().load_verified_thread_from_records(ChannelId::new(77), LedgerId(77), records);
+        let actual = store().load_verified_thread_from_records(
+            ChannelId::new(77),
+            walicord_ledger::test_fixtures::ledger_id(77),
+            records,
+        );
 
         assert!(matches!(
             actual,
@@ -1716,8 +1852,11 @@ mod tests {
         ]);
         records.insert(1, user_chatter_record(99, 77));
 
-        let actual =
-            store().load_verified_thread_from_records(ChannelId::new(77), LedgerId(77), records);
+        let actual = store().load_verified_thread_from_records(
+            ChannelId::new(77),
+            walicord_ledger::test_fixtures::ledger_id(77),
+            records,
+        );
 
         assert_eq!(
             actual
@@ -1740,8 +1879,11 @@ mod tests {
         records[1].attachments[0].bytes =
             serde_json::to_vec(&value).expect("tampered attachment should serialize");
 
-        let actual =
-            store().load_verified_thread_from_records(ChannelId::new(77), LedgerId(77), records);
+        let actual = store().load_verified_thread_from_records(
+            ChannelId::new(77),
+            walicord_ledger::test_fixtures::ledger_id(77),
+            records,
+        );
 
         assert!(matches!(actual, Err(StoreLoadError::Chain(_))));
     }
@@ -1752,8 +1894,11 @@ mod tests {
             encode_entries_as_records(vec![expense_entry(1, 1, &[(1, 5_000), (2, 5_000)])]);
         records[0].attachments[0].bytes = b"{".to_vec();
 
-        let actual =
-            store().load_verified_thread_from_records(ChannelId::new(77), LedgerId(77), records);
+        let actual = store().load_verified_thread_from_records(
+            ChannelId::new(77),
+            walicord_ledger::test_fixtures::ledger_id(77),
+            records,
+        );
 
         assert!(matches!(
             actual,
@@ -1771,8 +1916,11 @@ mod tests {
         records[0].attachments[0].bytes =
             serde_json::to_vec(&value).expect("tampered attachment should serialize");
 
-        let actual =
-            store().load_verified_thread_from_records(ChannelId::new(77), LedgerId(77), records);
+        let actual = store().load_verified_thread_from_records(
+            ChannelId::new(77),
+            walicord_ledger::test_fixtures::ledger_id(77),
+            records,
+        );
 
         assert!(matches!(
             actual,
@@ -1793,8 +1941,11 @@ mod tests {
         records[0].attachments[0].bytes =
             serde_json::to_vec(&value).expect("tampered attachment should serialize");
 
-        let actual =
-            store().load_verified_thread_from_records(ChannelId::new(77), LedgerId(77), records);
+        let actual = store().load_verified_thread_from_records(
+            ChannelId::new(77),
+            walicord_ledger::test_fixtures::ledger_id(77),
+            records,
+        );
 
         assert!(matches!(
             actual,
@@ -1818,8 +1969,11 @@ mod tests {
         records[0].attachments[0].bytes =
             serde_json::to_vec(&value).expect("tampered attachment should serialize");
 
-        let actual =
-            store().load_verified_thread_from_records(ChannelId::new(77), LedgerId(77), records);
+        let actual = store().load_verified_thread_from_records(
+            ChannelId::new(77),
+            walicord_ledger::test_fixtures::ledger_id(77),
+            records,
+        );
 
         assert!(matches!(
             actual,
@@ -1856,7 +2010,7 @@ mod tests {
     fn load_verified_thread_rejects_structure_failures() {
         let actual = store().load_verified_thread_from_records(
             ChannelId::new(77),
-            LedgerId(77),
+            walicord_ledger::test_fixtures::ledger_id(77),
             encode_entries_as_records(vec![
                 expense_entry(1, 1, &[(1, 5_000), (2, 5_000)]),
                 void_entry(2, 2),
@@ -1870,7 +2024,7 @@ mod tests {
     fn load_verified_thread_rejects_projection_failures() {
         let actual = store().load_verified_thread_from_records(
             ChannelId::new(77),
-            LedgerId(77),
+            walicord_ledger::test_fixtures::ledger_id(77),
             encode_entries_as_records(vec![settlement_entry(1, 1, 2, 100)]),
         );
 
@@ -1883,8 +2037,11 @@ mod tests {
             encode_entries_as_records(vec![expense_entry(1, 1, &[(1, 5_000), (2, 5_000)])]);
         records[0].guild_id = None;
 
-        let actual =
-            store().load_verified_thread_from_records(ChannelId::new(77), LedgerId(77), records);
+        let actual = store().load_verified_thread_from_records(
+            ChannelId::new(77),
+            walicord_ledger::test_fixtures::ledger_id(77),
+            records,
+        );
 
         assert!(matches!(
             actual,
@@ -1901,7 +2058,7 @@ mod tests {
 
         let actual = store().load_verified_thread_from_records_with_guard(
             ChannelId::new(77),
-            LedgerId(77),
+            walicord_ledger::test_fixtures::ledger_id(77),
             records,
             |envelope, record| {
                 if envelope.payload().entry.id == LedgerEntryId(1) && record.content == "canonical"
@@ -1924,7 +2081,8 @@ mod tests {
     fn load_verified_thread_allows_immediate_self_link_completion_edit() {
         let mut records =
             encode_entries_as_records(vec![expense_entry(1, 1, &[(1, 5_000), (2, 5_000)])]);
-        let ledger_id_short = recovery_reference_ledger_id_short(LedgerId(77));
+        let ledger_id_short =
+            recovery_reference_ledger_id_short(walicord_ledger::test_fixtures::ledger_id(77));
         let message_link =
             canonical_message_link(GuildId::new(500), ChannelId::new(77), MessageId::new(1));
         attach_pre_self_link_fingerprint(
@@ -1937,7 +2095,7 @@ mod tests {
 
         let actual = store().load_verified_thread_from_records_with_guard(
             ChannelId::new(77),
-            LedgerId(77),
+            walicord_ledger::test_fixtures::ledger_id(77),
             records,
             |_, record| {
                 let expected_link = canonical_message_link(
@@ -1971,7 +2129,8 @@ mod tests {
             expense_entry(1, 1, &[(1, 5_000), (2, 5_000)]),
             seal_entry(2, 1),
         ]);
-        let ledger_id_short = recovery_reference_ledger_id_short(LedgerId(77));
+        let ledger_id_short =
+            recovery_reference_ledger_id_short(walicord_ledger::test_fixtures::ledger_id(77));
         let message_link =
             canonical_message_link(GuildId::new(500), ChannelId::new(77), MessageId::new(2));
         attach_pre_self_link_fingerprint(
@@ -1987,7 +2146,7 @@ mod tests {
 
         let actual = store().load_verified_thread_from_records_with_guard(
             ChannelId::new(77),
-            LedgerId(77),
+            walicord_ledger::test_fixtures::ledger_id(77),
             records,
             |_, record| {
                 let expected_link = canonical_message_link(
@@ -2022,7 +2181,8 @@ mod tests {
             seal_entry(2, 1),
             adjustment_entry(3),
         ]);
-        let ledger_id_short = recovery_reference_ledger_id_short(LedgerId(77));
+        let ledger_id_short =
+            recovery_reference_ledger_id_short(walicord_ledger::test_fixtures::ledger_id(77));
         let message_link =
             canonical_message_link(GuildId::new(500), ChannelId::new(77), MessageId::new(3));
         attach_pre_self_link_fingerprint(
@@ -2038,7 +2198,7 @@ mod tests {
 
         let actual = store().load_verified_thread_from_records_with_guard(
             ChannelId::new(77),
-            LedgerId(77),
+            walicord_ledger::test_fixtures::ledger_id(77),
             records,
             |_, record| {
                 let expected_link = canonical_message_link(
@@ -2070,7 +2230,8 @@ mod tests {
     fn load_verified_thread_rejects_single_line_self_link_wipes() {
         let mut records =
             encode_entries_as_records(vec![expense_entry(1, 1, &[(1, 5_000), (2, 5_000)])]);
-        let ledger_id_short = recovery_reference_ledger_id_short(LedgerId(77));
+        let ledger_id_short =
+            recovery_reference_ledger_id_short(walicord_ledger::test_fixtures::ledger_id(77));
         let message_link =
             canonical_message_link(GuildId::new(500), ChannelId::new(77), MessageId::new(1));
         attach_pre_self_link_fingerprint(
@@ -2081,8 +2242,11 @@ mod tests {
         records[0].content =
             format!("復旧用の参照: ledger:{ledger_id_short}/entry:1 | <{message_link}>");
 
-        let actual =
-            store().load_verified_thread_from_records(ChannelId::new(77), LedgerId(77), records);
+        let actual = store().load_verified_thread_from_records(
+            ChannelId::new(77),
+            walicord_ledger::test_fixtures::ledger_id(77),
+            records,
+        );
 
         assert!(matches!(
             actual,
@@ -2094,7 +2258,8 @@ mod tests {
     fn load_verified_thread_rejects_edited_messages_with_extra_content_around_self_link() {
         let mut records =
             encode_entries_as_records(vec![expense_entry(1, 1, &[(1, 5_000), (2, 5_000)])]);
-        let ledger_id_short = recovery_reference_ledger_id_short(LedgerId(77));
+        let ledger_id_short =
+            recovery_reference_ledger_id_short(walicord_ledger::test_fixtures::ledger_id(77));
         let message_link =
             canonical_message_link(GuildId::new(500), ChannelId::new(77), MessageId::new(1));
         attach_pre_self_link_fingerprint(
@@ -2105,8 +2270,11 @@ mod tests {
         records[0].content =
             format!("tampered\n復旧用の参照: ledger:{ledger_id_short}/entry:1 | <{message_link}>");
 
-        let actual =
-            store().load_verified_thread_from_records(ChannelId::new(77), LedgerId(77), records);
+        let actual = store().load_verified_thread_from_records(
+            ChannelId::new(77),
+            walicord_ledger::test_fixtures::ledger_id(77),
+            records,
+        );
 
         assert!(matches!(
             actual,
@@ -2118,15 +2286,19 @@ mod tests {
     fn load_verified_thread_rejects_unrecognized_edited_message() {
         let mut records =
             encode_entries_as_records(vec![expense_entry(1, 1, &[(1, 5_000), (2, 5_000)])]);
-        let ledger_id_short = recovery_reference_ledger_id_short(LedgerId(77));
+        let ledger_id_short =
+            recovery_reference_ledger_id_short(walicord_ledger::test_fixtures::ledger_id(77));
         attach_pre_self_link_fingerprint(
             &mut records[0],
             &format!("支出 [#1]\n復旧用の参照: ledger:{ledger_id_short}/entry:1"),
         );
         records[0].edited_at = Some(UNIX_EPOCH + Duration::from_secs(90));
 
-        let actual =
-            store().load_verified_thread_from_records(ChannelId::new(77), LedgerId(77), records);
+        let actual = store().load_verified_thread_from_records(
+            ChannelId::new(77),
+            walicord_ledger::test_fixtures::ledger_id(77),
+            records,
+        );
 
         assert!(matches!(
             actual,
@@ -2138,15 +2310,19 @@ mod tests {
     fn load_verified_thread_rejects_self_link_edits_without_pre_edit_fingerprint() {
         let mut records =
             encode_entries_as_records(vec![expense_entry(1, 1, &[(1, 5_000), (2, 5_000)])]);
-        let ledger_id_short = recovery_reference_ledger_id_short(LedgerId(77));
+        let ledger_id_short =
+            recovery_reference_ledger_id_short(walicord_ledger::test_fixtures::ledger_id(77));
         let message_link =
             canonical_message_link(GuildId::new(500), ChannelId::new(77), MessageId::new(1));
         records[0].edited_at = Some(UNIX_EPOCH + Duration::from_secs(90));
         records[0].content =
             format!("支出 [#1]\n復旧用の参照: ledger:{ledger_id_short}/entry:1 | <{message_link}>");
 
-        let actual =
-            store().load_verified_thread_from_records(ChannelId::new(77), LedgerId(77), records);
+        let actual = store().load_verified_thread_from_records(
+            ChannelId::new(77),
+            walicord_ledger::test_fixtures::ledger_id(77),
+            records,
+        );
 
         assert!(matches!(
             actual,
@@ -2159,7 +2335,7 @@ mod tests {
         let actual = store()
             .load_verified_thread_from_records(
                 ChannelId::new(77),
-                LedgerId(77),
+                walicord_ledger::test_fixtures::ledger_id(77),
                 encode_entries_as_records(vec![expense_entry(10, 1, &[(1, 5_000), (2, 5_000)])]),
             )
             .expect("load should succeed");
@@ -2174,8 +2350,11 @@ mod tests {
             encode_entries_as_records(vec![expense_entry(1, 1, &[(1, 5_000), (2, 5_000)])]);
         records[0].channel_id = ChannelId::new(78);
 
-        let actual =
-            store().load_verified_thread_from_records(ChannelId::new(77), LedgerId(77), records);
+        let actual = store().load_verified_thread_from_records(
+            ChannelId::new(77),
+            walicord_ledger::test_fixtures::ledger_id(77),
+            records,
+        );
 
         assert!(matches!(
             actual,
@@ -2196,7 +2375,7 @@ mod tests {
         let actual = store()
             .load_verified_thread_from_records(
                 ChannelId::new(77),
-                LedgerId(77),
+                walicord_ledger::test_fixtures::ledger_id(77),
                 encode_entries_as_records(vec![
                     expense_entry(1, 1, &[(1, 5_000), (2, 5_000)]),
                     expense_entry(2, 2, &[(1, 1_000), (2, 1_000)]),

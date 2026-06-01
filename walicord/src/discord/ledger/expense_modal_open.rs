@@ -100,7 +100,7 @@ pub fn build_expense_modal_response(
     nonce: InteractionNonce,
     prefill: &ExpenseModalPrefill,
 ) -> Result<CreateInteractionResponse, ExpenseModalBuildError> {
-    let custom_id = format!("{EXPENSE_MODAL_CUSTOM_ID_PREFIX}{}", nonce.get());
+    let custom_id = format!("{EXPENSE_MODAL_CUSTOM_ID_PREFIX}{nonce}");
     validate_custom_id(&custom_id).map_err(ExpenseModalBuildError::Budget)?;
 
     let title_text = truncate_component_label(i18n::expense_modal_title());

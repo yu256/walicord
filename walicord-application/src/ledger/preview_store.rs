@@ -167,6 +167,58 @@ impl PreviewStore {
     }
 }
 
+pub struct PreviewCommitGuard<'a> {
+    preview_store: &'a PreviewStore,
+    key: PreviewStoreKey,
+    preview_instance_id: PreviewInstanceId,
+    finished: bool,
+}
+
+impl<'a> PreviewCommitGuard<'a> {
+    pub fn begin(
+        preview_store: &'a PreviewStore,
+        key: PreviewStoreKey,
+        preview_instance_id: PreviewInstanceId,
+    ) -> Result<Self, PreviewStoreError> {
+        preview_store.transition(
+            key,
+            PreviewStoreTransition::BeginCommit {
+                preview_instance_id,
+            },
+        )?;
+        Ok(Self {
+            preview_store,
+            key,
+            preview_instance_id,
+            finished: false,
+        })
+    }
+
+    pub fn finish(mut self) -> Result<(), PreviewStoreError> {
+        self.preview_store.transition(
+            self.key,
+            PreviewStoreTransition::FinishCommit {
+                preview_instance_id: self.preview_instance_id,
+            },
+        )?;
+        self.finished = true;
+        Ok(())
+    }
+}
+
+impl Drop for PreviewCommitGuard<'_> {
+    fn drop(&mut self) {
+        if !self.finished {
+            let _ = self.preview_store.transition(
+                self.key,
+                PreviewStoreTransition::AbortCommit {
+                    preview_instance_id: self.preview_instance_id,
+                },
+            );
+        }
+    }
+}
+
 fn compute_next_state(
     current: Option<PreviewStoreState>,
     transition: PreviewStoreTransition,
@@ -339,7 +391,7 @@ mod tests {
     }
 
     fn ledger_id() -> LedgerId {
-        LedgerId(77)
+        walicord_ledger::test_fixtures::ledger_id(77)
     }
 
     fn actor() -> MemberId {
@@ -534,6 +586,38 @@ mod tests {
         );
 
         assert_eq!(actual, Ok(Some(PreviewStoreState::Ready(rec))));
+    }
+
+    #[test]
+    fn dropping_commit_guard_returns_record_to_ready() {
+        let store = PreviewStore::new();
+        let rec = record(1, 1000);
+        store
+            .transition(
+                key(),
+                PreviewStoreTransition::Replace(Box::new(rec.clone())),
+            )
+            .expect("replace");
+
+        drop(PreviewCommitGuard::begin(&store, key(), instance(1)).expect("begin commit"));
+
+        assert_eq!(store.current(key()), Some(PreviewStoreState::Ready(rec)));
+    }
+
+    #[test]
+    fn finishing_commit_guard_removes_record() {
+        let store = PreviewStore::new();
+        let rec = record(1, 1000);
+        store
+            .transition(key(), PreviewStoreTransition::Replace(Box::new(rec)))
+            .expect("replace");
+
+        PreviewCommitGuard::begin(&store, key(), instance(1))
+            .expect("begin commit")
+            .finish()
+            .expect("finish commit");
+
+        assert_eq!(store.current(key()), None);
     }
 
     #[rstest]

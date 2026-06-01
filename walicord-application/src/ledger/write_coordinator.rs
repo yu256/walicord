@@ -12,10 +12,8 @@ use tokio::sync::Mutex as AsyncMutex;
 pub const LAZY_RETRY_SCAN_WINDOW: usize = 5;
 
 /// Write addressing key. Each canonical append targets exactly one ledger; the
-/// per-`LedgerId` async mutex serializes them. (Earlier revisions kept a separate
-/// bootstrap variant for the pre-ledger phase; the new pipeline derives `LedgerId`
-/// from the tracked channel at the adapter boundary, so there is never a moment
-/// when a write happens without a known `LedgerId`.)
+/// per-`LedgerId` async mutex serializes them. The adapter issues the identifier
+/// before the first append and reuses it for the entire canonical write lifecycle.
 pub type WriteTargetKey = LedgerId;
 
 /// Frozen exact-envelope retain state. After an ambiguous post outcome, the same bytes
@@ -398,7 +396,9 @@ mod tests {
         RetainedCanonicalWrite {
             target,
             entry_id: LedgerEntryId(entry_id),
-            previous_hash: ledger_chain_genesis_sha256_v1(LedgerId(77)),
+            previous_hash: ledger_chain_genesis_sha256_v1(
+                walicord_ledger::test_fixtures::ledger_id(77),
+            ),
             envelope_bytes: Arc::new(bytes),
             prepared_body: "draft".to_owned(),
             last_known_summary: "summary".to_owned(),
@@ -415,12 +415,16 @@ mod tests {
     #[test]
     fn set_live_then_current_returns_live_state() {
         let registry = UncertainWriteRegistry::new();
-        let entry = retained(LedgerId(77), b"X".to_vec(), 1);
+        let entry = retained(
+            walicord_ledger::test_fixtures::ledger_id(77),
+            b"X".to_vec(),
+            1,
+        );
         registry
             .set_live(entry.clone())
             .expect("first set_live should succeed");
 
-        let actual = registry.current(LedgerId(77));
+        let actual = registry.current(walicord_ledger::test_fixtures::ledger_id(77));
 
         assert_eq!(actual, Some(UncertainWriteState::Live(entry)));
     }
@@ -428,8 +432,16 @@ mod tests {
     #[test]
     fn set_live_rejects_different_retain_when_live_state_already_exists() {
         let registry = UncertainWriteRegistry::new();
-        let existing = retained(LedgerId(77), b"X".to_vec(), 1);
-        let incoming = retained(LedgerId(77), b"Y".to_vec(), 2);
+        let existing = retained(
+            walicord_ledger::test_fixtures::ledger_id(77),
+            b"X".to_vec(),
+            1,
+        );
+        let incoming = retained(
+            walicord_ledger::test_fixtures::ledger_id(77),
+            b"Y".to_vec(),
+            2,
+        );
         registry
             .set_live(existing.clone())
             .expect("first set_live succeeds");
@@ -444,7 +456,7 @@ mod tests {
             })
         );
         assert_eq!(
-            registry.current(LedgerId(77)),
+            registry.current(walicord_ledger::test_fixtures::ledger_id(77)),
             Some(UncertainWriteState::Live(existing))
         );
     }
@@ -452,7 +464,11 @@ mod tests {
     #[test]
     fn set_live_is_idempotent_when_retain_is_exactly_equal() {
         let registry = UncertainWriteRegistry::new();
-        let entry = retained(LedgerId(77), b"X".to_vec(), 1);
+        let entry = retained(
+            walicord_ledger::test_fixtures::ledger_id(77),
+            b"X".to_vec(),
+            1,
+        );
         registry.set_live(entry.clone()).expect("first");
         let actual = registry.set_live(entry);
         assert_eq!(actual, Ok(()));
@@ -461,9 +477,16 @@ mod tests {
     #[test]
     fn set_live_is_rejected_when_state_is_abandoned() {
         let registry = UncertainWriteRegistry::new();
-        let entry = retained(LedgerId(77), b"X".to_vec(), 1);
+        let entry = retained(
+            walicord_ledger::test_fixtures::ledger_id(77),
+            b"X".to_vec(),
+            1,
+        );
         registry.set_live(entry.clone()).expect("first set_live");
-        registry.mark_abandoned(LedgerId(77), "summary".to_owned());
+        registry.mark_abandoned(
+            walicord_ledger::test_fixtures::ledger_id(77),
+            "summary".to_owned(),
+        );
 
         let actual = registry.set_live(entry);
 
@@ -473,16 +496,23 @@ mod tests {
     #[test]
     fn mark_abandoned_changes_live_state_to_abandoned() {
         let registry = UncertainWriteRegistry::new();
-        let entry = retained(LedgerId(77), b"X".to_vec(), 1);
+        let entry = retained(
+            walicord_ledger::test_fixtures::ledger_id(77),
+            b"X".to_vec(),
+            1,
+        );
         registry.set_live(entry).expect("set_live");
 
-        let was_abandoned = registry.mark_abandoned(LedgerId(77), "summary".to_owned());
+        let was_abandoned = registry.mark_abandoned(
+            walicord_ledger::test_fixtures::ledger_id(77),
+            "summary".to_owned(),
+        );
 
         assert!(was_abandoned);
         assert_eq!(
-            registry.current(LedgerId(77)),
+            registry.current(walicord_ledger::test_fixtures::ledger_id(77)),
             Some(UncertainWriteState::Abandoned {
-                target: LedgerId(77),
+                target: walicord_ledger::test_fixtures::ledger_id(77),
                 last_known_summary: "summary".to_owned(),
             })
         );
@@ -491,11 +521,21 @@ mod tests {
     #[test]
     fn mark_abandoned_is_noop_when_state_already_abandoned() {
         let registry = UncertainWriteRegistry::new();
-        let entry = retained(LedgerId(77), b"X".to_vec(), 1);
+        let entry = retained(
+            walicord_ledger::test_fixtures::ledger_id(77),
+            b"X".to_vec(),
+            1,
+        );
         registry.set_live(entry).expect("set_live");
-        registry.mark_abandoned(LedgerId(77), "s".to_owned());
+        registry.mark_abandoned(
+            walicord_ledger::test_fixtures::ledger_id(77),
+            "s".to_owned(),
+        );
 
-        let second = registry.mark_abandoned(LedgerId(77), "different".to_owned());
+        let second = registry.mark_abandoned(
+            walicord_ledger::test_fixtures::ledger_id(77),
+            "different".to_owned(),
+        );
 
         assert!(!second);
     }
@@ -503,19 +543,30 @@ mod tests {
     #[test]
     fn clear_removes_entry() {
         let registry = UncertainWriteRegistry::new();
-        let entry = retained(LedgerId(77), b"X".to_vec(), 1);
+        let entry = retained(
+            walicord_ledger::test_fixtures::ledger_id(77),
+            b"X".to_vec(),
+            1,
+        );
         registry.set_live(entry.clone()).expect("set_live");
 
-        let removed = registry.clear(LedgerId(77));
+        let removed = registry.clear(walicord_ledger::test_fixtures::ledger_id(77));
 
         assert_eq!(removed, Some(UncertainWriteState::Live(entry)));
-        assert_eq!(registry.current(LedgerId(77)), None);
+        assert_eq!(
+            registry.current(walicord_ledger::test_fixtures::ledger_id(77)),
+            None
+        );
     }
 
     #[test]
     fn complete_scan_with_match_returns_matched() {
         let bytes = b"matching".to_vec();
-        let entry = retained(LedgerId(77), bytes.clone(), 1);
+        let entry = retained(
+            walicord_ledger::test_fixtures::ledger_id(77),
+            bytes.clone(),
+            1,
+        );
         let probes = vec![probe(99, b"other".to_vec()), probe(1, bytes)];
 
         let actual = UncertainWriteRegistry::scan_for_exact_envelope(
@@ -534,7 +585,11 @@ mod tests {
 
     #[test]
     fn complete_scan_with_no_match_returns_verified_no_match() {
-        let entry = retained(LedgerId(77), b"X".to_vec(), 1);
+        let entry = retained(
+            walicord_ledger::test_fixtures::ledger_id(77),
+            b"X".to_vec(),
+            1,
+        );
         let probes = vec![probe(99, b"other".to_vec())];
 
         let actual = UncertainWriteRegistry::scan_for_exact_envelope(
@@ -548,7 +603,11 @@ mod tests {
 
     #[test]
     fn incomplete_scan_with_no_match_returns_inconclusive() {
-        let entry = retained(LedgerId(77), b"X".to_vec(), 1);
+        let entry = retained(
+            walicord_ledger::test_fixtures::ledger_id(77),
+            b"X".to_vec(),
+            1,
+        );
         let probes = vec![probe(99, b"other".to_vec())];
 
         let actual = UncertainWriteRegistry::scan_for_exact_envelope(
@@ -563,7 +622,11 @@ mod tests {
     #[test]
     fn scan_only_inspects_first_window_of_messages() {
         let bytes = b"target".to_vec();
-        let entry = retained(LedgerId(77), bytes.clone(), 1);
+        let entry = retained(
+            walicord_ledger::test_fixtures::ledger_id(77),
+            bytes.clone(),
+            1,
+        );
         let mut probes: Vec<CanonicalMessageProbe> = (0..LAZY_RETRY_SCAN_WINDOW)
             .map(|i| probe(100 + i as u64, vec![0xaa]))
             .collect();
@@ -580,7 +643,11 @@ mod tests {
 
     #[test]
     fn classify_retry_with_match_clears_by_existing_post() {
-        let entry = retained(LedgerId(77), b"X".to_vec(), 1);
+        let entry = retained(
+            walicord_ledger::test_fixtures::ledger_id(77),
+            b"X".to_vec(),
+            1,
+        );
         let head = entry.previous_hash;
 
         let actual = UncertainWriteRegistry::classify_retry(
@@ -601,8 +668,13 @@ mod tests {
 
     #[test]
     fn classify_retry_with_verified_no_match_and_advanced_head_clears_by_conclusive_absence() {
-        let entry = retained(LedgerId(77), b"X".to_vec(), 1);
-        let other_head = ledger_chain_genesis_sha256_v1(LedgerId(99));
+        let entry = retained(
+            walicord_ledger::test_fixtures::ledger_id(77),
+            b"X".to_vec(),
+            1,
+        );
+        let other_head =
+            ledger_chain_genesis_sha256_v1(walicord_ledger::test_fixtures::ledger_id(99));
 
         let actual = UncertainWriteRegistry::classify_retry(
             &entry,
@@ -615,8 +687,13 @@ mod tests {
 
     #[test]
     fn classify_retry_inconclusive_scan_remains_blocked_even_with_head_movement() {
-        let entry = retained(LedgerId(77), b"X".to_vec(), 1);
-        let other_head = ledger_chain_genesis_sha256_v1(LedgerId(99));
+        let entry = retained(
+            walicord_ledger::test_fixtures::ledger_id(77),
+            b"X".to_vec(),
+            1,
+        );
+        let other_head =
+            ledger_chain_genesis_sha256_v1(walicord_ledger::test_fixtures::ledger_id(99));
 
         let actual = UncertainWriteRegistry::classify_retry(
             &entry,
@@ -629,7 +706,11 @@ mod tests {
 
     #[test]
     fn classify_retry_verified_no_match_without_head_movement_remains_blocked() {
-        let entry = retained(LedgerId(77), b"X".to_vec(), 1);
+        let entry = retained(
+            walicord_ledger::test_fixtures::ledger_id(77),
+            b"X".to_vec(),
+            1,
+        );
         let same_head = entry.previous_hash;
 
         let actual = UncertainWriteRegistry::classify_retry(
@@ -644,8 +725,8 @@ mod tests {
     #[test]
     fn write_coordinator_returns_same_lock_arc_for_repeated_published_key() {
         let coordinator = WriteCoordinator::new();
-        let first = coordinator.lock_for(LedgerId(77));
-        let second = coordinator.lock_for(LedgerId(77));
+        let first = coordinator.lock_for(walicord_ledger::test_fixtures::ledger_id(77));
+        let second = coordinator.lock_for(walicord_ledger::test_fixtures::ledger_id(77));
 
         assert!(Arc::ptr_eq(&first, &second));
     }
@@ -653,8 +734,8 @@ mod tests {
     #[test]
     fn write_coordinator_returns_distinct_locks_for_distinct_ledgers() {
         let coordinator = WriteCoordinator::new();
-        let first = coordinator.lock_for(LedgerId(1));
-        let second = coordinator.lock_for(LedgerId(2));
+        let first = coordinator.lock_for(walicord_ledger::test_fixtures::ledger_id(1));
+        let second = coordinator.lock_for(walicord_ledger::test_fixtures::ledger_id(2));
 
         assert!(!Arc::ptr_eq(&first, &second));
     }
@@ -667,7 +748,7 @@ mod tests {
         let coord_a = Arc::clone(&coordinator);
         let order_a = Arc::clone(&order);
         let task_a = tokio::spawn(async move {
-            let lock = coord_a.lock_for(LedgerId(77));
+            let lock = coord_a.lock_for(walicord_ledger::test_fixtures::ledger_id(77));
             let _guard = lock.lock().await;
             order_a.lock().unwrap().push("a_acquired");
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -679,7 +760,7 @@ mod tests {
         let coord_b = Arc::clone(&coordinator);
         let order_b = Arc::clone(&order);
         let task_b = tokio::spawn(async move {
-            let lock = coord_b.lock_for(LedgerId(77));
+            let lock = coord_b.lock_for(walicord_ledger::test_fixtures::ledger_id(77));
             let _guard = lock.lock().await;
             order_b.lock().unwrap().push("b_acquired");
         });
@@ -693,9 +774,9 @@ mod tests {
     #[test]
     fn prepared_canonical_write_into_retained_preserves_payload_identity() {
         let prepared = PreparedCanonicalWrite::new(
-            LedgerId(77),
+            walicord_ledger::test_fixtures::ledger_id(77),
             LedgerEntryId(1),
-            ledger_chain_genesis_sha256_v1(LedgerId(77)),
+            ledger_chain_genesis_sha256_v1(walicord_ledger::test_fixtures::ledger_id(77)),
             b"X".to_vec(),
             "body".to_owned(),
             "summary".to_owned(),

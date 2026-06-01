@@ -1,5 +1,8 @@
 use crate::{
-    Script, error::ProgramParseError, ledger::LedgerEffectiveDate, settle_up::PreviewInstanceId,
+    Script,
+    error::ProgramParseError,
+    ledger::{LedgerEffectiveDate, LedgerId},
+    settle_up::PreviewInstanceId,
 };
 use std::{collections::HashMap, num::NonZeroU64, time::SystemTime};
 use walicord_domain::{
@@ -73,9 +76,20 @@ impl InteractionNonce {
             .map(Self)
             .ok_or(InteractionNonceError::Zero)
     }
+}
 
-    pub fn get(self) -> u64 {
-        self.0.get()
+impl std::fmt::Display for InteractionNonce {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.0.get(), formatter)
+    }
+}
+
+#[cfg(feature = "legacy-discord-ledger")]
+pub mod legacy_discord_ledger {
+    use super::InteractionNonce;
+
+    pub fn interaction_nonce_u64(nonce: InteractionNonce) -> u64 {
+        nonce.0.get()
     }
 }
 
@@ -95,6 +109,10 @@ pub trait NonceProvider: Send + Sync {
     fn next_interaction_nonce(&self) -> InteractionNonce;
 
     fn next_preview_instance_id(&self) -> PreviewInstanceId;
+}
+
+pub trait LedgerIdProvider: Send + Sync {
+    fn next_ledger_id(&self) -> LedgerId;
 }
 
 pub trait MemberDirectory: Send + Sync {

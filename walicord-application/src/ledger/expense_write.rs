@@ -170,8 +170,8 @@ mod tests {
             expense_flow::{bootstrap_expense_session, build_confirmation_for_session},
             expense_modal::{RawExpenseModalSubmission, validate_expense_modal_submission},
             expense_session::{
-                ExpenseSelectionPhase, ExpenseSelectionState, ExpenseSession, ExpenseSessionKey,
-                ExpenseSessionStage,
+                ExpenseDraftScopeId, ExpenseSelectionPhase, ExpenseSelectionState, ExpenseSession,
+                ExpenseSessionKey, ExpenseSessionStage,
             },
             ledger_chain_genesis_sha256_v1,
             participant_resolution::RosterSnapshot,
@@ -214,7 +214,10 @@ mod tests {
     }
 
     fn key(actor: u64) -> ExpenseSessionKey {
-        ExpenseSessionKey::new(LedgerId(42), MemberId(actor))
+        ExpenseSessionKey::new(
+            ExpenseDraftScopeId::new(42).expect("draft scope should be non-zero"),
+            MemberId(actor),
+        )
     }
 
     fn roster_with(members: &[u64]) -> RosterSnapshot {
@@ -412,15 +415,15 @@ mod tests {
         };
 
         let envelope = build_canonical_envelope(
-            LedgerId(77),
-            ledger_chain_genesis_sha256_v1(LedgerId(77)),
+            walicord_ledger::test_fixtures::ledger_id(77),
+            ledger_chain_genesis_sha256_v1(walicord_ledger::test_fixtures::ledger_id(77)),
             entry,
         )
         .expect("envelope builds");
 
         assert_eq!(
             envelope.previous_hash,
-            ledger_chain_genesis_sha256_v1(LedgerId(77))
+            ledger_chain_genesis_sha256_v1(walicord_ledger::test_fixtures::ledger_id(77))
         );
     }
 }

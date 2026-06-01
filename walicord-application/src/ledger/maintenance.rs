@@ -20,10 +20,6 @@ impl TransportChannelId {
             .map(Self)
             .ok_or(TransportChannelIdError::Zero)
     }
-
-    pub fn get(self) -> u64 {
-        self.0.get()
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]

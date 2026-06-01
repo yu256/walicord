@@ -52,6 +52,7 @@ use walicord_domain::{
 };
 use walicord_i18n as i18n;
 use walicord_infrastructure::HighsSettlementPlanner;
+use walicord_ledger::CanonicalLedgerId;
 #[cfg(test)]
 use walicord_presentation::discord_ledger::{BalanceRow, PanelButtonStates, PanelSurfaceModel};
 use walicord_presentation::{
@@ -135,7 +136,10 @@ pub(crate) use self::{
 };
 
 pub(crate) use self::{
-    adapters::{DiscordLedgerThreadLoader, DiscordRouterRosterFetcher},
+    adapters::{
+        DiscordLedgerCanonicalThreadCreator, DiscordLedgerThreadLoader, DiscordRouterRosterFetcher,
+        discord_canonical_thread_locator,
+    },
     observability::TracingLedgerObservability,
     router::{InteractionDispatch, LedgerRouter, LedgerRouterDependencies},
     store::{DiscordCanonicalLedgerStore, WriterLineagePolicy},
@@ -435,7 +439,10 @@ impl DiscordLedgerPoc {
         let interaction_nonce = InteractionNonce::new(new_interaction_nonce().max(1))
             .expect("interaction nonce should be non-zero");
         Self {
-            interaction_nonce: interaction_nonce.get(),
+            interaction_nonce:
+                walicord_application::ports::legacy_discord_ledger::interaction_nonce_u64(
+                    interaction_nonce,
+                ),
             nonce_provider: PocNonceProvider::new(interaction_nonce),
             settlement_planner,
             next_session_id: AtomicU64::new(1),
@@ -5826,7 +5833,10 @@ impl DiscordLedgerPoc {
         channel_id: ChannelId,
         route: projection::CanonicalLoadRoute,
     ) -> Result<LoadedLedgerThread, String> {
-        let ledger_id = LedgerId(channel_id.get());
+        let ledger_id = walicord_ledger::legacy_discord_ledger::ledger_id_from_channel_id(
+            std::num::NonZeroU64::new(channel_id.get())
+                .expect("serenity channel IDs are always non-zero"),
+        );
         let bot_id = ctx.cache.current_user().id;
         let writer_lineage = writer_lineage_policy_from_env(bot_id).map_err(|error| {
             let failure = projection::CanonicalLoadFailure::WriterLineage { route };
@@ -5834,7 +5844,7 @@ impl DiscordLedgerPoc {
                 event = failure
                     .observability_event()
                     .unwrap_or("ledger_load_failed_closed"),
-                ledger_id = ledger_id.0,
+                ledger_id = %ledger_id,
                 route = failure.route().label(),
                 error = %error,
                 "writer lineage policy failed closed"
@@ -5857,7 +5867,7 @@ impl DiscordLedgerPoc {
                     event = failure
                         .observability_event()
                         .unwrap_or("ledger_load_failed_closed"),
-                    ledger_id = ledger_id.0,
+                    ledger_id = %ledger_id,
                     route = failure.route().label(),
                     failing_entry_id = failure.failing_entry_id().map(|entry_id| entry_id.0),
                     error = ?error,
@@ -8363,7 +8373,7 @@ fn business_timezone() -> FixedOffset {
 }
 
 fn ledger_id_short(ledger_id: LedgerId) -> String {
-    format!("{:08x}", ledger_id.0)
+    format!("{ledger_id:08x}")
 }
 
 fn loaded_transport(
@@ -9099,7 +9109,7 @@ impl EnvelopeDto {
 
 #[derive(Debug, Serialize, Deserialize)]
 struct PayloadDto {
-    ledger_id: u64,
+    ledger_id: CanonicalLedgerId,
     schema_version: u32,
     hash_suite: String,
     entry: EntryDto,
@@ -9111,7 +9121,7 @@ impl PayloadDto {
         payload: &walicord_application::ledger::HashedLedgerPayload,
     ) -> Result<Self, LedgerAttachmentError> {
         Ok(Self {
-            ledger_id: payload.ledger_id.0,
+            ledger_id: payload.ledger_id.into(),
             schema_version: payload.schema_version.0,
             hash_suite: hash_suite_name(payload.hash_suite).into(),
             entry: EntryDto::from_entry(&payload.entry)?,
@@ -9122,7 +9132,7 @@ impl PayloadDto {
         self,
     ) -> Result<walicord_application::ledger::HashedLedgerPayload, LedgerAttachmentError> {
         Ok(walicord_application::ledger::HashedLedgerPayload {
-            ledger_id: LedgerId(self.ledger_id),
+            ledger_id: self.ledger_id.into(),
             schema_version: SchemaVersion(self.schema_version),
             hash_suite: parse_hash_suite(&self.hash_suite)?,
             entry: self.entry.into_entry()?,
@@ -9751,7 +9761,7 @@ mod tests {
         entries: Vec<LedgerEntry>,
         transports: Vec<(LedgerEntryId, u64, &str)>,
     ) -> LoadedLedgerThread {
-        let ledger_id = LedgerId(0xabcd1234);
+        let ledger_id = walicord_ledger::test_fixtures::ledger_id(0xabcd1234);
         let channel_id = ChannelId::new(2);
         let mut previous_hash = ledger_chain_genesis_sha256_v1(ledger_id);
         let unverified = entries
@@ -9895,8 +9905,8 @@ mod tests {
         let entry =
             build_expense_entry(LedgerEntryId(1), &expense_input()).expect("entry should build");
         let envelope = make_unverified_envelope_sha256_v1(
-            LedgerId(77),
-            ledger_chain_genesis_sha256_v1(LedgerId(77)),
+            walicord_ledger::test_fixtures::ledger_id(77),
+            ledger_chain_genesis_sha256_v1(walicord_ledger::test_fixtures::ledger_id(77)),
             (),
             entry.clone(),
         )
@@ -9918,8 +9928,8 @@ mod tests {
         let entry =
             build_expense_entry(LedgerEntryId(1), &expense_input()).expect("entry should build");
         let envelope = make_unverified_envelope_sha256_v1(
-            LedgerId(77),
-            ledger_chain_genesis_sha256_v1(LedgerId(77)),
+            walicord_ledger::test_fixtures::ledger_id(77),
+            ledger_chain_genesis_sha256_v1(walicord_ledger::test_fixtures::ledger_id(77)),
             (),
             entry,
         )
@@ -10601,7 +10611,7 @@ mod tests {
         let fresh_expense_session = 2;
         let stale_void_session = 3;
         let stale_preview_key = (4, 9);
-        let ledger_id = LedgerId(77);
+        let ledger_id = walicord_ledger::test_fixtures::ledger_id(77);
         let thread_id = ChannelId::new(10);
         let previewed = preview_settlement_from_ledger(
             &replay_entries(vec![
@@ -10736,7 +10746,7 @@ mod tests {
 
     #[test]
     fn canonical_attachments_replay_through_v1_load_path() {
-        let ledger_id = LedgerId(77);
+        let ledger_id = walicord_ledger::test_fixtures::ledger_id(77);
         let entry =
             build_expense_entry(LedgerEntryId(1), &expense_input()).expect("entry should build");
         let envelope = make_unverified_envelope_sha256_v1(
@@ -10821,8 +10831,8 @@ mod tests {
         let previewed = preview_settlement_from_ledger(&projected).expect("preview should build");
         let binding = PreviewConfirmationBinding::capture(
             PreviewInstanceId::new(1).expect("preview instance id should be valid"),
-            LedgerId(77),
-            ledger_chain_genesis_sha256_v1(LedgerId(77)),
+            walicord_ledger::test_fixtures::ledger_id(77),
+            ledger_chain_genesis_sha256_v1(walicord_ledger::test_fixtures::ledger_id(77)),
             MemberId(9),
             UNIX_EPOCH,
             UNIX_EPOCH + std::time::Duration::from_secs(600),

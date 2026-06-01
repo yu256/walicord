@@ -337,7 +337,7 @@ mod tests {
         head: EntryHash,
         expires_at: SystemTime,
     ) -> (PreviewStore, PreviewStoreKey) {
-        let ledger_id = LedgerId(77);
+        let ledger_id = walicord_ledger::test_fixtures::ledger_id(77);
         let actor = MemberId(1);
         let preview = previewed(1000);
         let binding = binding_for(actor, ledger_id, head, &preview, expires_at);
@@ -352,7 +352,7 @@ mod tests {
 
     #[test]
     fn mark_preview_delivered_flips_binding_state_for_matching_instance() {
-        let head = ledger_chain_genesis_sha256_v1(LedgerId(77));
+        let head = ledger_chain_genesis_sha256_v1(walicord_ledger::test_fixtures::ledger_id(77));
         let (store, key) = store_with_preview(head, UNIX_EPOCH + Duration::from_secs(600));
 
         let state = mark_preview_delivered(&store, key, PreviewInstanceId::new(1).unwrap())
@@ -363,7 +363,7 @@ mod tests {
 
     #[test]
     fn mark_preview_delivered_rejects_when_instance_does_not_match() {
-        let head = ledger_chain_genesis_sha256_v1(LedgerId(77));
+        let head = ledger_chain_genesis_sha256_v1(walicord_ledger::test_fixtures::ledger_id(77));
         let (store, key) = store_with_preview(head, UNIX_EPOCH + Duration::from_secs(600));
 
         let actual = mark_preview_delivered(&store, key, PreviewInstanceId::new(99).unwrap());
@@ -384,7 +384,7 @@ mod tests {
 
         let actual = compose_settlement_entry_from_preview(
             &snapshot,
-            LedgerId(77),
+            walicord_ledger::test_fixtures::ledger_id(77),
             MemberId(1),
             LedgerEntryId(1),
             DiscordLedgerSourceDescriptor::settle_thread_v1(),
@@ -397,7 +397,7 @@ mod tests {
 
     #[test]
     fn compose_settlement_entry_rejects_undelivered_preview_without_mutating_store() {
-        let head = ledger_chain_genesis_sha256_v1(LedgerId(77));
+        let head = ledger_chain_genesis_sha256_v1(walicord_ledger::test_fixtures::ledger_id(77));
         let (store, key) = store_with_preview(head, UNIX_EPOCH + Duration::from_secs(600));
         // Intentionally skip `mark_preview_delivered`.
         let snapshot = crate::ledger::replay_verified_snapshot::<()>(&[]).expect("empty replay");
@@ -407,7 +407,7 @@ mod tests {
 
         let actual = compose_settlement_entry_from_preview(
             &snapshot,
-            LedgerId(77),
+            walicord_ledger::test_fixtures::ledger_id(77),
             MemberId(1),
             LedgerEntryId(1),
             DiscordLedgerSourceDescriptor::settle_thread_v1(),
