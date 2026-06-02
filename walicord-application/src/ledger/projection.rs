@@ -103,6 +103,33 @@ impl<ExternalId> VerifiedLedgerThreadLoad<ExternalId> {
     pub fn verified(&self) -> &[VerifiedLedgerStoreEnvelope<ExternalId>] {
         &self.verified
     }
+
+    pub fn next_entry_id(&self) -> Result<LedgerEntryId, NextLedgerEntryIdError> {
+        next_ledger_entry_id(
+            self.verified
+                .iter()
+                .map(|envelope| envelope.payload().entry.id),
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum NextLedgerEntryIdError {
+    #[error("ledger entry id space is exhausted")]
+    Exhausted,
+}
+
+pub fn next_ledger_entry_id(
+    entry_ids: impl IntoIterator<Item = LedgerEntryId>,
+) -> Result<LedgerEntryId, NextLedgerEntryIdError> {
+    entry_ids
+        .into_iter()
+        .map(|entry_id| entry_id.0)
+        .max()
+        .unwrap_or_default()
+        .checked_add(1)
+        .map(LedgerEntryId)
+        .ok_or(NextLedgerEntryIdError::Exhausted)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -186,4 +213,23 @@ pub fn project_recent_voidable_entries<ExternalId>(
     candidates.reverse();
     candidates.truncate(limit);
     Ok(candidates)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rstest::rstest;
+
+    #[rstest]
+    #[case::empty(Vec::new(), Ok(LedgerEntryId(1)))]
+    #[case::contiguous(vec![LedgerEntryId(1), LedgerEntryId(2)], Ok(LedgerEntryId(3)))]
+    #[case::sparse(vec![LedgerEntryId(1), LedgerEntryId(3)], Ok(LedgerEntryId(4)))]
+    #[case::unordered(vec![LedgerEntryId(20), LedgerEntryId(10)], Ok(LedgerEntryId(21)))]
+    #[case::exhausted(vec![LedgerEntryId(u64::MAX)], Err(NextLedgerEntryIdError::Exhausted))]
+    fn next_id_follows_maximum_existing_id(
+        #[case] entry_ids: Vec<LedgerEntryId>,
+        #[case] expected: Result<LedgerEntryId, NextLedgerEntryIdError>,
+    ) {
+        assert_eq!(next_ledger_entry_id(entry_ids), expected);
+    }
 }

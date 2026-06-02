@@ -170,8 +170,8 @@ mod tests {
             expense_flow::{bootstrap_expense_session, build_confirmation_for_session},
             expense_modal::{RawExpenseModalSubmission, validate_expense_modal_submission},
             expense_session::{
-                ExpenseDraftScopeId, ExpenseSelectionPhase, ExpenseSelectionState, ExpenseSession,
-                ExpenseSessionKey, ExpenseSessionStage,
+                ExpenseDraftScopeId, ExpenseLaunchOrigin, ExpenseSelectionPhase,
+                ExpenseSelectionState, ExpenseSession, ExpenseSessionKey, ExpenseSessionStage,
             },
             ledger_chain_genesis_sha256_v1,
             participant_resolution::RosterSnapshot,
@@ -234,8 +234,14 @@ mod tests {
             raw_date: "2026-05-01".to_owned(),
         };
         let validated = validate_expense_modal_submission(&raw, &FixedClock).unwrap();
-        let (session, _) =
-            bootstrap_expense_session(key(42), validated, &FixedClock, &nonces()).unwrap();
+        let (session, _) = bootstrap_expense_session(
+            key(42),
+            ExpenseLaunchOrigin::SlashCommand,
+            validated,
+            &FixedClock,
+            &nonces(),
+        )
+        .unwrap();
         let roster = roster_with(&[42, 7]);
         // Add member 7 to selection state before building confirmation
         let mut draft = session.draft().clone();
@@ -246,6 +252,7 @@ mod tests {
         });
         let session = ExpenseSession::new(
             session.key(),
+            session.origin(),
             ExpenseSessionStage::InSelection {
                 phase: ExpenseSelectionPhase::IndividualSelection,
             },
@@ -271,8 +278,14 @@ mod tests {
             raw_date: "2026-05-01".to_owned(),
         };
         let validated = validate_expense_modal_submission(&raw, &FixedClock).unwrap();
-        let (session, _) =
-            bootstrap_expense_session(key(42), validated, &FixedClock, &nonces()).unwrap();
+        let (session, _) = bootstrap_expense_session(
+            key(42),
+            ExpenseLaunchOrigin::SlashCommand,
+            validated,
+            &FixedClock,
+            &nonces(),
+        )
+        .unwrap();
 
         let actual = compose_expense_entry(
             &session,

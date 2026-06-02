@@ -23,8 +23,7 @@ impl Clock for SystemClock {
 
     fn today_business_date(&self) -> LedgerEffectiveDate {
         let today = Utc::now().with_timezone(&business_timezone()).date_naive();
-        LedgerEffectiveDate::new(today.format("%Y-%m-%d").to_string())
-            .expect("today_business_date should always produce a valid YYYY-MM-DD")
+        LedgerEffectiveDate::from_naive_date(today)
     }
 }
 

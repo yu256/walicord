@@ -18,10 +18,15 @@ use walicord_application::ledger::{
     LedgerEntry, LedgerEntryId, LedgerEvent, LedgerId, LedgerLoadError, LedgerReplayError,
     UnverifiedLedgerStoreEnvelope, VerifiedLedgerStoreEnvelope,
     canonical_attachment::{AttachmentCodecError, CanonicalAttachmentCodec},
-    observability::{LedgerObservability, LedgerObservabilityEvent},
+    observability::LedgerObservabilityEvent,
     projection::VerifiedEntryTransport,
     replay_verified_snapshot, verify_envelope_sha256_v1,
     verify_envelopes_in_append_order_sha256_v1,
+    write_coordinator::{CanonicalMessageProbe, LAZY_RETRY_SCAN_WINDOW},
+};
+
+use super::observability::{
+    DiscordLedgerObservability, DiscordLedgerObservabilityEvent, PermissionAction,
 };
 
 pub type VerifiedLedgerThreadLoad =
@@ -227,7 +232,10 @@ pub enum WriterLineageFailure {
     #[error("{0}")]
     PolicyUnavailable(#[from] WriterLineagePolicyError),
     #[error("webhook-authored canonical candidate found at message {message_id}")]
-    WebhookAuthor { message_id: MessageId },
+    WebhookAuthor {
+        message_id: MessageId,
+        author_id: UserId,
+    },
     #[error("author {author_id} is not approved for canonical history at message {message_id}")]
     UnapprovedAuthor {
         message_id: MessageId,
@@ -284,6 +292,7 @@ impl WriterLineagePolicy {
             if record.webhook_id().is_some() {
                 return Err(WriterLineageFailure::WebhookAuthor {
                     message_id: record.message_id(),
+                    author_id: record.author_id(),
                 });
             }
             if !self.approved_writers.contains(&record.author_id()) {
@@ -359,20 +368,43 @@ impl StoreLoadError {
     }
 }
 
+pub(crate) fn serenity_error_is_read_denied(error: &serenity::Error) -> bool {
+    matches!(
+        error,
+        serenity::Error::Http(http_error) if read_denied_status(http_error.status_code())
+    )
+}
+
+fn read_denied_status(status_code: Option<serenity::http::StatusCode>) -> bool {
+    matches!(
+        status_code,
+        Some(
+            serenity::http::StatusCode::FORBIDDEN
+                | serenity::http::StatusCode::UNAUTHORIZED
+                | serenity::http::StatusCode::NOT_FOUND
+        )
+    )
+}
+
 fn classify_send_error(error: serenity::Error) -> StoreWriteError {
-    use serenity::{Error, all::HttpError};
-    match &error {
-        Error::Http(HttpError::UnsuccessfulRequest(response))
-            if response.status_code == serenity::all::StatusCode::FORBIDDEN =>
-        {
+    if serenity_error_is_read_denied(&error) {
+        if matches!(
+            &error,
+            serenity::Error::Http(serenity::all::HttpError::UnsuccessfulRequest(response))
+                if response.status_code == serenity::all::StatusCode::FORBIDDEN
+        ) {
             StoreWriteError::Permission(format!("send forbidden: {error}"))
-        }
-        Error::Http(HttpError::UnsuccessfulRequest(response))
-            if response.status_code == serenity::all::StatusCode::UNAUTHORIZED =>
-        {
+        } else if matches!(
+            &error,
+            serenity::Error::Http(serenity::all::HttpError::UnsuccessfulRequest(response))
+                if response.status_code == serenity::all::StatusCode::NOT_FOUND
+        ) {
+            StoreWriteError::Permission(format!("send target hidden or missing: {error}"))
+        } else {
             StoreWriteError::Permission(format!("send unauthorized: {error}"))
         }
-        _ => StoreWriteError::Transport(format!("send failed: {error}")),
+    } else {
+        StoreWriteError::Transport(format!("send failed: {error}"))
     }
 }
 
@@ -404,13 +436,13 @@ pub enum StoreWriteError {
 pub struct DiscordCanonicalLedgerStore {
     writer_lineage: WriterLineagePolicy,
     display_drift_guard: DisplayDriftGuard,
-    observability: Arc<dyn LedgerObservability>,
+    observability: Arc<dyn DiscordLedgerObservability>,
 }
 
 impl DiscordCanonicalLedgerStore {
     pub fn new(
         writer_lineage: WriterLineagePolicy,
-        observability: Arc<dyn LedgerObservability>,
+        observability: Arc<dyn DiscordLedgerObservability>,
     ) -> Self {
         Self {
             writer_lineage,
@@ -422,13 +454,76 @@ impl DiscordCanonicalLedgerStore {
     pub fn new_with_display_drift_guard(
         writer_lineage: WriterLineagePolicy,
         display_drift_guard: DisplayDriftGuard,
-        observability: Arc<dyn LedgerObservability>,
+        observability: Arc<dyn DiscordLedgerObservability>,
     ) -> Self {
         Self {
             writer_lineage,
             display_drift_guard,
             observability,
         }
+    }
+
+    fn validate_writer_lineage<R>(
+        &self,
+        ledger_id: Option<LedgerId>,
+        records: &[R],
+    ) -> Result<(), StoreLoadError>
+    where
+        R: LineageRecord,
+    {
+        self.writer_lineage
+            .validate_records(records)
+            .map_err(|failure| {
+                let observed_writer = match &failure {
+                    WriterLineageFailure::UnapprovedAuthor { author_id, .. }
+                    | WriterLineageFailure::NonActiveWriterAfterCutover { author_id, .. } => {
+                        Some(*author_id)
+                    }
+                    WriterLineageFailure::WebhookAuthor { author_id, .. } => Some(*author_id),
+                    WriterLineageFailure::PolicyUnavailable(_) => None,
+                };
+                if let Some(observed_writer) = observed_writer {
+                    self.observability.emit_discord(
+                        DiscordLedgerObservabilityEvent::ActiveActiveMisconfiguration {
+                            ledger_id,
+                            observed_writer,
+                            expected_writer: self.writer_lineage.active_writer,
+                        },
+                    );
+                }
+                StoreLoadError::WriterLineage(failure)
+            })
+    }
+
+    pub(crate) fn observe_permission_failure(
+        &self,
+        ledger_id: Option<LedgerId>,
+        channel_id: ChannelId,
+        action: PermissionAction,
+    ) {
+        self.observability
+            .emit_discord(DiscordLedgerObservabilityEvent::PermissionFailure {
+                ledger_id,
+                guild_id: None,
+                channel_id,
+                action,
+            });
+    }
+
+    fn observe_load_permission_result<T>(
+        &self,
+        ledger_id: Option<LedgerId>,
+        channel_id: ChannelId,
+        result: Result<T, StoreLoadError>,
+    ) -> Result<T, StoreLoadError> {
+        if matches!(result, Err(StoreLoadError::Permission(_))) {
+            self.observe_permission_failure(
+                ledger_id,
+                channel_id,
+                PermissionAction::ReadMessageHistory,
+            );
+        }
+        result
     }
 
     /// Post a canonical entry to the bound thread, then read the just-posted message
@@ -461,13 +556,31 @@ impl DiscordCanonicalLedgerStore {
                     )),
             )
             .await
-            .map_err(classify_send_error)?;
+            .map_err(classify_send_error)
+            .inspect_err(|error| {
+                if matches!(error, StoreWriteError::Permission(_)) {
+                    self.observe_permission_failure(
+                        Some(envelope.payload.ledger_id),
+                        canonical_thread_id,
+                        PermissionAction::AppendCanonicalMessage,
+                    );
+                }
+            })?;
 
         let read_back = canonical_thread_id
             .message(&ctx.http, send_outcome.id)
             .await
             .map_err(|error| {
-                StoreWriteError::ReadBack(format!("fetch read-back failed: {error}"))
+                if serenity_error_is_read_denied(&error) {
+                    self.observe_permission_failure(
+                        Some(envelope.payload.ledger_id),
+                        canonical_thread_id,
+                        PermissionAction::ReadMessageHistory,
+                    );
+                    StoreWriteError::Permission(format!("fetch read-back forbidden: {error}"))
+                } else {
+                    StoreWriteError::ReadBack(format!("fetch read-back failed: {error}"))
+                }
             })?;
 
         let mut matching_attachments = read_back
@@ -526,7 +639,7 @@ impl DiscordCanonicalLedgerStore {
         let timeout_count = Arc::clone(&fetched_entry_count);
         let warning_observability = Arc::clone(&self.observability);
         let timeout_observability = Arc::clone(&self.observability);
-        with_load_timeout(
+        let result = with_load_timeout(
             CANONICAL_LOAD_TIMEOUT,
             CANONICAL_LOAD_WARNING,
             move || {
@@ -558,9 +671,7 @@ impl DiscordCanonicalLedgerStore {
                     .into_iter()
                     .filter(PendingCanonicalMessageRecord::should_validate_writer_lineage)
                     .collect();
-                self.writer_lineage
-                    .validate_records(&pending_records)
-                    .map_err(StoreLoadError::WriterLineage)?;
+                self.validate_writer_lineage(Some(ledger_id), &pending_records)?;
 
                 let mut records = Vec::with_capacity(pending_records.len());
                 for record in pending_records {
@@ -581,10 +692,132 @@ impl DiscordCanonicalLedgerStore {
                 )
             },
         )
-        .await
+        .await;
+        self.observe_load_permission_result(Some(ledger_id), canonical_thread_id, result)
+    }
+
+    pub async fn scan_recent_canonical_messages(
+        &self,
+        ctx: &Context,
+        canonical_thread_id: ChannelId,
+        ledger_id: LedgerId,
+    ) -> Result<Vec<CanonicalMessageProbe>, StoreLoadError> {
+        let result = self
+            .scan_recent_canonical_messages_inner(ctx, canonical_thread_id, ledger_id)
+            .await;
+        self.observe_load_permission_result(Some(ledger_id), canonical_thread_id, result)
+    }
+
+    async fn scan_recent_canonical_messages_inner(
+        &self,
+        ctx: &Context,
+        canonical_thread_id: ChannelId,
+        ledger_id: LedgerId,
+    ) -> Result<Vec<CanonicalMessageProbe>, StoreLoadError> {
+        let mut pending_records =
+            fetch_recent_canonical_pending_records(ctx, canonical_thread_id).await?;
+        pending_records.reverse();
+        self.validate_writer_lineage(Some(ledger_id), &pending_records)?;
+        pending_records.reverse();
+
+        let mut probes = Vec::new();
+        for pending in pending_records.into_iter().take(LAZY_RETRY_SCAN_WINDOW) {
+            let record = download_canonical_message_record(pending).await?;
+            let authoritative: Vec<&CanonicalAttachmentCandidate> = record
+                .attachments
+                .iter()
+                .filter(|attachment| attachment.filename == LEDGER_ATTACHMENT_FILENAME)
+                .collect();
+            if record.attachments.len() != 1 || authoritative.len() != 1 {
+                return Err(StoreLoadError::AttachmentCardinality {
+                    message_id: record.message_id,
+                    total_attachments: record.attachments.len(),
+                    authoritative_attachments: authoritative.len(),
+                });
+            }
+            let attachment = authoritative[0];
+            let decoded = CanonicalAttachmentCodec::decode(&attachment.bytes, record.message_id)
+                .map_err(|error| StoreLoadError::Decode {
+                    message_id: record.message_id,
+                    error,
+                })?;
+            probes.push(CanonicalMessageProbe {
+                entry_id: decoded.payload.entry.id,
+                envelope_bytes: attachment.bytes.clone(),
+            });
+        }
+        Ok(probes)
+    }
+
+    pub async fn scan_all_canonical_messages(
+        &self,
+        ctx: &Context,
+        canonical_thread_id: ChannelId,
+        ledger_id: LedgerId,
+    ) -> Result<Vec<CanonicalMessageProbe>, StoreLoadError> {
+        let result = self
+            .scan_all_canonical_messages_inner(ctx, canonical_thread_id, ledger_id)
+            .await;
+        self.observe_load_permission_result(Some(ledger_id), canonical_thread_id, result)
+    }
+
+    async fn scan_all_canonical_messages_inner(
+        &self,
+        ctx: &Context,
+        canonical_thread_id: ChannelId,
+        ledger_id: LedgerId,
+    ) -> Result<Vec<CanonicalMessageProbe>, StoreLoadError> {
+        let messages = fetch_all_channel_messages(ctx, canonical_thread_id)
+            .await
+            .map_err(classify_thread_fetch_error)?;
+        let pending_records: Vec<PendingCanonicalMessageRecord> = messages
+            .into_iter()
+            .map(pending_canonical_message_record)
+            .filter(PendingCanonicalMessageRecord::should_validate_writer_lineage)
+            .collect();
+        self.validate_writer_lineage(Some(ledger_id), &pending_records)?;
+
+        let mut probes = Vec::with_capacity(pending_records.len());
+        for pending in pending_records {
+            let record = download_canonical_message_record(pending).await?;
+            let authoritative: Vec<&CanonicalAttachmentCandidate> = record
+                .attachments
+                .iter()
+                .filter(|attachment| attachment.filename == LEDGER_ATTACHMENT_FILENAME)
+                .collect();
+            if record.attachments.len() != 1 || authoritative.len() != 1 {
+                return Err(StoreLoadError::AttachmentCardinality {
+                    message_id: record.message_id,
+                    total_attachments: record.attachments.len(),
+                    authoritative_attachments: authoritative.len(),
+                });
+            }
+            let attachment = authoritative[0];
+            let decoded = CanonicalAttachmentCodec::decode(&attachment.bytes, record.message_id)
+                .map_err(|error| StoreLoadError::Decode {
+                    message_id: record.message_id,
+                    error,
+                })?;
+            probes.push(CanonicalMessageProbe {
+                entry_id: decoded.payload.entry.id,
+                envelope_bytes: attachment.bytes.clone(),
+            });
+        }
+        Ok(probes)
     }
 
     pub async fn load_verified_thread_discovering_id(
+        &self,
+        http: &Http,
+        canonical_thread_id: ChannelId,
+    ) -> Result<Option<(LedgerId, VerifiedLedgerThreadLoad)>, StoreLoadError> {
+        let result = self
+            .load_verified_thread_discovering_id_inner(http, canonical_thread_id)
+            .await;
+        self.observe_load_permission_result(None, canonical_thread_id, result)
+    }
+
+    async fn load_verified_thread_discovering_id_inner(
         &self,
         http: &Http,
         canonical_thread_id: ChannelId,
@@ -597,9 +830,7 @@ impl DiscordCanonicalLedgerStore {
             .map(pending_canonical_message_record)
             .filter(PendingCanonicalMessageRecord::should_validate_writer_lineage)
             .collect();
-        self.writer_lineage
-            .validate_records(&pending_records)
-            .map_err(StoreLoadError::WriterLineage)?;
+        self.validate_writer_lineage(None, &pending_records)?;
 
         let mut records = Vec::with_capacity(pending_records.len());
         for record in pending_records {
@@ -648,9 +879,7 @@ impl DiscordCanonicalLedgerStore {
             .into_iter()
             .filter(CanonicalMessageRecord::should_validate_writer_lineage)
             .collect();
-        self.writer_lineage
-            .validate_records(&records)
-            .map_err(StoreLoadError::WriterLineage)?;
+        self.validate_writer_lineage(Some(ledger_id), &records)?;
 
         self.load_verified_thread_from_candidate_records_with_guard(
             canonical_thread_id,
@@ -772,6 +1001,40 @@ async fn fetch_all_channel_messages_with_http(
     }
     all_messages.reverse();
     Ok(all_messages)
+}
+
+async fn fetch_recent_canonical_pending_records(
+    ctx: &Context,
+    channel_id: ChannelId,
+) -> Result<Vec<PendingCanonicalMessageRecord>, StoreLoadError> {
+    use serenity::builder::GetMessages;
+
+    let mut pending_records = Vec::new();
+    let mut last_message_id = None;
+    loop {
+        let mut builder = GetMessages::new().limit(100);
+        if let Some(before) = last_message_id {
+            builder = builder.before(before);
+        }
+        let messages = channel_id
+            .messages(&ctx.http, builder)
+            .await
+            .map_err(classify_thread_fetch_error)?;
+        if messages.is_empty() {
+            break;
+        }
+        last_message_id = messages.last().map(|message| message.id);
+        pending_records.extend(
+            messages
+                .into_iter()
+                .map(pending_canonical_message_record)
+                .filter(PendingCanonicalMessageRecord::should_validate_writer_lineage),
+        );
+        if pending_records.len() >= LAZY_RETRY_SCAN_WINDOW {
+            break;
+        }
+    }
+    Ok(pending_records)
 }
 
 fn discover_ledger_id_from_records(
@@ -1243,6 +1506,7 @@ pub(super) fn verified_thread_load_for_test(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
     use serde_json::Value;
     use tokio::runtime::Builder as RuntimeBuilder;
     use walicord_application::ledger::{
@@ -1543,6 +1807,19 @@ mod tests {
         assert!(matches!(not_found, StoreLoadError::Permission(_)));
     }
 
+    #[rstest]
+    #[case::forbidden(Some(serenity::http::StatusCode::FORBIDDEN), true)]
+    #[case::unauthorized(Some(serenity::http::StatusCode::UNAUTHORIZED), true)]
+    #[case::not_found(Some(serenity::http::StatusCode::NOT_FOUND), true)]
+    #[case::other(Some(serenity::http::StatusCode::INTERNAL_SERVER_ERROR), false)]
+    #[case::missing(None, false)]
+    fn read_denied_status_matches_hidden_thread_responses(
+        #[case] status_code: Option<serenity::http::StatusCode>,
+        #[case] expected: bool,
+    ) {
+        assert_eq!(read_denied_status(status_code), expected);
+    }
+
     #[test]
     fn classify_attachment_fetch_status_maps_permission_status_codes() {
         let forbidden = classify_attachment_fetch_status(
@@ -1618,6 +1895,127 @@ mod tests {
                 author_id: UserId::new(800),
                 active_writer: UserId::new(900),
             })
+        );
+    }
+
+    #[test]
+    fn store_observes_non_active_writer_after_cutover() {
+        let observability = Arc::new(CapturingLedgerObservability::new());
+        let store = DiscordCanonicalLedgerStore::new(
+            WriterLineagePolicy::load(
+                Some(UserId::new(900)),
+                Some([UserId::new(800), UserId::new(900)]),
+            )
+            .expect("lineage should build"),
+            observability.clone(),
+        );
+        let records = vec![
+            canonical_record(1, 900, 500, 77, 1, Vec::new()),
+            canonical_record(2, 800, 500, 77, 2, Vec::new()),
+        ];
+
+        let _ = store.validate_writer_lineage(
+            Some(walicord_ledger::test_fixtures::ledger_id(77)),
+            &records,
+        );
+
+        assert_eq!(
+            observability.snapshot(),
+            vec![
+                super::super::observability::CapturedLedgerObservabilityEvent::Discord(
+                    DiscordLedgerObservabilityEvent::ActiveActiveMisconfiguration {
+                        ledger_id: Some(walicord_ledger::test_fixtures::ledger_id(77)),
+                        observed_writer: UserId::new(800),
+                        expected_writer: UserId::new(900),
+                    }
+                )
+            ]
+        );
+    }
+
+    #[test]
+    fn store_observes_lineage_failure_before_ledger_id_discovery() {
+        let observability = Arc::new(CapturingLedgerObservability::new());
+        let store = DiscordCanonicalLedgerStore::new(
+            WriterLineagePolicy::load(Some(UserId::new(900)), Some([UserId::new(900)]))
+                .expect("lineage should build"),
+            observability.clone(),
+        );
+        let records = vec![canonical_record(1, 800, 500, 77, 1, Vec::new())];
+
+        let _ = store.validate_writer_lineage(None, &records);
+
+        assert_eq!(
+            observability.snapshot(),
+            vec![
+                super::super::observability::CapturedLedgerObservabilityEvent::Discord(
+                    DiscordLedgerObservabilityEvent::ActiveActiveMisconfiguration {
+                        ledger_id: None,
+                        observed_writer: UserId::new(800),
+                        expected_writer: UserId::new(900),
+                    }
+                )
+            ]
+        );
+    }
+
+    #[test]
+    fn store_observes_webhook_authored_candidate() {
+        let observability = Arc::new(CapturingLedgerObservability::new());
+        let store = DiscordCanonicalLedgerStore::new(
+            WriterLineagePolicy::load(Some(UserId::new(900)), Some([UserId::new(900)]))
+                .expect("lineage should build"),
+            observability.clone(),
+        );
+        let mut records = vec![canonical_record(1, 900, 500, 77, 1, Vec::new())];
+        records[0].webhook_id = Some(7);
+
+        let _ = store.validate_writer_lineage(
+            Some(walicord_ledger::test_fixtures::ledger_id(77)),
+            &records,
+        );
+
+        assert_eq!(
+            observability.snapshot(),
+            vec![
+                super::super::observability::CapturedLedgerObservabilityEvent::Discord(
+                    DiscordLedgerObservabilityEvent::ActiveActiveMisconfiguration {
+                        ledger_id: Some(walicord_ledger::test_fixtures::ledger_id(77)),
+                        observed_writer: UserId::new(900),
+                        expected_writer: UserId::new(900),
+                    }
+                )
+            ]
+        );
+    }
+
+    #[test]
+    fn store_observes_permission_failure_with_transport_context() {
+        let observability = Arc::new(CapturingLedgerObservability::new());
+        let store = DiscordCanonicalLedgerStore::new(
+            WriterLineagePolicy::load(Some(UserId::new(900)), Some([UserId::new(900)]))
+                .expect("lineage should build"),
+            observability.clone(),
+        );
+
+        store.observe_permission_failure(
+            Some(walicord_ledger::test_fixtures::ledger_id(77)),
+            ChannelId::new(30),
+            PermissionAction::ReadMessageHistory,
+        );
+
+        assert_eq!(
+            observability.snapshot(),
+            vec![
+                super::super::observability::CapturedLedgerObservabilityEvent::Discord(
+                    DiscordLedgerObservabilityEvent::PermissionFailure {
+                        ledger_id: Some(walicord_ledger::test_fixtures::ledger_id(77)),
+                        guild_id: None,
+                        channel_id: ChannelId::new(30),
+                        action: PermissionAction::ReadMessageHistory,
+                    }
+                )
+            ]
         );
     }
 
@@ -1792,6 +2190,7 @@ mod tests {
             actual,
             Err(StoreLoadError::WriterLineage(WriterLineageFailure::WebhookAuthor {
                 message_id,
+                ..
             })) if message_id == MessageId::new(1)
         ));
     }

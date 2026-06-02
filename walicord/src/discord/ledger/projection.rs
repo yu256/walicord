@@ -381,6 +381,7 @@ mod tests {
                 StoreLoadError::WriterLineage(
                     crate::discord::ledger::store::WriterLineageFailure::WebhookAuthor {
                         message_id: MessageId::new(4),
+                        author_id: serenity::all::UserId::new(9),
                     },
                 ),
                 CanonicalLoadFailure::WriterLineage { route },

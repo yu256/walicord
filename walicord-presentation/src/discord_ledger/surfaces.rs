@@ -1012,12 +1012,6 @@ impl DiscordLedgerPresenter {
         )
     }
 
-    pub fn render_abandoned_uncertain_write(
-        model: &UncertainWriteSurfaceModel,
-    ) -> Result<RenderedSurface, RenderBudgetError> {
-        Self::render_uncertain_write_block(model)
-    }
-
     pub fn select_recovery_cta(context: RecoveryContext) -> RecoveryCta {
         if context.canonical_thread_known && context.canonical_thread_accessible {
             return RecoveryCta::ThreadLink;

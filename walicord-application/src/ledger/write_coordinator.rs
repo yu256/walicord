@@ -3,13 +3,14 @@ use dashmap::DashMap;
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
-    time::SystemTime,
+    time::{Duration, SystemTime},
 };
 use tokio::sync::Mutex as AsyncMutex;
 
-/// Number of trailing canonical messages the lazy-retry pass scans for an exact-envelope
-/// match before declaring an `uncertain_write` unrecoverable (criterion 176).
+/// Number of trailing canonical messages the normal lazy-retry pass scans for an
+/// exact-envelope match before retaining the `uncertain_write` block (criterion 176).
 pub const LAZY_RETRY_SCAN_WINDOW: usize = 5;
+pub const UNCERTAIN_WRITE_RETAIN_TTL: Duration = Duration::from_secs(10 * 60);
 
 /// Write addressing key. Each canonical append targets exactly one ledger; the
 /// per-`LedgerId` async mutex serializes them. The adapter issues the identifier
@@ -28,6 +29,7 @@ pub struct RetainedCanonicalWrite {
     envelope_bytes: Arc<Vec<u8>>,
     prepared_body: String,
     last_known_summary: String,
+    live_since: SystemTime,
 }
 
 impl RetainedCanonicalWrite {
@@ -37,6 +39,7 @@ impl RetainedCanonicalWrite {
         envelope_bytes: Vec<u8>,
         prepared_body: String,
         last_known_summary: String,
+        live_since: SystemTime,
     ) -> Self {
         Self {
             target,
@@ -45,6 +48,7 @@ impl RetainedCanonicalWrite {
             envelope_bytes: Arc::new(envelope_bytes),
             prepared_body,
             last_known_summary,
+            live_since,
         }
     }
 
@@ -66,25 +70,25 @@ impl RetainedCanonicalWrite {
     pub fn last_known_summary(&self) -> &str {
         &self.last_known_summary
     }
+    pub fn live_since(&self) -> SystemTime {
+        self.live_since
+    }
+
+    pub fn requires_full_scan(&self, now: SystemTime) -> bool {
+        now.duration_since(self.live_since).unwrap_or_default() >= UNCERTAIN_WRITE_RETAIN_TTL
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum UncertainWriteState {
     /// Retained payload still exists; lazy retry may still clear or confirm.
     Live(RetainedCanonicalWrite),
-    /// Retained payload expired or was consumed; the user-visible block clears to a
-    /// stale-recovery prompt (criterion 239).
-    Abandoned {
-        target: WriteTargetKey,
-        last_known_summary: String,
-    },
 }
 
 impl UncertainWriteState {
     pub fn target(&self) -> WriteTargetKey {
         match self {
             Self::Live(retained) => retained.target(),
-            Self::Abandoned { target, .. } => *target,
         }
     }
 }
@@ -98,10 +102,12 @@ pub enum UncertainWriteResolution {
     /// meaning the retained envelope was not posted. The block clears and a fresh write
     /// path is unblocked.
     ClearedByConclusiveAbsence,
+    /// A complete scan found no retained envelope after the bounded retain window.
+    ClearedByExpiredConclusiveAbsence,
+    /// A recent-window no-match cannot prove absence after canonical head movement.
+    RequiresFullHistoryScan,
     /// Scan was inconclusive; the block stays live (criteria 217, 248, 276-279, 287).
     StillBlocked,
-    /// Retained context expired or was dropped while the block was live (criterion 239).
-    Abandoned,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -128,12 +134,18 @@ pub enum ExactEnvelopeScanResult {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScanCompleteness {
-    /// `LAZY_RETRY_SCAN_WINDOW` messages (or the entire thread if shorter) were
-    /// successfully retrieved and decoded.
+    /// Every message required by the selected scope was successfully retrieved and
+    /// decoded.
     Complete,
     /// Fewer than the required messages were retrievable, or some failed to decode.
     /// Per criteria 176/217, callers may not clear `uncertain_write` from this state.
     Incomplete,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExactEnvelopeScanScope {
+    RecentWindow,
+    FullHistory,
 }
 
 /// Distinguishes a transition that genuinely captures new retain state from one that
@@ -150,10 +162,6 @@ pub enum SetLiveError {
         existing_entry_id: LedgerEntryId,
         incoming_entry_id: LedgerEntryId,
     },
-    /// The target is currently Abandoned. A fresh write path must explicitly `clear`
-    /// the abandoned state before starting a new retain.
-    #[error("target retain is Abandoned; clear it before setting Live again")]
-    AlreadyAbandoned,
 }
 
 /// Tracks the live `uncertain_write` blocks per write target. The registry has no
@@ -184,9 +192,8 @@ impl UncertainWriteRegistry {
     }
 
     /// Capture a new Live retain. Idempotent if the existing Live retain is exactly
-    /// equal; rejected if a different retain is already Live or if the target is
-    /// Abandoned (callers must `clear` first). This enforces criterion 217/279/287's
-    /// "retained envelope is authoritative" contract.
+    /// equal; rejected if a different retain is already Live. This enforces criterion
+    /// 217/279/287's "retained envelope is authoritative" contract.
     pub fn set_live(&self, retained: RetainedCanonicalWrite) -> Result<(), SetLiveError> {
         let mut guard = self
             .by_target
@@ -200,31 +207,10 @@ impl UncertainWriteRegistry {
                     incoming_entry_id: retained.entry_id(),
                 })
             }
-            Some(UncertainWriteState::Abandoned { .. }) => Err(SetLiveError::AlreadyAbandoned),
             None => {
                 guard.insert(retained.target, UncertainWriteState::Live(retained));
                 Ok(())
             }
-        }
-    }
-
-    pub fn mark_abandoned(&self, target: WriteTargetKey, last_known_summary: String) -> bool {
-        let mut guard = self
-            .by_target
-            .lock()
-            .expect("UncertainWriteRegistry mutex poisoned");
-        match guard.get(&target) {
-            Some(UncertainWriteState::Live(_)) => {
-                guard.insert(
-                    target,
-                    UncertainWriteState::Abandoned {
-                        target,
-                        last_known_summary,
-                    },
-                );
-                true
-            }
-            _ => false,
         }
     }
 
@@ -235,22 +221,28 @@ impl UncertainWriteRegistry {
             .remove(&target)
     }
 
-    /// Pure function: given the retained envelope bytes, the last canonical messages
-    /// observed on the thread (capped at `LAZY_RETRY_SCAN_WINDOW`), and whether the
-    /// retrieval was complete, decide the scan outcome.
+    /// Pure function: given the retained envelope bytes, canonical messages observed
+    /// on the thread, the requested scan scope, and whether retrieval was complete,
+    /// decide the scan outcome.
     ///
     /// An `Incomplete` retrieval cannot produce `VerifiedNoMatch` even when nothing
     /// matched, because the retained envelope may live outside the inspected window.
     pub fn scan_for_exact_envelope(
         retained: &RetainedCanonicalWrite,
-        recent_messages: &[CanonicalMessageProbe],
+        messages: &[CanonicalMessageProbe],
+        scope: ExactEnvelopeScanScope,
         completeness: ScanCompleteness,
     ) -> ExactEnvelopeScanResult {
-        if let Some(probe) = recent_messages
-            .iter()
-            .take(LAZY_RETRY_SCAN_WINDOW)
-            .find(|probe| probe.envelope_bytes == retained.envelope_bytes())
-        {
+        let matched = match scope {
+            ExactEnvelopeScanScope::RecentWindow => messages
+                .iter()
+                .take(LAZY_RETRY_SCAN_WINDOW)
+                .find(|probe| probe.envelope_bytes == retained.envelope_bytes()),
+            ExactEnvelopeScanScope::FullHistory => messages
+                .iter()
+                .find(|probe| probe.envelope_bytes == retained.envelope_bytes()),
+        };
+        if let Some(probe) = matched {
             return ExactEnvelopeScanResult::Matched {
                 entry_id: probe.entry_id,
             };
@@ -262,23 +254,33 @@ impl UncertainWriteRegistry {
     }
 
     /// Pure function: classify a lazy retry outcome from a typed scan result plus the
-    /// canonical head observed at retry time. Only the combination of `VerifiedNoMatch`
-    /// **and** head movement past the retained `previous_hash` clears as
-    /// `ClearedByConclusiveAbsence`; anything weaker keeps the block live (criterion
+    /// canonical head observed at retry time. Head movement after a recent-window
+    /// no-match requires a full-history scan before absence is conclusive (criterion
     /// 217).
     pub fn classify_retry(
         retained: &RetainedCanonicalWrite,
         scan: ExactEnvelopeScanResult,
+        scope: ExactEnvelopeScanScope,
         observed_head_hash: EntryHash,
+        now: SystemTime,
     ) -> UncertainWriteResolution {
         match scan {
             ExactEnvelopeScanResult::Matched { entry_id } => {
                 UncertainWriteResolution::ClearedByExistingPost { entry_id }
             }
             ExactEnvelopeScanResult::VerifiedNoMatch
-                if observed_head_hash != retained.previous_hash =>
+                if observed_head_hash != retained.previous_hash
+                    && scope == ExactEnvelopeScanScope::FullHistory =>
             {
                 UncertainWriteResolution::ClearedByConclusiveAbsence
+            }
+            ExactEnvelopeScanResult::VerifiedNoMatch
+                if observed_head_hash != retained.previous_hash =>
+            {
+                UncertainWriteResolution::RequiresFullHistoryScan
+            }
+            ExactEnvelopeScanResult::VerifiedNoMatch if retained.requires_full_scan(now) => {
+                UncertainWriteResolution::ClearedByExpiredConclusiveAbsence
             }
             ExactEnvelopeScanResult::VerifiedNoMatch | ExactEnvelopeScanResult::Inconclusive => {
                 UncertainWriteResolution::StillBlocked
@@ -382,6 +384,7 @@ impl PreparedCanonicalWrite {
             envelope_bytes: Arc::new(self.envelope_bytes),
             prepared_body: self.prepared_body,
             last_known_summary: self.last_known_summary,
+            live_since: self.issued_at,
         }
     }
 }
@@ -390,6 +393,7 @@ impl PreparedCanonicalWrite {
 mod tests {
     use super::*;
     use crate::ledger::ledger_chain_genesis_sha256_v1;
+    use rstest::rstest;
     use std::time::{Duration, UNIX_EPOCH};
 
     fn retained(target: WriteTargetKey, bytes: Vec<u8>, entry_id: u64) -> RetainedCanonicalWrite {
@@ -402,6 +406,7 @@ mod tests {
             envelope_bytes: Arc::new(bytes),
             prepared_body: "draft".to_owned(),
             last_known_summary: "summary".to_owned(),
+            live_since: UNIX_EPOCH,
         }
     }
 
@@ -475,72 +480,6 @@ mod tests {
     }
 
     #[test]
-    fn set_live_is_rejected_when_state_is_abandoned() {
-        let registry = UncertainWriteRegistry::new();
-        let entry = retained(
-            walicord_ledger::test_fixtures::ledger_id(77),
-            b"X".to_vec(),
-            1,
-        );
-        registry.set_live(entry.clone()).expect("first set_live");
-        registry.mark_abandoned(
-            walicord_ledger::test_fixtures::ledger_id(77),
-            "summary".to_owned(),
-        );
-
-        let actual = registry.set_live(entry);
-
-        assert_eq!(actual, Err(SetLiveError::AlreadyAbandoned));
-    }
-
-    #[test]
-    fn mark_abandoned_changes_live_state_to_abandoned() {
-        let registry = UncertainWriteRegistry::new();
-        let entry = retained(
-            walicord_ledger::test_fixtures::ledger_id(77),
-            b"X".to_vec(),
-            1,
-        );
-        registry.set_live(entry).expect("set_live");
-
-        let was_abandoned = registry.mark_abandoned(
-            walicord_ledger::test_fixtures::ledger_id(77),
-            "summary".to_owned(),
-        );
-
-        assert!(was_abandoned);
-        assert_eq!(
-            registry.current(walicord_ledger::test_fixtures::ledger_id(77)),
-            Some(UncertainWriteState::Abandoned {
-                target: walicord_ledger::test_fixtures::ledger_id(77),
-                last_known_summary: "summary".to_owned(),
-            })
-        );
-    }
-
-    #[test]
-    fn mark_abandoned_is_noop_when_state_already_abandoned() {
-        let registry = UncertainWriteRegistry::new();
-        let entry = retained(
-            walicord_ledger::test_fixtures::ledger_id(77),
-            b"X".to_vec(),
-            1,
-        );
-        registry.set_live(entry).expect("set_live");
-        registry.mark_abandoned(
-            walicord_ledger::test_fixtures::ledger_id(77),
-            "s".to_owned(),
-        );
-
-        let second = registry.mark_abandoned(
-            walicord_ledger::test_fixtures::ledger_id(77),
-            "different".to_owned(),
-        );
-
-        assert!(!second);
-    }
-
-    #[test]
     fn clear_removes_entry() {
         let registry = UncertainWriteRegistry::new();
         let entry = retained(
@@ -572,6 +511,7 @@ mod tests {
         let actual = UncertainWriteRegistry::scan_for_exact_envelope(
             &entry,
             &probes,
+            ExactEnvelopeScanScope::RecentWindow,
             ScanCompleteness::Complete,
         );
 
@@ -595,6 +535,7 @@ mod tests {
         let actual = UncertainWriteRegistry::scan_for_exact_envelope(
             &entry,
             &probes,
+            ExactEnvelopeScanScope::RecentWindow,
             ScanCompleteness::Complete,
         );
 
@@ -613,6 +554,7 @@ mod tests {
         let actual = UncertainWriteRegistry::scan_for_exact_envelope(
             &entry,
             &probes,
+            ExactEnvelopeScanScope::RecentWindow,
             ScanCompleteness::Incomplete,
         );
 
@@ -635,10 +577,39 @@ mod tests {
         let actual = UncertainWriteRegistry::scan_for_exact_envelope(
             &entry,
             &probes,
+            ExactEnvelopeScanScope::RecentWindow,
             ScanCompleteness::Complete,
         );
 
         assert_eq!(actual, ExactEnvelopeScanResult::VerifiedNoMatch);
+    }
+
+    #[test]
+    fn full_history_scan_inspects_messages_after_recent_window() {
+        let bytes = b"target".to_vec();
+        let entry = retained(
+            walicord_ledger::test_fixtures::ledger_id(77),
+            bytes.clone(),
+            1,
+        );
+        let mut probes: Vec<CanonicalMessageProbe> = (0..LAZY_RETRY_SCAN_WINDOW)
+            .map(|i| probe(100 + i as u64, vec![0xaa]))
+            .collect();
+        probes.push(probe(7, bytes));
+
+        let actual = UncertainWriteRegistry::scan_for_exact_envelope(
+            &entry,
+            &probes,
+            ExactEnvelopeScanScope::FullHistory,
+            ScanCompleteness::Complete,
+        );
+
+        assert_eq!(
+            actual,
+            ExactEnvelopeScanResult::Matched {
+                entry_id: LedgerEntryId(7)
+            }
+        );
     }
 
     #[test]
@@ -655,7 +626,9 @@ mod tests {
             ExactEnvelopeScanResult::Matched {
                 entry_id: LedgerEntryId(1),
             },
+            ExactEnvelopeScanScope::RecentWindow,
             head,
+            UNIX_EPOCH,
         );
 
         assert_eq!(
@@ -679,10 +652,33 @@ mod tests {
         let actual = UncertainWriteRegistry::classify_retry(
             &entry,
             ExactEnvelopeScanResult::VerifiedNoMatch,
+            ExactEnvelopeScanScope::FullHistory,
             other_head,
+            UNIX_EPOCH,
         );
 
         assert_eq!(actual, UncertainWriteResolution::ClearedByConclusiveAbsence);
+    }
+
+    #[test]
+    fn classify_retry_with_recent_no_match_and_advanced_head_does_not_clear() {
+        let entry = retained(
+            walicord_ledger::test_fixtures::ledger_id(77),
+            b"X".to_vec(),
+            1,
+        );
+        let other_head =
+            ledger_chain_genesis_sha256_v1(walicord_ledger::test_fixtures::ledger_id(99));
+
+        let actual = UncertainWriteRegistry::classify_retry(
+            &entry,
+            ExactEnvelopeScanResult::VerifiedNoMatch,
+            ExactEnvelopeScanScope::RecentWindow,
+            other_head,
+            UNIX_EPOCH,
+        );
+
+        assert_eq!(actual, UncertainWriteResolution::RequiresFullHistoryScan);
     }
 
     #[test]
@@ -698,7 +694,9 @@ mod tests {
         let actual = UncertainWriteRegistry::classify_retry(
             &entry,
             ExactEnvelopeScanResult::Inconclusive,
+            ExactEnvelopeScanScope::RecentWindow,
             other_head,
+            UNIX_EPOCH + UNCERTAIN_WRITE_RETAIN_TTL,
         );
 
         assert_eq!(actual, UncertainWriteResolution::StillBlocked);
@@ -716,10 +714,50 @@ mod tests {
         let actual = UncertainWriteRegistry::classify_retry(
             &entry,
             ExactEnvelopeScanResult::VerifiedNoMatch,
+            ExactEnvelopeScanScope::RecentWindow,
             same_head,
+            UNIX_EPOCH,
         );
 
         assert_eq!(actual, UncertainWriteResolution::StillBlocked);
+    }
+
+    #[test]
+    fn classify_retry_verified_no_match_after_retain_ttl_clears_by_expired_absence() {
+        let entry = retained(
+            walicord_ledger::test_fixtures::ledger_id(77),
+            b"X".to_vec(),
+            1,
+        );
+
+        let actual = UncertainWriteRegistry::classify_retry(
+            &entry,
+            ExactEnvelopeScanResult::VerifiedNoMatch,
+            ExactEnvelopeScanScope::FullHistory,
+            entry.previous_hash,
+            UNIX_EPOCH + UNCERTAIN_WRITE_RETAIN_TTL,
+        );
+
+        assert_eq!(
+            actual,
+            UncertainWriteResolution::ClearedByExpiredConclusiveAbsence
+        );
+    }
+
+    #[rstest]
+    #[case::before_ttl(UNCERTAIN_WRITE_RETAIN_TTL - Duration::from_secs(1), false)]
+    #[case::at_ttl(UNCERTAIN_WRITE_RETAIN_TTL, true)]
+    fn retained_write_requires_full_scan_only_after_ttl(
+        #[case] elapsed: Duration,
+        #[case] expected: bool,
+    ) {
+        let entry = retained(
+            walicord_ledger::test_fixtures::ledger_id(77),
+            b"X".to_vec(),
+            1,
+        );
+
+        assert_eq!(entry.requires_full_scan(UNIX_EPOCH + elapsed), expected);
     }
 
     #[test]

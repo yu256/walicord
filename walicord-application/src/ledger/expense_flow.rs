@@ -4,9 +4,9 @@ use crate::{
     ledger::{
         expense_session::{
             ExpenseBasicInfo, ExpenseConfirmationSnapshot, ExpenseDraftSnapshot,
-            ExpenseParticipantSelection, ExpenseSelectionPhase, ExpenseSelectionState,
-            ExpenseSession, ExpenseSessionConstructionError, ExpenseSessionKey,
-            ExpenseSessionStage,
+            ExpenseLaunchOrigin, ExpenseParticipantSelection, ExpenseSelectionPhase,
+            ExpenseSelectionState, ExpenseSession, ExpenseSessionConstructionError,
+            ExpenseSessionKey, ExpenseSessionStage,
         },
         participant_resolution::{
             ParticipantDrift, RosterSnapshot, drift_between_snapshot_and_resolution,
@@ -22,16 +22,13 @@ use walicord_domain::model::MemberId;
 /// from [`NonceProvider`] so all tests can be made deterministic.
 pub fn bootstrap_expense_session(
     key: ExpenseSessionKey,
+    origin: ExpenseLaunchOrigin,
     validated_modal: ValidatedExpenseModalSubmission,
     clock: &dyn Clock,
     nonce_provider: &dyn NonceProvider,
 ) -> Result<(ExpenseSession, InteractionNonce), ExpenseSessionConstructionError> {
     let nonce = nonce_provider.next_interaction_nonce();
-    let basic_info = ExpenseBasicInfo {
-        amount: validated_modal.amount,
-        note: validated_modal.note,
-        effective_date: validated_modal.effective_date,
-    };
+    let basic_info = ExpenseBasicInfo::from(validated_modal);
     let actor = key.actor_id();
     let selection_state = preselect_actor_as_payer_and_participant(actor);
     let draft = ExpenseDraftSnapshot::empty()
@@ -39,6 +36,7 @@ pub fn bootstrap_expense_session(
         .with_selection_state(selection_state);
     let session = ExpenseSession::new(
         key,
+        origin,
         ExpenseSessionStage::InSelection {
             phase: ExpenseSelectionPhase::Payer,
         },
@@ -47,6 +45,16 @@ pub fn bootstrap_expense_session(
         clock.now(),
     )?;
     Ok((session, nonce))
+}
+
+impl From<ValidatedExpenseModalSubmission> for ExpenseBasicInfo {
+    fn from(validated: ValidatedExpenseModalSubmission) -> Self {
+        Self {
+            amount: validated.amount,
+            note: validated.note,
+            effective_date: validated.effective_date,
+        }
+    }
 }
 
 fn preselect_actor_as_payer_and_participant(actor: MemberId) -> ExpenseSelectionState {
@@ -126,6 +134,7 @@ pub fn build_confirmation_for_session(
         .cloned()
         .expect("basic info verified present above");
     let key = session.key();
+    let origin = session.origin();
     let nonce = session.nonce();
     let next_draft = ExpenseDraftSnapshot::empty()
         .with_basic_info(basic_info)
@@ -133,6 +142,7 @@ pub fn build_confirmation_for_session(
         .with_confirmation_snapshot(snapshot.clone());
     let next_session = ExpenseSession::new(
         key,
+        origin,
         ExpenseSessionStage::InConfirmation,
         next_draft,
         nonce,
@@ -215,10 +225,12 @@ pub fn navigate_back(
     };
     let previous = previous_phase(phase).ok_or(NavigationError::AlreadyAtFirstStep)?;
     let key = session.key();
+    let origin = session.origin();
     let nonce = session.nonce();
     let draft = session.draft().clone();
     ExpenseSession::new(
         key,
+        origin,
         ExpenseSessionStage::InSelection { phase: previous },
         draft,
         nonce,
@@ -238,6 +250,7 @@ pub fn navigate_modify_selection(
         return Err(NavigationError::NotInConfirmation);
     }
     let key = session.key();
+    let origin = session.origin();
     let nonce = session.nonce();
     let basic_info = session
         .draft()
@@ -250,6 +263,7 @@ pub fn navigate_modify_selection(
         .with_selection_state(selection);
     ExpenseSession::new(
         key,
+        origin,
         ExpenseSessionStage::InSelection {
             phase: ExpenseSelectionPhase::Payer,
         },
@@ -295,10 +309,12 @@ pub fn navigate_to_phase(
         });
     }
     let key = session.key();
+    let origin = session.origin();
     let nonce = session.nonce();
     let draft = session.draft().clone();
     ExpenseSession::new(
         key,
+        origin,
         ExpenseSessionStage::InSelection { phase: target },
         draft,
         nonce,
@@ -322,6 +338,7 @@ pub fn toggle_members_group(
         return Err(NavigationError::NotInSelection);
     };
     let key = session.key();
+    let origin = session.origin();
     let nonce = session.nonce();
     let mut selection = session.draft().selection_state().clone();
     selection.include_members_group = !selection.include_members_group;
@@ -335,6 +352,7 @@ pub fn toggle_members_group(
         .with_selection_state(selection);
     ExpenseSession::new(
         key,
+        origin,
         ExpenseSessionStage::InSelection {
             phase: ExpenseSelectionPhase::ParticipantSource,
         },
@@ -357,6 +375,7 @@ pub fn apply_modified_basic_info(
     clock: &dyn Clock,
 ) -> Result<ExpenseSession, NavigationError> {
     let key = session.key();
+    let origin = session.origin();
     let nonce = session.nonce();
     let selection = session.draft().selection_state().clone();
     let stage = match session.stage() {
@@ -374,7 +393,7 @@ pub fn apply_modified_basic_info(
     let draft = ExpenseDraftSnapshot::empty()
         .with_basic_info(new_basic_info)
         .with_selection_state(selection);
-    ExpenseSession::new(key, stage, draft, nonce, clock.now())
+    ExpenseSession::new(key, origin, stage, draft, nonce, clock.now())
         .map_err(NavigationError::ConstructionFailed)
 }
 
@@ -454,9 +473,14 @@ mod tests {
         let validated =
             validate_expense_modal_submission(&raw, &fixed_clock()).expect("modal validates");
 
-        let (session, nonce) =
-            bootstrap_expense_session(key(), validated, &fixed_clock(), &nonce_provider())
-                .expect("bootstrap succeeds");
+        let (session, nonce) = bootstrap_expense_session(
+            key(),
+            ExpenseLaunchOrigin::SlashCommand,
+            validated,
+            &fixed_clock(),
+            &nonce_provider(),
+        )
+        .expect("bootstrap succeeds");
 
         assert_eq!(
             session.stage(),
@@ -489,9 +513,14 @@ mod tests {
         };
         let validated = validate_expense_modal_submission(&raw, &fixed_clock()).unwrap();
 
-        let (session, nonce) =
-            bootstrap_expense_session(key(), validated, &fixed_clock(), &nonce_provider())
-                .expect("bootstrap");
+        let (session, nonce) = bootstrap_expense_session(
+            key(),
+            ExpenseLaunchOrigin::SlashCommand,
+            validated,
+            &fixed_clock(),
+            &nonce_provider(),
+        )
+        .expect("bootstrap");
 
         assert_eq!(session.nonce(), nonce);
         assert_eq!(session.last_touched(), fixed_clock().now);
@@ -506,9 +535,14 @@ mod tests {
         };
         let validated = validate_expense_modal_submission(&raw, &fixed_clock()).unwrap();
 
-        let (session, _) =
-            bootstrap_expense_session(key(), validated, &fixed_clock(), &nonce_provider())
-                .expect("bootstrap");
+        let (session, _) = bootstrap_expense_session(
+            key(),
+            ExpenseLaunchOrigin::SlashCommand,
+            validated,
+            &fixed_clock(),
+            &nonce_provider(),
+        )
+        .expect("bootstrap");
 
         assert_eq!(session.draft().basic_info().unwrap().note, None);
     }
@@ -527,9 +561,15 @@ mod tests {
             raw_date: "2026-05-01".to_owned(),
         };
         let validated = validate_expense_modal_submission(&raw, &fixed_clock()).unwrap();
-        bootstrap_expense_session(key(), validated, &fixed_clock(), &nonce_provider())
-            .expect("bootstrap")
-            .0
+        bootstrap_expense_session(
+            key(),
+            ExpenseLaunchOrigin::SlashCommand,
+            validated,
+            &fixed_clock(),
+            &nonce_provider(),
+        )
+        .expect("bootstrap")
+        .0
     }
 
     #[test]
@@ -562,6 +602,7 @@ mod tests {
         });
         let session = ExpenseSession::new(
             key,
+            ExpenseLaunchOrigin::SlashCommand,
             ExpenseSessionStage::InSelection {
                 phase: ExpenseSelectionPhase::Payer,
             },
@@ -603,6 +644,7 @@ mod tests {
         });
         let session = ExpenseSession::new(
             first.session.key(),
+            ExpenseLaunchOrigin::SlashCommand,
             ExpenseSessionStage::InSelection {
                 phase: ExpenseSelectionPhase::IndividualSelection,
             },
@@ -654,6 +696,7 @@ mod tests {
         let draft = session.draft().clone();
         ExpenseSession::new(
             key,
+            ExpenseLaunchOrigin::SlashCommand,
             ExpenseSessionStage::InSelection { phase },
             draft,
             nonce,
@@ -875,6 +918,7 @@ mod tests {
         let nonce = session.nonce();
         let awaiting = ExpenseSession::new(
             key,
+            ExpenseLaunchOrigin::SlashCommand,
             ExpenseSessionStage::AwaitingBasicInfo,
             ExpenseDraftSnapshot::empty(),
             nonce,

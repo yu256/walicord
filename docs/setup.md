@@ -58,8 +58,11 @@ Rustの開発環境がある場合の手順です。
 3. **Bot Permissions**で以下の権限にチェックを入れます：
    - `Read Message History`
    - `Send Messages`
+   - `Send Messages in Threads`
    - `Add Reactions`
    - `Attach Files` (画像送信に必要)
+   - `Create Public Threads`
+   - `Manage Threads`
 4. 生成されたURLをブラウザで開き、ボットをあなたのサーバーに招待します。
 
 > **注意**: 既にボットを招待済みの場合でも、スラッシュコマンドを使用するには `applications.commands` スコープを含む新しいURLで再招待が必要です。サーバーから追放する必要はなく、上書きで追加されます。
@@ -70,9 +73,13 @@ Rustの開発環境がある場合の手順です。
 
 ```env
 DISCORD_TOKEN="YOUR_DISCORD_BOT_TOKEN_HERE"
+DISCORD_OAUTH_SCOPES="bot applications.commands"
+WALICORD_LEDGER_WRITER_LINEAGE_ALLOWLIST="YOUR_DISCORD_BOT_USER_ID"
 ```
 
 - `DISCORD_TOKEN`: Developer Portalで取得したボットのトークン
+- `DISCORD_OAUTH_SCOPES`: 招待 URL に含めた OAuth2 scopes。`bot applications.commands` が必須
+- `WALICORD_LEDGER_WRITER_LINEAGE_ALLOWLIST`: canonical 台帳への書き込みを許可する bot user ID。bot を切り替えた場合は、過去の bot user ID から現在の bot user ID の順にカンマ区切りで指定
 
 ### チャンネルトピックの設定
 ボットを有効にしたいチャンネルのトピックに `#walicord` を含めてください。

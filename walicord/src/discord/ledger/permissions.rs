@@ -19,24 +19,8 @@ const REQUIRED_GATEWAY_INTENTS: &[(GatewayIntents, &str)] = &[
     ),
 ];
 
-const CANONICAL_SURFACE_PERMISSIONS: &[(Permissions, &str)] = &[
-    (Permissions::VIEW_CHANNEL, "View Channel"),
-    (Permissions::READ_MESSAGE_HISTORY, "Read Message History"),
-    (Permissions::SEND_MESSAGES, "Send Messages"),
-    (
-        Permissions::SEND_MESSAGES_IN_THREADS,
-        "Send Messages in Threads",
-    ),
-    (Permissions::ATTACH_FILES, "Attach Files"),
-    (Permissions::CREATE_PUBLIC_THREADS, "Create Public Threads"),
-    (Permissions::MANAGE_THREADS, "Manage Threads"),
-];
-
-const LEGACY_REACTION_PERMISSIONS: &[(Permissions, &str)] = &[
-    (Permissions::VIEW_CHANNEL, "View Channel"),
-    (Permissions::READ_MESSAGE_HISTORY, "Read Message History"),
-    (Permissions::ADD_REACTIONS, "Add Reactions"),
-];
+const CANONICAL_SURFACE_PERMISSIONS: &[(Permissions, &str)] =
+    &[(Permissions::VIEW_CHANNEL, "View Channel")];
 
 const TOPIC_CHANGE_CAPABILITIES: &[NativeAdminCapability] = &[
     NativeAdminCapability::ManageChannels,
@@ -125,7 +109,6 @@ pub(crate) fn native_admin_capabilities(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RuntimePermissionScope {
     CanonicalSurface,
-    LegacyReactionPath,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -353,7 +336,6 @@ pub(crate) fn missing_runtime_permissions_for(
 ) -> Vec<&'static str> {
     let required = match scope {
         RuntimePermissionScope::CanonicalSurface => CANONICAL_SURFACE_PERMISSIONS,
-        RuntimePermissionScope::LegacyReactionPath => LEGACY_REACTION_PERMISSIONS,
     };
 
     required
@@ -442,24 +424,13 @@ mod tests {
     }
 
     #[test]
-    fn runtime_permission_matrix_and_add_reactions_scope() {
+    fn canonical_runtime_permission_matrix_requires_only_parent_visibility() {
         let canonical_missing = missing_runtime_permissions_for(
             RuntimePermissionScope::CanonicalSurface,
-            Permissions::VIEW_CHANNEL
-                | Permissions::READ_MESSAGE_HISTORY
-                | Permissions::SEND_MESSAGES
-                | Permissions::SEND_MESSAGES_IN_THREADS
-                | Permissions::ATTACH_FILES
-                | Permissions::CREATE_PUBLIC_THREADS
-                | Permissions::MANAGE_THREADS,
-        );
-        let reaction_missing = missing_runtime_permissions_for(
-            RuntimePermissionScope::LegacyReactionPath,
-            Permissions::VIEW_CHANNEL | Permissions::READ_MESSAGE_HISTORY,
+            Permissions::VIEW_CHANNEL,
         );
 
         assert_eq!(canonical_missing, Vec::<&'static str>::new());
-        assert_eq!(reaction_missing, vec!["Add Reactions"]);
     }
 
     #[rstest]

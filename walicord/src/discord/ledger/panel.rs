@@ -1,5 +1,4 @@
-use dashmap::{DashMap, DashSet};
-use serenity::all::{ChannelId, CreateActionRow, GuildId, MessageId};
+use serenity::all::{ChannelId, CreateActionRow};
 use walicord_i18n as i18n;
 use walicord_presentation::{
     DiscordLedgerPresenter,
@@ -21,34 +20,6 @@ pub(crate) const LEDGER_PANEL_REVIEW_ID: &str = "ledger:panel:review";
 pub(crate) const LEDGER_PANEL_LEDGER_ID: &str = "ledger:panel:ledger";
 pub(crate) const LEDGER_PANEL_VOID_ID: &str = "ledger:panel:void";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct PanelPostKey {
-    guild_id: GuildId,
-    tracked_parent_channel_id: ChannelId,
-}
-
-impl PanelPostKey {
-    pub(crate) fn new(guild_id: GuildId, tracked_parent_channel_id: ChannelId) -> Self {
-        Self {
-            guild_id,
-            tracked_parent_channel_id,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PanelPostAttempt {
-    Accepted {
-        previous_message_id: Option<MessageId>,
-    },
-    InProgress,
-}
-
-pub(crate) struct PanelPostRegistry {
-    in_progress: DashSet<PanelPostKey>,
-    last_panel_message_ids: DashMap<PanelPostKey, MessageId>,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PanelPostFailure {
     MissingParentAccess {
@@ -58,41 +29,6 @@ pub(crate) enum PanelPostFailure {
         tracked_parent_hint: Option<ChannelId>,
     },
     DiscordRejected,
-}
-
-impl PanelPostRegistry {
-    pub(crate) fn new() -> Self {
-        Self {
-            in_progress: DashSet::new(),
-            last_panel_message_ids: DashMap::new(),
-        }
-    }
-
-    pub(crate) fn begin(&self, key: PanelPostKey) -> PanelPostAttempt {
-        if !self.in_progress.insert(key) {
-            return PanelPostAttempt::InProgress;
-        }
-
-        PanelPostAttempt::Accepted {
-            previous_message_id: self.cached_message_id(key),
-        }
-    }
-
-    pub(crate) fn finish(&self, key: PanelPostKey, new_message_id: MessageId) -> Option<MessageId> {
-        let previous_message_id = self.last_panel_message_ids.insert(key, new_message_id);
-        self.in_progress.remove(&key);
-        previous_message_id
-    }
-
-    pub(crate) fn abort(&self, key: PanelPostKey) {
-        self.in_progress.remove(&key);
-    }
-
-    pub(crate) fn cached_message_id(&self, key: PanelPostKey) -> Option<MessageId> {
-        self.last_panel_message_ids
-            .get(&key)
-            .map(|message_id| *message_id)
-    }
 }
 
 pub(crate) fn is_ledger_panel_component_id(custom_id: &str) -> bool {
@@ -244,7 +180,7 @@ mod tests {
         CanonicalThreadBinding, CanonicalThreadLocatorState, LocatorRecoveryReference,
         TrackedParentKey,
     };
-    use serenity::all::ChannelType;
+    use serenity::all::{ChannelType, GuildId};
 
     fn tracked_parent_key() -> TrackedParentKey {
         TrackedParentKey::new(
@@ -271,67 +207,6 @@ mod tests {
                 channel_id.get()
             )),
         )
-    }
-
-    #[test]
-    fn panel_post_registry_rejects_concurrent_post_for_same_parent() {
-        let registry = PanelPostRegistry::new();
-        let key = PanelPostKey::new(GuildId::new(1), ChannelId::new(10));
-
-        assert_eq!(
-            registry.begin(key),
-            PanelPostAttempt::Accepted {
-                previous_message_id: None,
-            }
-        );
-        assert_eq!(registry.begin(key), PanelPostAttempt::InProgress);
-
-        registry.abort(key);
-
-        assert_eq!(
-            registry.begin(key),
-            PanelPostAttempt::Accepted {
-                previous_message_id: None,
-            }
-        );
-    }
-
-    #[test]
-    fn panel_post_registry_updates_last_message_only_after_success() {
-        let registry = PanelPostRegistry::new();
-        let key = PanelPostKey::new(GuildId::new(1), ChannelId::new(10));
-
-        assert_eq!(registry.finish(key, MessageId::new(50)), None);
-        assert_eq!(registry.cached_message_id(key), Some(MessageId::new(50)));
-        assert_eq!(
-            registry.begin(key),
-            PanelPostAttempt::Accepted {
-                previous_message_id: Some(MessageId::new(50)),
-            }
-        );
-        assert_eq!(
-            registry.finish(key, MessageId::new(60)),
-            Some(MessageId::new(50))
-        );
-        assert_eq!(registry.cached_message_id(key), Some(MessageId::new(60)));
-    }
-
-    #[test]
-    fn panel_post_registry_abort_keeps_cached_message_after_failed_retry() {
-        let registry = PanelPostRegistry::new();
-        let key = PanelPostKey::new(GuildId::new(1), ChannelId::new(10));
-
-        registry.finish(key, MessageId::new(50));
-        assert_eq!(
-            registry.begin(key),
-            PanelPostAttempt::Accepted {
-                previous_message_id: Some(MessageId::new(50)),
-            }
-        );
-
-        registry.abort(key);
-
-        assert_eq!(registry.cached_message_id(key), Some(MessageId::new(50)));
     }
 
     #[test]

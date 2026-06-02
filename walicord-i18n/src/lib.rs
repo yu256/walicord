@@ -2636,6 +2636,22 @@ pub fn expense_invalid_date_message() -> &'static str {
     }
 }
 
+pub fn expense_note_too_long_message() -> &'static str {
+    if cfg!(feature = "ja") {
+        "メモは 200 文字以内で入力してください。"
+    } else {
+        "Enter a note of at most 200 characters."
+    }
+}
+
+pub fn expense_modal_retry_button_label() -> &'static str {
+    if cfg!(feature = "ja") {
+        "入力を修正する"
+    } else {
+        "Edit input"
+    }
+}
+
 pub fn member_roster_load_failed_message() -> &'static str {
     if cfg!(feature = "ja") {
         "メンバー一覧を取得できませんでした。"

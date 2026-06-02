@@ -19,11 +19,15 @@ use super::{
         LocatorRecoveryReference, RediscoveringCanonicalThreadLocatorBackend, TrackedParentKey,
         VerifiedCanonicalThreadCandidate, canonical_thread_candidate_ids,
     },
+    observability::PermissionAction,
     router::{
         LedgerCanonicalThreadCreator, LedgerThreadLoader, RouterRosterFetchError,
         RouterRosterFetcher, RouterRosterSnapshot,
     },
-    store::{DiscordCanonicalLedgerStore, StoreLoadError, VerifiedLedgerThreadLoad},
+    store::{
+        DiscordCanonicalLedgerStore, StoreLoadError, VerifiedLedgerThreadLoad,
+        serenity_error_is_read_denied,
+    },
 };
 
 pub struct DiscordLedgerCanonicalThreadCreator;
@@ -86,10 +90,7 @@ impl CanonicalThreadDiscoveryPort for DiscordCanonicalThreadDiscovery {
         let active_threads = guild_id
             .get_active_threads(&self.http)
             .await
-            .map_err(|error| LocatorError::Fetch {
-                tracked_parent,
-                message: error.to_string(),
-            })?;
+            .map_err(|error| self.classify_discovery_error(tracked_parent, error))?;
         for thread_id in canonical_thread_candidate_ids(
             parent_channel_id,
             active_threads
@@ -107,10 +108,7 @@ impl CanonicalThreadDiscoveryPort for DiscordCanonicalThreadDiscovery {
             let archived_threads = parent_channel_id
                 .get_archived_public_threads(&self.http, before, Some(100))
                 .await
-                .map_err(|error| LocatorError::Fetch {
-                    tracked_parent,
-                    message: error.to_string(),
-                })?;
+                .map_err(|error| self.classify_discovery_error(tracked_parent, error))?;
             let next_before = archived_threads
                 .threads
                 .last()
@@ -151,6 +149,31 @@ impl CanonicalThreadDiscoveryPort for DiscordCanonicalThreadDiscovery {
             cached_binding,
             discovered,
         )
+    }
+}
+
+impl DiscordCanonicalThreadDiscovery {
+    fn classify_discovery_error(
+        &self,
+        tracked_parent: TrackedParentKey,
+        error: serenity::Error,
+    ) -> LocatorError {
+        if serenity_error_is_read_denied(&error) {
+            self.store.observe_permission_failure(
+                None,
+                tracked_parent.tracked_parent_channel_id(),
+                PermissionAction::ReadMessageHistory,
+            );
+            LocatorError::Permission {
+                tracked_parent,
+                message: error.to_string(),
+            }
+        } else {
+            LocatorError::Fetch {
+                tracked_parent,
+                message: error.to_string(),
+            }
+        }
     }
 }
 

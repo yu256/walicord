@@ -2,7 +2,7 @@ use serenity::all::{ChannelId, GuildId, UserId};
 use std::sync::Mutex;
 use walicord_application::ledger::{
     LedgerId,
-    observability::{CanonicalLoadRoute, LedgerObservability, LedgerObservabilityEvent},
+    observability::{LedgerObservability, LedgerObservabilityEvent},
 };
 
 /// Adapter-side observability variants that carry Discord-native identifiers. Kept
@@ -11,7 +11,7 @@ use walicord_application::ledger::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DiscordLedgerObservabilityEvent {
     ActiveActiveMisconfiguration {
-        ledger_id: LedgerId,
+        ledger_id: Option<LedgerId>,
         observed_writer: UserId,
         expected_writer: UserId,
     },
@@ -27,20 +27,17 @@ pub enum DiscordLedgerObservabilityEvent {
     },
     PermissionFailure {
         ledger_id: Option<LedgerId>,
-        guild_id: GuildId,
+        guild_id: Option<GuildId>,
         channel_id: ChannelId,
         action: PermissionAction,
-    },
-    RetryBudgetExhausted {
-        ledger_id: Option<LedgerId>,
-        route: CanonicalLoadRoute,
-        attempts: u32,
     },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PermissionAction {
+    ViewChannel,
     CreatePublicThread,
+    AppendCanonicalMessage,
     SendMessageInChannel,
     AttachFiles,
     ManageThreads,
@@ -118,8 +115,7 @@ impl DiscordLedgerObservability for TracingLedgerObservability {
             | DiscordLedgerObservabilityEvent::DamagedThreadBlocked { .. } => {
                 tracing::error!(?event, "ledger observability event");
             }
-            DiscordLedgerObservabilityEvent::PermissionFailure { .. }
-            | DiscordLedgerObservabilityEvent::RetryBudgetExhausted { .. } => {
+            DiscordLedgerObservabilityEvent::PermissionFailure { .. } => {
                 tracing::warn!(?event, "ledger observability event");
             }
         }
@@ -196,10 +192,11 @@ mod tests {
             ledger_id: ledger(),
             entry_count: LEDGER_GROWTH_WARNING_THRESHOLD,
         });
-        sink.emit_discord(DiscordLedgerObservabilityEvent::RetryBudgetExhausted {
+        sink.emit_discord(DiscordLedgerObservabilityEvent::PermissionFailure {
             ledger_id: Some(ledger()),
-            route: CanonicalLoadRoute::Read,
-            attempts: 3,
+            guild_id: Some(GuildId::new(1)),
+            channel_id: ChannelId::new(2),
+            action: PermissionAction::AttachFiles,
         });
         sink.emit(LedgerObservabilityEvent::LoadTimeoutWarning {
             ledger_id: ledger(),
@@ -218,10 +215,11 @@ mod tests {
                     }
                 ),
                 CapturedLedgerObservabilityEvent::Discord(
-                    DiscordLedgerObservabilityEvent::RetryBudgetExhausted {
+                    DiscordLedgerObservabilityEvent::PermissionFailure {
                         ledger_id: Some(ledger()),
-                        route: CanonicalLoadRoute::Read,
-                        attempts: 3,
+                        guild_id: Some(GuildId::new(1)),
+                        channel_id: ChannelId::new(2),
+                        action: PermissionAction::AttachFiles,
                     }
                 ),
                 CapturedLedgerObservabilityEvent::Application(

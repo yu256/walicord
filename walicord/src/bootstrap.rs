@@ -9,9 +9,11 @@ use crate::{
     message_cache::MessageCache,
 };
 use serenity::{Client, all::GatewayIntents};
-use std::env;
+use std::{env, path::PathBuf};
 use walicord_application::MessageProcessor;
-use walicord_infrastructure::{HighsSettlementPlanner, WalicordProgramParser};
+use walicord_infrastructure::{
+    HighsSettlementPlanner, WalicordProgramParser, acquire_instance_lock,
+};
 
 /// Application configuration and dependency injection container
 pub struct AppConfig {
@@ -97,9 +99,23 @@ pub fn init_logging() {
     tracing_subscriber::fmt::init();
 }
 
+fn runtime_instance_lock_path() -> PathBuf {
+    std::env::temp_dir()
+        .join("walicord-ledger-locks")
+        .join("runtime-instance.lock")
+}
+
 /// Run the application with proper error handling
 pub async fn run() {
     init_logging();
+
+    let _instance_lock = match acquire_instance_lock(runtime_instance_lock_path()) {
+        Ok(lock) => lock,
+        Err(error) => {
+            tracing::error!(%error, "failed to acquire startup instance lock");
+            std::process::exit(1);
+        }
+    };
 
     let config = match AppConfig::from_env() {
         Ok(config) => config,

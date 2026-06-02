@@ -2,14 +2,12 @@ use crate::{
     InteractionNonce,
     ledger::{EntryHash, ExpenseNote, LedgerEffectiveDate, LedgerEntryId, LedgerId},
 };
-use dashmap::DashMap;
 use std::{
     collections::{BTreeMap, HashMap},
     num::NonZeroU64,
-    sync::{Arc, Mutex},
+    sync::Mutex,
     time::{Duration, SystemTime},
 };
-use tokio::sync::Mutex as AsyncMutex;
 use walicord_domain::{
     Money,
     model::{MemberId, RoleId, Weight},
@@ -97,6 +95,12 @@ pub enum ExpenseSessionStage {
     AwaitingBasicInfo,
     InSelection { phase: ExpenseSelectionPhase },
     InConfirmation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExpenseLaunchOrigin {
+    SlashCommand,
+    PanelButton,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -217,6 +221,7 @@ pub enum VoidSessionConstructionError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExpenseSession {
     key: ExpenseSessionKey,
+    origin: ExpenseLaunchOrigin,
     stage: ExpenseSessionStage,
     draft: ExpenseDraftSnapshot,
     nonce: InteractionNonce,
@@ -226,6 +231,7 @@ pub struct ExpenseSession {
 impl ExpenseSession {
     pub fn new(
         key: ExpenseSessionKey,
+        origin: ExpenseLaunchOrigin,
         stage: ExpenseSessionStage,
         draft: ExpenseDraftSnapshot,
         nonce: InteractionNonce,
@@ -245,6 +251,7 @@ impl ExpenseSession {
             }
             _ => Ok(Self {
                 key,
+                origin,
                 stage,
                 draft,
                 nonce,
@@ -255,6 +262,9 @@ impl ExpenseSession {
 
     pub fn key(&self) -> ExpenseSessionKey {
         self.key
+    }
+    pub fn origin(&self) -> ExpenseLaunchOrigin {
+        self.origin
     }
     pub fn stage(&self) -> &ExpenseSessionStage {
         &self.stage
@@ -325,6 +335,106 @@ pub struct ModalRetryPreserved {
     pub raw_date: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExpenseModalIntent {
+    Create { origin: ExpenseLaunchOrigin },
+    ModifyExisting { session_nonce: InteractionNonce },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExpenseModalSubmissionBinding {
+    binding_nonce: InteractionNonce,
+    actor_id: MemberId,
+    draft_scope_id: ExpenseDraftScopeId,
+    intent: ExpenseModalIntent,
+    expires_at: SystemTime,
+}
+
+impl ExpenseModalSubmissionBinding {
+    pub fn capture(
+        binding_nonce: InteractionNonce,
+        actor_id: MemberId,
+        draft_scope_id: ExpenseDraftScopeId,
+        intent: ExpenseModalIntent,
+        created_at: SystemTime,
+    ) -> Self {
+        Self {
+            binding_nonce,
+            actor_id,
+            draft_scope_id,
+            intent,
+            expires_at: created_at + MODAL_RETRY_TTL,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ModalSubmissionBindingError {
+    #[error("modal submission binding not found in store")]
+    NotFound,
+    #[error("modal submission binding expired")]
+    Expired,
+    #[error("modal submission actor mismatch")]
+    ActorMismatch,
+    #[error("modal submission draft scope mismatch")]
+    DraftScopeMismatch,
+}
+
+pub struct ExpenseModalSubmissionBindingStore {
+    by_nonce: Mutex<HashMap<InteractionNonce, ExpenseModalSubmissionBinding>>,
+}
+
+impl Default for ExpenseModalSubmissionBindingStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ExpenseModalSubmissionBindingStore {
+    pub fn new() -> Self {
+        Self {
+            by_nonce: Mutex::new(HashMap::new()),
+        }
+    }
+
+    pub fn store(&self, binding: ExpenseModalSubmissionBinding) {
+        self.by_nonce
+            .lock()
+            .expect("ExpenseModalSubmissionBindingStore mutex poisoned")
+            .insert(binding.binding_nonce, binding);
+    }
+
+    pub fn try_consume(
+        &self,
+        binding_nonce: InteractionNonce,
+        actor_id: MemberId,
+        draft_scope_id: ExpenseDraftScopeId,
+        now: SystemTime,
+    ) -> Result<ExpenseModalIntent, ModalSubmissionBindingError> {
+        let mut guard = self
+            .by_nonce
+            .lock()
+            .expect("ExpenseModalSubmissionBindingStore mutex poisoned");
+        let Some(binding) = guard.get(&binding_nonce) else {
+            return Err(ModalSubmissionBindingError::NotFound);
+        };
+        if now >= binding.expires_at {
+            guard.remove(&binding_nonce);
+            return Err(ModalSubmissionBindingError::Expired);
+        }
+        if binding.actor_id != actor_id {
+            return Err(ModalSubmissionBindingError::ActorMismatch);
+        }
+        if binding.draft_scope_id != draft_scope_id {
+            return Err(ModalSubmissionBindingError::DraftScopeMismatch);
+        }
+        Ok(guard
+            .remove(&binding_nonce)
+            .expect("binding was just observed under the same lock")
+            .intent)
+    }
+}
+
 /// Single-use retry binding for re-opening a modal with preserved values after a
 /// validation failure. Single-use is enforced structurally by
 /// [`ModalRetryBindingStore::try_consume`] removing the binding from the store on the
@@ -338,6 +448,7 @@ pub struct ModalRetryBinding {
     actor_id: MemberId,
     draft_scope_id: ExpenseDraftScopeId,
     preserved: ModalRetryPreserved,
+    intent: ExpenseModalIntent,
     created_at: SystemTime,
     expires_at: SystemTime,
 }
@@ -369,6 +480,7 @@ impl ModalRetryBinding {
         actor_id: MemberId,
         draft_scope_id: ExpenseDraftScopeId,
         preserved: ModalRetryPreserved,
+        intent: ExpenseModalIntent,
         created_at: SystemTime,
     ) -> Self {
         Self {
@@ -376,6 +488,7 @@ impl ModalRetryBinding {
             actor_id,
             draft_scope_id,
             preserved,
+            intent,
             created_at,
             expires_at: created_at + MODAL_RETRY_TTL,
         }
@@ -393,6 +506,9 @@ impl ModalRetryBinding {
     pub fn preserved(&self) -> &ModalRetryPreserved {
         &self.preserved
     }
+    pub fn intent(&self) -> ExpenseModalIntent {
+        self.intent
+    }
     pub fn created_at(&self) -> SystemTime {
         self.created_at
     }
@@ -403,6 +519,12 @@ impl ModalRetryBinding {
 
 pub struct ModalRetryBindingStore {
     by_nonce: Mutex<HashMap<InteractionNonce, ModalRetryBinding>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModalRetryPayload {
+    pub preserved: ModalRetryPreserved,
+    pub intent: ExpenseModalIntent,
 }
 
 impl Default for ModalRetryBindingStore {
@@ -434,7 +556,7 @@ impl ModalRetryBindingStore {
         actor_id: MemberId,
         draft_scope_id: ExpenseDraftScopeId,
         now: SystemTime,
-    ) -> Result<ModalRetryPreserved, ModalRetryBindingError> {
+    ) -> Result<ModalRetryPayload, ModalRetryBindingError> {
         let mut guard = self
             .by_nonce
             .lock()
@@ -462,7 +584,10 @@ impl ModalRetryBindingStore {
         let binding = guard
             .remove(&binding_nonce)
             .expect("binding was just observed under the same lock");
-        Ok(binding.preserved)
+        Ok(ModalRetryPayload {
+            preserved: binding.preserved,
+            intent: binding.intent,
+        })
     }
 }
 
@@ -620,21 +745,60 @@ impl PagedReadViewState {
 pub enum SessionAccessError {
     #[error("session has expired")]
     Expired,
-    #[error("stale nonce: observed {actual:?}, expected {expected:?}")]
-    StaleNonce {
-        actual: InteractionNonce,
-        expected: InteractionNonce,
-    },
     #[error("session has been superseded: observed {actual:?}, expected {expected:?}")]
     Superseded {
         actual: InteractionNonce,
         expected: InteractionNonce,
     },
+    #[error("session interaction is already in flight")]
+    InFlight,
 }
 
 pub struct ExpenseSessionStore {
-    by_key: Mutex<HashMap<ExpenseSessionKey, ExpenseSession>>,
-    locks: DashMap<ExpenseSessionKey, Arc<AsyncMutex<()>>>,
+    state: Mutex<ExpenseSessionStoreState>,
+}
+
+struct ExpenseSessionStoreState {
+    by_key: HashMap<ExpenseSessionKey, ExpenseSessionSlot>,
+    next_claim_token: u64,
+}
+
+enum ExpenseSessionSlot {
+    Available(ExpenseSession),
+    Claimed {
+        token: ExpenseSessionClaimToken,
+        session: ExpenseSession,
+    },
+}
+
+impl ExpenseSessionSlot {
+    fn into_session(self) -> ExpenseSession {
+        match self {
+            Self::Available(session) | Self::Claimed { session, .. } => session,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExpenseSessionClaimToken {
+    key: ExpenseSessionKey,
+    value: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaimedExpenseSession {
+    token: ExpenseSessionClaimToken,
+    session: ExpenseSession,
+}
+
+impl ClaimedExpenseSession {
+    pub fn token(&self) -> ExpenseSessionClaimToken {
+        self.token
+    }
+
+    pub fn session(&self) -> &ExpenseSession {
+        &self.session
+    }
 }
 
 impl Default for ExpenseSessionStore {
@@ -646,48 +810,42 @@ impl Default for ExpenseSessionStore {
 impl ExpenseSessionStore {
     pub fn new() -> Self {
         Self {
-            by_key: Mutex::new(HashMap::new()),
-            locks: DashMap::new(),
+            state: Mutex::new(ExpenseSessionStoreState {
+                by_key: HashMap::new(),
+                next_claim_token: 1,
+            }),
         }
     }
 
-    fn lock_for(&self, key: ExpenseSessionKey) -> Arc<AsyncMutex<()>> {
-        self.locks
-            .entry(key)
-            .or_insert_with(|| Arc::new(AsyncMutex::new(())))
-            .clone()
-    }
-
     pub fn replace(&self, session: ExpenseSession) -> Option<ExpenseSession> {
-        self.by_key
+        self.state
             .lock()
             .expect("ExpenseSessionStore mutex poisoned")
-            .insert(session.key(), session)
+            .by_key
+            .insert(session.key(), ExpenseSessionSlot::Available(session))
+            .map(ExpenseSessionSlot::into_session)
     }
 
-    pub fn clear(&self, key: ExpenseSessionKey) -> Option<ExpenseSession> {
-        self.by_key
-            .lock()
-            .expect("ExpenseSessionStore mutex poisoned")
-            .remove(&key)
-    }
-
-    pub fn access(
+    pub fn claim(
         &self,
         key: ExpenseSessionKey,
         observed_nonce: InteractionNonce,
         now: SystemTime,
-    ) -> Result<Option<ExpenseSession>, SessionAccessError> {
+    ) -> Result<Option<ClaimedExpenseSession>, SessionAccessError> {
         let mut guard = self
-            .by_key
+            .state
             .lock()
             .expect("ExpenseSessionStore mutex poisoned");
-        let Some(session) = guard.get(&key).cloned() else {
+        let Some(slot) = guard.by_key.get(&key) else {
             return Ok(None);
+        };
+        let session = match slot {
+            ExpenseSessionSlot::Available(session) => session.clone(),
+            ExpenseSessionSlot::Claimed { .. } => return Err(SessionAccessError::InFlight),
         };
         let elapsed = now.duration_since(session.last_touched).unwrap_or_default();
         if elapsed >= EXPENSE_SESSION_TTL {
-            guard.remove(&key);
+            guard.by_key.remove(&key);
             return Err(SessionAccessError::Expired);
         }
         if session.nonce != observed_nonce {
@@ -696,61 +854,68 @@ impl ExpenseSessionStore {
                 expected: session.nonce,
             });
         }
-        Ok(Some(session))
+        let token = ExpenseSessionClaimToken {
+            key,
+            value: guard.next_claim_token,
+        };
+        guard.next_claim_token = guard
+            .next_claim_token
+            .checked_add(1)
+            .expect("expense session claim token space exhausted");
+        guard.by_key.insert(
+            key,
+            ExpenseSessionSlot::Claimed {
+                token,
+                session: session.clone(),
+            },
+        );
+        Ok(Some(ClaimedExpenseSession { token, session }))
     }
 
-    /// Atomic read-validate-mutate-write for a single session key. The per-session
-    /// mutex is held across the entire operation, so concurrent interactions targeting
-    /// the same key cannot race; nonce and TTL are revalidated inside the lock so any
-    /// supersede or expiry observed by a concurrent path takes precedence.
-    pub async fn with_session_mutation<R>(
+    pub fn restore_claim(&self, claimed: ClaimedExpenseSession) -> bool {
+        self.resolve_claim(claimed.token, Some(claimed.session))
+    }
+
+    pub fn resolve_claim(
         &self,
-        key: ExpenseSessionKey,
-        observed_nonce: InteractionNonce,
-        now: SystemTime,
-        mutate: impl FnOnce(&mut ExpenseSession) -> R,
-    ) -> Result<Option<R>, SessionAccessError> {
-        let lock = self.lock_for(key);
-        let _guard = lock.lock().await;
-
-        let mut session = {
-            let mut map = self
-                .by_key
-                .lock()
-                .expect("ExpenseSessionStore mutex poisoned");
-            let Some(existing) = map.get(&key) else {
-                return Ok(None);
-            };
-            let elapsed = now
-                .duration_since(existing.last_touched)
-                .unwrap_or_default();
-            if elapsed >= EXPENSE_SESSION_TTL {
-                map.remove(&key);
-                return Err(SessionAccessError::Expired);
-            }
-            if existing.nonce != observed_nonce {
-                return Err(SessionAccessError::Superseded {
-                    actual: observed_nonce,
-                    expected: existing.nonce,
-                });
-            }
-            existing.clone()
-        };
-
-        let result = mutate(&mut session);
-
-        self.by_key
+        token: ExpenseSessionClaimToken,
+        replacement: Option<ExpenseSession>,
+    ) -> bool {
+        let mut guard = self
+            .state
             .lock()
-            .expect("ExpenseSessionStore mutex poisoned")
-            .insert(key, session);
-
-        Ok(Some(result))
+            .expect("ExpenseSessionStore mutex poisoned");
+        let Some(ExpenseSessionSlot::Claimed {
+            token: current_token,
+            ..
+        }) = guard.by_key.get(&token.key)
+        else {
+            return false;
+        };
+        if *current_token != token {
+            return false;
+        }
+        match replacement {
+            Some(session) => {
+                assert_eq!(
+                    session.key(),
+                    token.key,
+                    "expense session claim replacement key changed"
+                );
+                guard
+                    .by_key
+                    .insert(token.key, ExpenseSessionSlot::Available(session));
+            }
+            None => {
+                guard.by_key.remove(&token.key);
+            }
+        }
+        true
     }
 }
 
 pub struct VoidSessionStore {
     by_key: Mutex<HashMap<VoidSessionKey, VoidSession>>,
-    locks: DashMap<VoidSessionKey, Arc<AsyncMutex<()>>>,
 }
 
 impl Default for VoidSessionStore {
@@ -763,15 +928,7 @@ impl VoidSessionStore {
     pub fn new() -> Self {
         Self {
             by_key: Mutex::new(HashMap::new()),
-            locks: DashMap::new(),
         }
-    }
-
-    fn lock_for(&self, key: VoidSessionKey) -> Arc<AsyncMutex<()>> {
-        self.locks
-            .entry(key)
-            .or_insert_with(|| Arc::new(AsyncMutex::new(())))
-            .clone()
     }
 
     pub fn replace(&self, session: VoidSession) -> Option<VoidSession> {
@@ -810,47 +967,6 @@ impl VoidSessionStore {
             });
         }
         Ok(Some(session))
-    }
-
-    pub async fn with_session_mutation<R>(
-        &self,
-        key: VoidSessionKey,
-        observed_nonce: InteractionNonce,
-        now: SystemTime,
-        mutate: impl FnOnce(&mut VoidSession) -> R,
-    ) -> Result<Option<R>, SessionAccessError> {
-        let lock = self.lock_for(key);
-        let _guard = lock.lock().await;
-
-        let mut session = {
-            let mut map = self.by_key.lock().expect("VoidSessionStore mutex poisoned");
-            let Some(existing) = map.get(&key) else {
-                return Ok(None);
-            };
-            let elapsed = now
-                .duration_since(existing.last_touched)
-                .unwrap_or_default();
-            if elapsed >= VOID_SESSION_TTL {
-                map.remove(&key);
-                return Err(SessionAccessError::Expired);
-            }
-            if existing.nonce != observed_nonce {
-                return Err(SessionAccessError::Superseded {
-                    actual: observed_nonce,
-                    expected: existing.nonce,
-                });
-            }
-            existing.clone()
-        };
-
-        let result = mutate(&mut session);
-
-        self.by_key
-            .lock()
-            .expect("VoidSessionStore mutex poisoned")
-            .insert(key, session);
-
-        Ok(Some(result))
     }
 }
 
@@ -952,8 +1068,15 @@ mod tests {
         #[case] draft: ExpenseDraftSnapshot,
         #[case] expected: Result<(), ExpenseSessionConstructionError>,
     ) {
-        let actual =
-            ExpenseSession::new(expense_key(), stage, draft, nonce(1), UNIX_EPOCH).map(|_| ());
+        let actual = ExpenseSession::new(
+            expense_key(),
+            ExpenseLaunchOrigin::SlashCommand,
+            stage,
+            draft,
+            nonce(1),
+            UNIX_EPOCH,
+        )
+        .map(|_| ());
         assert_eq!(actual, expected);
     }
 
@@ -986,12 +1109,26 @@ mod tests {
     fn fresh_expense_session(now: SystemTime, nonce_value: u64) -> ExpenseSession {
         ExpenseSession::new(
             expense_key(),
+            ExpenseLaunchOrigin::SlashCommand,
             ExpenseSessionStage::AwaitingBasicInfo,
             ExpenseDraftSnapshot::empty(),
             nonce(nonce_value),
             now,
         )
         .expect("session should construct")
+    }
+
+    fn inspect_expense_session(
+        store: &ExpenseSessionStore,
+        observed_nonce: InteractionNonce,
+        now: SystemTime,
+    ) -> Result<Option<ExpenseSession>, SessionAccessError> {
+        let claimed = store.claim(expense_key(), observed_nonce, now)?;
+        Ok(claimed.map(|claimed| {
+            let session = claimed.session().clone();
+            store.restore_claim(claimed);
+            session
+        }))
     }
 
     #[test]
@@ -1010,7 +1147,7 @@ mod tests {
     #[test]
     fn expense_session_access_returns_none_when_missing() {
         let store = ExpenseSessionStore::new();
-        let actual = store.access(expense_key(), nonce(1), UNIX_EPOCH);
+        let actual = inspect_expense_session(&store, nonce(1), UNIX_EPOCH);
         assert_eq!(actual, Ok(None));
     }
 
@@ -1042,11 +1179,9 @@ mod tests {
         let store = ExpenseSessionStore::new();
         store.replace(fresh_expense_session(last_touched, 1));
 
-        let actual = store
-            .access(expense_key(), observed_nonce, now)
-            .map(|maybe| {
-                assert!(maybe.is_some(), "should return session on Ok");
-            });
+        let actual = inspect_expense_session(&store, observed_nonce, now).map(|maybe| {
+            assert!(maybe.is_some(), "should return session on Ok");
+        });
 
         assert_eq!(actual, expected);
     }
@@ -1059,16 +1194,10 @@ mod tests {
         store.replace(first.clone());
         store.replace(second.clone());
 
-        let observed_with_old_nonce = store.access(
-            expense_key(),
-            first.nonce(),
-            UNIX_EPOCH + Duration::from_secs(60),
-        );
-        let observed_with_new_nonce = store.access(
-            expense_key(),
-            second.nonce(),
-            UNIX_EPOCH + Duration::from_secs(60),
-        );
+        let observed_with_old_nonce =
+            inspect_expense_session(&store, first.nonce(), UNIX_EPOCH + Duration::from_secs(60));
+        let observed_with_new_nonce =
+            inspect_expense_session(&store, second.nonce(), UNIX_EPOCH + Duration::from_secs(60));
 
         assert_eq!(
             observed_with_old_nonce,
@@ -1122,118 +1251,98 @@ mod tests {
         let store = ExpenseSessionStore::new();
         store.replace(fresh_expense_session(UNIX_EPOCH, 1));
 
-        let _ = store.access(expense_key(), nonce(1), UNIX_EPOCH + EXPENSE_SESSION_TTL);
+        let _ = inspect_expense_session(&store, nonce(1), UNIX_EPOCH + EXPENSE_SESSION_TTL);
 
-        let after = store.access(
-            expense_key(),
+        let after = inspect_expense_session(
+            &store,
             nonce(1),
             UNIX_EPOCH + EXPENSE_SESSION_TTL + Duration::from_secs(1),
         );
         assert_eq!(after, Ok(None));
     }
 
-    #[tokio::test]
-    async fn with_session_mutation_persists_changes_under_per_key_lock() {
-        let store = Arc::new(ExpenseSessionStore::new());
-        store.replace(fresh_expense_session(UNIX_EPOCH, 1));
+    #[test]
+    fn expense_session_claim_blocks_concurrent_access() {
+        let store = ExpenseSessionStore::new();
+        let session = fresh_expense_session(UNIX_EPOCH, 1);
+        store.replace(session.clone());
 
-        store
-            .with_session_mutation(
-                expense_key(),
-                nonce(1),
-                UNIX_EPOCH + Duration::from_secs(30),
-                |session| {
-                    session.last_touched = UNIX_EPOCH + Duration::from_secs(30);
-                },
-            )
-            .await
-            .expect("mutation should succeed");
-
-        let updated = store.access(
+        let claimed = store.claim(
             expense_key(),
             nonce(1),
             UNIX_EPOCH + Duration::from_secs(60),
         );
+        let after = inspect_expense_session(&store, nonce(1), UNIX_EPOCH + Duration::from_secs(60));
+
         assert_eq!(
-            updated.map(|maybe| maybe.map(|session| session.last_touched())),
-            Ok(Some(UNIX_EPOCH + Duration::from_secs(30)))
+            claimed.map(|maybe| maybe.map(|claimed| claimed.session().clone())),
+            Ok(Some(session))
         );
+        assert_eq!(after, Err(SessionAccessError::InFlight));
     }
 
-    #[tokio::test]
-    async fn with_session_mutation_rejects_superseded_observed_nonce() {
+    #[test]
+    fn expense_session_claim_rejects_stale_nonce_without_removing_current_session() {
         let store = ExpenseSessionStore::new();
-        store.replace(fresh_expense_session(UNIX_EPOCH, 1));
+        let session = fresh_expense_session(UNIX_EPOCH, 1);
+        store.replace(session.clone());
 
-        let actual = store
-            .with_session_mutation(
-                expense_key(),
-                nonce(99),
-                UNIX_EPOCH + Duration::from_secs(30),
-                |_| (),
-            )
-            .await;
+        let claimed = store.claim(
+            expense_key(),
+            nonce(99),
+            UNIX_EPOCH + Duration::from_secs(60),
+        );
+        let after = inspect_expense_session(&store, nonce(1), UNIX_EPOCH + Duration::from_secs(60));
 
         assert_eq!(
-            actual,
+            claimed,
             Err(SessionAccessError::Superseded {
                 actual: nonce(99),
                 expected: nonce(1),
             })
         );
+        assert_eq!(after, Ok(Some(session)));
     }
 
-    #[tokio::test]
-    async fn with_session_mutation_serializes_concurrent_writes_on_same_key() {
-        let store = Arc::new(ExpenseSessionStore::new());
-        store.replace(fresh_expense_session(UNIX_EPOCH, 1));
+    #[test]
+    fn stale_claim_restore_does_not_overwrite_new_session() {
+        let store = ExpenseSessionStore::new();
+        let first = fresh_expense_session(UNIX_EPOCH, 1);
+        let second = fresh_expense_session(UNIX_EPOCH, 2);
+        store.replace(first.clone());
+        let claimed = store
+            .claim(expense_key(), first.nonce(), UNIX_EPOCH)
+            .expect("claim should succeed")
+            .expect("session should exist");
+        store.replace(second.clone());
 
-        let (gate_tx_a, gate_rx_a) = tokio::sync::oneshot::channel();
-        let (gate_tx_b, gate_rx_b) = tokio::sync::oneshot::channel();
+        store.restore_claim(claimed);
 
-        let store_a = Arc::clone(&store);
-        let task_a = tokio::spawn(async move {
-            store_a
-                .with_session_mutation(
-                    expense_key(),
-                    nonce(1),
-                    UNIX_EPOCH + Duration::from_secs(10),
-                    move |session| {
-                        // Signal that we acquired the lock, then yield until B observes.
-                        let _ = gate_tx_a.send(());
-                        std::thread::sleep(Duration::from_millis(20));
-                        session.last_touched = UNIX_EPOCH + Duration::from_secs(10);
-                    },
-                )
-                .await
-        });
+        assert_eq!(
+            inspect_expense_session(&store, second.nonce(), UNIX_EPOCH),
+            Ok(Some(second))
+        );
+    }
 
-        let _ = gate_rx_a.await;
+    #[test]
+    fn stale_claim_resolution_does_not_overwrite_new_session() {
+        let store = ExpenseSessionStore::new();
+        let first = fresh_expense_session(UNIX_EPOCH, 1);
+        let second = fresh_expense_session(UNIX_EPOCH, 2);
+        let stale_replacement = fresh_expense_session(UNIX_EPOCH, 3);
+        store.replace(first.clone());
+        let claimed = store
+            .claim(expense_key(), first.nonce(), UNIX_EPOCH)
+            .expect("claim should succeed")
+            .expect("session should exist");
+        store.replace(second.clone());
 
-        let store_b = Arc::clone(&store);
-        let task_b = tokio::spawn(async move {
-            // Should block until A releases the lock; after A commits its mutation,
-            // B revalidates and sees the persisted state from A.
-            let result = store_b
-                .with_session_mutation(
-                    expense_key(),
-                    nonce(1),
-                    UNIX_EPOCH + Duration::from_secs(20),
-                    move |session| {
-                        let _ = gate_tx_b.send(session.last_touched);
-                        session.last_touched = UNIX_EPOCH + Duration::from_secs(20);
-                    },
-                )
-                .await;
-            (result, gate_rx_b.await.expect("gate b should receive"))
-        });
+        store.resolve_claim(claimed.token(), Some(stale_replacement));
 
-        let a_result = task_a.await.expect("task a should join");
-        let (b_result, b_observed_before) = task_b.await.expect("task b should join");
-
-        assert!(a_result.is_ok());
-        assert!(b_result.is_ok());
-        assert_eq!(b_observed_before, UNIX_EPOCH + Duration::from_secs(10));
+        assert_eq!(
+            inspect_expense_session(&store, second.nonce(), UNIX_EPOCH),
+            Ok(Some(second))
+        );
     }
 
     fn preserved() -> ModalRetryPreserved {
@@ -1244,6 +1353,19 @@ mod tests {
         }
     }
 
+    fn create_from_panel() -> ExpenseModalIntent {
+        ExpenseModalIntent::Create {
+            origin: ExpenseLaunchOrigin::PanelButton,
+        }
+    }
+
+    fn retry_payload() -> ModalRetryPayload {
+        ModalRetryPayload {
+            preserved: preserved(),
+            intent: create_from_panel(),
+        }
+    }
+
     #[test]
     fn modal_retry_binding_expires_at_is_creation_plus_ten_minutes() {
         let binding = ModalRetryBinding::capture(
@@ -1251,6 +1373,7 @@ mod tests {
             MemberId(3),
             draft_scope(42),
             preserved(),
+            create_from_panel(),
             UNIX_EPOCH,
         );
         assert_eq!(binding.expires_at(), UNIX_EPOCH + MODAL_RETRY_TTL);
@@ -1263,13 +1386,14 @@ mod tests {
             MemberId(3),
             draft_scope(42),
             preserved(),
+            create_from_panel(),
             UNIX_EPOCH,
         ));
         store
     }
 
     #[rstest]
-    #[case::within_ttl(UNIX_EPOCH + Duration::from_secs(599), Ok(preserved()))]
+    #[case::within_ttl(UNIX_EPOCH + Duration::from_secs(599), Ok(retry_payload()))]
     #[case::at_expiry_boundary(
         UNIX_EPOCH + MODAL_RETRY_TTL,
         Err(ModalRetryBindingError::Expired {
@@ -1279,7 +1403,7 @@ mod tests {
     )]
     fn modal_retry_store_try_consume_enforces_lifetime(
         #[case] now: SystemTime,
-        #[case] expected: Result<ModalRetryPreserved, ModalRetryBindingError>,
+        #[case] expected: Result<ModalRetryPayload, ModalRetryBindingError>,
     ) {
         let store = fresh_modal_retry_store();
         let actual = store.try_consume(nonce(1), MemberId(3), draft_scope(42), now);
@@ -1303,7 +1427,7 @@ mod tests {
             UNIX_EPOCH + Duration::from_secs(2),
         );
 
-        assert_eq!(first, Ok(preserved()));
+        assert_eq!(first, Ok(retry_payload()));
         assert_eq!(second, Err(ModalRetryBindingError::NotFound));
     }
 
@@ -1321,7 +1445,7 @@ mod tests {
     fn modal_retry_store_try_consume_enforces_actor_and_draft_scope(
         #[case] actor: MemberId,
         #[case] draft_scope_id: ExpenseDraftScopeId,
-        #[case] expected: Result<ModalRetryPreserved, ModalRetryBindingError>,
+        #[case] expected: Result<ModalRetryPayload, ModalRetryBindingError>,
     ) {
         let store = fresh_modal_retry_store();
 
@@ -1345,6 +1469,34 @@ mod tests {
             UNIX_EPOCH + Duration::from_secs(1),
         );
         assert_eq!(actual, Err(ModalRetryBindingError::NotFound));
+    }
+
+    #[test]
+    fn modal_submission_binding_is_structurally_single_use() {
+        let store = ExpenseModalSubmissionBindingStore::new();
+        store.store(ExpenseModalSubmissionBinding::capture(
+            nonce(1),
+            MemberId(3),
+            draft_scope(42),
+            create_from_panel(),
+            UNIX_EPOCH,
+        ));
+
+        let first = store.try_consume(
+            nonce(1),
+            MemberId(3),
+            draft_scope(42),
+            UNIX_EPOCH + Duration::from_secs(1),
+        );
+        let second = store.try_consume(
+            nonce(1),
+            MemberId(3),
+            draft_scope(42),
+            UNIX_EPOCH + Duration::from_secs(2),
+        );
+
+        assert_eq!(first, Ok(create_from_panel()));
+        assert_eq!(second, Err(ModalSubmissionBindingError::NotFound));
     }
 
     #[rstest]
