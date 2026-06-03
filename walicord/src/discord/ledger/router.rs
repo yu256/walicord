@@ -3343,8 +3343,11 @@ impl LedgerRouter {
             .expense_picker_page_for_session(ctx, scope, session, kind)
             .await?;
         let detail_lines = page.detail_lines;
-        let (custom_id, placeholder, min_values, max_values) = match phase {
-            ExpenseSelectionPhase::Payer => (
+        // `picker_kind_for_phase` already narrowed the phase set: every phase that
+        // reaches this point has a menu kind, so matching on `kind` makes the match
+        // exhaustive without an `unreachable!` arm.
+        let (custom_id, placeholder, min_values, max_values) = match kind {
+            ExpensePickerKind::Payer => (
                 expense_picker_selection_custom_id(
                     EXPENSE_PAYER_PICK_CUSTOM_ID_PREFIX,
                     nonce,
@@ -3354,7 +3357,7 @@ impl LedgerRouter {
                 1,
                 1,
             ),
-            ExpenseSelectionPhase::IndividualSelection => (
+            ExpensePickerKind::Individuals => (
                 expense_picker_selection_custom_id(
                     EXPENSE_INDIVIDUAL_PICK_CUSTOM_ID_PREFIX,
                     nonce,
@@ -3364,7 +3367,7 @@ impl LedgerRouter {
                 0,
                 page.page_item_count as u8,
             ),
-            ExpenseSelectionPhase::Roles => (
+            ExpensePickerKind::Roles => (
                 expense_picker_selection_custom_id(
                     EXPENSE_ROLE_PICK_CUSTOM_ID_PREFIX,
                     nonce,
@@ -3374,9 +3377,6 @@ impl LedgerRouter {
                 0,
                 page.page_item_count as u8,
             ),
-            ExpenseSelectionPhase::ParticipantSource | ExpenseSelectionPhase::WeightEditor => {
-                unreachable!("phases without menus return early")
-            }
         };
         if page.total_items == 0 {
             return Ok(ExpensePickerRenderParts {
