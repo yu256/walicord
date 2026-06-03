@@ -2046,7 +2046,7 @@ impl LedgerRouter {
                 tracing::error!(
                     ledger_id = ?ledger_id,
                     write_target = ?write_target,
-                    reason = reason.label(),
+                    reason = %reason,
                     error = %error,
                     "canonical append failed; uncertain_write remains Live for lazy retry",
                 );

@@ -44,27 +44,20 @@ pub enum OperatorHandoffReason {
 /// Closed taxonomy mirroring the adapter-side `StoreWriteError` variants so application
 /// observability can surface canonical-append failure mode without depending on the
 /// raw Discord error type. The adapter maps `StoreWriteError` into this on emit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum AppendFailureReason {
+    #[error("prepare")]
     Prepare,
+    #[error("permission")]
     Permission,
+    #[error("archived_or_locked")]
     ArchivedOrLocked,
+    #[error("transport")]
     Transport,
+    #[error("read_back")]
     ReadBack,
+    #[error("write_timeout")]
     WriteTimeout,
-}
-
-impl AppendFailureReason {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Prepare => "prepare",
-            Self::Permission => "permission",
-            Self::ArchivedOrLocked => "archived_or_locked",
-            Self::Transport => "transport",
-            Self::ReadBack => "read_back",
-            Self::WriteTimeout => "write_timeout",
-        }
-    }
 }
 
 /// Observability signals emitted by application-layer ledger logic. Carries no

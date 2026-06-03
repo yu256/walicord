@@ -112,7 +112,7 @@ impl LedgerObservability for TracingLedgerObservability {
                 tracing::error!(
                     event = "ledger_canonical_append_failed",
                     ledger_id = %ledger_id,
-                    reason = reason.label(),
+                    reason = %reason,
                     ?retained_live_since,
                     "canonical append failed; uncertain_write retain remains Live for lazy retry"
                 );

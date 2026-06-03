@@ -1,4 +1,5 @@
 pub mod canonical_attachment;
+pub mod canonical_write;
 mod correction;
 mod discord_authoring;
 mod entry;
