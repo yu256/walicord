@@ -491,6 +491,24 @@ pub enum StoreWriteError {
     WriteTimeout { elapsed: Duration },
 }
 
+impl StoreWriteError {
+    /// Classify into the application-side closed taxonomy so observability events
+    /// don't pierce the adapter layer.
+    pub(crate) fn append_failure_reason(
+        &self,
+    ) -> walicord_application::ledger::observability::AppendFailureReason {
+        use walicord_application::ledger::observability::AppendFailureReason;
+        match self {
+            Self::Prepare(_) => AppendFailureReason::Prepare,
+            Self::Permission(_) => AppendFailureReason::Permission,
+            Self::ArchivedOrLocked => AppendFailureReason::ArchivedOrLocked,
+            Self::Transport(_) => AppendFailureReason::Transport,
+            Self::ReadBack(_) => AppendFailureReason::ReadBack,
+            Self::WriteTimeout { .. } => AppendFailureReason::WriteTimeout,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct DiscordCanonicalLedgerStore {
     writer_lineage: WriterLineagePolicy,
@@ -2004,6 +2022,43 @@ mod tests {
         let actual = classify_thread_fetch_error(serenity::Error::Other("boom"));
 
         assert!(matches!(actual, StoreLoadError::Fetch(_)));
+    }
+
+    #[rstest]
+    #[case::permission(
+        StoreWriteError::Permission("forbidden".into()),
+        walicord_application::ledger::observability::AppendFailureReason::Permission,
+    )]
+    #[case::archived(
+        StoreWriteError::ArchivedOrLocked,
+        walicord_application::ledger::observability::AppendFailureReason::ArchivedOrLocked
+    )]
+    #[case::transport(
+        StoreWriteError::Transport("network".into()),
+        walicord_application::ledger::observability::AppendFailureReason::Transport,
+    )]
+    #[case::read_back(
+        StoreWriteError::ReadBack("drift".into()),
+        walicord_application::ledger::observability::AppendFailureReason::ReadBack,
+    )]
+    #[case::write_timeout(
+        StoreWriteError::WriteTimeout { elapsed: std::time::Duration::from_secs(30) },
+        walicord_application::ledger::observability::AppendFailureReason::WriteTimeout,
+    )]
+    fn append_failure_reason_maps_each_store_write_error_variant(
+        #[case] error: StoreWriteError,
+        #[case] expected: walicord_application::ledger::observability::AppendFailureReason,
+    ) {
+        assert_eq!(error.append_failure_reason(), expected);
+    }
+
+    #[test]
+    fn append_failure_reason_maps_prepare_variant() {
+        let error = StoreWriteError::Prepare(AttachmentCodecError::Clock);
+        assert_eq!(
+            error.append_failure_reason(),
+            walicord_application::ledger::observability::AppendFailureReason::Prepare
+        );
     }
 
     #[rstest]

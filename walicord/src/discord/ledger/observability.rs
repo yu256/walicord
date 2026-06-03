@@ -104,6 +104,19 @@ impl LedgerObservability for TracingLedgerObservability {
             event @ LedgerObservabilityEvent::OperatorHandoff { .. } => {
                 tracing::warn!(?event, "ledger observability event");
             }
+            LedgerObservabilityEvent::CanonicalAppendFailed {
+                ledger_id,
+                reason,
+                retained_live_since,
+            } => {
+                tracing::error!(
+                    event = "ledger_canonical_append_failed",
+                    ledger_id = %ledger_id,
+                    reason = reason.label(),
+                    ?retained_live_since,
+                    "canonical append failed; uncertain_write retain remains Live for lazy retry"
+                );
+            }
         }
     }
 }

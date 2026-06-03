@@ -41,6 +41,32 @@ pub enum OperatorHandoffReason {
     PersistentUncertainWrite,
 }
 
+/// Closed taxonomy mirroring the adapter-side `StoreWriteError` variants so application
+/// observability can surface canonical-append failure mode without depending on the
+/// raw Discord error type. The adapter maps `StoreWriteError` into this on emit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppendFailureReason {
+    Prepare,
+    Permission,
+    ArchivedOrLocked,
+    Transport,
+    ReadBack,
+    WriteTimeout,
+}
+
+impl AppendFailureReason {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Prepare => "prepare",
+            Self::Permission => "permission",
+            Self::ArchivedOrLocked => "archived_or_locked",
+            Self::Transport => "transport",
+            Self::ReadBack => "read_back",
+            Self::WriteTimeout => "write_timeout",
+        }
+    }
+}
+
 /// Observability signals emitted by application-layer ledger logic. Carries no
 /// transport-native identifiers (Discord `UserId` / `ChannelId` / `GuildId`); those
 /// live on the adapter-side `DiscordLedgerObservabilityEvent`.
@@ -79,6 +105,15 @@ pub enum LedgerObservabilityEvent {
     UnknownLedgerFormat {
         ledger_id: LedgerId,
         failing_entry_id: Option<LedgerEntryId>,
+    },
+    /// Canonical `append_authoritative` returned a transport / permission / read-back /
+    /// timeout error so the retain stays `Live` for criterion-217 / 279 lazy retry.
+    /// Adapter classifies the underlying `StoreWriteError` into the closed
+    /// `AppendFailureReason` set so this layer never references serenity types.
+    CanonicalAppendFailed {
+        ledger_id: LedgerId,
+        reason: AppendFailureReason,
+        retained_live_since: SystemTime,
     },
 }
 

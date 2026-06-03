@@ -2999,13 +2999,14 @@ impl LedgerRouter {
                 ))
             })?;
 
+        let retain_live_since = self.deps.clock.now();
         let retained = RetainedCanonicalWrite::new(
             write_target,
             envelope,
             envelope_bytes,
             prepared_body.to_owned(),
             short_summary_for_entry(entry),
-            self.deps.clock.now(),
+            retain_live_since,
         );
         self.deps.uncertain_writes.set_live(retained).map_err(|_| {
             LedgerRouteError::Internal(InternalLedgerRouteError::UncertainWriteAlreadyLive {
@@ -3024,11 +3025,28 @@ impl LedgerRouter {
                 self.deps.uncertain_writes.clear(write_target);
                 Ok(CommitOutcome::Recorded)
             }
-            Err(_error) => {
+            Err(error) => {
                 // Retain stays Live: a transport error here is exactly the
                 // criterion-217 / 279 case where lazy retry must decide whether the
-                // canonical message actually posted. Observability emit lands in a
-                // follow-up commit so the failure is no longer silent.
+                // canonical message actually posted. Classify the underlying
+                // StoreWriteError into the closed AppendFailureReason taxonomy and
+                // emit so the failure is observable in production logs (criterion
+                // 248 / AC28).
+                let reason = error.append_failure_reason();
+                tracing::error!(
+                    ledger_id = ?ledger_id,
+                    write_target = ?write_target,
+                    reason = reason.label(),
+                    error = %error,
+                    "canonical append failed; uncertain_write remains Live for lazy retry",
+                );
+                self.deps.observability.emit(
+                    walicord_application::ledger::observability::LedgerObservabilityEvent::CanonicalAppendFailed {
+                        ledger_id,
+                        reason,
+                        retained_live_since: retain_live_since,
+                    },
+                );
                 Ok(CommitOutcome::UncertainAppendFailed)
             }
         }
