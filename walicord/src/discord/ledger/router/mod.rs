@@ -32,21 +32,25 @@ use walicord_application::{
 use walicord_domain::model::{MemberId, RoleId};
 use walicord_i18n as i18n;
 use walicord_presentation::discord_ledger::{
-    BusinessDateTime, DiscordLedgerPresenter, ExpenseConfirmationButtonIds,
-    ExpenseSelectionStepButtonIds, LedgerPageInputs, PublicCanonicalMessageModel,
-    PublicSettlementMessageModel, PublicVoidMessageModel, ReadViewBuildError, ReadViewPageModel,
-    ReadViewRoute, RecoveryCta, RecoveryReference, RenderBudgetError, RenderedCanonicalMessage,
-    SafeLiteralText, SurfaceActionRow, SurfaceButton, SurfaceInteractiveButtonStyle,
-    SurfaceMemberLabels, SurfaceSelectMenu, SurfaceSelectOption, TransferRow, VoidCandidateRow,
-    VoidConfirmationRecap, VoidRetargetReason, VoidSurfaceModel,
-    build_expense_confirmation_surface, build_expense_selection_step_surface,
-    build_ledger_empty_page_model, build_ledger_page_model, build_review_empty_page_model,
-    build_review_no_transfers_page_model, build_review_page_model, paginate_read_view_model,
-    summary_for_view, truncate_component_label, validate_custom_id, validate_modal_title,
-    validate_text_input_label, validate_text_input_placeholder,
+    DiscordLedgerPresenter, ExpenseConfirmationButtonIds, ExpenseSelectionStepButtonIds,
+    LedgerPageInputs, ReadViewBuildError, ReadViewPageModel, ReadViewRoute, RecoveryCta,
+    RecoveryReference, RenderBudgetError, RenderedCanonicalMessage, SafeLiteralText,
+    SurfaceActionRow, SurfaceButton, SurfaceInteractiveButtonStyle, SurfaceMemberLabels,
+    SurfaceSelectMenu, SurfaceSelectOption, VoidCandidateRow, VoidConfirmationRecap,
+    VoidRetargetReason, VoidSurfaceModel, build_expense_confirmation_surface,
+    build_expense_selection_step_surface, build_ledger_empty_page_model, build_ledger_page_model,
+    build_review_empty_page_model, build_review_no_transfers_page_model, build_review_page_model,
+    paginate_read_view_model, summary_for_view, truncate_component_label, validate_custom_id,
+    validate_modal_title, validate_text_input_label, validate_text_input_placeholder,
 };
 
 use crate::channel::ChannelManager;
+
+mod canonical_message;
+use canonical_message::{
+    render_public_expense_message, render_public_settlement_message, render_public_void_message,
+    short_summary_for_entry,
+};
 
 use super::{
     adapters::DiscordCanonicalThreadLocator,
@@ -107,9 +111,8 @@ use walicord_application::ledger::{
     projection::{NextLedgerEntryIdError, VerifiedLedgerEntryView, project_verified_entries},
     read_view_session::{ReadViewSession, ReadViewSessionKey, ReadViewSessionStore},
     settle_flow::{
-        PreviewAttemptError, PreviewAttemptOutcome, RecordableSettlementEntry, SettleAttemptError,
-        SettleAttemptOutcome, compose_and_store_preview, compose_settlement_entry_from_preview,
-        mark_preview_delivered,
+        PreviewAttemptError, PreviewAttemptOutcome, SettleAttemptError, SettleAttemptOutcome,
+        compose_and_store_preview, compose_settlement_entry_from_preview, mark_preview_delivered,
     },
     void_flow::{
         VoidCandidateEnumerationError, VoidComposeError, VoidConfirmTransitionError,
@@ -4853,202 +4856,8 @@ fn format_money_for_modal(money: walicord_domain::Money) -> String {
     money.to_string()
 }
 
-/// Short canonical summary string retained alongside an in-flight write (criterion 217
-/// / 279). The lazy retry scan uses it as a debug breadcrumb; the value must be stable
-/// across the post / read-back / scan cycle so the retain comparison still matches.
-fn short_summary_for_entry(entry: &LedgerEntry) -> String {
-    format!("entry:{}", entry.id.0)
-}
-
-/// Render the public canonical message for a freshly composed expense entry. Returns
-/// the budget-validated `RenderedCanonicalMessage` newtype so the canonical recovery
-/// shape and surface budget stay enforced through the write boundary (criterion 275 /
-/// AC25); the caller passes it to `append_authoritative` unchanged.
-#[allow(clippy::result_large_err)] // LedgerRouteError is the project's standard error envelope.
-fn render_public_expense_message(
-    recordable: &RecordableExpenseEntry,
-    ledger_id: LedgerId,
-    display_names: &HashMap<MemberId, smol_str::SmolStr>,
-) -> Result<RenderedCanonicalMessage, LedgerRouteError> {
-    use walicord_application::ledger::MemberAmount;
-    use walicord_presentation::discord_ledger::{
-        ParticipantShareRow, PublicCanonicalMessageModel, PublicExpenseMessageModel,
-        RecoveryReference, SafeLiteralText,
-    };
-
-    let entry = recordable.entry();
-    let event = recordable.event();
-
-    let paid_by: &[MemberAmount] = event.paid_by();
-    let payer_member_id = paid_by
-        .first()
-        .map(|amount| amount.member_id)
-        .ok_or_else(|| {
-            LedgerRouteError::Internal(InternalLedgerRouteError::ConfirmationBuild(
-                ConfirmationBuildError::PayerNotSelected,
-            ))
-        })?;
-    let total_amount: walicord_domain::Money = paid_by.iter().map(|amount| amount.amount).sum();
-
-    let labels = SurfaceMemberLabels::from_member_names(
-        std::iter::once((
-            payer_member_id,
-            display_names.get(&payer_member_id).map(|s| s.as_str()),
-        ))
-        .chain(event.owed_by().iter().map(|amount| {
-            (
-                amount.member_id,
-                display_names.get(&amount.member_id).map(|s| s.as_str()),
-            )
-        })),
-    );
-
-    let payer_display_name = labels
-        .member(payer_member_id)
-        .map(|label| label.visible().clone())
-        .unwrap_or_else(|| {
-            SafeLiteralText::from_roster_label(
-                &i18n::unknown_user_label(payer_member_id.0).to_string(),
-            )
-            .expect("unknown_user_label is a fixed fallback that always sanitises")
-        });
-
-    let participant_rows: Vec<ParticipantShareRow> = event
-        .owed_by()
-        .iter()
-        .map(|amount| ParticipantShareRow {
-            display_name: labels
-                .member(amount.member_id)
-                .map(|label| label.visible().clone())
-                .unwrap_or_else(|| {
-                    SafeLiteralText::from_roster_label(
-                        &i18n::unknown_user_label(amount.member_id.0).to_string(),
-                    )
-                    .expect("unknown_user_label is a fixed fallback that always sanitises")
-                }),
-            share_amount: format_money_for_modal(amount.amount),
-        })
-        .collect();
-
-    let note = event.note().map(|note| {
-        // ExpenseNote validates canonical form; SafeLiteralText must accept it.
-        SafeLiteralText::from_note(note.as_str())
-            .expect("validated ExpenseNote should always produce a SafeLiteralText")
-    });
-
-    let actor_member_id = entry
-        .metadata
-        .recorded_by
-        .expect("composed entry always records `recorded_by`");
-    let actor_labels = SurfaceMemberLabels::from_member_names(std::iter::once((
-        actor_member_id,
-        display_names.get(&actor_member_id).map(|s| s.as_str()),
-    )));
-    let actor_display_name = actor_labels
-        .member(actor_member_id)
-        .map(|label| label.visible().clone())
-        .unwrap_or_else(|| {
-            SafeLiteralText::from_roster_label(
-                &i18n::unknown_user_label(actor_member_id.0).to_string(),
-            )
-            .expect("unknown_user_label is a fixed fallback that always sanitises")
-        });
-
-    let recorded_at = entry
-        .metadata
-        .recorded_at
-        .expect("composed entry always records `recorded_at`");
-    let effective_date = entry
-        .metadata
-        .effective_date
-        .expect("composed expense entry always records `effective_date`");
-
-    let model = PublicCanonicalMessageModel::Expense(PublicExpenseMessageModel {
-        entry_id: entry.id,
-        effective_date,
-        payer_display_name,
-        amount: format_money_for_modal(total_amount),
-        participant_rows,
-        note,
-        actor_display_name,
-        recorded_at: BusinessDateTime::from_system_time(recorded_at),
-        // The permalink only exists after the canonical message has been posted.
-        recovery_reference: RecoveryReference {
-            ledger_id_short: format!("{ledger_id:x}"),
-            entry_id: entry.id,
-            message_link: None,
-        },
-    });
-
-    DiscordLedgerPresenter::render_public_entry(&model)
-        .map_err(|error| LedgerRouteError::Internal(InternalLedgerRouteError::PanelRender(error)))
-}
-
-#[allow(clippy::result_large_err)] // LedgerRouteError is the project's standard error envelope.
-fn render_public_settlement_message(
-    recordable: &RecordableSettlementEntry,
-    ledger_id: LedgerId,
-    display_names: &HashMap<MemberId, smol_str::SmolStr>,
-) -> Result<RenderedCanonicalMessage, LedgerRouteError> {
-    let entry = recordable.entry();
-    let event = recordable.event();
-
-    let labels =
-        SurfaceMemberLabels::from_member_names(event.transfers().iter().flat_map(|transfer| {
-            [
-                (
-                    transfer.from,
-                    display_names.get(&transfer.from).map(|s| s.as_str()),
-                ),
-                (
-                    transfer.to,
-                    display_names.get(&transfer.to).map(|s| s.as_str()),
-                ),
-            ]
-        }));
-    let transfers = event
-        .transfers()
-        .iter()
-        .map(|transfer| TransferRow {
-            from_display_name: labels.safe_member_label(transfer.from),
-            to_display_name: labels.safe_member_label(transfer.to),
-            amount: format_money_for_modal(transfer.amount),
-        })
-        .collect();
-
-    let actor_member_id = entry
-        .metadata
-        .recorded_by
-        .expect("composed settlement entry always records `recorded_by`");
-    let actor_labels = SurfaceMemberLabels::from_member_names(std::iter::once((
-        actor_member_id,
-        display_names.get(&actor_member_id).map(|s| s.as_str()),
-    )));
-    let actor_display_name = actor_labels.safe_member_label(actor_member_id);
-    let recorded_at = entry
-        .metadata
-        .recorded_at
-        .expect("composed settlement entry always records `recorded_at`");
-
-    let model = PublicCanonicalMessageModel::Settlement(PublicSettlementMessageModel {
-        entry_id: entry.id,
-        recorded_date: walicord_application::ledger::LedgerEffectiveDate::from_system_time(
-            recorded_at,
-        ),
-        transfers,
-        actor_display_name,
-        recorded_at: BusinessDateTime::from_system_time(recorded_at),
-        recovery_reference: RecoveryReference {
-            ledger_id_short: format!("{ledger_id:08x}"),
-            entry_id: entry.id,
-            message_link: None,
-        },
-    });
-
-    DiscordLedgerPresenter::render_public_entry(&model)
-        .map_err(|error| LedgerRouteError::Internal(InternalLedgerRouteError::PanelRender(error)))
-}
-
+// canonical_message submodule owns the post-record public-message composers; the
+// helpers below (short_summary_for_entry, render_public_*_message) live there now.
 fn review_route_guidance_lines_with_replacement_notice(route: ReadViewRoute) -> Vec<String> {
     let mut lines = vec![
         i18n::settlement_preview_replaced_message().to_owned(),
@@ -5807,38 +5616,6 @@ fn void_confirmation_total_amount(entry: &LedgerEntry) -> Result<String, LedgerR
         )),
     }
 }
-
-#[allow(clippy::result_large_err)] // LedgerRouteError is the router-wide error envelope.
-fn render_public_void_message(
-    entry: &LedgerEntry,
-    target: &VerifiedLedgerEntryView,
-    ledger_id: LedgerId,
-    labels: &SurfaceMemberLabels,
-) -> Result<RenderedCanonicalMessage, LedgerRouteError> {
-    let actor_member_id = entry
-        .metadata
-        .recorded_by
-        .expect("composed void entry always records `recorded_by`");
-    let recorded_at = entry
-        .metadata
-        .recorded_at
-        .expect("composed void entry always records `recorded_at`");
-    let model = PublicCanonicalMessageModel::Void(PublicVoidMessageModel {
-        entry_id: entry.id,
-        voider_display_name: labels.safe_member_label(actor_member_id),
-        voided_at: BusinessDateTime::from_system_time(recorded_at),
-        original_summary: summary_for_view(target, labels)?,
-        recorded_at: BusinessDateTime::from_system_time(recorded_at),
-        recovery_reference: RecoveryReference {
-            ledger_id_short: format!("{ledger_id:08x}"),
-            entry_id: entry.id,
-            message_link: None,
-        },
-    });
-    DiscordLedgerPresenter::render_public_entry(&model)
-        .map_err(|error| LedgerRouteError::Internal(InternalLedgerRouteError::PanelRender(error)))
-}
-
 /// Parse a session-scoped button custom_id of the form `{prefix}{nonce}` and return
 /// the carried [`InteractionNonce`] when the prefix matches. Returns `None` on prefix
 /// mismatch or on a non-numeric / zero nonce — both treated as "not for this route"
