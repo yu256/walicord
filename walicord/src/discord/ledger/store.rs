@@ -21,6 +21,7 @@ use walicord_application::ledger::{
     LedgerEntry, LedgerEntryId, LedgerEvent, LedgerId, LedgerLoadError, LedgerReplayError,
     UnverifiedLedgerStoreEnvelope, VerifiedLedgerStoreEnvelope,
     canonical_attachment::{AttachmentCodecError, CanonicalAttachmentCodec},
+    canonical_write::{CanonicalAppendError, CanonicalThreadAppender},
     observability::LedgerObservabilityEvent,
     projection::VerifiedEntryTransport,
     replay_verified_snapshot, verify_envelope_sha256_v1,
@@ -31,7 +32,6 @@ use walicord_application::ledger::{
 use super::observability::{
     DiscordLedgerObservability, DiscordLedgerObservabilityEvent, PermissionAction,
 };
-use walicord_presentation::discord_ledger::RenderedCanonicalMessage;
 
 pub type VerifiedLedgerThreadLoad =
     walicord_application::ledger::projection::VerifiedLedgerThreadLoad<MessageId>;
@@ -616,11 +616,11 @@ impl DiscordCanonicalLedgerStore {
         ctx: &Context,
         canonical_thread_id: ChannelId,
         envelope: &UnverifiedLedgerStoreEnvelope<()>,
-        rendered: &RenderedCanonicalMessage,
+        body: &str,
     ) -> Result<VerifiedLedgerStoreEnvelope<MessageId>, StoreWriteError> {
         let result = with_write_timeout(
             CANONICAL_WRITE_TIMEOUT,
-            self.append_authoritative_inner(ctx, canonical_thread_id, envelope, rendered),
+            self.append_authoritative_inner(ctx, canonical_thread_id, envelope, body),
         )
         .await;
         if matches!(result, Err(StoreWriteError::Permission(_))) {
@@ -638,21 +638,18 @@ impl DiscordCanonicalLedgerStore {
         ctx: &Context,
         canonical_thread_id: ChannelId,
         envelope: &UnverifiedLedgerStoreEnvelope<()>,
-        rendered: &RenderedCanonicalMessage,
+        body: &str,
     ) -> Result<VerifiedLedgerStoreEnvelope<MessageId>, StoreWriteError> {
-        let prepared_body = rendered.body();
-        let attachment_bytes = CanonicalAttachmentCodec::encode_with_pre_self_link_content(
-            envelope,
-            Some(prepared_body),
-        )
-        .map_err(StoreWriteError::Prepare)?;
+        let attachment_bytes =
+            CanonicalAttachmentCodec::encode_with_pre_self_link_content(envelope, Some(body))
+                .map_err(StoreWriteError::Prepare)?;
         self.prepare_thread_for_append(ctx, canonical_thread_id, envelope.payload.ledger_id)
             .await?;
 
         let send_outcome = canonical_thread_id
             .send_message(
                 &ctx.http,
-                safe_create_message().content(prepared_body).add_file(
+                safe_create_message().content(body).add_file(
                     serenity::all::CreateAttachment::bytes(
                         attachment_bytes.clone(),
                         LEDGER_ATTACHMENT_FILENAME,
@@ -709,7 +706,7 @@ impl DiscordCanonicalLedgerStore {
                 )
             },
         )?;
-        if read_back.content != prepared_body {
+        if read_back.content != body {
             return Err(StoreWriteError::ReadBack(
                 "message body drift between send and read-back".to_owned(),
             ));
@@ -1504,6 +1501,44 @@ fn unreadable_attachment_error(message_id: MessageId, error: serenity::Error) ->
             message_id,
             error: AttachmentCodecError::UnreadableAttachment(error.to_string()),
         },
+    }
+}
+
+/// Per-request adapter binding the application [`CanonicalThreadAppender`] port
+/// to a serenity [`Context`] and target canonical thread. Constructed inside a
+/// single ledger interaction so the application use case never sees serenity
+/// types. The adapter logs the typed [`StoreWriteError`] before classifying it
+/// into the application-pure [`CanonicalAppendError`] taxonomy.
+pub(crate) struct RequestBoundCanonicalAppender<'a> {
+    pub(crate) ctx: &'a Context,
+    pub(crate) store: &'a DiscordCanonicalLedgerStore,
+    pub(crate) canonical_thread_id: ChannelId,
+}
+
+impl CanonicalThreadAppender for RequestBoundCanonicalAppender<'_> {
+    async fn append_authoritative(
+        &self,
+        envelope: &UnverifiedLedgerStoreEnvelope<()>,
+        body: &str,
+    ) -> Result<(), CanonicalAppendError> {
+        match self
+            .store
+            .append_authoritative(self.ctx, self.canonical_thread_id, envelope, body)
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(error) => {
+                let reason = error.append_failure_reason();
+                tracing::error!(
+                    canonical_thread_id = ?self.canonical_thread_id,
+                    ledger_id = ?envelope.payload.ledger_id,
+                    reason = %reason,
+                    error = %error,
+                    "canonical append failed; uncertain_write remains Live for lazy retry",
+                );
+                Err(CanonicalAppendError::with_source(reason, error))
+            }
+        }
     }
 }
 

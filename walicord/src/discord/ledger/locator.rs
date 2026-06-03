@@ -6,7 +6,7 @@ use serenity::{
 };
 use std::{collections::HashSet, num::NonZeroU64, sync::Arc};
 use tokio::sync::Mutex;
-use walicord_application::ledger::LedgerId;
+use walicord_application::ledger::{LedgerId, canonical_write::LocatorBindingPublisher};
 use walicord_i18n as i18n;
 
 #[cfg(test)]
@@ -603,6 +603,22 @@ where
         }
     }
     candidates
+}
+
+/// Per-request adapter binding the application
+/// [`LocatorBindingPublisher`] port to a concrete locator instance + binding.
+/// Constructed inside a single ledger interaction so the application use case
+/// publishes the ready binding through a typed port instead of pulling the
+/// `Arc<DiscordCanonicalThreadLocator>` from a shared dependency bag.
+pub(crate) struct RequestBoundLocatorPublisher<'a> {
+    pub(crate) locator: &'a super::adapters::DiscordCanonicalThreadLocator,
+    pub(crate) binding: CanonicalThreadBinding,
+}
+
+impl LocatorBindingPublisher for RequestBoundLocatorPublisher<'_> {
+    fn publish_ready(&self) {
+        self.locator.replace_with_ready_binding(self.binding);
+    }
 }
 
 #[cfg(test)]

@@ -57,7 +57,7 @@ mod settle;
 mod void;
 #[cfg(test)]
 use self::void::void_confirmation_total_amount;
-use canonical_message::{render_public_expense_message, short_summary_for_entry};
+use canonical_message::render_public_expense_message;
 #[cfg(test)]
 use expense_picker::expense_picker_custom_id;
 use expense_picker::{
@@ -83,7 +83,8 @@ use super::{
         parse_expense_weight_modal_custom_id, parse_expense_weight_modal_submission,
     },
     locator::{
-        CanonicalThreadBinding, CanonicalThreadLocatorState, LocatorError, LocatorRecoveryReference,
+        CanonicalThreadBinding, CanonicalThreadLocatorState, LocatorError,
+        LocatorRecoveryReference, RequestBoundLocatorPublisher,
     },
     observability::{
         DiscordLedgerObservability, DiscordLedgerObservabilityEvent, PermissionAction,
@@ -104,12 +105,13 @@ use super::{
         guard_ledger_interaction_resolving_parent,
     },
     store::{
-        DiscordCanonicalLedgerStore, StoreLoadError, StoreWriteError, VerifiedLedgerThreadLoad,
-        serenity_error_is_read_denied,
+        DiscordCanonicalLedgerStore, RequestBoundCanonicalAppender, StoreLoadError,
+        StoreWriteError, VerifiedLedgerThreadLoad, serenity_error_is_read_denied,
     },
 };
 
 use walicord_application::ledger::{
+    canonical_write::{CommitOrchestrationError, CommitOutcome, commit_authoritative_v1},
     expense_flow::{
         ConfirmationBuildError, NavigationError, apply_modified_basic_info,
         bootstrap_expense_session, build_confirmation_for_session, clear_picker_selection,
@@ -131,9 +133,8 @@ use walicord_application::ledger::{
         VoidSessionBootstrapError,
     },
     write_coordinator::{
-        BootstrapWriteTarget, ExactEnvelopeScanScope, RetainedCanonicalWrite, ScanCompleteness,
-        UncertainWriteRegistry, UncertainWriteResolution, UncertainWriteState, WriteCoordinator,
-        WriteTargetKey,
+        BootstrapWriteTarget, ExactEnvelopeScanScope, ScanCompleteness, UncertainWriteRegistry,
+        UncertainWriteResolution, UncertainWriteState, WriteCoordinator, WriteTargetKey,
     },
 };
 
@@ -530,6 +531,19 @@ impl From<StoreWriteError> for LedgerRouteError {
     }
 }
 
+impl From<CommitOrchestrationError> for LedgerRouteError {
+    fn from(error: CommitOrchestrationError) -> Self {
+        match error {
+            CommitOrchestrationError::Encode(codec) => Self::Internal(
+                InternalLedgerRouteError::ThreadWrite(StoreWriteError::Prepare(codec)),
+            ),
+            CommitOrchestrationError::UncertainWriteAlreadyLive { ledger_id, .. } => {
+                Self::Internal(InternalLedgerRouteError::UncertainWriteAlreadyLive { ledger_id })
+            }
+        }
+    }
+}
+
 impl From<walicord_application::ledger::projection::ProjectionConsistencyError>
     for LedgerRouteError
 {
@@ -699,17 +713,6 @@ impl Drop for ExpenseSessionClaim<'_> {
             self.store.restore_claim(claimed);
         }
     }
-}
-
-/// Closed outcome of [`LedgerRouter::commit_canonical_authoritative`] so the calling
-/// route handler can branch on the only two terminal states without inspecting
-/// `StoreWriteError` directly. `Recorded` means `append_authoritative` succeeded and the
-/// retain has been cleared; `UncertainAppendFailed` means the retain is still `Live` and
-/// the caller should render the criterion-217 / 279 block.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CommitOutcome {
-    Recorded,
-    UncertainAppendFailed,
 }
 
 impl LedgerRouter {
@@ -1996,70 +1999,29 @@ impl LedgerRouter {
         envelope: &UnverifiedLedgerStoreEnvelope<()>,
         rendered: &RenderedCanonicalMessage,
     ) -> Result<CommitOutcome, LedgerRouteError> {
-        let ledger_id = binding.ledger_id();
-        let canonical_thread_id = binding.canonical_thread_id();
-        let envelope_bytes =
-            walicord_application::ledger::canonical_attachment::CanonicalAttachmentCodec::encode_with_pre_self_link_content(
-                envelope,
-                Some(rendered.body()),
-            )
-            .map_err(|error| {
-                LedgerRouteError::Internal(InternalLedgerRouteError::ThreadWrite(
-                    StoreWriteError::Prepare(error),
-                ))
-            })?;
-
-        let retain_live_since = self.deps.clock.now();
-        let retained = RetainedCanonicalWrite::new(
+        let appender = RequestBoundCanonicalAppender {
+            ctx,
+            store: self.deps.canonical_store.as_ref(),
+            canonical_thread_id: binding.canonical_thread_id(),
+        };
+        let publisher = RequestBoundLocatorPublisher {
+            locator: self.deps.locator.as_ref(),
+            binding,
+        };
+        commit_authoritative_v1(
+            &appender,
+            &publisher,
+            self.deps.uncertain_writes.as_ref(),
+            self.deps.observability.as_ref(),
+            self.deps.clock.as_ref(),
             write_target,
+            binding.ledger_id(),
+            entry,
             envelope,
-            envelope_bytes,
-            rendered.body().to_owned(),
-            short_summary_for_entry(entry),
-            retain_live_since,
-        );
-        self.deps.uncertain_writes.set_live(retained).map_err(|_| {
-            LedgerRouteError::Internal(InternalLedgerRouteError::UncertainWriteAlreadyLive {
-                ledger_id,
-            })
-        })?;
-
-        match self
-            .deps
-            .canonical_store
-            .append_authoritative(ctx, canonical_thread_id, envelope, rendered)
-            .await
-        {
-            Ok(_verified) => {
-                self.deps.locator.replace_with_ready_binding(binding);
-                self.deps.uncertain_writes.clear(write_target);
-                Ok(CommitOutcome::Recorded)
-            }
-            Err(error) => {
-                // Retain stays Live: a transport error here is exactly the
-                // criterion-217 / 279 case where lazy retry must decide whether the
-                // canonical message actually posted. Classify the underlying
-                // StoreWriteError into the closed AppendFailureReason taxonomy and
-                // emit so the failure is observable in production logs (criterion
-                // 248 / AC28).
-                let reason = error.append_failure_reason();
-                tracing::error!(
-                    ledger_id = ?ledger_id,
-                    write_target = ?write_target,
-                    reason = %reason,
-                    error = %error,
-                    "canonical append failed; uncertain_write remains Live for lazy retry",
-                );
-                self.deps.observability.emit(
-                    walicord_application::ledger::observability::LedgerObservabilityEvent::CanonicalAppendFailed {
-                        ledger_id,
-                        reason,
-                        retained_live_since: retain_live_since,
-                    },
-                );
-                Ok(CommitOutcome::UncertainAppendFailed)
-            }
-        }
+            rendered.body(),
+        )
+        .await
+        .map_err(LedgerRouteError::from)
     }
 
     async fn respond_record_success(

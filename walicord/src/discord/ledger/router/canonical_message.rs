@@ -22,13 +22,6 @@ use walicord_presentation::discord_ledger::{
 
 use super::{InternalLedgerRouteError, LedgerRouteError, format_money_for_modal};
 
-/// Short canonical summary string retained alongside an in-flight write (criterion 217
-/// / 279). The lazy retry scan uses it as a debug breadcrumb; the value must be stable
-/// across the post / read-back / scan cycle so the retain comparison still matches.
-pub(super) fn short_summary_for_entry(entry: &LedgerEntry) -> String {
-    format!("entry:{}", entry.id.0)
-}
-
 /// Render the public canonical message for a freshly composed expense entry. Returns
 /// the budget-validated `RenderedCanonicalMessage` newtype so the canonical recovery
 /// shape and surface budget stay enforced through the write boundary (criterion 275 /
