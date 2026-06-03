@@ -31,6 +31,7 @@ use walicord_application::ledger::{
 use super::observability::{
     DiscordLedgerObservability, DiscordLedgerObservabilityEvent, PermissionAction,
 };
+use walicord_presentation::discord_ledger::RenderedCanonicalMessage;
 
 pub type VerifiedLedgerThreadLoad =
     walicord_application::ledger::projection::VerifiedLedgerThreadLoad<MessageId>;
@@ -615,11 +616,11 @@ impl DiscordCanonicalLedgerStore {
         ctx: &Context,
         canonical_thread_id: ChannelId,
         envelope: &UnverifiedLedgerStoreEnvelope<()>,
-        prepared_body: &str,
+        rendered: &RenderedCanonicalMessage,
     ) -> Result<VerifiedLedgerStoreEnvelope<MessageId>, StoreWriteError> {
         let result = with_write_timeout(
             CANONICAL_WRITE_TIMEOUT,
-            self.append_authoritative_inner(ctx, canonical_thread_id, envelope, prepared_body),
+            self.append_authoritative_inner(ctx, canonical_thread_id, envelope, rendered),
         )
         .await;
         if matches!(result, Err(StoreWriteError::Permission(_))) {
@@ -637,8 +638,9 @@ impl DiscordCanonicalLedgerStore {
         ctx: &Context,
         canonical_thread_id: ChannelId,
         envelope: &UnverifiedLedgerStoreEnvelope<()>,
-        prepared_body: &str,
+        rendered: &RenderedCanonicalMessage,
     ) -> Result<VerifiedLedgerStoreEnvelope<MessageId>, StoreWriteError> {
+        let prepared_body = rendered.body();
         let attachment_bytes = CanonicalAttachmentCodec::encode_with_pre_self_link_content(
             envelope,
             Some(prepared_body),

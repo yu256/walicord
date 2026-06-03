@@ -35,14 +35,15 @@ use walicord_presentation::discord_ledger::{
     BusinessDateTime, DiscordLedgerPresenter, ExpenseConfirmationButtonIds,
     ExpenseSelectionStepButtonIds, LedgerPageInputs, PublicCanonicalMessageModel,
     PublicSettlementMessageModel, PublicVoidMessageModel, ReadViewBuildError, ReadViewPageModel,
-    ReadViewRoute, RecoveryCta, RecoveryReference, RenderBudgetError, SafeLiteralText,
-    SurfaceActionRow, SurfaceButton, SurfaceInteractiveButtonStyle, SurfaceMemberLabels,
-    SurfaceSelectMenu, SurfaceSelectOption, TransferRow, VoidCandidateRow, VoidConfirmationRecap,
-    VoidRetargetReason, VoidSurfaceModel, build_expense_confirmation_surface,
-    build_expense_selection_step_surface, build_ledger_empty_page_model, build_ledger_page_model,
-    build_review_empty_page_model, build_review_no_transfers_page_model, build_review_page_model,
-    paginate_read_view_model, summary_for_view, truncate_component_label, validate_custom_id,
-    validate_modal_title, validate_text_input_label, validate_text_input_placeholder,
+    ReadViewRoute, RecoveryCta, RecoveryReference, RenderBudgetError, RenderedCanonicalMessage,
+    SafeLiteralText, SurfaceActionRow, SurfaceButton, SurfaceInteractiveButtonStyle,
+    SurfaceMemberLabels, SurfaceSelectMenu, SurfaceSelectOption, TransferRow, VoidCandidateRow,
+    VoidConfirmationRecap, VoidRetargetReason, VoidSurfaceModel,
+    build_expense_confirmation_surface, build_expense_selection_step_surface,
+    build_ledger_empty_page_model, build_ledger_page_model, build_review_empty_page_model,
+    build_review_no_transfers_page_model, build_review_page_model, paginate_read_view_model,
+    summary_for_view, truncate_component_label, validate_custom_id, validate_modal_title,
+    validate_text_input_label, validate_text_input_placeholder,
 };
 
 use crate::channel::ChannelManager;
@@ -1665,8 +1666,8 @@ impl LedgerRouter {
             .roster_fetcher
             .fetch(ctx, scope.guild_id(), scope.channel_id())
             .await?;
-        let prepared_body =
-            render_public_settlement_body(&entry, ledger_id, &roster.display_names)?;
+        let rendered_message =
+            render_public_settlement_message(&entry, ledger_id, &roster.display_names)?;
         let preview_commit = match PreviewCommitGuard::begin(
             self.deps.preview_store.as_ref(),
             key,
@@ -1692,7 +1693,7 @@ impl LedgerRouter {
                 binding,
                 &entry,
                 &envelope,
-                &prepared_body,
+                &rendered_message,
             )
             .await?
         {
@@ -2566,7 +2567,8 @@ impl LedgerRouter {
                 .iter()
                 .map(|(member_id, name)| (*member_id, Some(name.as_str()))),
         );
-        let prepared_body = render_public_void_body(&entry, &target_view, ledger_id, &labels)?;
+        let rendered_message =
+            render_public_void_message(&entry, &target_view, ledger_id, &labels)?;
         match self
             .commit_canonical_authoritative(
                 ctx,
@@ -2574,7 +2576,7 @@ impl LedgerRouter {
                 binding,
                 &entry,
                 &envelope,
-                &prepared_body,
+                &rendered_message,
             )
             .await?
         {
@@ -2939,7 +2941,7 @@ impl LedgerRouter {
         let envelope: UnverifiedLedgerStoreEnvelope<()> =
             build_canonical_envelope(ledger_id, previous_hash, entry.clone())?;
 
-        let prepared_body = render_public_expense_body(&entry, ledger_id, display_names)?;
+        let rendered_message = render_public_expense_message(&entry, ledger_id, display_names)?;
         match self
             .commit_canonical_authoritative(
                 ctx,
@@ -2947,7 +2949,7 @@ impl LedgerRouter {
                 binding,
                 &entry,
                 &envelope,
-                &prepared_body,
+                &rendered_message,
             )
             .await?
         {
@@ -2984,14 +2986,14 @@ impl LedgerRouter {
         binding: CanonicalThreadBinding,
         entry: &LedgerEntry,
         envelope: &UnverifiedLedgerStoreEnvelope<()>,
-        prepared_body: &str,
+        rendered: &RenderedCanonicalMessage,
     ) -> Result<CommitOutcome, LedgerRouteError> {
         let ledger_id = binding.ledger_id();
         let canonical_thread_id = binding.canonical_thread_id();
         let envelope_bytes =
             walicord_application::ledger::canonical_attachment::CanonicalAttachmentCodec::encode_with_pre_self_link_content(
                 envelope,
-                Some(prepared_body),
+                Some(rendered.body()),
             )
             .map_err(|error| {
                 LedgerRouteError::Internal(InternalLedgerRouteError::ThreadWrite(
@@ -3004,7 +3006,7 @@ impl LedgerRouter {
             write_target,
             envelope,
             envelope_bytes,
-            prepared_body.to_owned(),
+            rendered.body().to_owned(),
             short_summary_for_entry(entry),
             retain_live_since,
         );
@@ -3017,7 +3019,7 @@ impl LedgerRouter {
         match self
             .deps
             .canonical_store
-            .append_authoritative(ctx, canonical_thread_id, envelope, prepared_body)
+            .append_authoritative(ctx, canonical_thread_id, envelope, rendered)
             .await
         {
             Ok(_verified) => {
@@ -4857,16 +4859,16 @@ fn short_summary_for_entry(entry: &LedgerEntry) -> String {
     format!("entry:{}", entry.id.0)
 }
 
-/// Render the public canonical message body for a freshly composed expense entry.
-/// Drives `DiscordLedgerPresenter::render_public_entry` so the rendered string passes
-/// the canonical recovery-shape validation and matches the body that goes into the
-/// hash-protected attachment.
+/// Render the public canonical message for a freshly composed expense entry. Returns
+/// the budget-validated `RenderedCanonicalMessage` newtype so the canonical recovery
+/// shape and surface budget stay enforced through the write boundary (criterion 275 /
+/// AC25); the caller passes it to `append_authoritative` unchanged.
 #[allow(clippy::result_large_err)] // LedgerRouteError is the project's standard error envelope.
-fn render_public_expense_body(
+fn render_public_expense_message(
     entry: &LedgerEntry,
     ledger_id: LedgerId,
     display_names: &HashMap<MemberId, smol_str::SmolStr>,
-) -> Result<String, LedgerRouteError> {
+) -> Result<RenderedCanonicalMessage, LedgerRouteError> {
     use walicord_application::ledger::{LedgerEvent, MemberAmount};
     use walicord_presentation::discord_ledger::{
         ParticipantShareRow, PublicCanonicalMessageModel, PublicExpenseMessageModel,
@@ -4984,18 +4986,16 @@ fn render_public_expense_body(
         },
     });
 
-    let rendered = DiscordLedgerPresenter::render_public_entry(&model).map_err(|error| {
-        LedgerRouteError::Internal(InternalLedgerRouteError::PanelRender(error))
-    })?;
-    Ok(rendered.body().to_owned())
+    DiscordLedgerPresenter::render_public_entry(&model)
+        .map_err(|error| LedgerRouteError::Internal(InternalLedgerRouteError::PanelRender(error)))
 }
 
 #[allow(clippy::result_large_err)] // LedgerRouteError is the project's standard error envelope.
-fn render_public_settlement_body(
+fn render_public_settlement_message(
     entry: &LedgerEntry,
     ledger_id: LedgerId,
     display_names: &HashMap<MemberId, smol_str::SmolStr>,
-) -> Result<String, LedgerRouteError> {
+) -> Result<RenderedCanonicalMessage, LedgerRouteError> {
     let walicord_application::ledger::LedgerEvent::NormalizedSettlementPlanRecorded(event) =
         &entry.event
     else {
@@ -5054,10 +5054,8 @@ fn render_public_settlement_body(
         },
     });
 
-    let rendered = DiscordLedgerPresenter::render_public_entry(&model).map_err(|error| {
-        LedgerRouteError::Internal(InternalLedgerRouteError::PanelRender(error))
-    })?;
-    Ok(rendered.body().to_owned())
+    DiscordLedgerPresenter::render_public_entry(&model)
+        .map_err(|error| LedgerRouteError::Internal(InternalLedgerRouteError::PanelRender(error)))
 }
 
 fn review_route_guidance_lines_with_replacement_notice(route: ReadViewRoute) -> Vec<String> {
@@ -5820,12 +5818,12 @@ fn void_confirmation_total_amount(entry: &LedgerEntry) -> Result<String, LedgerR
 }
 
 #[allow(clippy::result_large_err)] // LedgerRouteError is the router-wide error envelope.
-fn render_public_void_body(
+fn render_public_void_message(
     entry: &LedgerEntry,
     target: &VerifiedLedgerEntryView,
     ledger_id: LedgerId,
     labels: &SurfaceMemberLabels,
-) -> Result<String, LedgerRouteError> {
+) -> Result<RenderedCanonicalMessage, LedgerRouteError> {
     let actor_member_id = entry
         .metadata
         .recorded_by
@@ -5846,10 +5844,8 @@ fn render_public_void_body(
             message_link: None,
         },
     });
-    let rendered = DiscordLedgerPresenter::render_public_entry(&model).map_err(|error| {
-        LedgerRouteError::Internal(InternalLedgerRouteError::PanelRender(error))
-    })?;
-    Ok(rendered.body().to_owned())
+    DiscordLedgerPresenter::render_public_entry(&model)
+        .map_err(|error| LedgerRouteError::Internal(InternalLedgerRouteError::PanelRender(error)))
 }
 
 /// Parse a session-scoped button custom_id of the form `{prefix}{nonce}` and return
