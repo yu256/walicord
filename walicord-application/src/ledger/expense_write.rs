@@ -46,6 +46,50 @@ pub enum ExpenseWriteOrchestrationError {
     EnvelopeEncode(#[from] LedgerCanonicalEncodeError),
 }
 
+/// Type-level guarantee that the wrapped `LedgerEntry` was produced by the
+/// Discord-expense authoring path and therefore carries an `ExpenseRecorded` event.
+/// Constructed only inside this crate by `build_discord_expense_entry`; downstream
+/// adapters can ask for the inner event variant without inserting their own
+/// `unreachable!` guards.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecordableExpenseEntry {
+    entry: LedgerEntry,
+}
+
+impl RecordableExpenseEntry {
+    pub(crate) fn from_built_entry(entry: LedgerEntry) -> Self {
+        debug_assert!(
+            matches!(&entry.event, crate::ledger::LedgerEvent::ExpenseRecorded(_)),
+            "RecordableExpenseEntry constructor invariant: entry.event must be ExpenseRecorded"
+        );
+        Self { entry }
+    }
+
+    pub fn entry(&self) -> &LedgerEntry {
+        &self.entry
+    }
+
+    pub fn id(&self) -> LedgerEntryId {
+        self.entry.id
+    }
+
+    /// Borrow the `ExpenseRecorded` event variant guaranteed by construction. The
+    /// internal `unreachable!` is the single place that enforces the invariant, so
+    /// every adapter call site stays match-free.
+    pub fn event(&self) -> &crate::ledger::ExpenseRecorded {
+        match &self.entry.event {
+            crate::ledger::LedgerEvent::ExpenseRecorded(event) => event,
+            other => {
+                unreachable!("RecordableExpenseEntry must wrap ExpenseRecorded, found {other:?}")
+            }
+        }
+    }
+
+    pub fn into_entry(self) -> LedgerEntry {
+        self.entry
+    }
+}
+
 /// Two-way outcome of the record-time compose path. Criterion 81 requires append-time
 /// resolution against the live roster, and criterion 111 requires drift between the
 /// last shown confirmation and the record-time resolution to surface a refresh — not
@@ -55,7 +99,7 @@ pub enum ExpenseWriteOrchestrationError {
 #[derive(Debug, Clone, PartialEq)]
 pub enum RecordTimeOutcome {
     Ready {
-        entry: LedgerEntry,
+        entry: RecordableExpenseEntry,
         refreshed: Vec<ExpenseParticipantSelection>,
         defaulted_members: Vec<MemberId>,
         dropped_overrides: Vec<(MemberId, Weight)>,
@@ -140,7 +184,7 @@ pub fn compose_expense_entry(
         .map_err(ExpenseWriteOrchestrationError::EntryBuild)?;
 
     Ok(RecordTimeOutcome::Ready {
-        entry,
+        entry: RecordableExpenseEntry::from_built_entry(entry),
         refreshed: refresh.resolved,
         defaulted_members: refresh.defaulted_members,
         dropped_overrides: refresh.dropped_overrides,
@@ -320,8 +364,8 @@ mod tests {
             RecordTimeOutcome::Ready {
                 entry, refreshed, ..
             } => {
-                assert_eq!(entry.id, LedgerEntryId(7));
-                assert!(entry.metadata.allocation_snapshot.is_some());
+                assert_eq!(entry.id(), LedgerEntryId(7));
+                assert!(entry.entry().metadata.allocation_snapshot.is_some());
                 assert_eq!(refreshed.len(), 2);
             }
             RecordTimeOutcome::DriftDetected { .. } => panic!("expected Ready, got DriftDetected"),
@@ -430,7 +474,7 @@ mod tests {
         let envelope = build_canonical_envelope(
             walicord_ledger::test_fixtures::ledger_id(77),
             ledger_chain_genesis_sha256_v1(walicord_ledger::test_fixtures::ledger_id(77)),
-            entry,
+            entry.into_entry(),
         )
         .expect("envelope builds");
 

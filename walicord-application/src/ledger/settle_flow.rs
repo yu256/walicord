@@ -155,13 +155,60 @@ pub enum SettleAttemptError {
     EnvelopeEncode(#[from] LedgerCanonicalEncodeError),
 }
 
+/// Type-level guarantee that the wrapped `LedgerEntry` was produced by the settlement
+/// commit path and therefore carries a `NormalizedSettlementPlanRecorded` event.
+/// Constructed only inside this crate by `compose_settlement_entry_from_preview`;
+/// downstream adapters can borrow the inner event variant without inserting their own
+/// `unreachable!` guards.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecordableSettlementEntry {
+    entry: LedgerEntry,
+}
+
+impl RecordableSettlementEntry {
+    fn from_built_entry(entry: LedgerEntry) -> Self {
+        debug_assert!(
+            matches!(
+                &entry.event,
+                crate::ledger::LedgerEvent::NormalizedSettlementPlanRecorded(_)
+            ),
+            "RecordableSettlementEntry constructor invariant: entry.event must be NormalizedSettlementPlanRecorded"
+        );
+        Self { entry }
+    }
+
+    pub fn entry(&self) -> &LedgerEntry {
+        &self.entry
+    }
+
+    pub fn id(&self) -> LedgerEntryId {
+        self.entry.id
+    }
+
+    /// Borrow the `NormalizedSettlementPlanRecorded` event variant guaranteed by
+    /// construction. The single internal `unreachable!` enforces the invariant so
+    /// every adapter call site stays match-free.
+    pub fn event(&self) -> &crate::ledger::NormalizedSettlementPlanRecorded {
+        match &self.entry.event {
+            crate::ledger::LedgerEvent::NormalizedSettlementPlanRecorded(event) => event,
+            other => unreachable!(
+                "RecordableSettlementEntry must wrap NormalizedSettlementPlanRecorded, found {other:?}"
+            ),
+        }
+    }
+
+    pub fn into_entry(self) -> LedgerEntry {
+        self.entry
+    }
+}
+
 /// Result of `/settle` composition. `RecordableEntry` carries the canonical settlement
 /// entry the caller must append; `NoOp` means the preview itself was a no-op so
 /// nothing should be appended (criterion 113 / 114).
 #[derive(Debug, Clone, PartialEq)]
 pub enum SettleAttemptOutcome {
     RecordableEntry {
-        entry: Box<LedgerEntry>,
+        entry: Box<RecordableSettlementEntry>,
         envelope: Box<UnverifiedLedgerStoreEnvelope<()>>,
     },
     NoOp,
@@ -243,7 +290,7 @@ pub fn compose_settlement_entry_from_preview(
         .map_err(SettleAttemptError::EnvelopeEncode)?;
 
     Ok(SettleAttemptOutcome::RecordableEntry {
-        entry: Box::new(entry),
+        entry: Box::new(RecordableSettlementEntry::from_built_entry(entry)),
         envelope: Box::new(envelope),
     })
 }

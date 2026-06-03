@@ -97,8 +97,8 @@ use walicord_application::ledger::{
     },
     expense_modal::{ExpenseModalValidationError, validate_expense_modal_submission},
     expense_write::{
-        ExpenseWriteOrchestrationError, RecordTimeOutcome, build_canonical_envelope,
-        compose_expense_entry,
+        ExpenseWriteOrchestrationError, RecordTimeOutcome, RecordableExpenseEntry,
+        build_canonical_envelope, compose_expense_entry,
     },
     preview_store::{
         PreviewCommitGuard, PreviewStore, PreviewStoreError, PreviewStoreKey,
@@ -107,8 +107,9 @@ use walicord_application::ledger::{
     projection::{NextLedgerEntryIdError, VerifiedLedgerEntryView, project_verified_entries},
     read_view_session::{ReadViewSession, ReadViewSessionKey, ReadViewSessionStore},
     settle_flow::{
-        PreviewAttemptError, PreviewAttemptOutcome, SettleAttemptError, SettleAttemptOutcome,
-        compose_and_store_preview, compose_settlement_entry_from_preview, mark_preview_delivered,
+        PreviewAttemptError, PreviewAttemptOutcome, RecordableSettlementEntry, SettleAttemptError,
+        SettleAttemptOutcome, compose_and_store_preview, compose_settlement_entry_from_preview,
+        mark_preview_delivered,
     },
     void_flow::{
         VoidCandidateEnumerationError, VoidComposeError, VoidConfirmTransitionError,
@@ -1691,7 +1692,7 @@ impl LedgerRouter {
                 ctx,
                 WriteTargetKey::Published(ledger_id),
                 binding,
-                &entry,
+                entry.entry(),
                 &envelope,
                 &rendered_message,
             )
@@ -2934,12 +2935,12 @@ impl LedgerRouter {
         write_target: WriteTargetKey,
         binding: CanonicalThreadBinding,
         previous_hash: walicord_application::ledger::EntryHash,
-        entry: LedgerEntry,
+        entry: RecordableExpenseEntry,
         display_names: &HashMap<MemberId, smol_str::SmolStr>,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
         let ledger_id = binding.ledger_id();
         let envelope: UnverifiedLedgerStoreEnvelope<()> =
-            build_canonical_envelope(ledger_id, previous_hash, entry.clone())?;
+            build_canonical_envelope(ledger_id, previous_hash, entry.entry().clone())?;
 
         let rendered_message = render_public_expense_message(&entry, ledger_id, display_names)?;
         match self
@@ -2947,7 +2948,7 @@ impl LedgerRouter {
                 ctx,
                 write_target,
                 binding,
-                &entry,
+                entry.entry(),
                 &envelope,
                 &rendered_message,
             )
@@ -4865,25 +4866,18 @@ fn short_summary_for_entry(entry: &LedgerEntry) -> String {
 /// AC25); the caller passes it to `append_authoritative` unchanged.
 #[allow(clippy::result_large_err)] // LedgerRouteError is the project's standard error envelope.
 fn render_public_expense_message(
-    entry: &LedgerEntry,
+    recordable: &RecordableExpenseEntry,
     ledger_id: LedgerId,
     display_names: &HashMap<MemberId, smol_str::SmolStr>,
 ) -> Result<RenderedCanonicalMessage, LedgerRouteError> {
-    use walicord_application::ledger::{LedgerEvent, MemberAmount};
+    use walicord_application::ledger::MemberAmount;
     use walicord_presentation::discord_ledger::{
         ParticipantShareRow, PublicCanonicalMessageModel, PublicExpenseMessageModel,
         RecoveryReference, SafeLiteralText,
     };
 
-    let LedgerEvent::ExpenseRecorded(event) = &entry.event else {
-        // The record path only composes ExpenseRecorded entries; landing here means
-        // compose_expense_entry produced a different event kind, which is a programmer
-        // error rather than a runtime case.
-        unreachable!(
-            "expense record path produced non-expense entry {:?}",
-            entry.id
-        );
-    };
+    let entry = recordable.entry();
+    let event = recordable.event();
 
     let paid_by: &[MemberAmount] = event.paid_by();
     let payer_member_id = paid_by
@@ -4992,15 +4986,12 @@ fn render_public_expense_message(
 
 #[allow(clippy::result_large_err)] // LedgerRouteError is the project's standard error envelope.
 fn render_public_settlement_message(
-    entry: &LedgerEntry,
+    recordable: &RecordableSettlementEntry,
     ledger_id: LedgerId,
     display_names: &HashMap<MemberId, smol_str::SmolStr>,
 ) -> Result<RenderedCanonicalMessage, LedgerRouteError> {
-    let walicord_application::ledger::LedgerEvent::NormalizedSettlementPlanRecorded(event) =
-        &entry.event
-    else {
-        unreachable!("settle path produced non-settlement entry {:?}", entry.id);
-    };
+    let entry = recordable.entry();
+    let event = recordable.event();
 
     let labels =
         SurfaceMemberLabels::from_member_names(event.transfers().iter().flat_map(|transfer| {
