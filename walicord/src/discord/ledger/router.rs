@@ -703,6 +703,17 @@ impl Drop for ExpenseSessionClaim<'_> {
     }
 }
 
+/// Closed outcome of [`LedgerRouter::commit_canonical_authoritative`] so the calling
+/// route handler can branch on the only two terminal states without inspecting
+/// `StoreWriteError` directly. `Recorded` means `append_authoritative` succeeded and the
+/// retain has been cleared; `UncertainAppendFailed` means the retain is still `Live` and
+/// the caller should render the criterion-217 / 279 block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CommitOutcome {
+    Recorded,
+    UncertainAppendFailed,
+}
+
 impl LedgerRouter {
     pub fn new(deps: LedgerRouterDependencies) -> Self {
         Self { deps }
@@ -1656,24 +1667,6 @@ impl LedgerRouter {
             .await?;
         let prepared_body =
             render_public_settlement_body(&entry, ledger_id, &roster.display_names)?;
-        let envelope_bytes =
-            walicord_application::ledger::canonical_attachment::CanonicalAttachmentCodec::encode_with_pre_self_link_content(
-                &envelope,
-                Some(prepared_body.as_str()),
-            )
-            .map_err(|error| {
-                LedgerRouteError::Internal(InternalLedgerRouteError::ThreadWrite(
-                    StoreWriteError::Prepare(error),
-                ))
-            })?;
-        let retained = RetainedCanonicalWrite::new(
-            ledger_id,
-            &envelope,
-            envelope_bytes,
-            prepared_body.clone(),
-            short_summary_for_entry(&entry),
-            self.deps.clock.now(),
-        );
         let preview_commit = match PreviewCommitGuard::begin(
             self.deps.preview_store.as_ref(),
             key,
@@ -1691,26 +1684,19 @@ impl LedgerRouter {
                     .await;
             }
         };
-        if self.deps.uncertain_writes.set_live(retained).is_err() {
-            return Err(LedgerRouteError::Internal(
-                InternalLedgerRouteError::UncertainWriteAlreadyLive { ledger_id },
-            ));
-        }
 
-        let append_result = self
-            .deps
-            .canonical_store
-            .append_authoritative(
+        match self
+            .commit_canonical_authoritative(
                 ctx,
-                binding.canonical_thread_id(),
+                WriteTargetKey::Published(ledger_id),
+                binding,
+                &entry,
                 &envelope,
-                prepared_body.as_str(),
+                &prepared_body,
             )
-            .await;
-        match append_result {
-            Ok(_verified) => {
-                self.deps.locator.replace_with_ready_binding(binding);
-                self.deps.uncertain_writes.clear(ledger_id);
+            .await?
+        {
+            CommitOutcome::Recorded => {
                 preview_commit.finish()?;
                 self.edit_command_response(
                     ctx,
@@ -1720,7 +1706,7 @@ impl LedgerRouter {
                 )
                 .await
             }
-            Err(_error) => {
+            CommitOutcome::UncertainAppendFailed => {
                 let (message, components) =
                     self.uncertain_write_block_response(ledger_id, false, true);
                 self.edit_command_response_with_components(
@@ -2581,44 +2567,18 @@ impl LedgerRouter {
                 .map(|(member_id, name)| (*member_id, Some(name.as_str()))),
         );
         let prepared_body = render_public_void_body(&entry, &target_view, ledger_id, &labels)?;
-        let envelope_bytes =
-            walicord_application::ledger::canonical_attachment::CanonicalAttachmentCodec::encode_with_pre_self_link_content(
-                &envelope,
-                Some(prepared_body.as_str()),
-            )
-            .map_err(|error| {
-                LedgerRouteError::Internal(InternalLedgerRouteError::ThreadWrite(
-                    StoreWriteError::Prepare(error),
-                ))
-            })?;
-        let retained = RetainedCanonicalWrite::new(
-            ledger_id,
-            &envelope,
-            envelope_bytes,
-            prepared_body.clone(),
-            short_summary_for_entry(&entry),
-            self.deps.clock.now(),
-        );
-        self.deps.uncertain_writes.set_live(retained).map_err(|_| {
-            LedgerRouteError::Internal(InternalLedgerRouteError::UncertainWriteAlreadyLive {
-                ledger_id,
-            })
-        })?;
-
         match self
-            .deps
-            .canonical_store
-            .append_authoritative(
+            .commit_canonical_authoritative(
                 ctx,
-                binding.canonical_thread_id(),
+                WriteTargetKey::Published(ledger_id),
+                binding,
+                &entry,
                 &envelope,
-                prepared_body.as_str(),
+                &prepared_body,
             )
-            .await
+            .await?
         {
-            Ok(_verified) => {
-                self.deps.locator.replace_with_ready_binding(binding);
-                self.deps.uncertain_writes.clear(ledger_id);
+            CommitOutcome::Recorded => {
                 self.deps.void_sessions.clear(key);
                 self.edit_component_with_void_model(
                     ctx,
@@ -2632,7 +2592,7 @@ impl LedgerRouter {
                 )
                 .await
             }
-            Err(_error) => {
+            CommitOutcome::UncertainAppendFailed => {
                 let (message, components) =
                     self.uncertain_write_block_response(ledger_id, true, false);
                 self.edit_component_response_with_components(
@@ -2976,52 +2936,26 @@ impl LedgerRouter {
         display_names: &HashMap<MemberId, smol_str::SmolStr>,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
         let ledger_id = binding.ledger_id();
-        let canonical_thread_id = binding.canonical_thread_id();
         let envelope: UnverifiedLedgerStoreEnvelope<()> =
             build_canonical_envelope(ledger_id, previous_hash, entry.clone())?;
 
         let prepared_body = render_public_expense_body(&entry, ledger_id, display_names)?;
-        let envelope_bytes =
-            walicord_application::ledger::canonical_attachment::CanonicalAttachmentCodec::encode_with_pre_self_link_content(
+        match self
+            .commit_canonical_authoritative(
+                ctx,
+                write_target,
+                binding,
+                &entry,
                 &envelope,
-                Some(prepared_body.as_str()),
+                &prepared_body,
             )
-            .map_err(|error| {
-                LedgerRouteError::Internal(InternalLedgerRouteError::ThreadWrite(
-                    StoreWriteError::Prepare(error),
-                ))
-            })?;
-
-        let retained = RetainedCanonicalWrite::new(
-            write_target,
-            &envelope,
-            envelope_bytes,
-            prepared_body.clone(),
-            short_summary_for_entry(&entry),
-            self.deps.clock.now(),
-        );
-        self.deps.uncertain_writes.set_live(retained).map_err(|_| {
-            LedgerRouteError::Internal(InternalLedgerRouteError::UncertainWriteAlreadyLive {
-                ledger_id,
-            })
-        })?;
-
-        let append_result = self
-            .deps
-            .canonical_store
-            .append_authoritative(ctx, canonical_thread_id, &envelope, prepared_body.as_str())
-            .await;
-        match append_result {
-            Ok(_verified) => {
+            .await?
+        {
+            CommitOutcome::Recorded => {
                 claim.discard();
-                self.deps.locator.replace_with_ready_binding(binding);
-                self.deps.uncertain_writes.clear(write_target);
                 self.respond_record_success(ctx, component).await
             }
-            Err(_error) => {
-                // Retain stays Live: a transport error here is exactly the
-                // criterion-217 / 279 case where lazy retry must decide whether the
-                // canonical message actually posted.
+            CommitOutcome::UncertainAppendFailed => {
                 let (message, components) =
                     self.uncertain_write_block_response(ledger_id, true, false);
                 self.reply_component_ephemeral_with_components(
@@ -3032,6 +2966,70 @@ impl LedgerRouter {
                     DiscordCallSite::ExpenseUncertainWriteReply,
                 )
                 .await
+            }
+        }
+    }
+
+    /// Shared write-path orchestration: freeze the retain payload via `set_live`, hand
+    /// the envelope + rendered body to `DiscordCanonicalLedgerStore::append_authoritative`,
+    /// then on success refresh the locator and clear the retain. On Discord-side append
+    /// failure the retain stays `Live`; the caller renders the criterion-217 / 279
+    /// uncertain-write block. Owning this sequence in one place is the AC18 contract
+    /// for `WriteCoordinator` + `UncertainWriteRegistry`: settle / void / expense all
+    /// commit through the same critical section.
+    async fn commit_canonical_authoritative(
+        &self,
+        ctx: &Context,
+        write_target: WriteTargetKey,
+        binding: CanonicalThreadBinding,
+        entry: &LedgerEntry,
+        envelope: &UnverifiedLedgerStoreEnvelope<()>,
+        prepared_body: &str,
+    ) -> Result<CommitOutcome, LedgerRouteError> {
+        let ledger_id = binding.ledger_id();
+        let canonical_thread_id = binding.canonical_thread_id();
+        let envelope_bytes =
+            walicord_application::ledger::canonical_attachment::CanonicalAttachmentCodec::encode_with_pre_self_link_content(
+                envelope,
+                Some(prepared_body),
+            )
+            .map_err(|error| {
+                LedgerRouteError::Internal(InternalLedgerRouteError::ThreadWrite(
+                    StoreWriteError::Prepare(error),
+                ))
+            })?;
+
+        let retained = RetainedCanonicalWrite::new(
+            write_target,
+            envelope,
+            envelope_bytes,
+            prepared_body.to_owned(),
+            short_summary_for_entry(entry),
+            self.deps.clock.now(),
+        );
+        self.deps.uncertain_writes.set_live(retained).map_err(|_| {
+            LedgerRouteError::Internal(InternalLedgerRouteError::UncertainWriteAlreadyLive {
+                ledger_id,
+            })
+        })?;
+
+        match self
+            .deps
+            .canonical_store
+            .append_authoritative(ctx, canonical_thread_id, envelope, prepared_body)
+            .await
+        {
+            Ok(_verified) => {
+                self.deps.locator.replace_with_ready_binding(binding);
+                self.deps.uncertain_writes.clear(write_target);
+                Ok(CommitOutcome::Recorded)
+            }
+            Err(_error) => {
+                // Retain stays Live: a transport error here is exactly the
+                // criterion-217 / 279 case where lazy retry must decide whether the
+                // canonical message actually posted. Observability emit lands in a
+                // follow-up commit so the failure is no longer silent.
+                Ok(CommitOutcome::UncertainAppendFailed)
             }
         }
     }
