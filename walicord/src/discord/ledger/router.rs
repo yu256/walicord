@@ -1403,6 +1403,9 @@ impl LedgerRouter {
 
         let pages = if views.is_empty() {
             if let Some(preview_instance_id) = prior_preview_instance_id {
+                // Intentional swallow: ClearMatching only removes when the stored
+                // instance still matches; a mismatch means another interaction
+                // already replaced the preview and we must not touch it.
                 let _ = self.deps.preview_store.transition(
                     key,
                     PreviewStoreTransition::ClearMatching {
@@ -1424,6 +1427,7 @@ impl LedgerRouter {
             ) {
                 Err(error) => {
                     if let Some(preview_instance_id) = prior_preview_instance_id {
+                        // Intentional swallow: see comment on the empty-views branch above.
                         let _ = self.deps.preview_store.transition(
                             key,
                             PreviewStoreTransition::ClearMatching {
@@ -1449,6 +1453,7 @@ impl LedgerRouter {
                 Ok(outcome) => match outcome {
                     PreviewAttemptOutcome::NoTransfersNeeded => {
                         if let Some(preview_instance_id) = prior_preview_instance_id {
+                            // Intentional swallow: see comment on the empty-views branch above.
                             let _ = self.deps.preview_store.transition(
                                 key,
                                 PreviewStoreTransition::ClearMatching {
@@ -1542,6 +1547,8 @@ impl LedgerRouter {
         let ledger_id = binding.ledger_id();
         let actor_id = MemberId(command.user.id.get());
         let key = PreviewStoreKey::new(ledger_id, actor_id);
+        // Pre-lock fast bail: avoid taking the per-ledger lock when uncertain_write
+        // is already unresolvable. Cheap when no retain exists (DashMap read only).
         if !self.clear_resolved_uncertain_write(ctx, binding).await {
             let (message, components) = self.uncertain_write_block_response(ledger_id, false, true);
             return self
@@ -1557,6 +1564,9 @@ impl LedgerRouter {
 
         let lock = self.deps.write_coordinator.lock_for(ledger_id);
         let _guard = lock.lock().await;
+        // Post-lock recheck: another writer may have set a fresh uncertain_write
+        // between the pre-lock check and acquiring the lock; revalidate inside the
+        // critical section before committing to set_live / append.
         if !self.clear_resolved_uncertain_write(ctx, binding).await {
             let (message, components) = self.uncertain_write_block_response(ledger_id, false, true);
             return self
@@ -1601,6 +1611,9 @@ impl LedgerRouter {
             Ok(outcome) => outcome,
             Err(error) => {
                 if should_clear_preview_after_settle_error(&error) {
+                    // Intentional swallow: ClearMatching only removes when the stored
+                    // instance still matches; a mismatch means another interaction
+                    // already replaced the preview and we must not touch it.
                     let _ = self.deps.preview_store.transition(
                         key,
                         PreviewStoreTransition::ClearMatching {
@@ -2493,6 +2506,8 @@ impl LedgerRouter {
             .await
             .map_err(discord_call_error(DiscordCallSite::VoidDeferComponent))?;
 
+        // Pre-lock fast bail: avoid taking the per-ledger lock when uncertain_write
+        // is already unresolvable. Cheap when no retain exists (DashMap read only).
         if !self.clear_resolved_uncertain_write(ctx, binding).await {
             let (message, components) = self.uncertain_write_block_response(ledger_id, true, false);
             return self
@@ -2508,6 +2523,9 @@ impl LedgerRouter {
 
         let lock = self.deps.write_coordinator.lock_for(ledger_id);
         let _guard = lock.lock().await;
+        // Post-lock recheck: another writer may have set a fresh uncertain_write
+        // between the pre-lock check and acquiring the lock; revalidate inside the
+        // critical section before committing to set_live / append.
         if !self.clear_resolved_uncertain_write(ctx, binding).await {
             let (message, components) = self.uncertain_write_block_response(ledger_id, true, false);
             return self
@@ -2782,6 +2800,8 @@ impl LedgerRouter {
         let ledger_id = binding.ledger_id();
         let write_target = WriteTargetKey::Published(ledger_id);
 
+        // Pre-lock fast bail: avoid taking the per-ledger lock when uncertain_write
+        // is already unresolvable. Cheap when no retain exists (DashMap read only).
         if !self.clear_resolved_uncertain_write(ctx, binding).await {
             let (message, components) = self.uncertain_write_block_response(ledger_id, true, false);
             return self
@@ -2799,6 +2819,9 @@ impl LedgerRouter {
         // append for this ledger holds the same async mutex for its whole lifecycle.
         let lock = self.deps.write_coordinator.lock_for(write_target);
         let _guard = lock.lock().await;
+        // Post-lock recheck: another writer may have set a fresh uncertain_write
+        // between the pre-lock check and acquiring the lock; revalidate inside the
+        // critical section before committing to set_live / append.
         if !self.clear_resolved_uncertain_write(ctx, binding).await {
             let (message, components) = self.uncertain_write_block_response(ledger_id, true, false);
             return self

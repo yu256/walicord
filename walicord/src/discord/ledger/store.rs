@@ -1475,25 +1475,11 @@ fn classify_thread_fetch_error(error: serenity::Error) -> StoreLoadError {
     }
 }
 
-fn classify_attachment_fetch_status(
-    _message_id: MessageId,
-    status_code: Option<serenity::http::StatusCode>,
-    error_text: String,
-) -> StoreLoadError {
-    match classify_fetch_status(status_code, error_text) {
-        StoreLoadError::Permission(message) => StoreLoadError::Permission(message),
-        StoreLoadError::Fetch(message) => StoreLoadError::Fetch(message),
-        _ => unreachable!("attachment fetch status should classify as fetch or permission"),
-    }
-}
-
 fn unreadable_attachment_error(message_id: MessageId, error: serenity::Error) -> StoreLoadError {
     match &error {
-        serenity::Error::Http(http_error) => classify_attachment_fetch_status(
-            message_id,
-            http_error.status_code(),
-            error.to_string(),
-        ),
+        serenity::Error::Http(http_error) => {
+            classify_fetch_status(http_error.status_code(), error.to_string())
+        }
         _ => StoreLoadError::Decode {
             message_id,
             error: AttachmentCodecError::UnreadableAttachment(error.to_string()),
@@ -2011,19 +1997,6 @@ mod tests {
         #[case] expected: bool,
     ) {
         assert_eq!(read_denied_status(status_code), expected);
-    }
-
-    #[test]
-    fn classify_attachment_fetch_status_maps_permission_status_codes() {
-        let forbidden = classify_attachment_fetch_status(
-            MessageId::new(1),
-            Some(serenity::http::StatusCode::FORBIDDEN),
-            "forbidden".to_owned(),
-        );
-        let other = classify_attachment_fetch_status(MessageId::new(1), None, "other".to_owned());
-
-        assert!(matches!(forbidden, StoreLoadError::Permission(_)));
-        assert!(matches!(other, StoreLoadError::Fetch(_)));
     }
 
     #[test]
