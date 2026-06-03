@@ -1,3 +1,7 @@
+#[cfg(test)]
+use crate::discord::ledger::panel::{
+    LEDGER_PANEL_EXPENSE_ID, LEDGER_PANEL_LEDGER_ID, LEDGER_PANEL_REVIEW_ID, LEDGER_PANEL_VOID_ID,
+};
 use serenity::{
     all::{
         ChannelId, CommandInteraction, ComponentInteraction, ComponentInteractionDataKind,
@@ -30,11 +34,13 @@ use walicord_application::{
 };
 use walicord_domain::model::{MemberId, RoleId};
 use walicord_i18n as i18n;
+#[cfg(test)]
+use walicord_presentation::discord_ledger::ReadViewRoute;
 use walicord_presentation::discord_ledger::{
     DiscordLedgerPresenter, ExpenseConfirmationButtonIds, ExpenseSelectionStepButtonIds,
-    ReadViewBuildError, ReadViewPageModel, ReadViewRoute, RenderBudgetError,
-    RenderedCanonicalMessage, SurfaceActionRow, SurfaceSelectMenu, VoidRetargetReason,
-    build_expense_confirmation_surface, build_expense_selection_step_surface,
+    ReadViewBuildError, ReadViewPageModel, RenderBudgetError, RenderedCanonicalMessage,
+    SurfaceActionRow, SurfaceSelectMenu, VoidRetargetReason, build_expense_confirmation_surface,
+    build_expense_selection_step_surface,
 };
 
 use crate::channel::ChannelManager;
@@ -42,7 +48,9 @@ use crate::channel::ChannelManager;
 mod canonical_message;
 mod expense_picker;
 mod ledger;
+mod panel;
 mod review;
+use panel::{PanelLauncher, panel_launcher};
 #[cfg(test)]
 use review::review_route_guidance_lines_with_replacement_notice;
 mod settle;
@@ -80,10 +88,7 @@ use super::{
     observability::{
         DiscordLedgerObservability, DiscordLedgerObservabilityEvent, PermissionAction,
     },
-    panel::{
-        LEDGER_PANEL_EXPENSE_ID, LEDGER_PANEL_LEDGER_ID, LEDGER_PANEL_REVIEW_ID,
-        LEDGER_PANEL_VOID_ID, render_panel_post_message_for_locator_state,
-    },
+    panel::render_panel_post_message_for_locator_state,
     permissions::{
         LedgerRefreshAcknowledgement, RuntimePermissionScope, missing_runtime_permissions_for,
         render_ledger_refresh_acknowledgement, render_ledger_refresh_uncertain_write_message,
@@ -549,24 +554,6 @@ impl From<ReadViewBuildError> for LedgerRouteError {
 pub(super) enum ReadViewNavigation {
     Previous,
     Next,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PanelLauncher {
-    Expense,
-    Review,
-    Ledger,
-    Void,
-}
-
-fn panel_launcher(custom_id: &str) -> Option<PanelLauncher> {
-    match custom_id {
-        LEDGER_PANEL_EXPENSE_ID => Some(PanelLauncher::Expense),
-        LEDGER_PANEL_REVIEW_ID => Some(PanelLauncher::Review),
-        LEDGER_PANEL_LEDGER_ID => Some(PanelLauncher::Ledger),
-        LEDGER_PANEL_VOID_ID => Some(PanelLauncher::Void),
-        _ => None,
-    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1315,39 +1302,6 @@ impl LedgerRouter {
             )
             .await
             .map_err(discord_call_error(DiscordCallSite::LedgerEditResponse))?;
-        Ok(InteractionDispatch::Handled)
-    }
-
-    /// /panel: post the operations panel with the 4 fixed launcher buttons. Panel
-    /// posts are direct responses (no defer) per criterion 178, and the body /
-    /// thread cue come straight from i18n + presentation, not from any per-channel
-    /// computation in the router.
-    async fn dispatch_panel_command(
-        &self,
-        ctx: &Context,
-        command: &CommandInteraction,
-    ) -> Result<InteractionDispatch, LedgerRouteError> {
-        let scope = self
-            .guard_scope(ctx, command.guild_id, command.channel_id, command)
-            .await?;
-        let locator_state = self.deps.locator.cached(scope.tracked_parent());
-        if let Some(state) = locator_state.as_ref() {
-            self.observe_blocked_locator_state(state);
-        }
-        let (body, components) =
-            match render_panel_post_message_for_locator_state(locator_state.as_ref(), false) {
-                Ok(rendered) => rendered,
-                Err(message) => message.into_parts(),
-            };
-        let response = CreateInteractionResponse::Message(
-            safe_interaction_response_message()
-                .content(body)
-                .components(components),
-        );
-        command
-            .create_response(&ctx.http, response)
-            .await
-            .map_err(discord_call_error(DiscordCallSite::PanelCreateResponse))?;
         Ok(InteractionDispatch::Handled)
     }
 
@@ -2978,101 +2932,6 @@ impl LedgerRouter {
         Ok(InteractionDispatch::Handled)
     }
 
-    async fn dispatch_panel_expense_launcher(
-        &self,
-        ctx: &Context,
-        component: &ComponentInteraction,
-    ) -> Result<InteractionDispatch, LedgerRouteError> {
-        let scope = self
-            .guard_scope(ctx, component.guild_id, component.channel_id, component)
-            .await?;
-        if let Some(ledger_id) = self.blocked_expense_launcher_ledger(ctx, scope).await? {
-            let (message, components) =
-                self.uncertain_write_block_response(ledger_id, false, false);
-            return self
-                .reply_component_ephemeral_with_components(
-                    ctx,
-                    component,
-                    message,
-                    components,
-                    DiscordCallSite::ExpenseUncertainWriteReply,
-                )
-                .await;
-        }
-        let nonce = self.deps.nonce_provider.next_interaction_nonce();
-        self.store_expense_modal_submission(
-            nonce,
-            MemberId(component.user.id.get()),
-            scope.expense_draft_scope_id(),
-            ExpenseModalIntent::Create {
-                origin: ExpenseLaunchOrigin::PanelButton,
-            },
-        );
-        let response = build_expense_modal_response(
-            self.deps.clock.as_ref(),
-            nonce,
-            &ExpenseModalPrefill::default(),
-        )
-        .map_err(LedgerRouteError::from)?;
-        component
-            .create_response(&ctx.http, response)
-            .await
-            .map_err(discord_call_error(
-                DiscordCallSite::PanelExpenseLauncherCreateResponse,
-            ))?;
-        Ok(InteractionDispatch::Handled)
-    }
-
-    async fn dispatch_panel_review_launcher(
-        &self,
-        ctx: &Context,
-        component: &ComponentInteraction,
-    ) -> Result<InteractionDispatch, LedgerRouteError> {
-        let scope = self
-            .guard_scope(ctx, component.guild_id, component.channel_id, component)
-            .await?;
-        self.dispatch_review(
-            ctx,
-            scope,
-            DeferredEphemeralInteraction::Component(component),
-            ReadViewRoute::ReviewParent,
-        )
-        .await
-    }
-
-    async fn dispatch_panel_ledger_launcher(
-        &self,
-        ctx: &Context,
-        component: &ComponentInteraction,
-    ) -> Result<InteractionDispatch, LedgerRouteError> {
-        let scope = self
-            .guard_scope(ctx, component.guild_id, component.channel_id, component)
-            .await?;
-        self.dispatch_ledger(
-            ctx,
-            scope,
-            DeferredEphemeralInteraction::Component(component),
-            ReadViewRoute::LedgerPanel,
-        )
-        .await
-    }
-
-    async fn dispatch_panel_void_launcher(
-        &self,
-        ctx: &Context,
-        component: &ComponentInteraction,
-    ) -> Result<InteractionDispatch, LedgerRouteError> {
-        let scope = self
-            .guard_scope(ctx, component.guild_id, component.channel_id, component)
-            .await?;
-        self.dispatch_void(
-            ctx,
-            scope,
-            DeferredEphemeralInteraction::Component(component),
-        )
-        .await
-    }
-
     pub async fn handle_modal(
         &self,
         ctx: &Context,
@@ -3672,7 +3531,9 @@ fn expense_modal_validation_message(error: &ExpenseModalValidationError) -> &'st
     }
 }
 
-fn expense_source_descriptor(origin: ExpenseLaunchOrigin) -> DiscordLedgerSourceDescriptor {
+pub(super) fn expense_source_descriptor(
+    origin: ExpenseLaunchOrigin,
+) -> DiscordLedgerSourceDescriptor {
     match origin {
         ExpenseLaunchOrigin::SlashCommand => {
             DiscordLedgerSourceDescriptor::expense_slash_modal_v1()
