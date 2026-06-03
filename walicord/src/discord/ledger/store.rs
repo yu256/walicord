@@ -18,9 +18,10 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use walicord_application::ledger::{
-    LedgerEntry, LedgerEntryId, LedgerEvent, LedgerId, LedgerLoadError, LedgerReplayError,
-    UnverifiedLedgerStoreEnvelope, VerifiedLedgerStoreEnvelope,
+    EntryHash, LedgerEntry, LedgerEntryId, LedgerEvent, LedgerId, LedgerLoadError,
+    LedgerReplayError, UnverifiedLedgerStoreEnvelope, VerifiedLedgerStoreEnvelope,
     canonical_attachment::{AttachmentCodecError, CanonicalAttachmentCodec},
+    canonical_read::{CanonicalReadError, CanonicalThreadReader},
     canonical_write::{CanonicalAppendError, CanonicalThreadAppender},
     observability::LedgerObservabilityEvent,
     projection::VerifiedEntryTransport,
@@ -1537,6 +1538,80 @@ impl CanonicalThreadAppender for RequestBoundCanonicalAppender<'_> {
                     "canonical append failed; uncertain_write remains Live for lazy retry",
                 );
                 Err(CanonicalAppendError::with_source(reason, error))
+            }
+        }
+    }
+}
+
+/// Per-request adapter binding the application [`CanonicalThreadReader`] port
+/// to a serenity [`Context`] and target canonical thread. Constructed inside a
+/// single ledger interaction so the application read use case never sees
+/// serenity types. The adapter logs the typed [`StoreLoadError`] before erasing
+/// it into the application-pure [`CanonicalReadError`].
+pub(crate) struct RequestBoundCanonicalReader<'a> {
+    pub(crate) ctx: &'a Context,
+    pub(crate) store: &'a DiscordCanonicalLedgerStore,
+    pub(crate) canonical_thread_id: ChannelId,
+    pub(crate) ledger_id: LedgerId,
+    pub(crate) load_route_label: &'static str,
+}
+
+impl RequestBoundCanonicalReader<'_> {
+    fn log_read_failure(&self, operation: &'static str, error: &StoreLoadError) {
+        tracing::warn!(
+            canonical_thread_id = ?self.canonical_thread_id,
+            ledger_id = ?self.ledger_id,
+            operation,
+            error = %error,
+            "canonical read failed; uncertain_write resolution returning false",
+        );
+    }
+}
+
+impl CanonicalThreadReader for RequestBoundCanonicalReader<'_> {
+    async fn load_verified_head_hash(&self) -> Result<Option<EntryHash>, CanonicalReadError> {
+        match self
+            .store
+            .load_verified_thread(
+                self.ctx,
+                self.canonical_thread_id,
+                self.ledger_id,
+                self.load_route_label,
+            )
+            .await
+        {
+            Ok(load) => Ok(load.snapshot().current_head_hash()),
+            Err(error) => {
+                self.log_read_failure("load_verified_head_hash", &error);
+                Err(CanonicalReadError::with_source(error))
+            }
+        }
+    }
+
+    async fn scan_recent(&self) -> Result<Vec<CanonicalMessageProbe>, CanonicalReadError> {
+        match self
+            .store
+            .scan_recent_canonical_messages(self.ctx, self.canonical_thread_id, self.ledger_id)
+            .await
+        {
+            Ok(probes) => Ok(probes),
+            Err(error) => {
+                self.log_read_failure("scan_recent", &error);
+                Err(CanonicalReadError::with_source(error))
+            }
+        }
+    }
+
+    async fn scan_all(&self) -> Result<Vec<CanonicalMessageProbe>, CanonicalReadError> {
+        match self
+            .store
+            .scan_all_canonical_messages(self.ctx, self.canonical_thread_id, self.ledger_id)
+            .await
+        {
+            Ok(probes) => Ok(probes),
+            Err(error) => {
+                self.log_read_failure("scan_all", &error);
+                Err(CanonicalReadError::with_source(error))
             }
         }
     }

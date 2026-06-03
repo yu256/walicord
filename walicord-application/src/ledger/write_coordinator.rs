@@ -1,4 +1,12 @@
-use crate::ledger::{EntryHash, LedgerEntryId, LedgerId, UnverifiedLedgerStoreEnvelope};
+use crate::{
+    Clock,
+    ledger::{
+        EntryHash, LedgerEntryId, LedgerId, UnverifiedLedgerStoreEnvelope,
+        canonical_read::CanonicalThreadReader,
+        ledger_chain_genesis_sha256_v1,
+        observability::{LedgerObservability, LedgerObservabilityEvent},
+    },
+};
 use dashmap::DashMap;
 use std::{
     collections::HashMap,
@@ -433,6 +441,100 @@ impl PreparedCanonicalWrite {
             last_known_summary: self.last_known_summary,
             live_since: self.issued_at,
         }
+    }
+}
+
+/// Resolve a Live `uncertain_write` retain by combining a verified canonical
+/// read with the exact-envelope scan defined by [`UncertainWriteRegistry`].
+/// Returns `true` when the retain has cleared (post landed, or conclusive
+/// absence observed) so the caller may proceed with a fresh write; returns
+/// `false` while the retain still blocks new writes.
+///
+/// On scope `RequiresFullHistoryScan` the function re-runs the scan with full
+/// history before classifying. On the `Abandoned` outcome the function emits
+/// the criterion-251 / 287 observability event and marks the registry
+/// `Abandoned`; the caller still receives `false` because user acknowledgement
+/// is required before the block lifts.
+///
+/// `reader` is a per-request port; the caller binds the transport context
+/// (serenity `Context`, canonical thread id, ledger id) at the boundary so
+/// this function never sees Discord types.
+pub async fn resolve_uncertain_write_v1(
+    reader: &impl CanonicalThreadReader,
+    uncertain_writes: &UncertainWriteRegistry,
+    observability: &dyn LedgerObservability,
+    clock: &dyn Clock,
+    ledger_id: LedgerId,
+) -> bool {
+    let retained = match uncertain_writes.current(ledger_id) {
+        None => return true,
+        Some(UncertainWriteState::Abandoned(_)) => return false,
+        Some(UncertainWriteState::Live(retained)) => retained,
+    };
+    let now = clock.now();
+    let retain_expired = retained.requires_full_scan(now);
+    let initial_scope = if retain_expired {
+        ExactEnvelopeScanScope::FullHistory
+    } else {
+        ExactEnvelopeScanScope::RecentWindow
+    };
+    let scan_future = async {
+        if retain_expired {
+            reader.scan_all().await
+        } else {
+            reader.scan_recent().await
+        }
+    };
+    let Ok((head_hash, probes)) = tokio::try_join!(reader.load_verified_head_hash(), scan_future)
+    else {
+        return false;
+    };
+    let observed_head = head_hash.unwrap_or_else(|| ledger_chain_genesis_sha256_v1(ledger_id));
+
+    let scan = UncertainWriteRegistry::scan_for_exact_envelope(
+        &retained,
+        &probes,
+        initial_scope,
+        ScanCompleteness::Complete,
+    );
+    let mut resolution =
+        UncertainWriteRegistry::classify_retry(&retained, scan, initial_scope, observed_head, now);
+
+    if resolution == UncertainWriteResolution::RequiresFullHistoryScan {
+        let Ok(probes) = reader.scan_all().await else {
+            return false;
+        };
+        let scan = UncertainWriteRegistry::scan_for_exact_envelope(
+            &retained,
+            &probes,
+            ExactEnvelopeScanScope::FullHistory,
+            ScanCompleteness::Complete,
+        );
+        resolution = UncertainWriteRegistry::classify_retry(
+            &retained,
+            scan,
+            ExactEnvelopeScanScope::FullHistory,
+            observed_head,
+            now,
+        );
+    }
+    match resolution {
+        UncertainWriteResolution::ClearedByExistingPost { .. }
+        | UncertainWriteResolution::ClearedByConclusiveAbsence => {
+            uncertain_writes.clear(ledger_id);
+            true
+        }
+        UncertainWriteResolution::Abandoned => {
+            observability.emit(LedgerObservabilityEvent::PersistentUncertainWrite {
+                ledger_id,
+                live_since: retained.live_since(),
+                now,
+            });
+            uncertain_writes.abandon(ledger_id);
+            false
+        }
+        UncertainWriteResolution::RequiresFullHistoryScan
+        | UncertainWriteResolution::StillBlocked => false,
     }
 }
 

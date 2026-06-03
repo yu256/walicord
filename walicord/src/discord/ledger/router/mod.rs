@@ -105,8 +105,8 @@ use super::{
         guard_ledger_interaction_resolving_parent,
     },
     store::{
-        DiscordCanonicalLedgerStore, RequestBoundCanonicalAppender, StoreLoadError,
-        StoreWriteError, VerifiedLedgerThreadLoad, serenity_error_is_read_denied,
+        DiscordCanonicalLedgerStore, RequestBoundCanonicalAppender, RequestBoundCanonicalReader,
+        StoreLoadError, StoreWriteError, VerifiedLedgerThreadLoad, serenity_error_is_read_denied,
     },
 };
 
@@ -133,8 +133,8 @@ use walicord_application::ledger::{
         VoidSessionBootstrapError,
     },
     write_coordinator::{
-        BootstrapWriteTarget, ExactEnvelopeScanScope, ScanCompleteness, UncertainWriteRegistry,
-        UncertainWriteResolution, UncertainWriteState, WriteCoordinator, WriteTargetKey,
+        BootstrapWriteTarget, UncertainWriteRegistry, UncertainWriteState, WriteCoordinator,
+        WriteTargetKey, resolve_uncertain_write_v1,
     },
 };
 
@@ -725,99 +725,21 @@ impl LedgerRouter {
         ctx: &Context,
         binding: CanonicalThreadBinding,
     ) -> bool {
-        let ledger_id = binding.ledger_id();
-        let Some(state) = self.deps.uncertain_writes.current(ledger_id) else {
-            return true;
+        let reader = RequestBoundCanonicalReader {
+            ctx,
+            store: self.deps.canonical_store.as_ref(),
+            canonical_thread_id: binding.canonical_thread_id(),
+            ledger_id: binding.ledger_id(),
+            load_route_label: CanonicalLoadRoute::WritePrelude.label(),
         };
-        let UncertainWriteState::Live(retained) = state else {
-            return false;
-        };
-        let now = self.deps.clock.now();
-        let retain_expired = retained.requires_full_scan(now);
-        let initial_scope = if retain_expired {
-            ExactEnvelopeScanScope::FullHistory
-        } else {
-            ExactEnvelopeScanScope::RecentWindow
-        };
-        let probes = async {
-            if retain_expired {
-                self.deps
-                    .canonical_store
-                    .scan_all_canonical_messages(ctx, binding.canonical_thread_id(), ledger_id)
-                    .await
-            } else {
-                self.deps
-                    .canonical_store
-                    .scan_recent_canonical_messages(ctx, binding.canonical_thread_id(), ledger_id)
-                    .await
-            }
-            .map_err(LedgerRouteError::from)
-        };
-        let Ok((load, probes)) = tokio::try_join!(
-            self.load_verified_thread(ctx, binding, CanonicalLoadRoute::WritePrelude),
-            probes,
-        ) else {
-            return false;
-        };
-        let scan = UncertainWriteRegistry::scan_for_exact_envelope(
-            &retained,
-            &probes,
-            initial_scope,
-            ScanCompleteness::Complete,
-        );
-        let observed_head = load.snapshot().current_head_hash().unwrap_or_else(|| {
-            walicord_application::ledger::ledger_chain_genesis_sha256_v1(ledger_id)
-        });
-        let mut resolution = UncertainWriteRegistry::classify_retry(
-            &retained,
-            scan,
-            initial_scope,
-            observed_head,
-            now,
-        );
-        if resolution == UncertainWriteResolution::RequiresFullHistoryScan {
-            let Ok(probes) = self
-                .deps
-                .canonical_store
-                .scan_all_canonical_messages(ctx, binding.canonical_thread_id(), ledger_id)
-                .await
-            else {
-                return false;
-            };
-            let scan = UncertainWriteRegistry::scan_for_exact_envelope(
-                &retained,
-                &probes,
-                ExactEnvelopeScanScope::FullHistory,
-                ScanCompleteness::Complete,
-            );
-            resolution = UncertainWriteRegistry::classify_retry(
-                &retained,
-                scan,
-                ExactEnvelopeScanScope::FullHistory,
-                observed_head,
-                now,
-            );
-        }
-        match resolution {
-            UncertainWriteResolution::ClearedByExistingPost { .. }
-            | UncertainWriteResolution::ClearedByConclusiveAbsence => {
-                self.deps.uncertain_writes.clear(ledger_id);
-                true
-            }
-            UncertainWriteResolution::Abandoned => {
-                self.deps
-                    .observability
-                    .emit(LedgerObservabilityEvent::PersistentUncertainWrite {
-                        ledger_id,
-                        live_since: retained.live_since(),
-                        now: self.deps.clock.now(),
-                    });
-                self.deps.uncertain_writes.abandon(ledger_id);
-                false
-            }
-            UncertainWriteResolution::RequiresFullHistoryScan
-            | UncertainWriteResolution::StillBlocked => false,
-        }
+        resolve_uncertain_write_v1(
+            &reader,
+            self.deps.uncertain_writes.as_ref(),
+            self.deps.observability.as_ref(),
+            self.deps.clock.as_ref(),
+            binding.ledger_id(),
+        )
+        .await
     }
 
     pub(super) async fn load_verified_thread(
