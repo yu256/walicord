@@ -11,7 +11,7 @@ use std::{borrow::Cow, collections::HashMap, fmt::Write as _, sync::Arc, time::D
 use walicord_application::{
     Clock, NonceProvider, SettlementPlanner,
     ledger::{
-        DiscordLedgerSourceDescriptor, ExpenseAuthoringError, LedgerEntry, LedgerEntryId, LedgerId,
+        DiscordLedgerSourceDescriptor, ExpenseAuthoringError, LedgerEntry, LedgerId,
         UnverifiedLedgerStoreEnvelope,
         expense_session::{
             ClaimedExpenseSession, ExpenseConfirmationSnapshot, ExpenseDraftScopeId,
@@ -34,19 +34,24 @@ use walicord_i18n as i18n;
 use walicord_presentation::discord_ledger::{
     DiscordLedgerPresenter, ExpenseConfirmationButtonIds, ExpenseSelectionStepButtonIds,
     LedgerPageInputs, ReadViewBuildError, ReadViewPageModel, ReadViewRoute, RecoveryCta,
-    RecoveryReference, RenderBudgetError, RenderedCanonicalMessage, SafeLiteralText,
-    SurfaceActionRow, SurfaceButton, SurfaceInteractiveButtonStyle, SurfaceMemberLabels,
-    SurfaceSelectMenu, SurfaceSelectOption, VoidCandidateRow, VoidConfirmationRecap,
+    RenderBudgetError, RenderedCanonicalMessage, SafeLiteralText, SurfaceActionRow, SurfaceButton,
+    SurfaceInteractiveButtonStyle, SurfaceMemberLabels, SurfaceSelectMenu, SurfaceSelectOption,
     VoidRetargetReason, VoidSurfaceModel, build_expense_confirmation_surface,
     build_expense_selection_step_surface, build_ledger_empty_page_model, build_ledger_page_model,
     build_review_empty_page_model, build_review_no_transfers_page_model, build_review_page_model,
-    paginate_read_view_model, summary_for_view, truncate_component_label, validate_custom_id,
-    validate_modal_title, validate_text_input_label, validate_text_input_placeholder,
+    paginate_read_view_model, truncate_component_label, validate_custom_id, validate_modal_title,
+    validate_text_input_label, validate_text_input_placeholder,
 };
 
 use crate::channel::ChannelManager;
 
 mod canonical_message;
+mod void;
+#[cfg(test)]
+use self::void::void_confirmation_total_amount;
+use self::void::{
+    selected_void_target, void_candidate_rows, void_confirmation_model, void_selection_action_rows,
+};
 use canonical_message::{
     render_public_expense_message, render_public_settlement_message, render_public_void_message,
     short_summary_for_entry,
@@ -108,7 +113,7 @@ use walicord_application::ledger::{
         PreviewCommitGuard, PreviewStore, PreviewStoreError, PreviewStoreKey,
         PreviewStoreTransition,
     },
-    projection::{NextLedgerEntryIdError, VerifiedLedgerEntryView, project_verified_entries},
+    projection::{NextLedgerEntryIdError, project_verified_entries},
     read_view_session::{ReadViewSession, ReadViewSessionKey, ReadViewSessionStore},
     settle_flow::{
         PreviewAttemptError, PreviewAttemptOutcome, SettleAttemptError, SettleAttemptOutcome,
@@ -5398,16 +5403,6 @@ fn merge_paged_selection(existing: &[u64], visible: &[u64], selected: &[u64]) ->
     merged
 }
 
-fn selected_void_target(component: &ComponentInteraction) -> Option<LedgerEntryId> {
-    match &component.data.kind {
-        ComponentInteractionDataKind::StringSelect { values } => values
-            .first()
-            .and_then(|value| value.parse::<u64>().ok())
-            .map(LedgerEntryId),
-        _ => None,
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum ComponentSelectionParseError {
     #[error("component is not a string select")]
@@ -5445,177 +5440,6 @@ fn parse_component_selection_values(
         })
         .collect()
 }
-
-#[allow(clippy::result_large_err)] // LedgerRouteError is the router-wide error envelope.
-fn void_candidate_rows(
-    candidates: &[VerifiedLedgerEntryView],
-    labels: &SurfaceMemberLabels,
-    ledger_id: LedgerId,
-) -> Result<Vec<VoidCandidateRow>, LedgerRouteError> {
-    candidates
-        .iter()
-        .map(|view| {
-            Ok(VoidCandidateRow {
-                summary: summary_for_view(view, labels)?,
-                recovery_reference: void_recovery_reference(view, ledger_id),
-            })
-        })
-        .collect()
-}
-
-fn void_recovery_reference(
-    view: &VerifiedLedgerEntryView,
-    ledger_id: LedgerId,
-) -> RecoveryReference {
-    RecoveryReference {
-        ledger_id_short: format!("{ledger_id:08x}"),
-        entry_id: view.entry().id,
-        message_link: Some(view.message_link().to_owned()),
-    }
-}
-
-fn void_selection_action_rows(
-    nonce: walicord_application::InteractionNonce,
-    candidates: &[VerifiedLedgerEntryView],
-    labels: &SurfaceMemberLabels,
-) -> Vec<SurfaceActionRow> {
-    let n = nonce;
-    vec![SurfaceActionRow::Select(SurfaceSelectMenu {
-        custom_id: format!("{VOID_PICK_CUSTOM_ID_PREFIX}{n}"),
-        placeholder: Some(i18n::void_select_placeholder().to_owned()),
-        options: candidates
-            .iter()
-            .map(|view| SurfaceSelectOption {
-                value: view.entry().id.0.to_string(),
-                label: void_candidate_select_label(view, labels),
-                description: None,
-                selected: false,
-            })
-            .collect(),
-        min_values: 1,
-        max_values: 1,
-        disabled: false,
-    })]
-}
-
-fn void_confirmation_action_rows(
-    nonce: walicord_application::InteractionNonce,
-) -> Vec<SurfaceActionRow> {
-    let n = nonce;
-    vec![SurfaceActionRow::Buttons(vec![
-        SurfaceButton::Interactive {
-            label: i18n::void_confirm_label().to_owned(),
-            custom_id: format!("{VOID_CONFIRM_CUSTOM_ID_PREFIX}{n}"),
-            style: SurfaceInteractiveButtonStyle::Danger,
-            disabled: false,
-        },
-        SurfaceButton::Interactive {
-            label: i18n::void_reselect_label().to_owned(),
-            custom_id: format!("{VOID_RESELECT_CUSTOM_ID_PREFIX}{n}"),
-            style: SurfaceInteractiveButtonStyle::Secondary,
-            disabled: false,
-        },
-        SurfaceButton::Interactive {
-            label: i18n::void_cancel_label().to_owned(),
-            custom_id: format!("{VOID_CANCEL_CUSTOM_ID_PREFIX}{n}"),
-            style: SurfaceInteractiveButtonStyle::Secondary,
-            disabled: false,
-        },
-    ])]
-}
-
-fn void_candidate_select_label(
-    view: &VerifiedLedgerEntryView,
-    labels: &SurfaceMemberLabels,
-) -> SafeLiteralText {
-    use std::fmt::Write as _;
-    use walicord_application::ledger::LedgerEvent;
-    use walicord_domain::Money;
-
-    let mut label = String::new();
-    match &view.entry().event {
-        LedgerEvent::ExpenseRecorded(event) => {
-            let payer = event
-                .paid_by()
-                .first()
-                .map(|paid| labels.safe_member_label(paid.member_id));
-            let amount = event
-                .paid_by()
-                .iter()
-                .map(|paid| paid.amount)
-                .sum::<Money>();
-            let _ = match payer {
-                Some(payer) => write!(label, "#{} 経費 {amount}円 {payer}", view.entry().id.0),
-                None => write!(label, "#{} 経費 {amount}円", view.entry().id.0),
-            };
-        }
-        LedgerEvent::NormalizedSettlementPlanRecorded(event) => {
-            let _ = write!(label, "#{} 清算", view.entry().id.0);
-            if let Some(first) = event.transfers().first() {
-                let _ = write!(
-                    label,
-                    " {}->{} {}円",
-                    labels.safe_member_label(first.from),
-                    labels.safe_member_label(first.to),
-                    first.amount
-                );
-            }
-            let additional = event.transfers().len().saturating_sub(1);
-            if additional > 0 {
-                let _ = write!(label, " {}", i18n::additional_items(additional));
-            }
-        }
-        _ => {
-            let _ = write!(label, "#{}", view.entry().id.0);
-        }
-    }
-    SafeLiteralText::from_roster_label(&label).expect("void candidate select label should sanitize")
-}
-
-#[allow(clippy::result_large_err)] // LedgerRouteError is the router-wide error envelope.
-fn void_confirmation_model(
-    target: &VerifiedLedgerEntryView,
-    labels: &SurfaceMemberLabels,
-    ledger_id: LedgerId,
-    nonce: walicord_application::InteractionNonce,
-) -> Result<VoidSurfaceModel, LedgerRouteError> {
-    Ok(VoidSurfaceModel::confirmation(
-        i18n::void_confirmation_title(),
-        VoidConfirmationRecap {
-            summary: summary_for_view(target, labels)?,
-            total_amount: void_confirmation_total_amount(target.entry())?,
-            recovery_reference: void_recovery_reference(target, ledger_id),
-        },
-        void_confirmation_action_rows(nonce),
-        true,
-    ))
-}
-
-#[allow(clippy::result_large_err)] // LedgerRouteError is the router-wide error envelope.
-fn void_confirmation_total_amount(entry: &LedgerEntry) -> Result<String, LedgerRouteError> {
-    use walicord_application::ledger::LedgerEvent;
-    use walicord_domain::Money;
-
-    match &entry.event {
-        LedgerEvent::ExpenseRecorded(event) => Ok(event
-            .paid_by()
-            .iter()
-            .map(|paid| paid.amount)
-            .sum::<Money>()
-            .to_string()),
-        LedgerEvent::NormalizedSettlementPlanRecorded(event) => Ok(event
-            .transfers()
-            .iter()
-            .map(|transfer| transfer.amount)
-            .sum::<Money>()
-            .to_string()),
-        _ => Err(LedgerRouteError::Internal(
-            InternalLedgerRouteError::VoidCompose(VoidComposeError::TargetNoLongerVoidable {
-                target_entry_id: entry.id,
-            }),
-        )),
-    }
-}
 /// Parse a session-scoped button custom_id of the form `{prefix}{nonce}` and return
 /// the carried [`InteractionNonce`] when the prefix matches. Returns `None` on prefix
 /// mismatch or on a non-numeric / zero nonce — both treated as "not for this route"
@@ -5640,8 +5464,9 @@ mod tests {
     use walicord_application::{
         InteractionNonce, PreviewInstanceId,
         ledger::{
-            AllocationSnapshot, ExpenseRecorded, MemberAmount, NormalizedSettlementPlanRecorded,
-            ledger_chain_genesis_sha256_v1, participant_resolution::RosterSnapshot,
+            AllocationSnapshot, ExpenseRecorded, LedgerEntryId, MemberAmount,
+            NormalizedSettlementPlanRecorded, ledger_chain_genesis_sha256_v1,
+            participant_resolution::RosterSnapshot,
         },
     };
     use walicord_domain::{Money, Transfer};
