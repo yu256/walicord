@@ -3,6 +3,7 @@ name = "walicord"
 version = "2.5.0"
 edition = "2024"
 license = "MIT"
+default-run = "walicord"
 
 [dependencies]
 walicord-application = { path = "../walicord-application" }

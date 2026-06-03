@@ -3,27 +3,16 @@ use serenity::{
     prelude::Context,
 };
 
-#[allow(dead_code)]
 mod adapters;
-#[allow(dead_code)]
 mod expense_modal_open;
-#[allow(dead_code)]
 mod locator;
-#[allow(dead_code)]
 mod observability;
-#[allow(dead_code)]
 mod panel;
-#[allow(dead_code)]
 mod permissions;
-#[allow(dead_code)]
 mod projection;
-#[allow(dead_code)]
 mod response_writer;
-#[allow(dead_code)]
 mod route_guard;
-#[allow(dead_code)]
 mod router;
-#[allow(dead_code)]
 mod store;
 
 #[cfg(test)]

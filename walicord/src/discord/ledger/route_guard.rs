@@ -4,6 +4,7 @@ use serenity::{
     prelude::Context,
 };
 use walicord_application::ledger::expense_session::ExpenseDraftScopeId;
+#[cfg(test)]
 use walicord_i18n as i18n;
 
 use super::locator::TrackedParentKey;
@@ -46,6 +47,7 @@ pub(crate) fn channel_flag_action(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn outside_tracked_channel_message(
     tracked_parent_channel_id: Option<ChannelId>,
 ) -> String {
@@ -104,9 +106,6 @@ impl LedgerInteractionScope {
     pub(crate) fn channel_id(&self) -> ChannelId {
         self.tracked_parent_channel_id
     }
-    pub(crate) fn interaction_channel_id(&self) -> ChannelId {
-        self.interaction_channel_id
-    }
     pub(crate) fn is_thread_interaction(&self) -> bool {
         self.interaction_channel_id != self.tracked_parent_channel_id
     }
@@ -125,6 +124,7 @@ impl LedgerInteractionScope {
 /// scope the interaction targets — for thread interactions the caller is expected to
 /// pre-resolve the parent via [`slash_scope_channel_id`].
 ///
+#[cfg(test)]
 pub(crate) fn guard_ledger_interaction(
     guild_id: Option<GuildId>,
     channel_id: ChannelId,

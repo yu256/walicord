@@ -1,17 +1,15 @@
-use dashmap::DashMap;
 use serenity::{
     all::{
         ChannelId, CommandInteraction, ComponentInteraction, ComponentInteractionDataKind,
-        CreateInteractionResponse, CreateInteractionResponseMessage, GuildId, ModalInteraction,
-        Permissions, UserId,
+        CreateActionRow, CreateButton, CreateInputText, CreateInteractionResponse, CreateModal,
+        GuildId, InputTextStyle, ModalInteraction, Permissions, UserId,
     },
     async_trait,
     prelude::Context,
 };
-use std::{borrow::Cow, collections::HashMap, sync::Arc};
-use tokio::sync::Mutex;
+use std::{borrow::Cow, collections::HashMap, fmt::Write as _, sync::Arc, time::Duration};
 use walicord_application::{
-    Clock, LedgerIdProvider, NonceProvider, SettlementPlanner,
+    Clock, NonceProvider, SettlementPlanner,
     ledger::{
         DiscordLedgerSourceDescriptor, ExpenseAuthoringError, LedgerEntry, LedgerEntryId, LedgerId,
         UnverifiedLedgerStoreEnvelope,
@@ -19,28 +17,32 @@ use walicord_application::{
             ClaimedExpenseSession, ExpenseConfirmationSnapshot, ExpenseDraftScopeId,
             ExpenseDraftSnapshot, ExpenseLaunchOrigin, ExpenseModalIntent,
             ExpenseModalSubmissionBinding, ExpenseModalSubmissionBindingStore,
-            ExpenseParticipantSelection, ExpenseSelectionPhase, ExpenseSession,
-            ExpenseSessionConstructionError, ExpenseSessionKey, ExpenseSessionStage,
-            ExpenseSessionStore, ModalRetryBinding, ModalRetryBindingStore, ModalRetryPreserved,
-            SessionAccessError, VoidSession, VoidSessionKey, VoidSessionStage, VoidSessionStore,
+            ExpenseParticipantSelection, ExpensePickerKind, ExpenseSelectionPhase,
+            ExpenseSelectionState, ExpenseSession, ExpenseSessionConstructionError,
+            ExpenseSessionKey, ExpenseSessionStage, ExpenseSessionStore, ModalRetryBinding,
+            ModalRetryBindingStore, ModalRetryPreserved, PickerSnapshotId, SessionAccessError,
+            VoidSession, VoidSessionKey, VoidSessionStage, VoidSessionStore,
         },
         observability::LedgerObservabilityEvent,
-        participant_resolution::{ParticipantDrift, RosterSnapshot},
+        participant_resolution::{
+            ParticipantDrift, RosterSnapshot, resolve_selection_against_roster,
+        },
     },
 };
-use walicord_domain::model::MemberId;
+use walicord_domain::model::{MemberId, RoleId};
 use walicord_i18n as i18n;
 use walicord_presentation::discord_ledger::{
     BusinessDateTime, DiscordLedgerPresenter, ExpenseConfirmationButtonIds,
     ExpenseSelectionStepButtonIds, LedgerPageInputs, PublicCanonicalMessageModel,
     PublicSettlementMessageModel, PublicVoidMessageModel, ReadViewBuildError, ReadViewPageModel,
-    ReadViewRoute, RecoveryCta, RecoveryReference, RenderBudgetError, SurfaceActionRow,
-    SurfaceButton, SurfaceInteractiveButtonStyle, SurfaceMemberLabels, SurfaceSelectMenu,
-    SurfaceSelectOption, TransferRow, VoidCandidateRow, VoidConfirmationRecap, VoidRetargetReason,
-    VoidSurfaceModel, build_expense_confirmation_surface, build_expense_selection_step_surface,
-    build_ledger_empty_page_model, build_ledger_page_model, build_review_empty_page_model,
-    build_review_no_transfers_page_model, build_review_page_model, paginate_read_view_model,
-    summary_for_view,
+    ReadViewRoute, RecoveryCta, RecoveryReference, RenderBudgetError, SafeLiteralText,
+    SurfaceActionRow, SurfaceButton, SurfaceInteractiveButtonStyle, SurfaceMemberLabels,
+    SurfaceSelectMenu, SurfaceSelectOption, TransferRow, VoidCandidateRow, VoidConfirmationRecap,
+    VoidRetargetReason, VoidSurfaceModel, build_expense_confirmation_surface,
+    build_expense_selection_step_surface, build_ledger_empty_page_model, build_ledger_page_model,
+    build_review_empty_page_model, build_review_no_transfers_page_model, build_review_page_model,
+    paginate_read_view_model, summary_for_view, truncate_component_label, validate_custom_id,
+    validate_modal_title, validate_text_input_label, validate_text_input_placeholder,
 };
 
 use crate::channel::ChannelManager;
@@ -49,8 +51,9 @@ use super::{
     adapters::DiscordCanonicalThreadLocator,
     expense_modal_open::{
         ExpenseModalBuildError, ExpenseModalCustomIdMatch, ExpenseModalPrefill,
-        build_expense_modal_response, extract_raw_expense_modal_submission,
-        parse_expense_modal_custom_id,
+        build_expense_modal_response, build_expense_weight_modal_response,
+        extract_raw_expense_modal_submission, parse_expense_modal_custom_id,
+        parse_expense_weight_modal_custom_id, parse_expense_weight_modal_submission,
     },
     locator::{
         CanonicalThreadBinding, CanonicalThreadLocatorState, LocatorError,
@@ -67,7 +70,12 @@ use super::{
         LedgerRefreshAcknowledgement, RuntimePermissionScope, missing_runtime_permissions_for,
         render_ledger_refresh_acknowledgement, render_ledger_refresh_uncertain_write_message,
     },
-    response_writer::{rendered_surface_to_message, suppressed_allowed_mentions},
+    projection::{CanonicalLoadFailure, CanonicalLoadRoute},
+    response_writer::{
+        deferred_ephemeral_interaction_response_message, rendered_surface_to_message,
+        safe_edit_interaction_response, safe_ephemeral_interaction_response_message,
+        safe_interaction_response_message,
+    },
     route_guard::{
         LedgerInteractionGuardError, LedgerInteractionScope,
         guard_ledger_interaction_resolving_parent,
@@ -81,8 +89,10 @@ use super::{
 use walicord_application::ledger::{
     expense_flow::{
         ConfirmationBuildError, NavigationError, apply_modified_basic_info,
-        bootstrap_expense_session, build_confirmation_for_session, navigate_back,
-        navigate_modify_selection, navigate_to_phase, toggle_members_group,
+        bootstrap_expense_session, build_confirmation_for_session, clear_picker_selection,
+        navigate_back, navigate_modify_selection, navigate_to_phase, replace_individual_members,
+        replace_payer, replace_selected_roles, replace_weight_overrides, set_picker_view_state,
+        toggle_members_group,
     },
     expense_modal::{ExpenseModalValidationError, validate_expense_modal_submission},
     expense_write::{
@@ -105,8 +115,9 @@ use walicord_application::ledger::{
         enumerate_void_candidates, transition_to_confirm,
     },
     write_coordinator::{
-        ExactEnvelopeScanScope, RetainedCanonicalWrite, ScanCompleteness, UncertainWriteRegistry,
-        UncertainWriteResolution, UncertainWriteState, WriteCoordinator, WriteTargetKey,
+        BootstrapWriteTarget, ExactEnvelopeScanScope, RetainedCanonicalWrite, ScanCompleteness,
+        UncertainWriteRegistry, UncertainWriteResolution, UncertainWriteState, WriteCoordinator,
+        WriteTargetKey,
     },
 };
 
@@ -117,7 +128,6 @@ use walicord_application::ledger::{
 pub struct LedgerRouterDependencies {
     pub clock: Arc<dyn Clock>,
     pub nonce_provider: Arc<dyn NonceProvider>,
-    pub ledger_id_provider: Arc<dyn LedgerIdProvider>,
     pub channels: Arc<ChannelManager>,
     pub roster_fetcher: Arc<dyn RouterRosterFetcher>,
     pub thread_loader: Arc<dyn LedgerThreadLoader>,
@@ -137,6 +147,41 @@ pub struct LedgerRouterDependencies {
     pub bot_user_id: UserId,
 }
 
+trait LedgerInteractionActor {
+    fn ledger_actor_id(&self) -> MemberId;
+    fn ledger_actor_permissions(&self) -> Option<Permissions>;
+}
+
+impl LedgerInteractionActor for CommandInteraction {
+    fn ledger_actor_id(&self) -> MemberId {
+        MemberId(self.user.id.get())
+    }
+
+    fn ledger_actor_permissions(&self) -> Option<Permissions> {
+        self.member.as_deref().and_then(|member| member.permissions)
+    }
+}
+
+impl LedgerInteractionActor for ComponentInteraction {
+    fn ledger_actor_id(&self) -> MemberId {
+        MemberId(self.user.id.get())
+    }
+
+    fn ledger_actor_permissions(&self) -> Option<Permissions> {
+        self.member.as_ref().and_then(|member| member.permissions)
+    }
+}
+
+impl LedgerInteractionActor for ModalInteraction {
+    fn ledger_actor_id(&self) -> MemberId {
+        MemberId(self.user.id.get())
+    }
+
+    fn ledger_actor_permissions(&self) -> Option<Permissions> {
+        self.member.as_ref().and_then(|member| member.permissions)
+    }
+}
+
 /// Object-safe port the router uses to load the verified canonical thread for a
 /// tracked channel. Wraps `DiscordCanonicalLedgerStore::load_verified_thread`; the
 /// adapter is responsible for choosing the `route_label` and supplying the `ctx`.
@@ -147,7 +192,7 @@ pub trait LedgerThreadLoader: Send + Sync {
         ctx: &Context,
         canonical_thread_id: ChannelId,
         ledger_id: LedgerId,
-    ) -> Result<VerifiedLedgerThreadLoad, StoreLoadError>;
+    ) -> Result<VerifiedLedgerThreadLoad, Arc<StoreLoadError>>;
 }
 
 #[async_trait]
@@ -159,14 +204,11 @@ pub trait LedgerCanonicalThreadCreator: Send + Sync {
     ) -> Result<ChannelId, serenity::Error>;
 }
 
-/// Roster snapshot the router needs at confirmation rebuild / record time. Combines the
-/// participant-resolution `RosterSnapshot` (membership + roles) with the per-member
-/// display names so the confirmation page can render labelled rows without a second
-/// round-trip. The Discord adapter populates this from its `RosterProvider`.
 #[derive(Debug, Clone)]
 pub struct RouterRosterSnapshot {
     pub roster: RosterSnapshot,
     pub display_names: HashMap<MemberId, smol_str::SmolStr>,
+    pub role_display_names: HashMap<RoleId, smol_str::SmolStr>,
 }
 
 /// Object-safe roster port for the router. The discord-side `RosterProvider` trait is
@@ -227,16 +269,23 @@ impl LedgerRouteError {
             Self::Permission(message) => message,
             Self::Internal(InternalLedgerRouteError::ThreadLookup(LocatorError::Fetch {
                 ..
-            }))
-            | Self::Internal(InternalLedgerRouteError::ThreadLoad(StoreLoadError::Fetch(_))) => {
+            })) => i18n::ledger_retryable_load_message(),
+            Self::Internal(InternalLedgerRouteError::ThreadLoad(error))
+                if matches!(error.as_ref(), StoreLoadError::Fetch(_)) =>
+            {
                 i18n::ledger_retryable_load_message()
             }
             Self::Internal(InternalLedgerRouteError::ThreadLookup(LocatorError::Permission {
                 ..
-            }))
-            | Self::Internal(InternalLedgerRouteError::ThreadLoad(StoreLoadError::Permission(_))) => {
+            })) => i18n::ledger_permission_failed_message(),
+            Self::Internal(InternalLedgerRouteError::ThreadLoad(error))
+                if matches!(error.as_ref(), StoreLoadError::Permission(_)) =>
+            {
                 i18n::ledger_permission_failed_message()
             }
+            Self::Internal(InternalLedgerRouteError::CanonicalLoad { failure, .. }) => failure
+                .user_message()
+                .unwrap_or_else(|| i18n::ledger_thread_prepare_failed_message()),
             Self::Internal(InternalLedgerRouteError::ExistingLedgerNotReady) => {
                 i18n::ledger_thread_prepare_failed_message()
             }
@@ -269,11 +318,19 @@ pub enum InternalLedgerRouteError {
     #[error("expense write orchestration: {0}")]
     ExpenseWriteOrchestration(#[from] ExpenseWriteOrchestrationError),
     #[error("canonical thread load: {0}")]
-    ThreadLoad(#[from] StoreLoadError),
+    ThreadLoad(Arc<StoreLoadError>),
+    #[error("canonical thread load ({failure:?}): {error}")]
+    CanonicalLoad {
+        failure: CanonicalLoadFailure,
+        #[source]
+        error: Arc<StoreLoadError>,
+    },
     #[error("canonical thread lookup: {0}")]
     ThreadLookup(#[from] LocatorError),
     #[error("canonical thread lookup did not resolve an existing ledger")]
     ExistingLedgerNotReady,
+    #[error("canonical thread bootstrap lock timed out")]
+    BootstrapTimeout,
     #[error("interaction channel scope lookup failed for {observed}: {message}")]
     ChannelScopeLookup {
         observed: ChannelId,
@@ -307,11 +364,10 @@ pub enum InternalLedgerRouteError {
     UncertainWriteAlreadyLive { ledger_id: LedgerId },
     #[error("expense modal submission missing required fields")]
     ModalSubmissionMissingFields,
-    #[error("expense {operation} navigation landed on non-selection stage: {observed_stage:?}")]
-    PostNavigationStageInvariant {
-        operation: PostNavigationOperation,
-        observed_stage: ExpenseSessionStage,
-    },
+    #[error("expense navigation landed on non-selection stage: {observed_stage:?}")]
+    PostNavigationStageInvariant { observed_stage: ExpenseSessionStage },
+    #[error("component selection parse: {0}")]
+    ComponentSelectionParse(#[from] ComponentSelectionParseError),
     #[error("discord call ({site}) failed: {error}")]
     DiscordCall {
         site: DiscordCallSite,
@@ -334,6 +390,12 @@ impl From<LedgerInteractionGuardError> for LedgerRouteError {
 
 impl From<ExpenseModalBuildError> for LedgerRouteError {
     fn from(error: ExpenseModalBuildError) -> Self {
+        Self::Internal(error.into())
+    }
+}
+
+impl From<ComponentSelectionParseError> for LedgerRouteError {
+    fn from(error: ComponentSelectionParseError) -> Self {
         Self::Internal(error.into())
     }
 }
@@ -430,7 +492,13 @@ impl From<ExpenseWriteOrchestrationError> for LedgerRouteError {
 
 impl From<StoreLoadError> for LedgerRouteError {
     fn from(error: StoreLoadError) -> Self {
-        Self::Internal(error.into())
+        Self::Internal(InternalLedgerRouteError::ThreadLoad(Arc::new(error)))
+    }
+}
+
+impl From<Arc<StoreLoadError>> for LedgerRouteError {
+    fn from(error: Arc<StoreLoadError>) -> Self {
+        Self::Internal(InternalLedgerRouteError::ThreadLoad(error))
     }
 }
 
@@ -514,7 +582,7 @@ impl DeferredEphemeralInteraction<'_> {
                 .create_response(
                     &ctx.http,
                     CreateInteractionResponse::Defer(
-                        CreateInteractionResponseMessage::new().ephemeral(true),
+                        deferred_ephemeral_interaction_response_message(),
                     ),
                 )
                 .await
@@ -530,10 +598,9 @@ impl DeferredEphemeralInteraction<'_> {
         components: Vec<serenity::all::CreateActionRow>,
         site: DiscordCallSite,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
-        let response = serenity::all::EditInteractionResponse::new()
+        let response = safe_edit_interaction_response()
             .content(content)
-            .components(components)
-            .allowed_mentions(suppressed_allowed_mentions());
+            .components(components);
         match self {
             Self::Command(command) => command.edit_response(&ctx.http, response).await,
             Self::Component(component) => component.edit_response(&ctx.http, response).await,
@@ -541,14 +608,6 @@ impl DeferredEphemeralInteraction<'_> {
         .map_err(discord_call_error(site))?;
         Ok(InteractionDispatch::Handled)
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-pub enum PostNavigationOperation {
-    #[error("forward")]
-    Forward,
-    #[error("back")]
-    Back,
 }
 
 /// Every serenity API call we make from the router is tagged with a site so a failure
@@ -608,7 +667,6 @@ pub enum DiscordCallSite {
 
 pub struct LedgerRouter {
     deps: LedgerRouterDependencies,
-    bootstrap_locks: DashMap<TrackedParentKey, Arc<Mutex<()>>>,
 }
 
 struct ExpenseSessionClaim<'a> {
@@ -647,10 +705,7 @@ impl Drop for ExpenseSessionClaim<'_> {
 
 impl LedgerRouter {
     pub fn new(deps: LedgerRouterDependencies) -> Self {
-        Self {
-            deps,
-            bootstrap_locks: DashMap::new(),
-        }
+        Self { deps }
     }
 
     async fn clear_resolved_uncertain_write(
@@ -662,7 +717,9 @@ impl LedgerRouter {
         let Some(state) = self.deps.uncertain_writes.current(ledger_id) else {
             return true;
         };
-        let UncertainWriteState::Live(retained) = state;
+        let UncertainWriteState::Live(retained) = state else {
+            return false;
+        };
         let now = self.deps.clock.now();
         let retain_expired = retained.requires_full_scan(now);
         let initial_scope = if retain_expired {
@@ -682,11 +739,10 @@ impl LedgerRouter {
                     .scan_recent_canonical_messages(ctx, binding.canonical_thread_id(), ledger_id)
                     .await
             }
+            .map_err(LedgerRouteError::from)
         };
         let Ok((load, probes)) = tokio::try_join!(
-            self.deps
-                .thread_loader
-                .load(ctx, binding.canonical_thread_id(), ledger_id),
+            self.load_verified_thread(ctx, binding, CanonicalLoadRoute::WritePrelude),
             probes,
         ) else {
             return false;
@@ -736,7 +792,7 @@ impl LedgerRouter {
                 self.deps.uncertain_writes.clear(ledger_id);
                 true
             }
-            UncertainWriteResolution::ClearedByExpiredConclusiveAbsence => {
+            UncertainWriteResolution::Abandoned => {
                 self.deps
                     .observability
                     .emit(LedgerObservabilityEvent::PersistentUncertainWrite {
@@ -744,16 +800,117 @@ impl LedgerRouter {
                         live_since: retained.live_since(),
                         now: self.deps.clock.now(),
                     });
-                self.deps.uncertain_writes.clear(ledger_id);
-                true
+                self.deps.uncertain_writes.abandon(ledger_id);
+                false
             }
             UncertainWriteResolution::RequiresFullHistoryScan
             | UncertainWriteResolution::StillBlocked => false,
         }
     }
 
-    pub fn deps(&self) -> &LedgerRouterDependencies {
-        &self.deps
+    async fn load_verified_thread(
+        &self,
+        ctx: &Context,
+        binding: CanonicalThreadBinding,
+        route: CanonicalLoadRoute,
+    ) -> Result<VerifiedLedgerThreadLoad, LedgerRouteError> {
+        match self
+            .deps
+            .thread_loader
+            .load(ctx, binding.canonical_thread_id(), binding.ledger_id())
+            .await
+        {
+            Ok(load) => Ok(load),
+            Err(error) => {
+                let failure = CanonicalLoadFailure::from_store_error(route, &error);
+                if failure.observability_event().is_some() {
+                    self.deps
+                        .observability
+                        .emit(LedgerObservabilityEvent::UnknownLedgerFormat {
+                            ledger_id: binding.ledger_id(),
+                            failing_entry_id: failure.failing_entry_id(),
+                        });
+                }
+                if canonical_load_failure_blocks_locator(failure) {
+                    let state = self.deps.locator.replace_with_damaged_blocked(
+                        binding.tracked_parent(),
+                        ledger_refresh_recovery_reference(binding),
+                    );
+                    self.observe_blocked_locator_state(&state);
+                }
+                Err(LedgerRouteError::Internal(
+                    InternalLedgerRouteError::CanonicalLoad { failure, error },
+                ))
+            }
+        }
+    }
+
+    pub(crate) fn clear_tracked_parent_channel(&self, tracked_parent_channel_id: ChannelId) {
+        let draft_scope_id = ExpenseDraftScopeId::new(tracked_parent_channel_id.get())
+            .expect("serenity channel IDs are always non-zero");
+        self.deps.expense_sessions.clear_draft_scope(draft_scope_id);
+        self.deps.modal_retries.clear_draft_scope(draft_scope_id);
+        self.deps
+            .modal_submissions
+            .clear_draft_scope(draft_scope_id);
+        let bindings = self
+            .deps
+            .locator
+            .clear_tracked_parent_channel(tracked_parent_channel_id);
+        for binding in bindings {
+            self.deps.void_sessions.clear_ledger(binding.ledger_id());
+            self.deps.preview_store.clear_ledger(binding.ledger_id());
+            self.deps
+                .read_view_sessions
+                .clear_ledger(binding.ledger_id());
+        }
+    }
+
+    #[allow(clippy::result_large_err)] // LedgerRouteError is the router-wide error envelope.
+    fn ensure_actor_visibility(
+        &self,
+        scope: LedgerInteractionScope,
+        actor_id: MemberId,
+        permissions: Option<Permissions>,
+    ) -> Result<(), LedgerRouteError> {
+        if actor_can_view_channel(permissions) {
+            return Ok(());
+        }
+        self.clear_actor_state(scope, actor_id);
+        Err(LedgerRouteError::Permission(Cow::Borrowed(
+            i18n::ledger_permission_failed_message(),
+        )))
+    }
+
+    fn clear_actor_state(&self, scope: LedgerInteractionScope, actor_id: MemberId) {
+        let draft_scope_id = scope.expense_draft_scope_id();
+        self.deps
+            .expense_sessions
+            .clear(ExpenseSessionKey::new(draft_scope_id, actor_id));
+        self.deps
+            .modal_retries
+            .clear_actor_draft_scope(draft_scope_id, actor_id);
+        self.deps
+            .modal_submissions
+            .clear_actor_draft_scope(draft_scope_id, actor_id);
+        let Some(binding) = self
+            .deps
+            .locator
+            .cached(scope.tracked_parent())
+            .and_then(|state| state.binding())
+        else {
+            return;
+        };
+        self.deps
+            .void_sessions
+            .clear(VoidSessionKey::new(binding.ledger_id(), actor_id));
+        self.deps
+            .preview_store
+            .clear(PreviewStoreKey::new(binding.ledger_id(), actor_id));
+        self.deps.read_view_sessions.clear(ReadViewSessionKey {
+            ledger_id: binding.ledger_id(),
+            actor_id,
+        });
     }
 
     #[allow(clippy::result_large_err)] // LedgerRouteError is the router-wide error envelope.
@@ -857,11 +1014,17 @@ impl LedgerRouter {
         ctx: &Context,
         guild_id: Option<GuildId>,
         interaction_channel_id: ChannelId,
+        interaction: &impl LedgerInteractionActor,
     ) -> Result<LedgerInteractionScope, LedgerRouteError> {
         let scope = self
             .guard_scope_without_runtime_permissions(ctx, guild_id, interaction_channel_id)
             .await?;
         self.ensure_runtime_permissions(ctx, scope)?;
+        self.ensure_actor_visibility(
+            scope,
+            interaction.ledger_actor_id(),
+            interaction.ledger_actor_permissions(),
+        )?;
         Ok(scope)
     }
 
@@ -904,6 +1067,29 @@ impl LedgerRouter {
         }
     }
 
+    async fn resolve_readable_ledger(
+        &self,
+        ctx: &Context,
+        scope: LedgerInteractionScope,
+    ) -> Result<Option<CanonicalThreadBinding>, LedgerRouteError> {
+        let state = self
+            .deps
+            .locator
+            .resolve(ctx, scope.tracked_parent())
+            .await?;
+        self.observe_blocked_locator_state(&state);
+        match state {
+            CanonicalThreadLocatorState::Provisioned(binding)
+            | CanonicalThreadLocatorState::ReadyBound(binding) => Ok(Some(binding)),
+            CanonicalThreadLocatorState::ReadyNoThread { .. }
+            | CanonicalThreadLocatorState::ReadyEmptyThread { .. } => Ok(None),
+            CanonicalThreadLocatorState::DuplicateBlocked { .. }
+            | CanonicalThreadLocatorState::DamagedBlocked { .. } => Err(
+                LedgerRouteError::Internal(InternalLedgerRouteError::ExistingLedgerNotReady),
+            ),
+        }
+    }
+
     async fn resolve_or_bootstrap_expense_ledger(
         &self,
         ctx: &Context,
@@ -919,11 +1105,15 @@ impl LedgerRouter {
             return Ok(binding);
         }
         let lock = self
-            .bootstrap_locks
-            .entry(tracked_parent)
-            .or_insert_with(|| Arc::new(Mutex::new(())))
-            .clone();
-        let _guard = lock.lock().await;
+            .deps
+            .write_coordinator
+            .lock_for(WriteTargetKey::Bootstrap(BootstrapWriteTarget::new(
+                scope.guild_id().get(),
+                tracked_parent.tracked_parent_channel_id().get(),
+            )));
+        let _guard = tokio::time::timeout(Duration::from_secs(10), lock.lock())
+            .await
+            .map_err(|_| LedgerRouteError::Internal(InternalLedgerRouteError::BootstrapTimeout))?;
         if let Some(binding) = self
             .deps
             .locator
@@ -941,14 +1131,11 @@ impl LedgerRouter {
                 canonical_thread_id,
                 ..
             } => {
-                let ledger_id = self.deps.ledger_id_provider.next_ledger_id();
-                let binding =
-                    CanonicalThreadBinding::new(tracked_parent, canonical_thread_id, ledger_id);
+                let binding = CanonicalThreadBinding::new(tracked_parent, canonical_thread_id);
                 self.deps.locator.replace_with_provisioned_binding(binding);
                 Ok(binding)
             }
             CanonicalThreadLocatorState::ReadyNoThread { .. } => {
-                let ledger_id = self.deps.ledger_id_provider.next_ledger_id();
                 let canonical_thread_id = self
                     .deps
                     .thread_creator
@@ -958,7 +1145,7 @@ impl LedgerRouter {
                         if serenity_error_is_read_denied(&error) {
                             self.deps.observability.emit_discord(
                                 DiscordLedgerObservabilityEvent::PermissionFailure {
-                                    ledger_id: Some(ledger_id),
+                                    ledger_id: None,
                                     guild_id: Some(scope.guild_id()),
                                     channel_id: scope.channel_id(),
                                     action: PermissionAction::CreatePublicThread,
@@ -967,11 +1154,38 @@ impl LedgerRouter {
                         }
                         discord_call_error(DiscordCallSite::CanonicalThreadCreate)(error)
                     })?;
-                let binding =
-                    CanonicalThreadBinding::new(tracked_parent, canonical_thread_id, ledger_id);
+                let binding = CanonicalThreadBinding::new(tracked_parent, canonical_thread_id);
                 self.deps.locator.replace_with_provisioned_binding(binding);
                 Ok(binding)
             }
+            CanonicalThreadLocatorState::DuplicateBlocked { .. }
+            | CanonicalThreadLocatorState::DamagedBlocked { .. } => Err(
+                LedgerRouteError::Internal(InternalLedgerRouteError::ExistingLedgerNotReady),
+            ),
+        }
+    }
+
+    async fn blocked_expense_launcher_ledger(
+        &self,
+        ctx: &Context,
+        scope: LedgerInteractionScope,
+    ) -> Result<Option<LedgerId>, LedgerRouteError> {
+        let state = self
+            .deps
+            .locator
+            .resolve(ctx, scope.tracked_parent())
+            .await?;
+        self.observe_blocked_locator_state(&state);
+        match state {
+            CanonicalThreadLocatorState::Provisioned(binding)
+            | CanonicalThreadLocatorState::ReadyBound(binding) => Ok(self
+                .deps
+                .uncertain_writes
+                .current(binding.ledger_id())
+                .is_some()
+                .then_some(binding.ledger_id())),
+            CanonicalThreadLocatorState::ReadyNoThread { .. }
+            | CanonicalThreadLocatorState::ReadyEmptyThread { .. } => Ok(None),
             CanonicalThreadLocatorState::DuplicateBlocked { .. }
             | CanonicalThreadLocatorState::DamagedBlocked { .. } => Err(
                 LedgerRouteError::Internal(InternalLedgerRouteError::ExistingLedgerNotReady),
@@ -1047,7 +1261,12 @@ impl LedgerRouter {
                 }
                 CanonicalThreadLocatorState::Provisioned(binding)
                 | CanonicalThreadLocatorState::ReadyBound(binding) => {
-                    if self.clear_resolved_uncertain_write(ctx, binding).await {
+                    if self
+                        .deps
+                        .uncertain_writes
+                        .current(binding.ledger_id())
+                        .is_none()
+                    {
                         (
                             render_ledger_refresh_acknowledgement(
                                 LedgerRefreshAcknowledgement::Ready,
@@ -1067,11 +1286,9 @@ impl LedgerRouter {
             .create_response(
                 &ctx.http,
                 CreateInteractionResponse::Message(
-                    CreateInteractionResponseMessage::new()
-                        .ephemeral(true)
+                    safe_ephemeral_interaction_response_message()
                         .content(content)
-                        .components(components)
-                        .allowed_mentions(suppressed_allowed_mentions()),
+                        .components(components),
                 ),
             )
             .await
@@ -1089,24 +1306,21 @@ impl LedgerRouter {
         command: &CommandInteraction,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
         let scope = self
-            .guard_scope(ctx, command.guild_id, command.channel_id)
+            .guard_scope(ctx, command.guild_id, command.channel_id, command)
             .await?;
-        let locator_state = self
-            .deps
-            .locator
-            .refresh(ctx, scope.tracked_parent())
-            .await?;
-        self.observe_blocked_locator_state(&locator_state);
+        let locator_state = self.deps.locator.cached(scope.tracked_parent());
+        if let Some(state) = locator_state.as_ref() {
+            self.observe_blocked_locator_state(state);
+        }
         let (body, components) =
-            match render_panel_post_message_for_locator_state(Some(&locator_state), false) {
+            match render_panel_post_message_for_locator_state(locator_state.as_ref(), false) {
                 Ok(rendered) => rendered,
                 Err(message) => message.into_parts(),
             };
         let response = CreateInteractionResponse::Message(
-            CreateInteractionResponseMessage::new()
+            safe_interaction_response_message()
                 .content(body)
-                .components(components)
-                .allowed_mentions(suppressed_allowed_mentions()),
+                .components(components),
         );
         command
             .create_response(&ctx.http, response)
@@ -1121,7 +1335,7 @@ impl LedgerRouter {
         command: &CommandInteraction,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
         let scope = match self
-            .guard_scope(ctx, command.guild_id, command.channel_id)
+            .guard_scope(ctx, command.guild_id, command.channel_id, command)
             .await
         {
             Ok(scope) => scope,
@@ -1152,12 +1366,19 @@ impl LedgerRouter {
         interaction
             .defer(ctx, DiscordCallSite::ReviewDeferEphemeral)
             .await?;
-        let binding = self.resolve_existing_ledger(ctx, scope).await?;
+        let Some(binding) = self.resolve_readable_ledger(ctx, scope).await? else {
+            let rendered = DiscordLedgerPresenter::render_read_view_page(
+                &build_review_empty_page_model(route, false, None),
+            )?;
+            let (body, components) = rendered_surface_to_message(rendered);
+            return interaction
+                .edit(ctx, body, components, DiscordCallSite::ReviewEditResponse)
+                .await;
+        };
         let ledger_id = binding.ledger_id();
+        let uncertain_write = self.deps.uncertain_writes.current(ledger_id).is_some();
         let load = self
-            .deps
-            .thread_loader
-            .load(ctx, binding.canonical_thread_id(), ledger_id)
+            .load_verified_thread(ctx, binding, CanonicalLoadRoute::Preview)
             .await?;
         let roster = self
             .deps
@@ -1189,7 +1410,7 @@ impl LedgerRouter {
                     },
                 );
             }
-            vec![build_review_empty_page_model(route, false, None)]
+            vec![build_review_empty_page_model(route, uncertain_write, None)]
         } else {
             let actor_id = MemberId(interaction.user_id().get());
             match compose_and_store_preview(
@@ -1235,24 +1456,29 @@ impl LedgerRouter {
                                 },
                             );
                         }
-                        vec![build_review_no_transfers_page_model(route, false)]
+                        vec![build_review_no_transfers_page_model(route, uncertain_write)]
                     }
                     PreviewAttemptOutcome::Stored {
                         record,
                         preview_instance_id,
                     } => {
                         stored_preview_instance_id = Some(preview_instance_id);
-                        paginate_read_view_model(build_review_page_model(
+                        let mut model = build_review_page_model(
                             walicord_presentation::discord_ledger::ReviewPageInputs {
                                 route,
                                 state: load.snapshot().projected().state(),
                                 previewed: record.previewed(),
                                 labels: &labels,
-                                uncertain_write: false,
+                                uncertain_write,
                                 recovery_cta: RecoveryCta::ParentLink,
                                 recovery_url: None,
                             },
-                        ))
+                        );
+                        if prior_preview_instance_id.is_some() {
+                            model.route_guidance_lines =
+                                review_route_guidance_lines_with_replacement_notice(route);
+                        }
+                        paginate_read_view_model(model)
                     }
                 },
             }
@@ -1294,7 +1520,7 @@ impl LedgerRouter {
         command: &CommandInteraction,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
         let scope = match self
-            .guard_scope(ctx, command.guild_id, command.channel_id)
+            .guard_scope(ctx, command.guild_id, command.channel_id, command)
             .await
         {
             Ok(scope) => scope,
@@ -1317,11 +1543,13 @@ impl LedgerRouter {
         let actor_id = MemberId(command.user.id.get());
         let key = PreviewStoreKey::new(ledger_id, actor_id);
         if !self.clear_resolved_uncertain_write(ctx, binding).await {
+            let (message, components) = self.uncertain_write_block_response(ledger_id, false, true);
             return self
-                .edit_command_response(
+                .edit_command_response_with_components(
                     ctx,
                     command,
-                    uncertain_write_block_message(false, true),
+                    message,
+                    components,
                     DiscordCallSite::SettleEditResponse,
                 )
                 .await;
@@ -1330,20 +1558,20 @@ impl LedgerRouter {
         let lock = self.deps.write_coordinator.lock_for(ledger_id);
         let _guard = lock.lock().await;
         if !self.clear_resolved_uncertain_write(ctx, binding).await {
+            let (message, components) = self.uncertain_write_block_response(ledger_id, false, true);
             return self
-                .edit_command_response(
+                .edit_command_response_with_components(
                     ctx,
                     command,
-                    uncertain_write_block_message(false, true),
+                    message,
+                    components,
                     DiscordCallSite::SettleEditResponse,
                 )
                 .await;
         }
 
         let load = self
-            .deps
-            .thread_loader
-            .load(ctx, binding.canonical_thread_id(), ledger_id)
+            .load_verified_thread(ctx, binding, CanonicalLoadRoute::WritePrelude)
             .await?;
         let next_entry_id = load.next_entry_id()?;
         let Some(preview_instance_id) = self
@@ -1480,10 +1708,13 @@ impl LedgerRouter {
                 .await
             }
             Err(_error) => {
-                self.edit_command_response(
+                let (message, components) =
+                    self.uncertain_write_block_response(ledger_id, false, true);
+                self.edit_command_response_with_components(
                     ctx,
                     command,
-                    uncertain_write_block_message(false, true),
+                    message,
+                    components,
                     DiscordCallSite::SettleEditResponse,
                 )
                 .await
@@ -1497,7 +1728,7 @@ impl LedgerRouter {
         command: &CommandInteraction,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
         let scope = match self
-            .guard_scope(ctx, command.guild_id, command.channel_id)
+            .guard_scope(ctx, command.guild_id, command.channel_id, command)
             .await
         {
             Ok(scope) => scope,
@@ -1519,23 +1750,26 @@ impl LedgerRouter {
         interaction
             .defer(ctx, DiscordCallSite::VoidDeferEphemeral)
             .await?;
-        let binding = self.resolve_existing_ledger(ctx, scope).await?;
+        let Some(binding) = self.resolve_readable_ledger(ctx, scope).await? else {
+            return self
+                .edit_initial_void_model(
+                    ctx,
+                    interaction,
+                    VoidSurfaceModel::empty(i18n::panel_void_button_label(), Vec::new(), true),
+                )
+                .await;
+        };
         let ledger_id = binding.ledger_id();
         if !self.clear_resolved_uncertain_write(ctx, binding).await {
+            let (message, components) =
+                self.uncertain_write_block_response(ledger_id, false, false);
             return interaction
-                .edit(
-                    ctx,
-                    uncertain_write_block_message(false, false),
-                    Vec::new(),
-                    DiscordCallSite::VoidEditResponse,
-                )
+                .edit(ctx, message, components, DiscordCallSite::VoidEditResponse)
                 .await;
         }
 
         let load = self
-            .deps
-            .thread_loader
-            .load(ctx, binding.canonical_thread_id(), ledger_id)
+            .load_verified_thread(ctx, binding, CanonicalLoadRoute::Read)
             .await?;
         if load.snapshot().canonical_entry_count() == 0 {
             return self
@@ -1585,13 +1819,19 @@ impl LedgerRouter {
         );
         let rows = void_candidate_rows(&candidates, &labels, ledger_id)?;
         let action_rows = void_selection_action_rows(nonce, &candidates, &labels);
+        let replaced = self
+            .deps
+            .void_sessions
+            .has_active_session(key, self.deps.clock.now());
         self.deps.void_sessions.replace(session);
-        self.edit_initial_void_model(
-            ctx,
-            interaction,
-            VoidSurfaceModel::selection(i18n::panel_void_button_label(), rows, action_rows, true),
-        )
-        .await
+        let mut model =
+            VoidSurfaceModel::selection(i18n::panel_void_button_label(), rows, action_rows, true);
+        if replaced {
+            model
+                .phase_copy
+                .insert(0, i18n::void_session_replaced_message().to_owned());
+        }
+        self.edit_initial_void_model(ctx, interaction, model).await
     }
 
     async fn dispatch_expense_command(
@@ -1600,8 +1840,26 @@ impl LedgerRouter {
         command: &CommandInteraction,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
         let scope = self
-            .guard_scope(ctx, command.guild_id, command.channel_id)
+            .guard_scope(ctx, command.guild_id, command.channel_id, command)
             .await?;
+        if let Some(ledger_id) = self.blocked_expense_launcher_ledger(ctx, scope).await? {
+            let (message, components) =
+                self.uncertain_write_block_response(ledger_id, false, false);
+            command
+                .create_response(
+                    &ctx.http,
+                    CreateInteractionResponse::Message(
+                        safe_ephemeral_interaction_response_message()
+                            .content(message)
+                            .components(components),
+                    ),
+                )
+                .await
+                .map_err(discord_call_error(
+                    DiscordCallSite::ExpenseModalCreateResponse,
+                ))?;
+            return Ok(InteractionDispatch::Handled);
+        }
 
         let nonce = self.deps.nonce_provider.next_interaction_nonce();
         self.store_expense_modal_submission(
@@ -1633,7 +1891,7 @@ impl LedgerRouter {
         command: &CommandInteraction,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
         let scope = match self
-            .guard_scope(ctx, command.guild_id, command.channel_id)
+            .guard_scope(ctx, command.guild_id, command.channel_id, command)
             .await
         {
             Ok(scope) => scope,
@@ -1661,11 +1919,22 @@ impl LedgerRouter {
         interaction
             .defer(ctx, DiscordCallSite::LedgerDeferEphemeral)
             .await?;
-        let binding = self.resolve_existing_ledger(ctx, scope).await?;
-        let load = self
+        let Some(binding) = self.resolve_readable_ledger(ctx, scope).await? else {
+            let rendered = DiscordLedgerPresenter::render_read_view_page(
+                &build_ledger_empty_page_model(route, false),
+            )?;
+            let (body, components) = rendered_surface_to_message(rendered);
+            return interaction
+                .edit(ctx, body, components, DiscordCallSite::LedgerEditResponse)
+                .await;
+        };
+        let uncertain_write = self
             .deps
-            .thread_loader
-            .load(ctx, binding.canonical_thread_id(), binding.ledger_id())
+            .uncertain_writes
+            .current(binding.ledger_id())
+            .is_some();
+        let load = self
+            .load_verified_thread(ctx, binding, CanonicalLoadRoute::Read)
             .await?;
 
         let roster = self
@@ -1683,7 +1952,7 @@ impl LedgerRouter {
         let views = project_verified_entries(&load).map_err(LedgerRouteError::from)?;
 
         let pages = if views.is_empty() {
-            vec![build_ledger_empty_page_model(route, false)]
+            vec![build_ledger_empty_page_model(route, uncertain_write)]
         } else {
             let model = build_ledger_page_model(LedgerPageInputs {
                 route,
@@ -1691,7 +1960,7 @@ impl LedgerRouter {
                 state: load.snapshot().projected().state(),
                 labels: &labels,
                 ledger_id: binding.ledger_id(),
-                uncertain_write: false,
+                uncertain_write,
             })?;
             paginate_read_view_model(model)
         };
@@ -1728,6 +1997,11 @@ impl LedgerRouter {
         ctx: &Context,
         component: &ComponentInteraction,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
+        if component.data.custom_id == UNCERTAIN_WRITE_ACKNOWLEDGE_CUSTOM_ID {
+            return self
+                .dispatch_abandoned_uncertain_write_acknowledge(ctx, component)
+                .await;
+        }
         match panel_launcher(&component.data.custom_id) {
             Some(PanelLauncher::Expense) => {
                 return self.dispatch_panel_expense_launcher(ctx, component).await;
@@ -1766,6 +2040,70 @@ impl LedgerRouter {
         {
             return self
                 .dispatch_expense_basic_edit(ctx, component, nonce)
+                .await;
+        }
+        if let Some((nonce, snapshot_id)) =
+            parse_expense_picker_selection_custom_id(custom_id, EXPENSE_PAYER_PICK_CUSTOM_ID_PREFIX)
+        {
+            return self
+                .dispatch_expense_payer_pick(ctx, component, nonce, snapshot_id)
+                .await;
+        }
+        if let Some((kind, nonce, snapshot_id)) =
+            parse_expense_picker_custom_id(custom_id, EXPENSE_PICKER_PREV_CUSTOM_ID_PREFIX)
+        {
+            return self
+                .dispatch_expense_picker_page(
+                    ctx,
+                    component,
+                    kind,
+                    PickerPageDirection::Previous,
+                    nonce,
+                    snapshot_id,
+                )
+                .await;
+        }
+        if let Some((kind, nonce, snapshot_id)) =
+            parse_expense_picker_custom_id(custom_id, EXPENSE_PICKER_NEXT_CUSTOM_ID_PREFIX)
+        {
+            return self
+                .dispatch_expense_picker_page(
+                    ctx,
+                    component,
+                    kind,
+                    PickerPageDirection::Next,
+                    nonce,
+                    snapshot_id,
+                )
+                .await;
+        }
+        if let Some((kind, nonce, snapshot_id)) =
+            parse_expense_picker_custom_id(custom_id, EXPENSE_PICKER_SEARCH_CUSTOM_ID_PREFIX)
+        {
+            return self
+                .dispatch_expense_picker_search_open(ctx, component, kind, nonce, snapshot_id)
+                .await;
+        }
+        if let Some((kind, nonce, snapshot_id)) =
+            parse_expense_picker_custom_id(custom_id, EXPENSE_PICKER_CLEAR_CUSTOM_ID_PREFIX)
+        {
+            return self
+                .dispatch_expense_picker_clear(ctx, component, kind, nonce, snapshot_id)
+                .await;
+        }
+        if let Some((nonce, snapshot_id)) = parse_expense_picker_selection_custom_id(
+            custom_id,
+            EXPENSE_INDIVIDUAL_PICK_CUSTOM_ID_PREFIX,
+        ) {
+            return self
+                .dispatch_expense_individual_pick(ctx, component, nonce, snapshot_id)
+                .await;
+        }
+        if let Some((nonce, snapshot_id)) =
+            parse_expense_picker_selection_custom_id(custom_id, EXPENSE_ROLE_PICK_CUSTOM_ID_PREFIX)
+        {
+            return self
+                .dispatch_expense_role_pick(ctx, component, nonce, snapshot_id)
                 .await;
         }
         if let Some(nonce) =
@@ -1817,6 +2155,13 @@ impl LedgerRouter {
                     nonce,
                     ExpenseSelectionPhase::WeightEditor,
                 )
+                .await;
+        }
+        if let Some(nonce) =
+            parse_expense_session_button_nonce(custom_id, EXPENSE_WEIGHT_EDIT_CUSTOM_ID_PREFIX)
+        {
+            return self
+                .dispatch_expense_weight_edit(ctx, component, nonce)
                 .await;
         }
         if let Some(nonce) =
@@ -1883,7 +2228,7 @@ impl LedgerRouter {
         direction: ReadViewNavigation,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
         let scope = self
-            .guard_scope(ctx, component.guild_id, component.channel_id)
+            .guard_scope(ctx, component.guild_id, component.channel_id, component)
             .await?;
         let binding = self.resolve_existing_ledger(ctx, scope).await?;
         let actor_id = MemberId(component.user.id.get());
@@ -1927,10 +2272,9 @@ impl LedgerRouter {
             .create_response(
                 &ctx.http,
                 CreateInteractionResponse::UpdateMessage(
-                    CreateInteractionResponseMessage::new()
+                    safe_interaction_response_message()
                         .content(body)
-                        .components(components)
-                        .allowed_mentions(suppressed_allowed_mentions()),
+                        .components(components),
                 ),
             )
             .await
@@ -1940,6 +2284,38 @@ impl LedgerRouter {
         Ok(InteractionDispatch::Handled)
     }
 
+    async fn dispatch_abandoned_uncertain_write_acknowledge(
+        &self,
+        ctx: &Context,
+        component: &ComponentInteraction,
+    ) -> Result<InteractionDispatch, LedgerRouteError> {
+        let scope = self
+            .guard_scope(ctx, component.guild_id, component.channel_id, component)
+            .await?;
+        let binding = self.resolve_existing_ledger(ctx, scope).await?;
+        let ledger_id = binding.ledger_id();
+        let lock = self.deps.write_coordinator.lock_for(ledger_id);
+        let _guard = lock.lock().await;
+        let acknowledged = matches!(
+            self.deps.uncertain_writes.current(ledger_id),
+            Some(UncertainWriteState::Abandoned(_))
+        );
+        if acknowledged {
+            self.deps.uncertain_writes.clear(ledger_id);
+        }
+        self.reply_component_ephemeral(
+            ctx,
+            component,
+            if acknowledged {
+                i18n::abandoned_uncertain_write_acknowledged_message()
+            } else {
+                i18n::uncertain_write_block_message()
+            },
+            DiscordCallSite::ExpenseUncertainWriteReply,
+        )
+        .await
+    }
+
     async fn dispatch_void_pick(
         &self,
         ctx: &Context,
@@ -1947,7 +2323,7 @@ impl LedgerRouter {
         nonce: walicord_application::InteractionNonce,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
         let scope = self
-            .guard_scope(ctx, component.guild_id, component.channel_id)
+            .guard_scope(ctx, component.guild_id, component.channel_id, component)
             .await?;
         let binding = self.resolve_existing_ledger(ctx, scope).await?;
         let ledger_id = binding.ledger_id();
@@ -1974,9 +2350,7 @@ impl LedgerRouter {
         };
 
         let load = self
-            .deps
-            .thread_loader
-            .load(ctx, binding.canonical_thread_id(), ledger_id)
+            .load_verified_thread(ctx, binding, CanonicalLoadRoute::Read)
             .await?;
         let candidates = enumerate_void_candidates(&load)?;
         match transition_to_confirm(
@@ -2033,7 +2407,7 @@ impl LedgerRouter {
         nonce: walicord_application::InteractionNonce,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
         let scope = self
-            .guard_scope(ctx, component.guild_id, component.channel_id)
+            .guard_scope(ctx, component.guild_id, component.channel_id, component)
             .await?;
         let binding = self.resolve_existing_ledger(ctx, scope).await?;
         let key = VoidSessionKey::new(binding.ledger_id(), MemberId(component.user.id.get()));
@@ -2063,7 +2437,7 @@ impl LedgerRouter {
         nonce: walicord_application::InteractionNonce,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
         let scope = self
-            .guard_scope(ctx, component.guild_id, component.channel_id)
+            .guard_scope(ctx, component.guild_id, component.channel_id, component)
             .await?;
         let binding = self.resolve_existing_ledger(ctx, scope).await?;
         let key = VoidSessionKey::new(binding.ledger_id(), MemberId(component.user.id.get()));
@@ -2091,7 +2465,7 @@ impl LedgerRouter {
         nonce: walicord_application::InteractionNonce,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
         let scope = self
-            .guard_scope(ctx, component.guild_id, component.channel_id)
+            .guard_scope(ctx, component.guild_id, component.channel_id, component)
             .await?;
         let binding = self.resolve_existing_ledger(ctx, scope).await?;
         let ledger_id = binding.ledger_id();
@@ -2120,11 +2494,13 @@ impl LedgerRouter {
             .map_err(discord_call_error(DiscordCallSite::VoidDeferComponent))?;
 
         if !self.clear_resolved_uncertain_write(ctx, binding).await {
+            let (message, components) = self.uncertain_write_block_response(ledger_id, true, false);
             return self
-                .edit_component_response(
+                .edit_component_response_with_components(
                     ctx,
                     component,
-                    uncertain_write_block_message(true, false),
+                    message,
+                    components,
                     DiscordCallSite::VoidEditResponse,
                 )
                 .await;
@@ -2133,19 +2509,19 @@ impl LedgerRouter {
         let lock = self.deps.write_coordinator.lock_for(ledger_id);
         let _guard = lock.lock().await;
         if !self.clear_resolved_uncertain_write(ctx, binding).await {
+            let (message, components) = self.uncertain_write_block_response(ledger_id, true, false);
             return self
-                .edit_component_response(
+                .edit_component_response_with_components(
                     ctx,
                     component,
-                    uncertain_write_block_message(true, false),
+                    message,
+                    components,
                     DiscordCallSite::VoidEditResponse,
                 )
                 .await;
         }
         let load = self
-            .deps
-            .thread_loader
-            .load(ctx, binding.canonical_thread_id(), ledger_id)
+            .load_verified_thread(ctx, binding, CanonicalLoadRoute::WritePrelude)
             .await?;
         let next_entry_id = load.next_entry_id()?;
         let target_id = session
@@ -2239,10 +2615,13 @@ impl LedgerRouter {
                 .await
             }
             Err(_error) => {
-                self.edit_component_response(
+                let (message, components) =
+                    self.uncertain_write_block_response(ledger_id, true, false);
+                self.edit_component_response_with_components(
                     ctx,
                     component,
-                    uncertain_write_block_message(true, false),
+                    message,
+                    components,
                     DiscordCallSite::VoidEditResponse,
                 )
                 .await
@@ -2261,7 +2640,7 @@ impl LedgerRouter {
         target: ExpenseSelectionPhase,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
         let scope = self
-            .guard_scope(ctx, component.guild_id, component.channel_id)
+            .guard_scope(ctx, component.guild_id, component.channel_id, component)
             .await?;
         let key = ExpenseSessionKey::new(
             scope.expense_draft_scope_id(),
@@ -2279,19 +2658,8 @@ impl LedgerRouter {
             self.deps.clock.as_ref(),
         ) {
             Ok(updated) => {
-                let next_phase = match updated.stage() {
-                    ExpenseSessionStage::InSelection { phase } => phase.clone(),
-                    other => {
-                        return Err(InternalLedgerRouteError::PostNavigationStageInvariant {
-                            operation: PostNavigationOperation::Forward,
-                            observed_stage: other.clone(),
-                        }
-                        .into());
-                    }
-                };
-                let nonce = updated.nonce();
                 let dispatch = self
-                    .respond_with_step_body(ctx, component, &next_phase, nonce)
+                    .respond_with_step_body(ctx, component, scope, &updated)
                     .await?;
                 claim.replace(updated);
                 Ok(dispatch)
@@ -2317,7 +2685,7 @@ impl LedgerRouter {
         observed_nonce: walicord_application::InteractionNonce,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
         let scope = self
-            .guard_scope(ctx, component.guild_id, component.channel_id)
+            .guard_scope(ctx, component.guild_id, component.channel_id, component)
             .await?;
         let key = ExpenseSessionKey::new(
             scope.expense_draft_scope_id(),
@@ -2359,9 +2727,7 @@ impl LedgerRouter {
         let (body, components) = rendered_surface_to_message(rendered);
 
         let response = CreateInteractionResponse::UpdateMessage(
-            CreateInteractionResponseMessage::new()
-                .ephemeral(true)
-                .allowed_mentions(suppressed_allowed_mentions())
+            safe_ephemeral_interaction_response_message()
                 .content(body)
                 .components(components),
         );
@@ -2393,7 +2759,7 @@ impl LedgerRouter {
         observed_nonce: walicord_application::InteractionNonce,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
         let scope = self
-            .guard_scope(ctx, component.guild_id, component.channel_id)
+            .guard_scope(ctx, component.guild_id, component.channel_id, component)
             .await?;
         let guild_id = scope.guild_id();
         let channel_id = scope.channel_id();
@@ -2414,15 +2780,16 @@ impl LedgerRouter {
 
         let binding = self.resolve_or_bootstrap_expense_ledger(ctx, scope).await?;
         let ledger_id = binding.ledger_id();
-        let canonical_thread_id = binding.canonical_thread_id();
-        let write_target = ledger_id;
+        let write_target = WriteTargetKey::Published(ledger_id);
 
         if !self.clear_resolved_uncertain_write(ctx, binding).await {
+            let (message, components) = self.uncertain_write_block_response(ledger_id, true, false);
             return self
-                .reply_component_ephemeral(
+                .reply_component_ephemeral_with_components(
                     ctx,
                     component,
-                    uncertain_write_block_message(true, false),
+                    message,
+                    components,
                     DiscordCallSite::ExpenseUncertainWriteReply,
                 )
                 .await;
@@ -2433,20 +2800,19 @@ impl LedgerRouter {
         let lock = self.deps.write_coordinator.lock_for(write_target);
         let _guard = lock.lock().await;
         if !self.clear_resolved_uncertain_write(ctx, binding).await {
+            let (message, components) = self.uncertain_write_block_response(ledger_id, true, false);
             return self
-                .reply_component_ephemeral(
+                .reply_component_ephemeral_with_components(
                     ctx,
                     component,
-                    uncertain_write_block_message(true, false),
+                    message,
+                    components,
                     DiscordCallSite::ExpenseUncertainWriteReply,
                 )
                 .await;
         }
 
-        let load_future = self
-            .deps
-            .thread_loader
-            .load(ctx, canonical_thread_id, ledger_id);
+        let load_future = self.load_verified_thread(ctx, binding, CanonicalLoadRoute::WritePrelude);
         let roster_future = self.deps.roster_fetcher.fetch(ctx, guild_id, channel_id);
         let (load_result, roster_result) = tokio::join!(load_future, roster_future);
         let snapshot_load = load_result?;
@@ -2556,9 +2922,7 @@ impl LedgerRouter {
         }
 
         let response = CreateInteractionResponse::UpdateMessage(
-            CreateInteractionResponseMessage::new()
-                .ephemeral(true)
-                .allowed_mentions(suppressed_allowed_mentions())
+            safe_ephemeral_interaction_response_message()
                 .content(body)
                 .components(components),
         );
@@ -2631,11 +2995,20 @@ impl LedgerRouter {
                 self.deps.uncertain_writes.clear(write_target);
                 self.respond_record_success(ctx, component).await
             }
-            Err(error) => {
+            Err(_error) => {
                 // Retain stays Live: a transport error here is exactly the
                 // criterion-217 / 279 case where lazy retry must decide whether the
                 // canonical message actually posted.
-                Err(error.into())
+                let (message, components) =
+                    self.uncertain_write_block_response(ledger_id, true, false);
+                self.reply_component_ephemeral_with_components(
+                    ctx,
+                    component,
+                    message,
+                    components,
+                    DiscordCallSite::ExpenseUncertainWriteReply,
+                )
+                .await
             }
         }
     }
@@ -2646,9 +3019,7 @@ impl LedgerRouter {
         component: &ComponentInteraction,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
         let response = CreateInteractionResponse::UpdateMessage(
-            CreateInteractionResponseMessage::new()
-                .ephemeral(true)
-                .allowed_mentions(suppressed_allowed_mentions())
+            safe_ephemeral_interaction_response_message()
                 .content(i18n::expense_recorded_message())
                 .components(Vec::new()),
         );
@@ -2670,7 +3041,7 @@ impl LedgerRouter {
         observed_nonce: walicord_application::InteractionNonce,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
         let scope = self
-            .guard_scope(ctx, component.guild_id, component.channel_id)
+            .guard_scope(ctx, component.guild_id, component.channel_id, component)
             .await?;
         let key = ExpenseSessionKey::new(
             scope.expense_draft_scope_id(),
@@ -2683,9 +3054,8 @@ impl LedgerRouter {
             return Ok(InteractionDispatch::Handled);
         };
         let updated = navigate_modify_selection(claim.session().clone(), self.deps.clock.as_ref())?;
-        let nonce = updated.nonce();
         let dispatch = self
-            .respond_with_step_body(ctx, component, &ExpenseSelectionPhase::Payer, nonce)
+            .respond_with_step_body(ctx, component, scope, &updated)
             .await?;
         claim.replace(updated);
         Ok(dispatch)
@@ -2693,6 +3063,151 @@ impl LedgerRouter {
 
     /// Toggle the `MEMBERS` virtual group on the active session and refresh the
     /// participant-source step chrome.
+    async fn dispatch_expense_payer_pick(
+        &self,
+        ctx: &Context,
+        component: &ComponentInteraction,
+        observed_nonce: walicord_application::InteractionNonce,
+        expected_snapshot: PickerSnapshotId,
+    ) -> Result<InteractionDispatch, LedgerRouteError> {
+        let scope = self
+            .guard_scope(ctx, component.guild_id, component.channel_id, component)
+            .await?;
+        let key = ExpenseSessionKey::new(
+            scope.expense_draft_scope_id(),
+            MemberId(component.user.id.get()),
+        );
+        let Some(mut claim) = self
+            .take_expense_session_or_reply(ctx, component, key, observed_nonce)
+            .await?
+        else {
+            return Ok(InteractionDispatch::Handled);
+        };
+        let page = self
+            .expense_picker_page_for_session(ctx, scope, claim.session(), ExpensePickerKind::Payer)
+            .await?;
+        if page.snapshot_id != expected_snapshot {
+            return self.reject_stale_picker_component(ctx, component).await;
+        }
+        let payer = selected_component_values(component)?
+            .first()
+            .copied()
+            .map(MemberId);
+        let updated = replace_payer(claim.session().clone(), payer, self.deps.clock.as_ref())?;
+        let dispatch = self
+            .respond_with_step_body(ctx, component, scope, &updated)
+            .await?;
+        claim.replace(updated);
+        Ok(dispatch)
+    }
+
+    async fn dispatch_expense_individual_pick(
+        &self,
+        ctx: &Context,
+        component: &ComponentInteraction,
+        observed_nonce: walicord_application::InteractionNonce,
+        expected_snapshot: PickerSnapshotId,
+    ) -> Result<InteractionDispatch, LedgerRouteError> {
+        let scope = self
+            .guard_scope(ctx, component.guild_id, component.channel_id, component)
+            .await?;
+        let key = ExpenseSessionKey::new(
+            scope.expense_draft_scope_id(),
+            MemberId(component.user.id.get()),
+        );
+        let Some(mut claim) = self
+            .take_expense_session_or_reply(ctx, component, key, observed_nonce)
+            .await?
+        else {
+            return Ok(InteractionDispatch::Handled);
+        };
+        let selected = selected_component_values(component)?;
+        let page = self
+            .expense_picker_page_for_session(
+                ctx,
+                scope,
+                claim.session(),
+                ExpensePickerKind::Individuals,
+            )
+            .await?;
+        if page.snapshot_id != expected_snapshot {
+            return self.reject_stale_picker_component(ctx, component).await;
+        }
+        let members = merge_paged_selection(
+            &claim
+                .session()
+                .draft()
+                .selection_state()
+                .individual_members
+                .iter()
+                .map(|member_id| member_id.0)
+                .collect::<Vec<_>>(),
+            &page.visible_values,
+            &selected,
+        )
+        .into_iter()
+        .map(MemberId)
+        .collect();
+        let updated =
+            replace_individual_members(claim.session().clone(), members, self.deps.clock.as_ref())?;
+        let dispatch = self
+            .respond_with_step_body(ctx, component, scope, &updated)
+            .await?;
+        claim.replace(updated);
+        Ok(dispatch)
+    }
+
+    async fn dispatch_expense_role_pick(
+        &self,
+        ctx: &Context,
+        component: &ComponentInteraction,
+        observed_nonce: walicord_application::InteractionNonce,
+        expected_snapshot: PickerSnapshotId,
+    ) -> Result<InteractionDispatch, LedgerRouteError> {
+        let scope = self
+            .guard_scope(ctx, component.guild_id, component.channel_id, component)
+            .await?;
+        let key = ExpenseSessionKey::new(
+            scope.expense_draft_scope_id(),
+            MemberId(component.user.id.get()),
+        );
+        let Some(mut claim) = self
+            .take_expense_session_or_reply(ctx, component, key, observed_nonce)
+            .await?
+        else {
+            return Ok(InteractionDispatch::Handled);
+        };
+        let selected = selected_component_values(component)?;
+        let page = self
+            .expense_picker_page_for_session(ctx, scope, claim.session(), ExpensePickerKind::Roles)
+            .await?;
+        if page.snapshot_id != expected_snapshot {
+            return self.reject_stale_picker_component(ctx, component).await;
+        }
+        let roles = merge_paged_selection(
+            &claim
+                .session()
+                .draft()
+                .selection_state()
+                .selected_roles
+                .iter()
+                .map(|role_id| role_id.0)
+                .collect::<Vec<_>>(),
+            &page.visible_values,
+            &selected,
+        )
+        .into_iter()
+        .map(RoleId)
+        .collect();
+        let updated =
+            replace_selected_roles(claim.session().clone(), roles, self.deps.clock.as_ref())?;
+        let dispatch = self
+            .respond_with_step_body(ctx, component, scope, &updated)
+            .await?;
+        claim.replace(updated);
+        Ok(dispatch)
+    }
+
     async fn dispatch_expense_members_toggle(
         &self,
         ctx: &Context,
@@ -2700,7 +3215,7 @@ impl LedgerRouter {
         observed_nonce: walicord_application::InteractionNonce,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
         let scope = self
-            .guard_scope(ctx, component.guild_id, component.channel_id)
+            .guard_scope(ctx, component.guild_id, component.channel_id, component)
             .await?;
         let key = ExpenseSessionKey::new(
             scope.expense_draft_scope_id(),
@@ -2714,14 +3229,8 @@ impl LedgerRouter {
         };
         let updated = toggle_members_group(claim.session().clone(), self.deps.clock.as_ref())
             .map_err(LedgerRouteError::from)?;
-        let nonce = updated.nonce();
         let dispatch = self
-            .respond_with_step_body(
-                ctx,
-                component,
-                &ExpenseSelectionPhase::ParticipantSource,
-                nonce,
-            )
+            .respond_with_step_body(ctx, component, scope, &updated)
             .await?;
         claim.replace(updated);
         Ok(dispatch)
@@ -2731,17 +3240,12 @@ impl LedgerRouter {
         &self,
         ctx: &Context,
         component: &ComponentInteraction,
-        phase: &ExpenseSelectionPhase,
-        nonce: walicord_application::InteractionNonce,
+        scope: LedgerInteractionScope,
+        session: &ExpenseSession,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
-        let button_ids = build_selection_step_button_ids(nonce);
-        let model = build_expense_selection_step_surface(phase, &button_ids);
-        let rendered = DiscordLedgerPresenter::render_expense_step(&model)?;
-        let (body, components) = rendered_surface_to_message(rendered);
+        let (body, components) = self.build_expense_step_message(ctx, scope, session).await?;
         let response = CreateInteractionResponse::UpdateMessage(
-            CreateInteractionResponseMessage::new()
-                .ephemeral(true)
-                .allowed_mentions(suppressed_allowed_mentions())
+            safe_ephemeral_interaction_response_message()
                 .content(body)
                 .components(components),
         );
@@ -2750,6 +3254,138 @@ impl LedgerRouter {
             .await
             .map_err(discord_call_error(DiscordCallSite::ExpenseStepRefresh))?;
         Ok(InteractionDispatch::Handled)
+    }
+
+    async fn build_expense_step_message(
+        &self,
+        ctx: &Context,
+        scope: LedgerInteractionScope,
+        session: &ExpenseSession,
+    ) -> Result<(String, Vec<CreateActionRow>), LedgerRouteError> {
+        let ExpenseSessionStage::InSelection { phase } = session.stage() else {
+            return Err(InternalLedgerRouteError::PostNavigationStageInvariant {
+                observed_stage: session.stage().clone(),
+            }
+            .into());
+        };
+        let nonce = session.nonce();
+        let button_ids = build_selection_step_button_ids(nonce);
+        let mut model = build_expense_selection_step_surface(phase, &button_ids);
+        let picker = self
+            .expense_picker_render_parts(ctx, scope, session, phase, nonce)
+            .await?;
+        model.detail_lines.extend(picker.detail_lines);
+        if let Some(row) = picker.utility_row {
+            model.action_rows.insert(0, row);
+        }
+        if let Some(menu) = picker.select_menu {
+            model.action_rows.insert(0, SurfaceActionRow::Select(menu));
+        }
+        let rendered = DiscordLedgerPresenter::render_expense_step(&model)?;
+        let (body, components) = rendered_surface_to_message(rendered);
+        Ok((body, components))
+    }
+
+    async fn expense_picker_render_parts(
+        &self,
+        ctx: &Context,
+        scope: LedgerInteractionScope,
+        session: &ExpenseSession,
+        phase: &ExpenseSelectionPhase,
+        nonce: walicord_application::InteractionNonce,
+    ) -> Result<ExpensePickerRenderParts, LedgerRouteError> {
+        let Some(kind) = picker_kind_for_phase(phase) else {
+            return Ok(ExpensePickerRenderParts::default());
+        };
+        let page = self
+            .expense_picker_page_for_session(ctx, scope, session, kind)
+            .await?;
+        let detail_lines = page.detail_lines;
+        let (custom_id, placeholder, min_values, max_values) = match phase {
+            ExpenseSelectionPhase::Payer => (
+                expense_picker_selection_custom_id(
+                    EXPENSE_PAYER_PICK_CUSTOM_ID_PREFIX,
+                    nonce,
+                    page.snapshot_id,
+                ),
+                i18n::expense_payer_placeholder(),
+                1,
+                1,
+            ),
+            ExpenseSelectionPhase::IndividualSelection => (
+                expense_picker_selection_custom_id(
+                    EXPENSE_INDIVIDUAL_PICK_CUSTOM_ID_PREFIX,
+                    nonce,
+                    page.snapshot_id,
+                ),
+                i18n::participant_source_individual_placeholder(),
+                0,
+                page.page_item_count as u8,
+            ),
+            ExpenseSelectionPhase::Roles => (
+                expense_picker_selection_custom_id(
+                    EXPENSE_ROLE_PICK_CUSTOM_ID_PREFIX,
+                    nonce,
+                    page.snapshot_id,
+                ),
+                i18n::participant_source_role_placeholder(),
+                0,
+                page.page_item_count as u8,
+            ),
+            ExpenseSelectionPhase::ParticipantSource | ExpenseSelectionPhase::WeightEditor => {
+                unreachable!("phases without menus return early")
+            }
+        };
+        if page.total_items == 0 {
+            return Ok(ExpensePickerRenderParts {
+                select_menu: None,
+                utility_row: Some(expense_picker_utility_row(
+                    kind,
+                    nonce,
+                    page.snapshot_id,
+                    page.current_page,
+                    page.total_pages,
+                )),
+                detail_lines,
+            });
+        }
+        Ok(ExpensePickerRenderParts {
+            select_menu: Some(SurfaceSelectMenu {
+                custom_id,
+                placeholder: Some(placeholder.to_owned()),
+                options: page.options,
+                min_values,
+                max_values: max_values.min(page.page_item_count as u8),
+                disabled: false,
+            }),
+            utility_row: Some(expense_picker_utility_row(
+                kind,
+                nonce,
+                page.snapshot_id,
+                page.current_page,
+                page.total_pages,
+            )),
+            detail_lines,
+        })
+    }
+
+    async fn expense_picker_page_for_session(
+        &self,
+        ctx: &Context,
+        scope: LedgerInteractionScope,
+        session: &ExpenseSession,
+        kind: ExpensePickerKind,
+    ) -> Result<ExpensePickerPage, LedgerRouteError> {
+        let roster = self
+            .deps
+            .roster_fetcher
+            .fetch(ctx, scope.guild_id(), scope.channel_id())
+            .await?;
+        Ok(expense_picker_page(
+            &roster,
+            session.draft().selection_state(),
+            kind,
+        ))
     }
 
     /// Re-open the expense modal prefilled from the session's current basic_info so
@@ -2762,7 +3398,7 @@ impl LedgerRouter {
         observed_nonce: walicord_application::InteractionNonce,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
         let scope = self
-            .guard_scope(ctx, component.guild_id, component.channel_id)
+            .guard_scope(ctx, component.guild_id, component.channel_id, component)
             .await?;
         let key = ExpenseSessionKey::new(
             scope.expense_draft_scope_id(),
@@ -2804,6 +3440,199 @@ impl LedgerRouter {
         Ok(InteractionDispatch::Handled)
     }
 
+    async fn dispatch_expense_weight_edit(
+        &self,
+        ctx: &Context,
+        component: &ComponentInteraction,
+        observed_nonce: walicord_application::InteractionNonce,
+    ) -> Result<InteractionDispatch, LedgerRouteError> {
+        let scope = self
+            .guard_scope(ctx, component.guild_id, component.channel_id, component)
+            .await?;
+        let key = ExpenseSessionKey::new(
+            scope.expense_draft_scope_id(),
+            MemberId(component.user.id.get()),
+        );
+        let Some(claim) = self
+            .take_expense_session_or_reply(ctx, component, key, observed_nonce)
+            .await?
+        else {
+            return Ok(InteractionDispatch::Handled);
+        };
+        if !matches!(
+            claim.session().stage(),
+            ExpenseSessionStage::InSelection {
+                phase: ExpenseSelectionPhase::WeightEditor
+            }
+        ) {
+            return self.respond_expense_session_missing(ctx, component).await;
+        }
+        let roster = self
+            .deps
+            .roster_fetcher
+            .fetch(ctx, scope.guild_id(), scope.channel_id())
+            .await?;
+        let participants = resolve_selection_against_roster(
+            claim.session().draft().selection_state(),
+            &roster.roster,
+        )
+        .resolved;
+        if participants.len() > 40 {
+            return self
+                .reply_component_ephemeral(
+                    ctx,
+                    component,
+                    i18n::weight_editor_too_many_message(),
+                    DiscordCallSite::ExpenseStepRefresh,
+                )
+                .await;
+        }
+        let response = build_expense_weight_modal_response(observed_nonce, &participants)?;
+        component
+            .create_response(&ctx.http, response)
+            .await
+            .map_err(discord_call_error(DiscordCallSite::ExpenseStepRefresh))?;
+        Ok(InteractionDispatch::Handled)
+    }
+
+    async fn dispatch_expense_picker_page(
+        &self,
+        ctx: &Context,
+        component: &ComponentInteraction,
+        kind: ExpensePickerKind,
+        direction: PickerPageDirection,
+        observed_nonce: walicord_application::InteractionNonce,
+        expected_snapshot: PickerSnapshotId,
+    ) -> Result<InteractionDispatch, LedgerRouteError> {
+        let scope = self
+            .guard_scope(ctx, component.guild_id, component.channel_id, component)
+            .await?;
+        let key = ExpenseSessionKey::new(
+            scope.expense_draft_scope_id(),
+            MemberId(component.user.id.get()),
+        );
+        let Some(mut claim) = self
+            .take_expense_session_or_reply(ctx, component, key, observed_nonce)
+            .await?
+        else {
+            return Ok(InteractionDispatch::Handled);
+        };
+        let page = self
+            .expense_picker_page_for_session(ctx, scope, claim.session(), kind)
+            .await?;
+        if page.snapshot_id != expected_snapshot {
+            return self.reject_stale_picker_component(ctx, component).await;
+        }
+        let state = claim
+            .session()
+            .draft()
+            .selection_state()
+            .picker_states
+            .get(&kind);
+        let next_page = match direction {
+            PickerPageDirection::Previous => page.current_page.saturating_sub(1),
+            PickerPageDirection::Next => page.current_page.saturating_add(1),
+        }
+        .min(page.total_pages.saturating_sub(1));
+        let updated = set_picker_view_state(
+            claim.session().clone(),
+            kind,
+            page.snapshot_id,
+            next_page,
+            state.and_then(|state| state.query().map(str::to_owned)),
+            self.deps.clock.as_ref(),
+        )?;
+        let dispatch = self
+            .respond_with_step_body(ctx, component, scope, &updated)
+            .await?;
+        claim.replace(updated);
+        Ok(dispatch)
+    }
+
+    async fn dispatch_expense_picker_clear(
+        &self,
+        ctx: &Context,
+        component: &ComponentInteraction,
+        kind: ExpensePickerKind,
+        observed_nonce: walicord_application::InteractionNonce,
+        expected_snapshot: PickerSnapshotId,
+    ) -> Result<InteractionDispatch, LedgerRouteError> {
+        let scope = self
+            .guard_scope(ctx, component.guild_id, component.channel_id, component)
+            .await?;
+        let key = ExpenseSessionKey::new(
+            scope.expense_draft_scope_id(),
+            MemberId(component.user.id.get()),
+        );
+        let Some(mut claim) = self
+            .take_expense_session_or_reply(ctx, component, key, observed_nonce)
+            .await?
+        else {
+            return Ok(InteractionDispatch::Handled);
+        };
+        let page = self
+            .expense_picker_page_for_session(ctx, scope, claim.session(), kind)
+            .await?;
+        if page.snapshot_id != expected_snapshot {
+            return self.reject_stale_picker_component(ctx, component).await;
+        }
+        let session_with_snapshot = set_picker_view_state(
+            claim.session().clone(),
+            kind,
+            page.snapshot_id,
+            page.current_page,
+            page.query.clone(),
+            self.deps.clock.as_ref(),
+        )?;
+        let updated = clear_picker_selection(
+            session_with_snapshot,
+            kind,
+            page.snapshot_id,
+            self.deps.clock.as_ref(),
+        )?;
+        let dispatch = self
+            .respond_with_step_body(ctx, component, scope, &updated)
+            .await?;
+        claim.replace(updated);
+        Ok(dispatch)
+    }
+
+    async fn dispatch_expense_picker_search_open(
+        &self,
+        ctx: &Context,
+        component: &ComponentInteraction,
+        kind: ExpensePickerKind,
+        observed_nonce: walicord_application::InteractionNonce,
+        expected_snapshot: PickerSnapshotId,
+    ) -> Result<InteractionDispatch, LedgerRouteError> {
+        let scope = self
+            .guard_scope(ctx, component.guild_id, component.channel_id, component)
+            .await?;
+        let key = ExpenseSessionKey::new(
+            scope.expense_draft_scope_id(),
+            MemberId(component.user.id.get()),
+        );
+        let Some(claim) = self
+            .take_expense_session_or_reply(ctx, component, key, observed_nonce)
+            .await?
+        else {
+            return Ok(InteractionDispatch::Handled);
+        };
+        let page = self
+            .expense_picker_page_for_session(ctx, scope, claim.session(), kind)
+            .await?;
+        if page.snapshot_id != expected_snapshot {
+            return self.reject_stale_picker_component(ctx, component).await;
+        }
+        let response =
+            build_expense_picker_search_modal_response(kind, observed_nonce, expected_snapshot)?;
+        component
+            .create_response(&ctx.http, response)
+            .await
+            .map_err(discord_call_error(DiscordCallSite::ExpenseStepRefresh))?;
+        Ok(InteractionDispatch::Handled)
+    }
+
     fn store_expense_modal_submission(
         &self,
         binding_nonce: walicord_application::InteractionNonce,
@@ -2829,7 +3658,7 @@ impl LedgerRouter {
         binding_nonce: walicord_application::InteractionNonce,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
         let scope = self
-            .guard_scope(ctx, component.guild_id, component.channel_id)
+            .guard_scope(ctx, component.guild_id, component.channel_id, component)
             .await?;
         let actor = MemberId(component.user.id.get());
         let retry = match self.deps.modal_retries.try_consume(
@@ -2873,10 +3702,8 @@ impl LedgerRouter {
             .create_response(
                 &ctx.http,
                 CreateInteractionResponse::Message(
-                    CreateInteractionResponseMessage::new()
-                        .ephemeral(true)
-                        .content(i18n::stale_interaction_message())
-                        .allowed_mentions(suppressed_allowed_mentions()),
+                    safe_ephemeral_interaction_response_message()
+                        .content(i18n::stale_interaction_message()),
                 ),
             )
             .await
@@ -2886,6 +3713,20 @@ impl LedgerRouter {
         Ok(InteractionDispatch::Handled)
     }
 
+    async fn reject_stale_picker_component(
+        &self,
+        ctx: &Context,
+        component: &ComponentInteraction,
+    ) -> Result<InteractionDispatch, LedgerRouteError> {
+        self.reply_component_ephemeral(
+            ctx,
+            component,
+            i18n::stale_interaction_message(),
+            DiscordCallSite::ExpenseStepRefresh,
+        )
+        .await
+    }
+
     async fn dispatch_expense_back(
         &self,
         ctx: &Context,
@@ -2893,7 +3734,7 @@ impl LedgerRouter {
         observed_nonce: walicord_application::InteractionNonce,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
         let scope = self
-            .guard_scope(ctx, component.guild_id, component.channel_id)
+            .guard_scope(ctx, component.guild_id, component.channel_id, component)
             .await?;
         let key = ExpenseSessionKey::new(
             scope.expense_draft_scope_id(),
@@ -2907,19 +3748,8 @@ impl LedgerRouter {
         };
         match navigate_back(claim.session().clone(), self.deps.clock.as_ref()) {
             Ok(updated) => {
-                let previous_phase = match updated.stage() {
-                    ExpenseSessionStage::InSelection { phase } => phase.clone(),
-                    other => {
-                        return Err(InternalLedgerRouteError::PostNavigationStageInvariant {
-                            operation: PostNavigationOperation::Back,
-                            observed_stage: other.clone(),
-                        }
-                        .into());
-                    }
-                };
-                let nonce = updated.nonce();
                 let dispatch = self
-                    .respond_with_step_body(ctx, component, &previous_phase, nonce)
+                    .respond_with_step_body(ctx, component, scope, &updated)
                     .await?;
                 claim.replace(updated);
                 Ok(dispatch)
@@ -2941,11 +3771,8 @@ impl LedgerRouter {
         key: ExpenseSessionKey,
         observed_nonce: walicord_application::InteractionNonce,
     ) -> Result<Option<ExpenseSessionClaim<'_>>, LedgerRouteError> {
-        match self
-            .deps
-            .expense_sessions
-            .claim(key, observed_nonce, self.deps.clock.now())
-        {
+        let now = self.deps.clock.now();
+        match self.deps.expense_sessions.claim(key, observed_nonce, now) {
             Ok(Some(session)) => Ok(Some(ExpenseSessionClaim {
                 store: self.deps.expense_sessions.as_ref(),
                 original: Some(session),
@@ -2956,10 +3783,27 @@ impl LedgerRouter {
                 | SessionAccessError::Superseded { .. }
                 | SessionAccessError::InFlight,
             ) => {
-                self.respond_expense_session_missing(ctx, component).await?;
+                let owner = self.expense_session_nonce_owner(key, observed_nonce, now);
+                if owner.is_some() && owner != Some(key.actor_id()) {
+                    self.respond_expense_session_wrong_actor(ctx, component)
+                        .await?;
+                } else {
+                    self.respond_expense_session_missing(ctx, component).await?;
+                }
                 Ok(None)
             }
         }
+    }
+
+    fn expense_session_nonce_owner(
+        &self,
+        key: ExpenseSessionKey,
+        observed_nonce: walicord_application::InteractionNonce,
+        now: std::time::SystemTime,
+    ) -> Option<MemberId> {
+        self.deps
+            .expense_sessions
+            .active_owner_by_nonce(key.draft_scope_id(), observed_nonce, now)
     }
 
     async fn respond_expense_session_missing(
@@ -2968,9 +3812,7 @@ impl LedgerRouter {
         component: &ComponentInteraction,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
         let response = CreateInteractionResponse::Message(
-            CreateInteractionResponseMessage::new()
-                .ephemeral(true)
-                .allowed_mentions(suppressed_allowed_mentions())
+            safe_ephemeral_interaction_response_message()
                 .content(walicord_i18n::expense_session_expired_message()),
         );
         component
@@ -2982,6 +3824,22 @@ impl LedgerRouter {
         Ok(InteractionDispatch::Handled)
     }
 
+    async fn respond_expense_session_wrong_actor(
+        &self,
+        ctx: &Context,
+        component: &ComponentInteraction,
+    ) -> Result<InteractionDispatch, LedgerRouteError> {
+        let response = CreateInteractionResponse::Message(
+            safe_ephemeral_interaction_response_message()
+                .content(walicord_i18n::expense_session_wrong_actor_message()),
+        );
+        component
+            .create_response(&ctx.http, response)
+            .await
+            .map_err(discord_call_error(DiscordCallSite::ExpenseStepRefresh))?;
+        Ok(InteractionDispatch::Handled)
+    }
+
     async fn dispatch_expense_cancel(
         &self,
         ctx: &Context,
@@ -2989,7 +3847,7 @@ impl LedgerRouter {
         observed_nonce: walicord_application::InteractionNonce,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
         let scope = self
-            .guard_scope(ctx, component.guild_id, component.channel_id)
+            .guard_scope(ctx, component.guild_id, component.channel_id, component)
             .await?;
         let key = ExpenseSessionKey::new(
             scope.expense_draft_scope_id(),
@@ -3012,9 +3870,7 @@ impl LedgerRouter {
         component: &ComponentInteraction,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
         let response = CreateInteractionResponse::UpdateMessage(
-            CreateInteractionResponseMessage::new()
-                .ephemeral(true)
-                .allowed_mentions(suppressed_allowed_mentions())
+            safe_ephemeral_interaction_response_message()
                 .content(walicord_i18n::expense_cancelled_message())
                 .components(Vec::new()),
         );
@@ -3033,8 +3889,21 @@ impl LedgerRouter {
         component: &ComponentInteraction,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
         let scope = self
-            .guard_scope(ctx, component.guild_id, component.channel_id)
+            .guard_scope(ctx, component.guild_id, component.channel_id, component)
             .await?;
+        if let Some(ledger_id) = self.blocked_expense_launcher_ledger(ctx, scope).await? {
+            let (message, components) =
+                self.uncertain_write_block_response(ledger_id, false, false);
+            return self
+                .reply_component_ephemeral_with_components(
+                    ctx,
+                    component,
+                    message,
+                    components,
+                    DiscordCallSite::ExpenseUncertainWriteReply,
+                )
+                .await;
+        }
         let nonce = self.deps.nonce_provider.next_interaction_nonce();
         self.store_expense_modal_submission(
             nonce,
@@ -3065,7 +3934,7 @@ impl LedgerRouter {
         component: &ComponentInteraction,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
         let scope = self
-            .guard_scope(ctx, component.guild_id, component.channel_id)
+            .guard_scope(ctx, component.guild_id, component.channel_id, component)
             .await?;
         self.dispatch_review(
             ctx,
@@ -3082,7 +3951,7 @@ impl LedgerRouter {
         component: &ComponentInteraction,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
         let scope = self
-            .guard_scope(ctx, component.guild_id, component.channel_id)
+            .guard_scope(ctx, component.guild_id, component.channel_id, component)
             .await?;
         self.dispatch_ledger(
             ctx,
@@ -3099,7 +3968,7 @@ impl LedgerRouter {
         component: &ComponentInteraction,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
         let scope = self
-            .guard_scope(ctx, component.guild_id, component.channel_id)
+            .guard_scope(ctx, component.guild_id, component.channel_id, component)
             .await?;
         self.dispatch_void(
             ctx,
@@ -3109,13 +3978,28 @@ impl LedgerRouter {
         .await
     }
 
-    /// Modal submission dispatch. Currently handles the expense-new modal; weight
-    /// editor and retry modals are added in subsequent slices.
     pub async fn handle_modal(
         &self,
         ctx: &Context,
         modal: &ModalInteraction,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
+        if let Some((kind, nonce, snapshot_id)) = parse_expense_picker_custom_id(
+            &modal.data.custom_id,
+            EXPENSE_PICKER_SEARCH_MODAL_CUSTOM_ID_PREFIX,
+        ) {
+            return self
+                .dispatch_expense_picker_search_submit(ctx, modal, kind, nonce, snapshot_id)
+                .await;
+        }
+        match parse_expense_weight_modal_custom_id(&modal.data.custom_id) {
+            ExpenseModalCustomIdMatch::Match { nonce } => {
+                return self
+                    .dispatch_expense_weight_modal_submit(ctx, modal, nonce)
+                    .await;
+            }
+            ExpenseModalCustomIdMatch::Stale => return self.reply_stale_modal(ctx, modal).await,
+            ExpenseModalCustomIdMatch::NoMatch => {}
+        }
         match parse_expense_modal_custom_id(&modal.data.custom_id) {
             ExpenseModalCustomIdMatch::Match { nonce } => {
                 self.dispatch_expense_modal_submit(ctx, modal, nonce).await
@@ -3125,6 +4009,169 @@ impl LedgerRouter {
         }
     }
 
+    async fn dispatch_expense_weight_modal_submit(
+        &self,
+        ctx: &Context,
+        modal: &ModalInteraction,
+        observed_nonce: walicord_application::InteractionNonce,
+    ) -> Result<InteractionDispatch, LedgerRouteError> {
+        let scope = self
+            .guard_scope(ctx, modal.guild_id, modal.channel_id, modal)
+            .await?;
+        let key = ExpenseSessionKey::new(
+            scope.expense_draft_scope_id(),
+            MemberId(modal.user.id.get()),
+        );
+        let claimed =
+            match self
+                .deps
+                .expense_sessions
+                .claim(key, observed_nonce, self.deps.clock.now())
+            {
+                Ok(Some(claimed)) => claimed,
+                Ok(None)
+                | Err(
+                    SessionAccessError::Expired
+                    | SessionAccessError::Superseded { .. }
+                    | SessionAccessError::InFlight,
+                ) => return self.reply_stale_modal(ctx, modal).await,
+            };
+        let mut claim = ExpenseSessionClaim {
+            store: self.deps.expense_sessions.as_ref(),
+            original: Some(claimed),
+        };
+        let weights = match parse_expense_weight_modal_submission(modal) {
+            Ok(weights) => weights,
+            Err(_) => {
+                modal
+                    .create_response(
+                        &ctx.http,
+                        CreateInteractionResponse::Message(
+                            safe_ephemeral_interaction_response_message()
+                                .content(i18n::weight_editor_parse_error()),
+                        ),
+                    )
+                    .await
+                    .map_err(discord_call_error(DiscordCallSite::ExpenseStepRefresh))?;
+                return Ok(InteractionDispatch::Handled);
+            }
+        };
+        let updated =
+            replace_weight_overrides(claim.session().clone(), weights, self.deps.clock.as_ref())?;
+        let button_ids = build_selection_step_button_ids(updated.nonce());
+        let model =
+            build_expense_selection_step_surface(&ExpenseSelectionPhase::WeightEditor, &button_ids);
+        let rendered = DiscordLedgerPresenter::render_expense_step(&model)?;
+        let (body, components) = rendered_surface_to_message(rendered);
+        modal
+            .create_response(
+                &ctx.http,
+                CreateInteractionResponse::Message(
+                    safe_ephemeral_interaction_response_message()
+                        .content(body)
+                        .components(components),
+                ),
+            )
+            .await
+            .map_err(discord_call_error(DiscordCallSite::ExpenseStepRefresh))?;
+        claim.replace(updated);
+        Ok(InteractionDispatch::Handled)
+    }
+
+    async fn dispatch_expense_picker_search_submit(
+        &self,
+        ctx: &Context,
+        modal: &ModalInteraction,
+        kind: ExpensePickerKind,
+        observed_nonce: walicord_application::InteractionNonce,
+        expected_snapshot: PickerSnapshotId,
+    ) -> Result<InteractionDispatch, LedgerRouteError> {
+        let scope = self
+            .guard_scope(ctx, modal.guild_id, modal.channel_id, modal)
+            .await?;
+        let key = ExpenseSessionKey::new(
+            scope.expense_draft_scope_id(),
+            MemberId(modal.user.id.get()),
+        );
+        let Some(claimed) = self
+            .deps
+            .expense_sessions
+            .claim(key, observed_nonce, self.deps.clock.now())
+            .map_err(LedgerRouteError::from)?
+        else {
+            return self.reply_stale_modal(ctx, modal).await;
+        };
+        let mut claim = ExpenseSessionClaim {
+            store: self.deps.expense_sessions.as_ref(),
+            original: Some(claimed),
+        };
+        let query = extract_expense_picker_search_query(modal).trim();
+        if query.is_empty() {
+            modal
+                .create_response(
+                    &ctx.http,
+                    CreateInteractionResponse::Message(
+                        safe_ephemeral_interaction_response_message()
+                            .content(i18n::search_blank_error()),
+                    ),
+                )
+                .await
+                .map_err(discord_call_error(DiscordCallSite::ExpenseStepRefresh))?;
+            return Ok(InteractionDispatch::Handled);
+        }
+        let roster = self
+            .deps
+            .roster_fetcher
+            .fetch(ctx, scope.guild_id(), scope.channel_id())
+            .await?;
+        let page = expense_picker_page(&roster, claim.session().draft().selection_state(), kind);
+        if page.snapshot_id != expected_snapshot {
+            return self.reply_stale_modal(ctx, modal).await;
+        }
+        if !expense_picker_query_matches(
+            &roster,
+            claim.session().draft().selection_state(),
+            kind,
+            query,
+        ) {
+            modal
+                .create_response(
+                    &ctx.http,
+                    CreateInteractionResponse::Message(
+                        safe_ephemeral_interaction_response_message()
+                            .content(expense_picker_search_not_found_message(kind)),
+                    ),
+                )
+                .await
+                .map_err(discord_call_error(DiscordCallSite::ExpenseStepRefresh))?;
+            return Ok(InteractionDispatch::Handled);
+        }
+        let updated = set_picker_view_state(
+            claim.session().clone(),
+            kind,
+            page.snapshot_id,
+            0,
+            Some(query.to_owned()),
+            self.deps.clock.as_ref(),
+        )?;
+        let (body, components) = self
+            .build_expense_step_message(ctx, scope, &updated)
+            .await?;
+        modal
+            .create_response(
+                &ctx.http,
+                CreateInteractionResponse::UpdateMessage(
+                    safe_ephemeral_interaction_response_message()
+                        .content(body)
+                        .components(components),
+                ),
+            )
+            .await
+            .map_err(discord_call_error(DiscordCallSite::ExpenseStepRefresh))?;
+        claim.replace(updated);
+        Ok(InteractionDispatch::Handled)
+    }
+
     async fn dispatch_expense_modal_submit(
         &self,
         ctx: &Context,
@@ -3132,7 +4179,7 @@ impl LedgerRouter {
         binding_nonce: walicord_application::InteractionNonce,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
         let scope = self
-            .guard_scope(ctx, modal.guild_id, modal.channel_id)
+            .guard_scope(ctx, modal.guild_id, modal.channel_id, modal)
             .await?;
         let guild_id = scope.guild_id();
         let actor = MemberId(modal.user.id.get());
@@ -3171,14 +4218,27 @@ impl LedgerRouter {
                 let key = ExpenseSessionKey::new(scope.expense_draft_scope_id(), actor);
                 match intent {
                     ExpenseModalIntent::Create { origin } => {
-                        let (session, nonce) = bootstrap_expense_session(
+                        let (session, _) = bootstrap_expense_session(
                             key,
                             origin,
                             validated,
                             self.deps.clock.as_ref(),
                             self.deps.nonce_provider.as_ref(),
                         )?;
-                        let dispatch = self.acknowledge_modal_success(ctx, modal, nonce).await?;
+                        let replacement_notice = self
+                            .deps
+                            .expense_sessions
+                            .has_active_session(key, self.deps.clock.now())
+                            .then(i18n::expense_session_replaced_message);
+                        let dispatch = self
+                            .acknowledge_modal_success(
+                                ctx,
+                                modal,
+                                scope,
+                                &session,
+                                replacement_notice,
+                            )
+                            .await?;
                         self.deps.expense_sessions.replace(session);
                         Ok(dispatch)
                     }
@@ -3206,8 +4266,9 @@ impl LedgerRouter {
                             validated.into(),
                             self.deps.clock.as_ref(),
                         )?;
-                        let nonce = updated.nonce();
-                        let dispatch = self.acknowledge_modal_success(ctx, modal, nonce).await?;
+                        let dispatch = self
+                            .acknowledge_modal_success(ctx, modal, scope, &updated, None)
+                            .await?;
                         claim.replace(updated);
                         Ok(dispatch)
                     }
@@ -3244,11 +4305,9 @@ impl LedgerRouter {
             .create_response(
                 &ctx.http,
                 CreateInteractionResponse::Message(
-                    CreateInteractionResponseMessage::new()
-                        .ephemeral(true)
+                    safe_ephemeral_interaction_response_message()
                         .content(expense_modal_validation_message(&validation_error))
-                        .components(vec![expense_modal_retry_row(binding_nonce)])
-                        .allowed_mentions(suppressed_allowed_mentions()),
+                        .components(vec![expense_modal_retry_row(binding_nonce)]),
                 ),
             )
             .await
@@ -3262,17 +4321,31 @@ impl LedgerRouter {
         &self,
         ctx: &Context,
         modal: &ModalInteraction,
-        nonce: walicord_application::InteractionNonce,
+        scope: LedgerInteractionScope,
+        session: &ExpenseSession,
+        notice: Option<&'static str>,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
+        let nonce = session.nonce();
         let button_ids = build_selection_step_button_ids(nonce);
-        let model =
+        let mut model =
             build_expense_selection_step_surface(&ExpenseSelectionPhase::Payer, &button_ids);
+        let picker = self
+            .expense_picker_render_parts(ctx, scope, session, &ExpenseSelectionPhase::Payer, nonce)
+            .await?;
+        model.detail_lines.extend(picker.detail_lines);
+        if let Some(row) = picker.utility_row {
+            model.action_rows.insert(0, row);
+        }
+        if let Some(menu) = picker.select_menu {
+            model.action_rows.insert(0, SurfaceActionRow::Select(menu));
+        }
+        if let Some(notice) = notice {
+            model.detail_lines.insert(0, notice.to_owned());
+        }
         let rendered = DiscordLedgerPresenter::render_expense_step(&model)?;
         let (body, components) = rendered_surface_to_message(rendered);
         let response = CreateInteractionResponse::Message(
-            CreateInteractionResponseMessage::new()
-                .ephemeral(true)
-                .allowed_mentions(suppressed_allowed_mentions())
+            safe_ephemeral_interaction_response_message()
                 .content(body)
                 .components(components),
         );
@@ -3290,17 +4363,55 @@ impl LedgerRouter {
         content: impl Into<String>,
         site: DiscordCallSite,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
+        self.edit_command_response_with_components(ctx, command, content, Vec::new(), site)
+            .await
+    }
+
+    async fn edit_command_response_with_components(
+        &self,
+        ctx: &Context,
+        command: &CommandInteraction,
+        content: impl Into<String>,
+        components: Vec<CreateActionRow>,
+        site: DiscordCallSite,
+    ) -> Result<InteractionDispatch, LedgerRouteError> {
         command
             .edit_response(
                 &ctx.http,
-                serenity::all::EditInteractionResponse::new()
+                safe_edit_interaction_response()
                     .content(content)
-                    .components(Vec::new())
-                    .allowed_mentions(suppressed_allowed_mentions()),
+                    .components(components),
             )
             .await
             .map_err(discord_call_error(site))?;
         Ok(InteractionDispatch::Handled)
+    }
+
+    fn uncertain_write_block_response(
+        &self,
+        ledger_id: LedgerId,
+        preserve_input: bool,
+        preserve_preview: bool,
+    ) -> (String, Vec<CreateActionRow>) {
+        let mut message = uncertain_write_block_message(preserve_input, preserve_preview);
+        let Some(UncertainWriteState::Abandoned(retained)) =
+            self.deps.uncertain_writes.current(ledger_id)
+        else {
+            return (message, Vec::new());
+        };
+        message.push('\n');
+        let _ = write!(
+            message,
+            "{}",
+            i18n::abandoned_uncertain_write_message(retained.last_known_summary())
+        );
+        (
+            message,
+            vec![CreateActionRow::Buttons(vec![
+                CreateButton::new(UNCERTAIN_WRITE_ACKNOWLEDGE_CUSTOM_ID)
+                    .label(i18n::abandoned_uncertain_write_acknowledge_label()),
+            ])],
+        )
     }
 
     async fn edit_initial_void_model(
@@ -3348,10 +4459,9 @@ impl LedgerRouter {
         component
             .edit_response(
                 &ctx.http,
-                serenity::all::EditInteractionResponse::new()
+                safe_edit_interaction_response()
                     .content(body)
-                    .components(components)
-                    .allowed_mentions(suppressed_allowed_mentions()),
+                    .components(components),
             )
             .await
             .map_err(discord_call_error(DiscordCallSite::VoidEditResponse))?;
@@ -3370,10 +4480,9 @@ impl LedgerRouter {
             .create_response(
                 &ctx.http,
                 CreateInteractionResponse::UpdateMessage(
-                    CreateInteractionResponseMessage::new()
+                    safe_interaction_response_message()
                         .content(content)
-                        .components(components)
-                        .allowed_mentions(suppressed_allowed_mentions()),
+                        .components(components),
                 ),
             )
             .await
@@ -3388,13 +4497,24 @@ impl LedgerRouter {
         content: impl Into<String>,
         site: DiscordCallSite,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
+        self.edit_component_response_with_components(ctx, component, content, Vec::new(), site)
+            .await
+    }
+
+    async fn edit_component_response_with_components(
+        &self,
+        ctx: &Context,
+        component: &ComponentInteraction,
+        content: impl Into<String>,
+        components: Vec<CreateActionRow>,
+        site: DiscordCallSite,
+    ) -> Result<InteractionDispatch, LedgerRouteError> {
         component
             .edit_response(
                 &ctx.http,
-                serenity::all::EditInteractionResponse::new()
+                safe_edit_interaction_response()
                     .content(content)
-                    .components(Vec::new())
-                    .allowed_mentions(suppressed_allowed_mentions()),
+                    .components(components),
             )
             .await
             .map_err(discord_call_error(site))?;
@@ -3408,14 +4528,25 @@ impl LedgerRouter {
         content: impl Into<String>,
         site: DiscordCallSite,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
+        self.reply_component_ephemeral_with_components(ctx, component, content, Vec::new(), site)
+            .await
+    }
+
+    async fn reply_component_ephemeral_with_components(
+        &self,
+        ctx: &Context,
+        component: &ComponentInteraction,
+        content: impl Into<String>,
+        components: Vec<CreateActionRow>,
+        site: DiscordCallSite,
+    ) -> Result<InteractionDispatch, LedgerRouteError> {
         component
             .create_response(
                 &ctx.http,
                 CreateInteractionResponse::Message(
-                    CreateInteractionResponseMessage::new()
-                        .ephemeral(true)
+                    safe_ephemeral_interaction_response_message()
                         .content(content)
-                        .allowed_mentions(suppressed_allowed_mentions()),
+                        .components(components),
                 ),
             )
             .await
@@ -3430,26 +4561,37 @@ impl LedgerRouter {
         key: VoidSessionKey,
         nonce: walicord_application::InteractionNonce,
     ) -> Result<Option<VoidSession>, LedgerRouteError> {
-        match self
-            .deps
-            .void_sessions
-            .access(key, nonce, self.deps.clock.now())
-        {
+        let now = self.deps.clock.now();
+        match self.deps.void_sessions.access(key, nonce, now) {
             Ok(Some(session)) => Ok(Some(session)),
             Ok(None) | Err(SessionAccessError::Expired | SessionAccessError::Superseded { .. }) => {
-                self.update_component_with_void_model(
-                    ctx,
-                    component,
-                    VoidSurfaceModel::stale_page(
-                        i18n::panel_void_button_label(),
-                        RecoveryCta::None,
-                        None,
-                        false,
-                        Vec::new(),
-                        true,
-                    ),
-                )
-                .await?;
+                let owner =
+                    self.deps
+                        .void_sessions
+                        .active_owner_by_nonce(key.ledger_id(), nonce, now);
+                if owner.is_some() && owner != Some(key.actor_id()) {
+                    self.reply_component_ephemeral(
+                        ctx,
+                        component,
+                        i18n::void_session_wrong_actor_message(),
+                        DiscordCallSite::VoidEditResponse,
+                    )
+                    .await?;
+                } else {
+                    self.update_component_with_void_model(
+                        ctx,
+                        component,
+                        VoidSurfaceModel::stale_page(
+                            i18n::panel_void_button_label(),
+                            RecoveryCta::None,
+                            None,
+                            false,
+                            Vec::new(),
+                            true,
+                        ),
+                    )
+                    .await?;
+                }
                 Ok(None)
             }
             Err(error) => Err(error.into()),
@@ -3468,10 +4610,12 @@ impl LedgerRouter {
         session: VoidSession,
         render_kind: VoidSelectionRenderKind,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
+        let binding = CanonicalThreadBinding::new(
+            TrackedParentKey::from_guarded_parent(guild_id, tracked_parent_channel_id),
+            canonical_thread_id,
+        );
         let load = self
-            .deps
-            .thread_loader
-            .load(ctx, canonical_thread_id, ledger_id)
+            .load_verified_thread(ctx, binding, CanonicalLoadRoute::Read)
             .await?;
         let candidates = enumerate_void_candidates(&load)?;
         if candidates.is_empty() {
@@ -3549,12 +4693,25 @@ pub(crate) const EXPENSE_CANCEL_CUSTOM_ID_PREFIX: &str = "ledger:expense:cancel:
 pub(crate) const EXPENSE_MODAL_RETRY_CUSTOM_ID_PREFIX: &str = "ledger:expense:retry:";
 pub(crate) const EXPENSE_BACK_CUSTOM_ID_PREFIX: &str = "ledger:expense:back:";
 pub(crate) const EXPENSE_BASIC_EDIT_CUSTOM_ID_PREFIX: &str = "ledger:expense:basic-edit:";
+pub(crate) const EXPENSE_PAYER_PICK_CUSTOM_ID_PREFIX: &str = "ledger:expense:payer-pick:";
+pub(crate) const EXPENSE_INDIVIDUAL_PICK_CUSTOM_ID_PREFIX: &str = "ledger:expense:individual-pick:";
+pub(crate) const EXPENSE_ROLE_PICK_CUSTOM_ID_PREFIX: &str = "ledger:expense:role-pick:";
+pub(crate) const EXPENSE_PICKER_PREV_CUSTOM_ID_PREFIX: &str = "ledger:expense:picker-prev:";
+pub(crate) const EXPENSE_PICKER_NEXT_CUSTOM_ID_PREFIX: &str = "ledger:expense:picker-next:";
+pub(crate) const EXPENSE_PICKER_SEARCH_CUSTOM_ID_PREFIX: &str = "ledger:expense:picker-search:";
+pub(crate) const EXPENSE_PICKER_CLEAR_CUSTOM_ID_PREFIX: &str = "ledger:expense:picker-clear:";
+pub(crate) const EXPENSE_PICKER_SEARCH_MODAL_CUSTOM_ID_PREFIX: &str =
+    "ledger:expense:picker-search-modal:";
+const EXPENSE_PICKER_SEARCH_FIELD: &str = "query";
+const EXPENSE_PICKER_PAGE_SIZE: usize = 25;
+pub(crate) const UNCERTAIN_WRITE_ACKNOWLEDGE_CUSTOM_ID: &str = "ledger:uncertain:acknowledge";
 pub(crate) const EXPENSE_TO_PARTICIPANTS_CUSTOM_ID_PREFIX: &str = "ledger:expense:to-participants:";
 pub(crate) const EXPENSE_SOURCE_INDIVIDUAL_CUSTOM_ID_PREFIX: &str =
     "ledger:expense:source-individual:";
 pub(crate) const EXPENSE_SOURCE_ROLES_CUSTOM_ID_PREFIX: &str = "ledger:expense:source-roles:";
 pub(crate) const EXPENSE_SOURCE_MEMBERS_CUSTOM_ID_PREFIX: &str = "ledger:expense:source-members:";
 pub(crate) const EXPENSE_TO_WEIGHTS_CUSTOM_ID_PREFIX: &str = "ledger:expense:to-weights:";
+pub(crate) const EXPENSE_WEIGHT_EDIT_CUSTOM_ID_PREFIX: &str = "ledger:expense:weight-edit:";
 pub(crate) const EXPENSE_TO_CONFIRM_CUSTOM_ID_PREFIX: &str = "ledger:expense:to-confirm:";
 pub(crate) const EXPENSE_MODIFY_SELECTION_CUSTOM_ID_PREFIX: &str =
     "ledger:expense:modify-selection:";
@@ -3630,6 +4787,7 @@ fn build_selection_step_button_ids(
         source_roles: format!("{EXPENSE_SOURCE_ROLES_CUSTOM_ID_PREFIX}{n}"),
         source_members: format!("{EXPENSE_SOURCE_MEMBERS_CUSTOM_ID_PREFIX}{n}"),
         to_weights: format!("{EXPENSE_TO_WEIGHTS_CUSTOM_ID_PREFIX}{n}"),
+        weight_edit: format!("{EXPENSE_WEIGHT_EDIT_CUSTOM_ID_PREFIX}{n}"),
         to_confirm: format!("{EXPENSE_TO_CONFIRM_CUSTOM_ID_PREFIX}{n}"),
         back: format!("{EXPENSE_BACK_CUSTOM_ID_PREFIX}{n}"),
         cancel: format!("{EXPENSE_CANCEL_CUSTOM_ID_PREFIX}{n}"),
@@ -3863,6 +5021,17 @@ fn render_public_settlement_body(
     Ok(rendered.body().to_owned())
 }
 
+fn review_route_guidance_lines_with_replacement_notice(route: ReadViewRoute) -> Vec<String> {
+    let mut lines = vec![
+        i18n::settlement_preview_replaced_message().to_owned(),
+        i18n::route_task_guidance().to_owned(),
+    ];
+    if matches!(route, ReadViewRoute::ReviewParent) {
+        lines.push(i18n::parent_preview_entry_guidance().to_owned());
+    }
+    lines
+}
+
 fn settle_attempt_error_message(error: &SettleAttemptError) -> &'static str {
     match error {
         SettleAttemptError::NoPreviewStored => i18n::review_preview_required_message(),
@@ -3907,6 +5076,10 @@ fn uncertain_write_block_message(preserve_input: bool, preserve_preview: bool) -
     message
 }
 
+fn actor_can_view_channel(permissions: Option<Permissions>) -> bool {
+    permissions.is_some_and(|permissions| permissions.contains(Permissions::VIEW_CHANNEL))
+}
+
 fn first_missing_permission_action(current: Permissions) -> PermissionAction {
     if !current.contains(Permissions::VIEW_CHANNEL) {
         PermissionAction::ViewChannel
@@ -3943,11 +5116,449 @@ fn ledger_refresh_recovery_reference(binding: CanonicalThreadBinding) -> Locator
     )
 }
 
+fn canonical_load_failure_blocks_locator(failure: CanonicalLoadFailure) -> bool {
+    matches!(
+        failure,
+        CanonicalLoadFailure::AttachmentCardinality { .. }
+            | CanonicalLoadFailure::OversizeAttachment { .. }
+            | CanonicalLoadFailure::Decode { .. }
+            | CanonicalLoadFailure::VersionMismatch { .. }
+            | CanonicalLoadFailure::WriterLineage { .. }
+            | CanonicalLoadFailure::Chain { .. }
+            | CanonicalLoadFailure::Structure { .. }
+            | CanonicalLoadFailure::Projection { .. }
+            | CanonicalLoadFailure::MetadataCoherence { .. }
+            | CanonicalLoadFailure::DisplayDrift { .. }
+    )
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum VoidSelectionRenderKind {
     Normal,
     MissingSelection,
     StaleTarget(VoidRetargetReason),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PickerPageDirection {
+    Previous,
+    Next,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ExpensePickerRenderParts {
+    select_menu: Option<SurfaceSelectMenu>,
+    utility_row: Option<SurfaceActionRow>,
+    detail_lines: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ExpensePickerPage {
+    snapshot_id: PickerSnapshotId,
+    query: Option<String>,
+    options: Vec<SurfaceSelectOption>,
+    visible_values: Vec<u64>,
+    detail_lines: Vec<String>,
+    current_page: usize,
+    total_pages: usize,
+    total_items: usize,
+    page_item_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ExpensePickerItem {
+    value: u64,
+    label: SafeLiteralText,
+    selected: bool,
+}
+
+fn picker_kind_for_phase(phase: &ExpenseSelectionPhase) -> Option<ExpensePickerKind> {
+    match phase {
+        ExpenseSelectionPhase::Payer => Some(ExpensePickerKind::Payer),
+        ExpenseSelectionPhase::IndividualSelection => Some(ExpensePickerKind::Individuals),
+        ExpenseSelectionPhase::Roles => Some(ExpensePickerKind::Roles),
+        ExpenseSelectionPhase::ParticipantSource | ExpenseSelectionPhase::WeightEditor => None,
+    }
+}
+
+fn expense_picker_page(
+    roster: &RouterRosterSnapshot,
+    selection: &ExpenseSelectionState,
+    kind: ExpensePickerKind,
+) -> ExpensePickerPage {
+    let query = selection
+        .picker_states
+        .get(&kind)
+        .and_then(|state| state.query().map(str::to_owned));
+    let snapshot_id = expense_picker_snapshot_id(roster, kind);
+    let requested_page = selection
+        .picker_states
+        .get(&kind)
+        .map_or(0, |state| state.current_page());
+    let mut items = expense_picker_items(roster, selection, kind);
+    items.sort_by(|left, right| {
+        left.label
+            .as_str()
+            .cmp(right.label.as_str())
+            .then_with(|| left.value.cmp(&right.value))
+    });
+    if let Some(query) = query.as_deref() {
+        let normalized = query.to_lowercase();
+        items.retain(|item| item.label.as_str().to_lowercase().contains(&normalized));
+    }
+    let total_items = items.len();
+    let total_pages = total_items.div_ceil(EXPENSE_PICKER_PAGE_SIZE).max(1);
+    let current_page = requested_page.min(total_pages.saturating_sub(1));
+    let page_start = current_page * EXPENSE_PICKER_PAGE_SIZE;
+    let page_end = (page_start + EXPENSE_PICKER_PAGE_SIZE).min(total_items);
+    let page_items = if total_items == 0 {
+        Vec::new()
+    } else {
+        items[page_start..page_end].to_vec()
+    };
+    let mut detail_lines = Vec::new();
+    match kind {
+        ExpensePickerKind::Payer | ExpensePickerKind::Individuals => {
+            detail_lines.push(i18n::member_picker_help().to_owned());
+        }
+        ExpensePickerKind::Roles => detail_lines.push(i18n::role_picker_help().to_owned()),
+    }
+    if let Some(query) = query.as_deref() {
+        detail_lines.push(i18n::expense_search_line(query).to_string());
+        if total_items == 0 {
+            detail_lines.push(
+                match kind {
+                    ExpensePickerKind::Roles => i18n::role_search_not_found_error(),
+                    ExpensePickerKind::Payer | ExpensePickerKind::Individuals => {
+                        i18n::member_search_not_found_error()
+                    }
+                }
+                .to_owned(),
+            );
+        }
+    }
+    detail_lines.push(i18n::page_indicator(current_page + 1, total_pages).to_string());
+    if total_items > 0 {
+        detail_lines
+            .push(i18n::page_range_indicator(page_start + 1, page_end, total_items).to_string());
+    }
+    let visible_values = page_items.iter().map(|item| item.value).collect::<Vec<_>>();
+    let options = page_items
+        .into_iter()
+        .map(|item| SurfaceSelectOption {
+            value: item.value.to_string(),
+            label: item.label,
+            description: None,
+            selected: item.selected,
+        })
+        .collect::<Vec<_>>();
+    ExpensePickerPage {
+        snapshot_id,
+        query,
+        page_item_count: options.len(),
+        options,
+        visible_values,
+        detail_lines,
+        current_page,
+        total_pages,
+        total_items,
+    }
+}
+
+fn expense_picker_query_matches(
+    roster: &RouterRosterSnapshot,
+    selection: &ExpenseSelectionState,
+    kind: ExpensePickerKind,
+    query: &str,
+) -> bool {
+    let normalized = query.to_lowercase();
+    expense_picker_items(roster, selection, kind)
+        .into_iter()
+        .any(|item| item.label.as_str().to_lowercase().contains(&normalized))
+}
+
+fn expense_picker_search_not_found_message(kind: ExpensePickerKind) -> &'static str {
+    match kind {
+        ExpensePickerKind::Roles => i18n::role_search_not_found_error(),
+        ExpensePickerKind::Payer | ExpensePickerKind::Individuals => {
+            i18n::member_search_not_found_error()
+        }
+    }
+}
+
+fn expense_picker_snapshot_id(
+    roster: &RouterRosterSnapshot,
+    kind: ExpensePickerKind,
+) -> PickerSnapshotId {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for item in expense_picker_items(roster, &ExpenseSelectionState::default(), kind) {
+        for byte in item.value.to_be_bytes() {
+            hash = hash
+                .wrapping_mul(0x100_0000_01b3)
+                .wrapping_add(u64::from(byte));
+        }
+        for byte in item.label.as_str().as_bytes() {
+            hash = hash
+                .wrapping_mul(0x100_0000_01b3)
+                .wrapping_add(u64::from(*byte));
+        }
+    }
+    PickerSnapshotId::new(hash)
+}
+
+fn expense_picker_items(
+    roster: &RouterRosterSnapshot,
+    selection: &ExpenseSelectionState,
+    kind: ExpensePickerKind,
+) -> Vec<ExpensePickerItem> {
+    match kind {
+        ExpensePickerKind::Payer | ExpensePickerKind::Individuals => {
+            let labels = SurfaceMemberLabels::from_member_names(
+                roster.roster.all_members.iter().map(|member_id| {
+                    (
+                        *member_id,
+                        roster
+                            .display_names
+                            .get(member_id)
+                            .map(|name| name.as_str()),
+                    )
+                }),
+            );
+            roster
+                .roster
+                .all_members
+                .iter()
+                .map(|member_id| ExpensePickerItem {
+                    value: member_id.0,
+                    label: labels.safe_member_label(*member_id),
+                    selected: match kind {
+                        ExpensePickerKind::Payer => selection.payer == Some(*member_id),
+                        ExpensePickerKind::Individuals => {
+                            selection.individual_members.contains(member_id)
+                        }
+                        ExpensePickerKind::Roles => false,
+                    },
+                })
+                .collect()
+        }
+        ExpensePickerKind::Roles => roster
+            .roster
+            .role_members
+            .keys()
+            .map(|role_id| ExpensePickerItem {
+                value: role_id.0,
+                label: roster
+                    .role_display_names
+                    .get(role_id)
+                    .and_then(|name| SafeLiteralText::from_roster_label(name.as_str()))
+                    .unwrap_or_else(|| {
+                        SafeLiteralText::from_roster_label(
+                            &i18n::unknown_role_label(role_id.0).to_string(),
+                        )
+                        .expect("fallback role label should sanitize")
+                    }),
+                selected: selection.selected_roles.contains(role_id),
+            })
+            .collect(),
+    }
+}
+
+fn expense_picker_utility_row(
+    kind: ExpensePickerKind,
+    nonce: walicord_application::InteractionNonce,
+    snapshot_id: PickerSnapshotId,
+    current_page: usize,
+    total_pages: usize,
+) -> SurfaceActionRow {
+    SurfaceActionRow::Buttons(vec![
+        SurfaceButton::Interactive {
+            label: i18n::picker_previous_page_label().to_owned(),
+            custom_id: expense_picker_custom_id(
+                EXPENSE_PICKER_PREV_CUSTOM_ID_PREFIX,
+                kind,
+                nonce,
+                snapshot_id,
+            ),
+            style: SurfaceInteractiveButtonStyle::Secondary,
+            disabled: current_page == 0,
+        },
+        SurfaceButton::Interactive {
+            label: i18n::picker_next_page_label().to_owned(),
+            custom_id: expense_picker_custom_id(
+                EXPENSE_PICKER_NEXT_CUSTOM_ID_PREFIX,
+                kind,
+                nonce,
+                snapshot_id,
+            ),
+            style: SurfaceInteractiveButtonStyle::Secondary,
+            disabled: current_page + 1 >= total_pages,
+        },
+        SurfaceButton::Interactive {
+            label: i18n::picker_search_label().to_owned(),
+            custom_id: expense_picker_custom_id(
+                EXPENSE_PICKER_SEARCH_CUSTOM_ID_PREFIX,
+                kind,
+                nonce,
+                snapshot_id,
+            ),
+            style: SurfaceInteractiveButtonStyle::Secondary,
+            disabled: false,
+        },
+        SurfaceButton::Interactive {
+            label: picker_clear_label(kind).to_owned(),
+            custom_id: expense_picker_custom_id(
+                EXPENSE_PICKER_CLEAR_CUSTOM_ID_PREFIX,
+                kind,
+                nonce,
+                snapshot_id,
+            ),
+            style: SurfaceInteractiveButtonStyle::Secondary,
+            disabled: false,
+        },
+    ])
+}
+
+fn picker_clear_label(kind: ExpensePickerKind) -> &'static str {
+    match kind {
+        ExpensePickerKind::Payer => i18n::payer_clear_label(),
+        ExpensePickerKind::Individuals => i18n::individual_clear_label(),
+        ExpensePickerKind::Roles => i18n::role_clear_label(),
+    }
+}
+
+fn expense_picker_custom_id(
+    prefix: &str,
+    kind: ExpensePickerKind,
+    nonce: walicord_application::InteractionNonce,
+    snapshot_id: PickerSnapshotId,
+) -> String {
+    format!(
+        "{prefix}{}:{nonce}:{snapshot_id}",
+        expense_picker_kind_slug(kind)
+    )
+}
+
+fn parse_expense_picker_custom_id(
+    custom_id: &str,
+    prefix: &str,
+) -> Option<(
+    ExpensePickerKind,
+    walicord_application::InteractionNonce,
+    PickerSnapshotId,
+)> {
+    let remainder = custom_id.strip_prefix(prefix)?;
+    let (kind, remainder) = remainder.split_once(':')?;
+    let (nonce, snapshot_id) = remainder.split_once(':')?;
+    let kind = parse_expense_picker_kind(kind)?;
+    let nonce = nonce
+        .parse::<u64>()
+        .ok()
+        .and_then(|value| walicord_application::InteractionNonce::new(value).ok())?;
+    let snapshot_id = snapshot_id.parse::<PickerSnapshotId>().ok()?;
+    Some((kind, nonce, snapshot_id))
+}
+
+fn expense_picker_selection_custom_id(
+    prefix: &str,
+    nonce: walicord_application::InteractionNonce,
+    snapshot_id: PickerSnapshotId,
+) -> String {
+    format!("{prefix}{nonce}:{snapshot_id}")
+}
+
+fn parse_expense_picker_selection_custom_id(
+    custom_id: &str,
+    prefix: &str,
+) -> Option<(walicord_application::InteractionNonce, PickerSnapshotId)> {
+    let remainder = custom_id.strip_prefix(prefix)?;
+    let (nonce, snapshot_id) = remainder.split_once(':')?;
+    let nonce = nonce
+        .parse::<u64>()
+        .ok()
+        .and_then(|value| walicord_application::InteractionNonce::new(value).ok())?;
+    let snapshot_id = snapshot_id.parse::<PickerSnapshotId>().ok()?;
+    Some((nonce, snapshot_id))
+}
+
+fn expense_picker_kind_slug(kind: ExpensePickerKind) -> &'static str {
+    match kind {
+        ExpensePickerKind::Payer => "payer",
+        ExpensePickerKind::Individuals => "individuals",
+        ExpensePickerKind::Roles => "roles",
+    }
+}
+
+fn parse_expense_picker_kind(value: &str) -> Option<ExpensePickerKind> {
+    match value {
+        "payer" => Some(ExpensePickerKind::Payer),
+        "individuals" => Some(ExpensePickerKind::Individuals),
+        "roles" => Some(ExpensePickerKind::Roles),
+        _ => None,
+    }
+}
+
+#[allow(clippy::result_large_err)] // LedgerRouteError is the router-wide error envelope.
+fn build_expense_picker_search_modal_response(
+    kind: ExpensePickerKind,
+    nonce: walicord_application::InteractionNonce,
+    snapshot_id: PickerSnapshotId,
+) -> Result<CreateInteractionResponse, LedgerRouteError> {
+    let custom_id = expense_picker_custom_id(
+        EXPENSE_PICKER_SEARCH_MODAL_CUSTOM_ID_PREFIX,
+        kind,
+        nonce,
+        snapshot_id,
+    );
+    validate_custom_id(&custom_id)?;
+    let (title, label, placeholder) = match kind {
+        ExpensePickerKind::Payer | ExpensePickerKind::Individuals => (
+            i18n::member_search_modal_title(),
+            i18n::member_search_input_label(),
+            i18n::member_search_placeholder(),
+        ),
+        ExpensePickerKind::Roles => (
+            i18n::role_search_modal_title(),
+            i18n::role_search_input_label(),
+            i18n::role_search_placeholder(),
+        ),
+    };
+    let title = truncate_component_label(title);
+    validate_modal_title(&title)?;
+    let label = truncate_component_label(label);
+    validate_text_input_label(&label)?;
+    let placeholder = truncate_component_label(placeholder);
+    validate_text_input_placeholder(&placeholder)?;
+    let input = CreateInputText::new(InputTextStyle::Short, label, EXPENSE_PICKER_SEARCH_FIELD)
+        .placeholder(placeholder)
+        .required(true);
+    Ok(CreateInteractionResponse::Modal(
+        CreateModal::new(custom_id, title).components(vec![CreateActionRow::InputText(input)]),
+    ))
+}
+
+fn extract_expense_picker_search_query(modal: &ModalInteraction) -> &str {
+    for row in &modal.data.components {
+        for component in &row.components {
+            if let serenity::all::ActionRowComponent::InputText(input) = component
+                && input.custom_id == EXPENSE_PICKER_SEARCH_FIELD
+            {
+                return input.value.as_deref().unwrap_or_default();
+            }
+        }
+    }
+    ""
+}
+
+fn merge_paged_selection(existing: &[u64], visible: &[u64], selected: &[u64]) -> Vec<u64> {
+    let mut merged = existing
+        .iter()
+        .copied()
+        .filter(|value| !visible.contains(value))
+        .chain(selected.iter().copied())
+        .collect::<Vec<_>>();
+    merged.sort_unstable();
+    merged.dedup();
+    merged
 }
 
 fn selected_void_target(component: &ComponentInteraction) -> Option<LedgerEntryId> {
@@ -3958,6 +5569,44 @@ fn selected_void_target(component: &ComponentInteraction) -> Option<LedgerEntryI
             .map(LedgerEntryId),
         _ => None,
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum ComponentSelectionParseError {
+    #[error("component is not a string select")]
+    NotStringSelect,
+    #[error("selection value is not an unsigned integer: {0}")]
+    InvalidValue(String),
+}
+
+fn selected_component_values(
+    component: &ComponentInteraction,
+) -> Result<Vec<u64>, ComponentSelectionParseError> {
+    component_selection_values(&component.data.kind)
+}
+
+fn component_selection_values(
+    kind: &ComponentInteractionDataKind,
+) -> Result<Vec<u64>, ComponentSelectionParseError> {
+    match kind {
+        ComponentInteractionDataKind::StringSelect { values } => {
+            parse_component_selection_values(values)
+        }
+        _ => Err(ComponentSelectionParseError::NotStringSelect),
+    }
+}
+
+fn parse_component_selection_values(
+    values: &[String],
+) -> Result<Vec<u64>, ComponentSelectionParseError> {
+    values
+        .iter()
+        .map(|value| {
+            value
+                .parse::<u64>()
+                .map_err(|_| ComponentSelectionParseError::InvalidValue(value.clone()))
+        })
+        .collect()
 }
 
 #[allow(clippy::result_large_err)] // LedgerRouteError is the router-wide error envelope.
@@ -4041,7 +5690,7 @@ fn void_confirmation_action_rows(
 fn void_candidate_select_label(
     view: &VerifiedLedgerEntryView,
     labels: &SurfaceMemberLabels,
-) -> String {
+) -> SafeLiteralText {
     use std::fmt::Write as _;
     use walicord_application::ledger::LedgerEvent;
     use walicord_domain::Money;
@@ -4083,7 +5732,7 @@ fn void_candidate_select_label(
             let _ = write!(label, "#{}", view.entry().id.0);
         }
     }
-    label
+    SafeLiteralText::from_roster_label(&label).expect("void candidate select label should sanitize")
 }
 
 #[allow(clippy::result_large_err)] // LedgerRouteError is the router-wide error envelope.
@@ -4181,12 +5830,15 @@ pub(crate) fn parse_expense_session_button_nonce(
 mod tests {
     use super::*;
     use rstest::rstest;
-    use std::time::UNIX_EPOCH;
+    use std::{
+        collections::{BTreeMap, BTreeSet, HashMap},
+        time::UNIX_EPOCH,
+    };
     use walicord_application::{
         InteractionNonce, PreviewInstanceId,
         ledger::{
             AllocationSnapshot, ExpenseRecorded, MemberAmount, NormalizedSettlementPlanRecorded,
-            ledger_chain_genesis_sha256_v1,
+            ledger_chain_genesis_sha256_v1, participant_resolution::RosterSnapshot,
         },
     };
     use walicord_domain::{Money, Transfer};
@@ -4201,6 +5853,25 @@ mod tests {
         fn from(value: bool) -> Self {
             if value { Self::Clear } else { Self::Preserve }
         }
+    }
+
+    fn nonce(value: u64) -> InteractionNonce {
+        InteractionNonce::new(value).expect("nonce should be non-zero")
+    }
+
+    #[rstest]
+    #[case(None, false)]
+    #[case(Some(Permissions::empty()), false)]
+    #[case(Some(Permissions::VIEW_CHANNEL), true)]
+    #[case(
+        Some(Permissions::VIEW_CHANNEL | Permissions::SEND_MESSAGES),
+        true
+    )]
+    fn actor_visibility_fails_closed_without_view_channel(
+        #[case] permissions: Option<Permissions>,
+        #[case] expected: bool,
+    ) {
+        assert_eq!(actor_can_view_channel(permissions), expected);
     }
 
     fn member_amount(member_id: u64, amount: i64) -> MemberAmount {
@@ -4387,6 +6058,32 @@ mod tests {
         assert_eq!(error.user_message(), expected);
     }
 
+    #[rstest]
+    #[case(
+        CanonicalLoadFailure::FetchTimeout {
+            route: CanonicalLoadRoute::Read,
+        },
+        walicord_i18n::ledger_load_timeout_message()
+    )]
+    #[case(
+        CanonicalLoadFailure::VersionMismatch {
+            route: CanonicalLoadRoute::Read,
+            failing_entry_id: Some(LedgerEntryId(7)),
+        },
+        walicord_i18n::unknown_ledger_format_message()
+    )]
+    fn canonical_load_route_error_preserves_route_aware_user_message(
+        #[case] failure: CanonicalLoadFailure,
+        #[case] expected: &str,
+    ) {
+        let error = LedgerRouteError::Internal(InternalLedgerRouteError::CanonicalLoad {
+            failure,
+            error: Arc::new(StoreLoadError::Fetch("simulated".to_owned())),
+        });
+
+        assert_eq!(error.user_message(), expected);
+    }
+
     #[test]
     fn route_error_display_includes_underlying_internal_message_via_thiserror() {
         let error: LedgerRouteError = InternalLedgerRouteError::DiscordCall {
@@ -4404,13 +6101,12 @@ mod tests {
     #[test]
     fn internal_route_error_post_navigation_invariant_renders_operation_and_stage() {
         let error = InternalLedgerRouteError::PostNavigationStageInvariant {
-            operation: PostNavigationOperation::Forward,
             observed_stage: ExpenseSessionStage::InConfirmation,
         };
 
         let rendered = error.to_string();
 
-        assert!(rendered.contains("forward"));
+        assert!(rendered.contains("navigation"));
         assert!(rendered.contains("InConfirmation"));
     }
 
@@ -4491,13 +6187,12 @@ mod tests {
         let binding = CanonicalThreadBinding::new(
             TrackedParentKey::from_guarded_parent(GuildId::new(10), ChannelId::new(20)),
             ChannelId::new(30),
-            walicord_ledger::test_fixtures::ledger_id(77),
         );
 
         assert_eq!(
             ledger_refresh_recovery_reference(binding),
             LocatorRecoveryReference::ledger(
-                "0000004d",
+                "0000001e",
                 Some("https://discord.com/channels/10/30")
             )
         );
@@ -4562,5 +6257,278 @@ mod tests {
             void_confirmation_total_amount(&entry).expect("entry should support void confirmation");
 
         assert_eq!(actual, expected);
+    }
+
+    #[rstest]
+    #[case::empty(vec![], Ok(vec![]))]
+    #[case::valid(vec!["7".to_owned(), "42".to_owned()], Ok(vec![7, 42]))]
+    #[case::malformed(
+        vec!["7".to_owned(), "not-a-member".to_owned()],
+        Err(ComponentSelectionParseError::InvalidValue("not-a-member".to_owned()))
+    )]
+    fn component_selection_parser_is_fail_closed(
+        #[case] values: Vec<String>,
+        #[case] expected: Result<Vec<u64>, ComponentSelectionParseError>,
+    ) {
+        assert_eq!(parse_component_selection_values(&values), expected);
+    }
+
+    #[test]
+    fn component_selection_parser_rejects_non_select_components() {
+        assert_eq!(
+            component_selection_values(&ComponentInteractionDataKind::Button),
+            Err(ComponentSelectionParseError::NotStringSelect)
+        );
+    }
+
+    fn picker_roster(member_count: u64) -> RouterRosterSnapshot {
+        let all_members = (1..=member_count).map(MemberId).collect::<BTreeSet<_>>();
+        let display_names = (1..=member_count)
+            .map(|id| {
+                (
+                    MemberId(id),
+                    smol_str::SmolStr::new(format!("member {id:02}")),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        RouterRosterSnapshot {
+            roster: RosterSnapshot {
+                all_members,
+                role_members: BTreeMap::new(),
+            },
+            display_names,
+            role_display_names: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn expense_picker_page_reaches_members_after_the_first_discord_page() {
+        let mut selection = ExpenseSelectionState::default();
+        selection.picker_states.insert(
+            ExpensePickerKind::Individuals,
+            walicord_application::ledger::expense_session::PagedPickerState::new(
+                walicord_application::ledger::expense_session::PickerSnapshotId::new(21),
+                1,
+                None,
+                Vec::new(),
+            ),
+        );
+
+        let actual = expense_picker_page(
+            &picker_roster(30),
+            &selection,
+            ExpensePickerKind::Individuals,
+        );
+
+        assert_eq!(actual.current_page, 1);
+        assert_eq!(actual.total_pages, 2);
+        assert_eq!(actual.visible_values, vec![26, 27, 28, 29, 30]);
+    }
+
+    #[test]
+    fn expense_picker_page_filters_by_search_query() {
+        let mut selection = ExpenseSelectionState::default();
+        selection.picker_states.insert(
+            ExpensePickerKind::Individuals,
+            walicord_application::ledger::expense_session::PagedPickerState::new(
+                walicord_application::ledger::expense_session::PickerSnapshotId::new(22),
+                0,
+                Some("03".to_owned()),
+                Vec::new(),
+            ),
+        );
+
+        let actual = expense_picker_page(
+            &picker_roster(30),
+            &selection,
+            ExpensePickerKind::Individuals,
+        );
+
+        assert_eq!(actual.visible_values, vec![3]);
+        assert_eq!(actual.total_items, 1);
+    }
+
+    #[test]
+    fn role_picker_uses_unknown_role_label_when_role_names_are_not_available() {
+        let roster = RouterRosterSnapshot {
+            roster: RosterSnapshot {
+                all_members: BTreeSet::new(),
+                role_members: BTreeMap::from([(RoleId(10), BTreeSet::from([MemberId(1)]))]),
+            },
+            display_names: HashMap::new(),
+            role_display_names: HashMap::new(),
+        };
+
+        let actual = expense_picker_page(
+            &roster,
+            &ExpenseSelectionState::default(),
+            ExpensePickerKind::Roles,
+        );
+
+        assert_eq!(
+            actual.options[0].label.as_str(),
+            i18n::unknown_role_label(10).to_string()
+        );
+    }
+
+    #[test]
+    fn role_picker_uses_cached_role_display_name_when_available() {
+        let roster = RouterRosterSnapshot {
+            roster: RosterSnapshot {
+                all_members: BTreeSet::new(),
+                role_members: BTreeMap::from([(RoleId(10), BTreeSet::from([MemberId(1)]))]),
+            },
+            display_names: HashMap::new(),
+            role_display_names: HashMap::from([(RoleId(10), smol_str::SmolStr::new("開発"))]),
+        };
+
+        let actual = expense_picker_page(
+            &roster,
+            &ExpenseSelectionState::default(),
+            ExpensePickerKind::Roles,
+        );
+
+        assert_eq!(actual.options[0].label.as_str(), "開発");
+    }
+
+    #[test]
+    fn member_picker_sanitizes_roster_sourced_select_labels() {
+        let roster = RouterRosterSnapshot {
+            roster: RosterSnapshot {
+                all_members: BTreeSet::from([MemberId(1)]),
+                role_members: BTreeMap::new(),
+            },
+            display_names: HashMap::from([(
+                MemberId(1),
+                smol_str::SmolStr::new(" \nA=@everyone <@123> `x`\u{202E} "),
+            )]),
+            role_display_names: HashMap::new(),
+        };
+
+        let actual = expense_picker_page(
+            &roster,
+            &ExpenseSelectionState::default(),
+            ExpensePickerKind::Individuals,
+        );
+
+        assert_eq!(
+            actual.options[0].label.as_str(),
+            "A＝＠everyone ＜＠123＞ \\`x\\`"
+        );
+    }
+
+    #[test]
+    fn role_picker_sanitizes_roster_sourced_select_labels() {
+        let roster = RouterRosterSnapshot {
+            roster: RosterSnapshot {
+                all_members: BTreeSet::new(),
+                role_members: BTreeMap::from([(RoleId(10), BTreeSet::from([MemberId(1)]))]),
+            },
+            display_names: HashMap::new(),
+            role_display_names: HashMap::from([(
+                RoleId(10),
+                smol_str::SmolStr::new(" \nRole=@everyone <@123> `x`\u{202E} "),
+            )]),
+        };
+
+        let actual = expense_picker_page(
+            &roster,
+            &ExpenseSelectionState::default(),
+            ExpensePickerKind::Roles,
+        );
+
+        assert_eq!(
+            actual.options[0].label.as_str(),
+            "Role＝＠everyone ＜＠123＞ \\`x\\`"
+        );
+    }
+
+    #[test]
+    fn picker_navigation_custom_id_round_trips_snapshot_id() {
+        let custom_id = expense_picker_custom_id(
+            EXPENSE_PICKER_NEXT_CUSTOM_ID_PREFIX,
+            ExpensePickerKind::Individuals,
+            nonce(7),
+            PickerSnapshotId::new(42),
+        );
+
+        let actual =
+            parse_expense_picker_custom_id(&custom_id, EXPENSE_PICKER_NEXT_CUSTOM_ID_PREFIX);
+
+        assert_eq!(
+            actual,
+            Some((
+                ExpensePickerKind::Individuals,
+                nonce(7),
+                PickerSnapshotId::new(42),
+            ))
+        );
+    }
+
+    #[test]
+    fn picker_selection_custom_id_round_trips_snapshot_id() {
+        let custom_id = expense_picker_selection_custom_id(
+            EXPENSE_INDIVIDUAL_PICK_CUSTOM_ID_PREFIX,
+            nonce(7),
+            PickerSnapshotId::new(42),
+        );
+
+        let actual = parse_expense_picker_selection_custom_id(
+            &custom_id,
+            EXPENSE_INDIVIDUAL_PICK_CUSTOM_ID_PREFIX,
+        );
+
+        assert_eq!(actual, Some((nonce(7), PickerSnapshotId::new(42))));
+    }
+
+    #[rstest]
+    #[case::matching_member("03", true)]
+    #[case::missing_member("missing", false)]
+    fn expense_picker_query_match_reports_whether_session_should_mutate(
+        #[case] query: &str,
+        #[case] expected: bool,
+    ) {
+        let actual = expense_picker_query_matches(
+            &picker_roster(30),
+            &ExpenseSelectionState::default(),
+            ExpensePickerKind::Individuals,
+            query,
+        );
+
+        assert_eq!(actual, expected);
+    }
+
+    #[rstest]
+    #[case::thread(
+        ReadViewRoute::ReviewThread,
+        vec![
+            i18n::settlement_preview_replaced_message().to_owned(),
+            i18n::route_task_guidance().to_owned(),
+        ]
+    )]
+    #[case::parent(
+        ReadViewRoute::ReviewParent,
+        vec![
+            i18n::settlement_preview_replaced_message().to_owned(),
+            i18n::route_task_guidance().to_owned(),
+            i18n::parent_preview_entry_guidance().to_owned(),
+        ]
+    )]
+    fn replacement_review_guidance_preserves_route_guidance(
+        #[case] route: ReadViewRoute,
+        #[case] expected: Vec<String>,
+    ) {
+        assert_eq!(
+            review_route_guidance_lines_with_replacement_notice(route),
+            expected
+        );
+    }
+
+    #[test]
+    fn paged_selection_merge_replaces_only_the_visible_page() {
+        assert_eq!(
+            merge_paged_selection(&[1, 27], &[26, 27, 28], &[26]),
+            vec![1, 26]
+        );
     }
 }

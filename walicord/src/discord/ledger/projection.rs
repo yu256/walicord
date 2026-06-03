@@ -78,24 +78,6 @@ impl CanonicalLoadFailure {
         }
     }
 
-    pub fn route(self) -> CanonicalLoadRoute {
-        match self {
-            Self::Fetch { route }
-            | Self::FetchTimeout { route }
-            | Self::AttachmentCardinality { route }
-            | Self::OversizeAttachment { route }
-            | Self::Decode { route }
-            | Self::VersionMismatch { route, .. }
-            | Self::WriterLineage { route }
-            | Self::Chain { route }
-            | Self::Structure { route }
-            | Self::Projection { route }
-            | Self::MetadataCoherence { route }
-            | Self::DisplayDrift { route }
-            | Self::Permission { route } => route,
-        }
-    }
-
     pub fn failing_entry_id(self) -> Option<LedgerEntryId> {
         match self {
             Self::VersionMismatch {

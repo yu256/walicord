@@ -4,7 +4,9 @@ use crate::{
 };
 use std::{
     collections::{BTreeMap, HashMap},
-    num::NonZeroU64,
+    fmt,
+    num::{NonZeroU64, ParseIntError},
+    str::FromStr,
     sync::Mutex,
     time::{Duration, SystemTime},
 };
@@ -90,6 +92,13 @@ pub enum ExpenseSelectionPhase {
     WeightEditor,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ExpensePickerKind {
+    Payer,
+    Individuals,
+    Roles,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExpenseSessionStage {
     AwaitingBasicInfo,
@@ -130,6 +139,7 @@ pub struct ExpenseSelectionState {
     pub selected_roles: Vec<RoleId>,
     pub include_members_group: bool,
     pub weight_overrides: BTreeMap<MemberId, Weight>,
+    pub picker_states: BTreeMap<ExpensePickerKind, PagedPickerState>,
 }
 
 /// One resolved participant row as captured at confirmation rebuild time.
@@ -404,6 +414,22 @@ impl ExpenseModalSubmissionBindingStore {
             .insert(binding.binding_nonce, binding);
     }
 
+    pub fn clear_draft_scope(&self, draft_scope_id: ExpenseDraftScopeId) {
+        self.by_nonce
+            .lock()
+            .expect("ExpenseModalSubmissionBindingStore mutex poisoned")
+            .retain(|_, binding| binding.draft_scope_id != draft_scope_id);
+    }
+
+    pub fn clear_actor_draft_scope(&self, draft_scope_id: ExpenseDraftScopeId, actor_id: MemberId) {
+        self.by_nonce
+            .lock()
+            .expect("ExpenseModalSubmissionBindingStore mutex poisoned")
+            .retain(|_, binding| {
+                binding.draft_scope_id != draft_scope_id || binding.actor_id != actor_id
+            });
+    }
+
     pub fn try_consume(
         &self,
         binding_nonce: InteractionNonce,
@@ -547,6 +573,22 @@ impl ModalRetryBindingStore {
             .insert(binding.binding_nonce, binding);
     }
 
+    pub fn clear_draft_scope(&self, draft_scope_id: ExpenseDraftScopeId) {
+        self.by_nonce
+            .lock()
+            .expect("ModalRetryBindingStore mutex poisoned")
+            .retain(|_, binding| binding.draft_scope_id != draft_scope_id);
+    }
+
+    pub fn clear_actor_draft_scope(&self, draft_scope_id: ExpenseDraftScopeId, actor_id: MemberId) {
+        self.by_nonce
+            .lock()
+            .expect("ModalRetryBindingStore mutex poisoned")
+            .retain(|_, binding| {
+                binding.draft_scope_id != draft_scope_id || binding.actor_id != actor_id
+            });
+    }
+
     /// Atomically validate and remove the binding. Single-use is structural: the binding
     /// is removed from the store on success, so subsequent attempts with the same nonce
     /// return [`ModalRetryBindingError::NotFound`].
@@ -597,6 +639,20 @@ pub struct PickerSnapshotId(u64);
 impl PickerSnapshotId {
     pub fn new(value: u64) -> Self {
         Self(value)
+    }
+}
+
+impl fmt::Display for PickerSnapshotId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl FromStr for PickerSnapshotId {
+    type Err = ParseIntError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        value.parse::<u64>().map(Self)
     }
 }
 
@@ -777,6 +833,12 @@ impl ExpenseSessionSlot {
             Self::Available(session) | Self::Claimed { session, .. } => session,
         }
     }
+
+    fn session(&self) -> &ExpenseSession {
+        match self {
+            Self::Available(session) | Self::Claimed { session, .. } => session,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -826,6 +888,23 @@ impl ExpenseSessionStore {
             .map(ExpenseSessionSlot::into_session)
     }
 
+    pub fn clear_draft_scope(&self, draft_scope_id: ExpenseDraftScopeId) {
+        self.state
+            .lock()
+            .expect("ExpenseSessionStore mutex poisoned")
+            .by_key
+            .retain(|_, slot| slot.session().key().draft_scope_id() != draft_scope_id);
+    }
+
+    pub fn clear(&self, key: ExpenseSessionKey) -> Option<ExpenseSession> {
+        self.state
+            .lock()
+            .expect("ExpenseSessionStore mutex poisoned")
+            .by_key
+            .remove(&key)
+            .map(ExpenseSessionSlot::into_session)
+    }
+
     pub fn claim(
         &self,
         key: ExpenseSessionKey,
@@ -870,6 +949,39 @@ impl ExpenseSessionStore {
             },
         );
         Ok(Some(ClaimedExpenseSession { token, session }))
+    }
+
+    pub fn active_owner_by_nonce(
+        &self,
+        draft_scope_id: ExpenseDraftScopeId,
+        observed_nonce: InteractionNonce,
+        now: SystemTime,
+    ) -> Option<MemberId> {
+        self.state
+            .lock()
+            .expect("ExpenseSessionStore mutex poisoned")
+            .by_key
+            .iter()
+            .filter(|(key, _)| key.draft_scope_id() == draft_scope_id)
+            .find_map(|(key, slot)| {
+                let session = slot.session();
+                let elapsed = now.duration_since(session.last_touched).unwrap_or_default();
+                (elapsed < EXPENSE_SESSION_TTL && session.nonce == observed_nonce)
+                    .then(|| key.actor_id())
+            })
+    }
+
+    pub fn has_active_session(&self, key: ExpenseSessionKey, now: SystemTime) -> bool {
+        self.state
+            .lock()
+            .expect("ExpenseSessionStore mutex poisoned")
+            .by_key
+            .get(&key)
+            .is_some_and(|slot| {
+                now.duration_since(slot.session().last_touched)
+                    .unwrap_or_default()
+                    < EXPENSE_SESSION_TTL
+            })
     }
 
     pub fn restore_claim(&self, claimed: ClaimedExpenseSession) -> bool {
@@ -945,6 +1057,13 @@ impl VoidSessionStore {
             .remove(&key)
     }
 
+    pub fn clear_ledger(&self, ledger_id: LedgerId) {
+        self.by_key
+            .lock()
+            .expect("VoidSessionStore mutex poisoned")
+            .retain(|key, _| key.ledger_id() != ledger_id);
+    }
+
     pub fn access(
         &self,
         key: VoidSessionKey,
@@ -967,6 +1086,34 @@ impl VoidSessionStore {
             });
         }
         Ok(Some(session))
+    }
+
+    pub fn active_owner_by_nonce(
+        &self,
+        ledger_id: LedgerId,
+        observed_nonce: InteractionNonce,
+        now: SystemTime,
+    ) -> Option<MemberId> {
+        self.by_key
+            .lock()
+            .expect("VoidSessionStore mutex poisoned")
+            .iter()
+            .filter(|(key, _)| key.ledger_id() == ledger_id)
+            .find_map(|(key, session)| {
+                let elapsed = now.duration_since(session.last_touched).unwrap_or_default();
+                (elapsed < VOID_SESSION_TTL && session.nonce == observed_nonce)
+                    .then(|| key.actor_id())
+            })
+    }
+
+    pub fn has_active_session(&self, key: VoidSessionKey, now: SystemTime) -> bool {
+        self.by_key
+            .lock()
+            .expect("VoidSessionStore mutex poisoned")
+            .get(&key)
+            .is_some_and(|session| {
+                now.duration_since(session.last_touched).unwrap_or_default() < VOID_SESSION_TTL
+            })
     }
 }
 
@@ -1145,6 +1292,29 @@ mod tests {
     }
 
     #[test]
+    fn expense_session_store_clear_draft_scope_keeps_other_channels() {
+        let store = ExpenseSessionStore::new();
+        let retained_key = ExpenseSessionKey::new(draft_scope(43), MemberId(3));
+        let removed = fresh_expense_session(UNIX_EPOCH, 1);
+        let retained = ExpenseSession::new(
+            retained_key,
+            ExpenseLaunchOrigin::SlashCommand,
+            ExpenseSessionStage::AwaitingBasicInfo,
+            ExpenseDraftSnapshot::empty(),
+            nonce(2),
+            UNIX_EPOCH,
+        )
+        .expect("session should construct");
+        store.replace(removed);
+        store.replace(retained.clone());
+
+        store.clear_draft_scope(draft_scope(42));
+
+        assert_eq!(store.clear(expense_key()), None);
+        assert_eq!(store.clear(retained_key), Some(retained));
+    }
+
+    #[test]
     fn expense_session_access_returns_none_when_missing() {
         let store = ExpenseSessionStore::new();
         let actual = inspect_expense_session(&store, nonce(1), UNIX_EPOCH);
@@ -1247,6 +1417,36 @@ mod tests {
     }
 
     #[test]
+    fn void_session_store_clear_ledger_keeps_other_ledgers() {
+        let store = VoidSessionStore::new();
+        let retained_key =
+            VoidSessionKey::new(walicord_ledger::test_fixtures::ledger_id(43), MemberId(3));
+        let removed = VoidSession::new(
+            void_key(),
+            VoidSessionStage::SelectingCandidate,
+            None,
+            nonce(1),
+            UNIX_EPOCH,
+        )
+        .expect("session");
+        let retained = VoidSession::new(
+            retained_key,
+            VoidSessionStage::SelectingCandidate,
+            None,
+            nonce(2),
+            UNIX_EPOCH,
+        )
+        .expect("session");
+        store.replace(removed);
+        store.replace(retained.clone());
+
+        store.clear_ledger(walicord_ledger::test_fixtures::ledger_id(42));
+
+        assert_eq!(store.clear(void_key()), None);
+        assert_eq!(store.clear(retained_key), Some(retained));
+    }
+
+    #[test]
     fn expense_session_access_clears_expired_session_inline() {
         let store = ExpenseSessionStore::new();
         store.replace(fresh_expense_session(UNIX_EPOCH, 1));
@@ -1302,6 +1502,42 @@ mod tests {
             })
         );
         assert_eq!(after, Ok(Some(session)));
+    }
+
+    #[test]
+    fn expense_session_store_finds_active_owner_by_nonce_without_claiming() {
+        let store = ExpenseSessionStore::new();
+        let session = fresh_expense_session(UNIX_EPOCH, 1);
+        let key = session.key();
+        store.replace(session.clone());
+
+        let actual = store.active_owner_by_nonce(key.draft_scope_id(), nonce(1), UNIX_EPOCH);
+
+        assert_eq!(actual, Some(key.actor_id()));
+        assert_eq!(
+            inspect_expense_session(&store, nonce(1), UNIX_EPOCH),
+            Ok(Some(session))
+        );
+    }
+
+    #[test]
+    fn void_session_store_finds_active_owner_by_nonce_without_mutating() {
+        let store = VoidSessionStore::new();
+        let session = VoidSession::new(
+            void_key(),
+            VoidSessionStage::SelectingCandidate,
+            None,
+            nonce(1),
+            UNIX_EPOCH,
+        )
+        .expect("session");
+        let key = session.key();
+        store.replace(session.clone());
+
+        let actual = store.active_owner_by_nonce(key.ledger_id(), nonce(1), UNIX_EPOCH);
+
+        assert_eq!(actual, Some(key.actor_id()));
+        assert_eq!(store.access(key, nonce(1), UNIX_EPOCH), Ok(Some(session)));
     }
 
     #[test]

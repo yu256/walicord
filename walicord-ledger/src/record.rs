@@ -2,13 +2,18 @@ use crate::{
     LedgerEvent, LedgerStructureError,
     validation::{StructuralValidation, validate_structure},
 };
-use std::{
-    num::NonZeroU64,
-    sync::atomic::{AtomicU64, Ordering},
-};
+use std::num::NonZeroU64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct LedgerEntryId(pub u64);
+
+impl LedgerEntryId {
+    /// Provide the schema-v1 canonical representation without making hash encoders
+    /// depend on the tuple layout.
+    pub fn with_canonical_bytes(self, consume: impl FnOnce(&[u8])) {
+        consume(&self.0.to_be_bytes());
+    }
+}
 
 /// Identifier of the ledger this entry belongs to. Two chains with different `LedgerId`
 /// values are isolated tamper-evidence chains: the application binds the id into the
@@ -24,6 +29,12 @@ impl LedgerId {
     /// Provide the schema-v1 canonical representation without exposing the inner value.
     pub fn with_canonical_bytes(self, consume: impl FnOnce(&[u8])) {
         consume(&self.0.get().to_be_bytes());
+    }
+}
+
+impl From<NonZeroU64> for LedgerId {
+    fn from(value: NonZeroU64) -> Self {
+        Self(value)
     }
 }
 
@@ -56,63 +67,31 @@ pub mod test_fixtures {
     }
 }
 
-pub struct LedgerIdIssuer {
-    salt: u64,
-    counter: AtomicU64,
-}
-
-impl LedgerIdIssuer {
-    pub fn from_entropy(entropy: NonZeroU64) -> Self {
-        Self {
-            salt: entropy.get(),
-            counter: AtomicU64::new(1),
-        }
-    }
-
-    pub fn issue(&self) -> LedgerId {
-        loop {
-            let counter = self.counter.fetch_add(1, Ordering::Relaxed);
-            if let Some(value) = NonZeroU64::new(mix(self.salt, counter)) {
-                return LedgerId(value);
-            }
-        }
-    }
-}
-
-fn mix(salt: u64, counter: u64) -> u64 {
-    salt.wrapping_add(counter).wrapping_mul(0x9E3779B97F4A7C15)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn ledger_id_issuer_returns_distinct_ids_across_calls() {
-        let issuer = LedgerIdIssuer::from_entropy(NonZeroU64::new(1).expect("non-zero"));
-
-        assert_ne!(issuer.issue(), issuer.issue());
-    }
-
-    #[test]
-    fn ledger_id_issuer_separates_distinct_entropy_sources() {
-        let first = LedgerIdIssuer::from_entropy(NonZeroU64::new(1).expect("non-zero"));
-        let second = LedgerIdIssuer::from_entropy(NonZeroU64::new(2).expect("non-zero"));
-
-        assert_ne!(first.issue(), second.issue());
-    }
-
-    #[test]
-    fn ledger_id_issuer_skips_zero_candidate() {
-        let issuer = LedgerIdIssuer {
-            salt: 1,
-            counter: AtomicU64::new(u64::MAX),
-        };
-
+    fn ledger_id_parses_untrusted_nonzero_decimal_input() {
         assert_eq!(
-            issuer.issue(),
-            LedgerId(NonZeroU64::new(0x9E3779B97F4A7C15).expect("non-zero"))
+            "42".parse::<LedgerId>(),
+            Ok(LedgerId(NonZeroU64::new(42).expect("non-zero")))
         );
+    }
+
+    #[test]
+    fn ledger_id_rejects_zero_decimal_input() {
+        assert_eq!("0".parse::<LedgerId>(), Err(LedgerIdParseError));
+    }
+
+    #[test]
+    fn ledger_entry_id_canonical_bytes_are_big_endian() {
+        let mut actual = Vec::new();
+
+        LedgerEntryId(0x0102_0304_0506_0708)
+            .with_canonical_bytes(|bytes| actual.extend_from_slice(bytes));
+
+        assert_eq!(actual, vec![1, 2, 3, 4, 5, 6, 7, 8]);
     }
 }
 
@@ -127,6 +106,21 @@ impl std::fmt::Display for LedgerId {
         std::fmt::Display::fmt(&self.0.get(), formatter)
     }
 }
+
+impl std::str::FromStr for LedgerId {
+    type Err = LedgerIdParseError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        value
+            .parse::<NonZeroU64>()
+            .map(Self)
+            .map_err(|_| LedgerIdParseError)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("ledger id must be a non-zero unsigned integer")]
+pub struct LedgerIdParseError;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct LedgerRecord {

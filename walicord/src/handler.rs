@@ -308,6 +308,9 @@ where
             self.channel_manager.untrack(channel_id)
         {
             self.message_cache.remove(untracked_id);
+            if let Some(router) = self.ledger_router.get() {
+                router.clear_tracked_parent_channel(channel_id);
+            }
             tracing::info!("Untracked channel {untracked_id}");
         }
     }
@@ -1067,7 +1070,6 @@ where
         let deps = crate::discord::ledger::LedgerRouterDependencies {
             clock: Arc::new(crate::discord::ledger::SystemClock),
             nonce_provider: Arc::new(crate::discord::ledger::ProcessNonceProvider::new()),
-            ledger_id_provider: Arc::new(crate::discord::ledger::ProcessNonceProvider::new()),
             channels: Arc::new(self.channel_manager.clone()),
             roster_fetcher: Arc::new(crate::discord::ledger::DiscordRouterRosterFetcher::new(
                 self.roster_provider.clone(),

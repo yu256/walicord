@@ -22,51 +22,60 @@ const REQUIRED_GATEWAY_INTENTS: &[(GatewayIntents, &str)] = &[
 const CANONICAL_SURFACE_PERMISSIONS: &[(Permissions, &str)] =
     &[(Permissions::VIEW_CHANNEL, "View Channel")];
 
+#[cfg(test)]
 const TOPIC_CHANGE_CAPABILITIES: &[NativeAdminCapability] = &[
     NativeAdminCapability::ManageChannels,
     NativeAdminCapability::Administrator,
     NativeAdminCapability::ServerOwner,
 ];
 
+#[cfg(test)]
 const CHANNEL_OVERRIDE_CAPABILITIES: &[NativeAdminCapability] = &[
     NativeAdminCapability::ManageChannels,
     NativeAdminCapability::Administrator,
     NativeAdminCapability::ServerOwner,
 ];
 
+#[cfg(test)]
 const ROLE_BASED_CAPABILITIES: &[NativeAdminCapability] = &[
     NativeAdminCapability::ManageRoles,
     NativeAdminCapability::Administrator,
     NativeAdminCapability::ServerOwner,
 ];
 
+#[cfg(test)]
 const THREAD_COMMAND_CAPABILITIES: &[NativeAdminCapability] = &[
     NativeAdminCapability::UseApplicationCommandsOrEquivalent,
     NativeAdminCapability::Administrator,
     NativeAdminCapability::ServerOwner,
 ];
 
+#[cfg(test)]
 const THREAD_MAINTENANCE_CAPABILITIES: &[NativeAdminCapability] = &[
     NativeAdminCapability::ManageThreads,
     NativeAdminCapability::Administrator,
     NativeAdminCapability::ServerOwner,
 ];
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AdminTermMeaning {
     DiscordNativePermissionHolder,
 }
 
+#[cfg(test)]
 pub(crate) fn admin_term_meaning() -> AdminTermMeaning {
     AdminTermMeaning::DiscordNativePermissionHolder
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AccessControlMode {
     ChannelOverride,
     RoleBased,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NativeAdminOperation {
     TrackedStateTopicChange,
@@ -77,6 +86,7 @@ pub(crate) enum NativeAdminOperation {
     DuplicateThreadDeletion,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NativeAdminCapability {
     ManageChannels,
@@ -87,6 +97,7 @@ pub(crate) enum NativeAdminCapability {
     ServerOwner,
 }
 
+#[cfg(test)]
 pub(crate) fn native_admin_capabilities(
     operation: NativeAdminOperation,
 ) -> &'static [NativeAdminCapability] {
@@ -111,12 +122,14 @@ pub(crate) enum RuntimePermissionScope {
     CanonicalSurface,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ParentAdminSurfaceAuthorization {
     Allowed,
     MissingNativeAdminPermission,
 }
 
+#[cfg(test)]
 pub(crate) fn authorize_parent_admin_surface(
     has_required_native_permission: bool,
 ) -> ParentAdminSurfaceAuthorization {
@@ -127,6 +140,7 @@ pub(crate) fn authorize_parent_admin_surface(
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ThreadCommandReadiness {
     Ready,
@@ -134,6 +148,7 @@ pub(crate) enum ThreadCommandReadiness {
     MissingThreadCommandPermission,
 }
 
+#[cfg(test)]
 pub(crate) fn thread_command_readiness(
     can_open_thread: bool,
     can_use_thread_commands: bool,
@@ -175,10 +190,12 @@ impl RecoveryOutcomeMessage {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn body(&self) -> &str {
         &self.body
     }
 
+    #[cfg(test)]
     pub(crate) fn components(&self) -> &[CreateActionRow] {
         &self.components
     }
@@ -213,6 +230,7 @@ pub(crate) fn recovery_reference_components(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn render_parent_channel_access_failure_message(
     recovery_reference: &LocatorRecoveryReference,
 ) -> RecoveryOutcomeMessage {
@@ -226,6 +244,7 @@ pub(crate) fn render_parent_channel_access_failure_message(
     )
 }
 
+#[cfg(test)]
 pub(crate) fn render_archived_thread_recovery_message(
     recovery_reference: &LocatorRecoveryReference,
 ) -> RecoveryOutcomeMessage {
@@ -266,7 +285,6 @@ pub(crate) fn render_ledger_refresh_uncertain_write_message(
     )
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn ledger_refresh_command() -> CreateCommand {
     CreateCommand::new("ledger-refresh").description(i18n::slash_ledger_refresh_description())
 }

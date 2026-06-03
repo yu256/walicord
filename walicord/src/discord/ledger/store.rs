@@ -1,6 +1,9 @@
-use super::{LEDGER_ATTACHMENT_FILENAME, fetch_all_channel_messages};
+use super::{
+    LEDGER_ATTACHMENT_FILENAME, fetch_all_channel_messages, response_writer::safe_create_message,
+};
 use serenity::{
-    all::{ChannelId, GuildId, Message, MessageId, UserId},
+    all::{ChannelId, GuildId, Message, MessageId, Permissions, UserId},
+    builder::{EditThread, GetMessages},
     http::Http,
     prelude::Context,
 };
@@ -35,7 +38,9 @@ pub type VerifiedLedgerThreadLoad =
 pub const MAX_AUTHORITATIVE_ATTACHMENT_BYTES: u32 = 64 * 1024;
 pub const CANONICAL_LOAD_TIMEOUT: Duration = Duration::from_secs(30);
 pub const CANONICAL_LOAD_WARNING: Duration = Duration::from_secs(20);
+pub const CANONICAL_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 const IMMEDIATE_SELF_LINK_EDIT_WINDOW: Duration = Duration::from_secs(120);
+const STABLE_SNAPSHOT_ATTEMPTS: usize = 3;
 
 type DisplayDriftGuard = fn(&DisplayDriftObservation) -> Result<(), StoreLoadError>;
 
@@ -408,6 +413,60 @@ fn classify_send_error(error: serenity::Error) -> StoreWriteError {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AppendThreadPreparation {
+    Ready,
+    Unarchive,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AppendThreadPreparationError {
+    NotThreadOrLocked,
+}
+
+fn append_thread_preparation(
+    thread_metadata: Option<(bool, bool)>,
+) -> Result<AppendThreadPreparation, AppendThreadPreparationError> {
+    match thread_metadata {
+        Some((_, true)) | None => Err(AppendThreadPreparationError::NotThreadOrLocked),
+        Some((true, false)) => Ok(AppendThreadPreparation::Unarchive),
+        Some((false, false)) => Ok(AppendThreadPreparation::Ready),
+    }
+}
+
+fn missing_append_permission(current: Permissions) -> Option<PermissionAction> {
+    [
+        (Permissions::VIEW_CHANNEL, PermissionAction::ViewChannel),
+        (
+            Permissions::READ_MESSAGE_HISTORY,
+            PermissionAction::ReadMessageHistory,
+        ),
+        (
+            Permissions::SEND_MESSAGES_IN_THREADS,
+            PermissionAction::SendMessageInChannel,
+        ),
+        (Permissions::ATTACH_FILES, PermissionAction::AttachFiles),
+    ]
+    .into_iter()
+    .find_map(|(required, action)| (!current.contains(required)).then_some(action))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReadBackAttachmentBytesError {
+    Drift,
+}
+
+fn verify_read_back_attachment_bytes(
+    expected: &[u8],
+    actual: &[u8],
+) -> Result<(), ReadBackAttachmentBytesError> {
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(ReadBackAttachmentBytesError::Drift)
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum StoreWriteError {
     /// Canonical attachment encoding failed (codec rejected the envelope).
@@ -451,6 +510,7 @@ impl DiscordCanonicalLedgerStore {
         }
     }
 
+    #[cfg(test)]
     pub fn new_with_display_drift_guard(
         writer_lineage: WriterLineagePolicy,
         display_drift_guard: DisplayDriftGuard,
@@ -539,33 +599,48 @@ impl DiscordCanonicalLedgerStore {
         envelope: &UnverifiedLedgerStoreEnvelope<()>,
         prepared_body: &str,
     ) -> Result<VerifiedLedgerStoreEnvelope<MessageId>, StoreWriteError> {
+        let result = with_write_timeout(
+            CANONICAL_WRITE_TIMEOUT,
+            self.append_authoritative_inner(ctx, canonical_thread_id, envelope, prepared_body),
+        )
+        .await;
+        if matches!(result, Err(StoreWriteError::Permission(_))) {
+            self.observe_permission_failure(
+                Some(envelope.payload.ledger_id),
+                canonical_thread_id,
+                PermissionAction::AppendCanonicalMessage,
+            );
+        }
+        result
+    }
+
+    async fn append_authoritative_inner(
+        &self,
+        ctx: &Context,
+        canonical_thread_id: ChannelId,
+        envelope: &UnverifiedLedgerStoreEnvelope<()>,
+        prepared_body: &str,
+    ) -> Result<VerifiedLedgerStoreEnvelope<MessageId>, StoreWriteError> {
         let attachment_bytes = CanonicalAttachmentCodec::encode_with_pre_self_link_content(
             envelope,
             Some(prepared_body),
         )
         .map_err(StoreWriteError::Prepare)?;
+        self.prepare_thread_for_append(ctx, canonical_thread_id, envelope.payload.ledger_id)
+            .await?;
 
         let send_outcome = canonical_thread_id
             .send_message(
                 &ctx.http,
-                serenity::builder::CreateMessage::new()
-                    .content(prepared_body)
-                    .add_file(serenity::all::CreateAttachment::bytes(
+                safe_create_message().content(prepared_body).add_file(
+                    serenity::all::CreateAttachment::bytes(
                         attachment_bytes.clone(),
                         LEDGER_ATTACHMENT_FILENAME,
-                    )),
+                    ),
+                ),
             )
             .await
-            .map_err(classify_send_error)
-            .inspect_err(|error| {
-                if matches!(error, StoreWriteError::Permission(_)) {
-                    self.observe_permission_failure(
-                        Some(envelope.payload.ledger_id),
-                        canonical_thread_id,
-                        PermissionAction::AppendCanonicalMessage,
-                    );
-                }
-            })?;
+            .map_err(classify_send_error)?;
 
         let read_back = canonical_thread_id
             .message(&ctx.http, send_outcome.id)
@@ -602,6 +677,18 @@ impl DiscordCanonicalLedgerStore {
                 actual = authoritative.size,
             )));
         }
+        let read_back_attachment_bytes = authoritative.download().await.map_err(|error| {
+            StoreWriteError::ReadBack(format!(
+                "authoritative attachment download failed on read-back: {error}"
+            ))
+        })?;
+        verify_read_back_attachment_bytes(&attachment_bytes, &read_back_attachment_bytes).map_err(
+            |_| {
+                StoreWriteError::ReadBack(
+                    "authoritative attachment bytes drifted on read-back".to_owned(),
+                )
+            },
+        )?;
         if read_back.content != prepared_body {
             return Err(StoreWriteError::ReadBack(
                 "message body drift between send and read-back".to_owned(),
@@ -625,6 +712,61 @@ impl DiscordCanonicalLedgerStore {
                 StoreWriteError::ReadBack(format!("envelope verification failed: {error:?}"))
             })?;
         Ok(verified)
+    }
+
+    async fn prepare_thread_for_append(
+        &self,
+        ctx: &Context,
+        canonical_thread_id: ChannelId,
+        ledger_id: LedgerId,
+    ) -> Result<(), StoreWriteError> {
+        let channel = canonical_thread_id
+            .to_channel(&ctx.http)
+            .await
+            .map_err(classify_send_error)?
+            .guild()
+            .ok_or(StoreWriteError::ArchivedOrLocked)?;
+        let preparation = append_thread_preparation(
+            channel
+                .thread_metadata
+                .map(|metadata| (metadata.archived, metadata.locked)),
+        )
+        .map_err(|_| StoreWriteError::ArchivedOrLocked)?;
+        let current_permissions = {
+            let guild = ctx.cache.guild(channel.guild_id).ok_or_else(|| {
+                StoreWriteError::Permission("guild permission cache is unavailable".to_owned())
+            })?;
+            let bot_user_id = ctx.cache.current_user().id;
+            let member = guild.members.get(&bot_user_id).ok_or_else(|| {
+                StoreWriteError::Permission("bot member permission cache is unavailable".to_owned())
+            })?;
+            guild.user_permissions_in(&channel, member)
+        };
+        if let Some(missing) = missing_append_permission(current_permissions) {
+            return Err(StoreWriteError::Permission(format!(
+                "missing Discord permission for canonical append: {missing:?}"
+            )));
+        }
+        if preparation == AppendThreadPreparation::Unarchive {
+            canonical_thread_id
+                .edit_thread(&ctx.http, EditThread::new().archived(false))
+                .await
+                .map_err(|error| {
+                    if serenity_error_is_read_denied(&error) {
+                        self.observe_permission_failure(
+                            Some(ledger_id),
+                            canonical_thread_id,
+                            PermissionAction::UnarchiveThread,
+                        );
+                        StoreWriteError::Permission(format!(
+                            "canonical thread unarchive forbidden: {error}"
+                        ))
+                    } else {
+                        StoreWriteError::ArchivedOrLocked
+                    }
+                })?;
+        }
+        Ok(())
     }
 
     pub async fn load_verified_thread(
@@ -659,9 +801,7 @@ impl DiscordCanonicalLedgerStore {
                 });
             },
             async {
-                let messages = fetch_all_channel_messages(ctx, canonical_thread_id)
-                    .await
-                    .map_err(classify_thread_fetch_error)?;
+                let messages = fetch_stable_channel_messages(ctx, canonical_thread_id).await?;
                 fetched_entry_count.store(messages.len(), Ordering::Relaxed);
                 let mut pending_records = Vec::with_capacity(messages.len());
                 for message in messages {
@@ -767,9 +907,7 @@ impl DiscordCanonicalLedgerStore {
         canonical_thread_id: ChannelId,
         ledger_id: LedgerId,
     ) -> Result<Vec<CanonicalMessageProbe>, StoreLoadError> {
-        let messages = fetch_all_channel_messages(ctx, canonical_thread_id)
-            .await
-            .map_err(classify_thread_fetch_error)?;
+        let messages = fetch_stable_channel_messages(ctx, canonical_thread_id).await?;
         let pending_records: Vec<PendingCanonicalMessageRecord> = messages
             .into_iter()
             .map(pending_canonical_message_record)
@@ -822,9 +960,7 @@ impl DiscordCanonicalLedgerStore {
         http: &Http,
         canonical_thread_id: ChannelId,
     ) -> Result<Option<(LedgerId, VerifiedLedgerThreadLoad)>, StoreLoadError> {
-        let messages = fetch_all_channel_messages_with_http(http, canonical_thread_id)
-            .await
-            .map_err(classify_thread_fetch_error)?;
+        let messages = fetch_stable_channel_messages_with_http(http, canonical_thread_id).await?;
         let pending_records: Vec<PendingCanonicalMessageRecord> = messages
             .into_iter()
             .map(pending_canonical_message_record)
@@ -983,8 +1119,6 @@ async fn fetch_all_channel_messages_with_http(
     http: &Http,
     channel_id: ChannelId,
 ) -> serenity::Result<Vec<Message>> {
-    use serenity::builder::GetMessages;
-
     let mut all_messages = Vec::new();
     let mut last_message_id = None;
     loop {
@@ -1003,12 +1137,61 @@ async fn fetch_all_channel_messages_with_http(
     Ok(all_messages)
 }
 
+async fn fetch_stable_channel_messages(
+    ctx: &Context,
+    channel_id: ChannelId,
+) -> Result<Vec<Message>, StoreLoadError> {
+    for _ in 0..STABLE_SNAPSHOT_ATTEMPTS {
+        let messages = fetch_all_channel_messages(ctx, channel_id)
+            .await
+            .map_err(classify_thread_fetch_error)?;
+        let observed_head = fetch_channel_head(&ctx.http, channel_id).await?;
+        if snapshot_head_matches(messages.last().map(|message| message.id), observed_head) {
+            return Ok(messages);
+        }
+    }
+    Err(StoreLoadError::Fetch(
+        "canonical thread changed while loading stable snapshot".to_owned(),
+    ))
+}
+
+async fn fetch_stable_channel_messages_with_http(
+    http: &Http,
+    channel_id: ChannelId,
+) -> Result<Vec<Message>, StoreLoadError> {
+    for _ in 0..STABLE_SNAPSHOT_ATTEMPTS {
+        let messages = fetch_all_channel_messages_with_http(http, channel_id)
+            .await
+            .map_err(classify_thread_fetch_error)?;
+        let observed_head = fetch_channel_head(http, channel_id).await?;
+        if snapshot_head_matches(messages.last().map(|message| message.id), observed_head) {
+            return Ok(messages);
+        }
+    }
+    Err(StoreLoadError::Fetch(
+        "canonical thread changed while loading stable snapshot".to_owned(),
+    ))
+}
+
+async fn fetch_channel_head(
+    http: &Http,
+    channel_id: ChannelId,
+) -> Result<Option<MessageId>, StoreLoadError> {
+    channel_id
+        .messages(http, GetMessages::new().limit(1))
+        .await
+        .map_err(classify_thread_fetch_error)
+        .map(|messages| messages.first().map(|message| message.id))
+}
+
+fn snapshot_head_matches(loaded_head: Option<MessageId>, observed_head: Option<MessageId>) -> bool {
+    loaded_head == observed_head
+}
+
 async fn fetch_recent_canonical_pending_records(
     ctx: &Context,
     channel_id: ChannelId,
 ) -> Result<Vec<PendingCanonicalMessageRecord>, StoreLoadError> {
-    use serenity::builder::GetMessages;
-
     let mut pending_records = Vec::new();
     let mut last_message_id = None;
     loop {
@@ -1318,6 +1501,7 @@ fn unreadable_attachment_error(message_id: MessageId, error: serenity::Error) ->
     }
 }
 
+#[cfg(test)]
 fn reject_edited_messages(observation: &DisplayDriftObservation) -> Result<(), StoreLoadError> {
     if observation.edited_at.is_some() {
         return Err(StoreLoadError::DisplayDrift {
@@ -1450,6 +1634,15 @@ where
             }
         }
     }
+}
+
+async fn with_write_timeout<F, T>(timeout: Duration, future: F) -> Result<T, StoreWriteError>
+where
+    F: Future<Output = Result<T, StoreWriteError>>,
+{
+    tokio::time::timeout(timeout, future)
+        .await
+        .map_err(|_| StoreWriteError::WriteTimeout { elapsed: timeout })?
 }
 
 #[cfg(test)]
@@ -1838,6 +2031,25 @@ mod tests {
         let actual = classify_thread_fetch_error(serenity::Error::Other("boom"));
 
         assert!(matches!(actual, StoreLoadError::Fetch(_)));
+    }
+
+    #[rstest]
+    #[case(None, None, true)]
+    #[case(Some(1), Some(1), true)]
+    #[case(None, Some(1), false)]
+    #[case(Some(1), Some(2), false)]
+    fn stable_snapshot_requires_the_same_head_before_verification(
+        #[case] loaded_head: Option<u64>,
+        #[case] observed_head: Option<u64>,
+        #[case] expected: bool,
+    ) {
+        assert_eq!(
+            snapshot_head_matches(
+                loaded_head.map(MessageId::new),
+                observed_head.map(MessageId::new)
+            ),
+            expected
+        );
     }
 
     #[test]
@@ -2807,6 +3019,90 @@ mod tests {
         assert!(matches!(
             actual,
             Err(StoreLoadError::FetchTimeout { elapsed }) if elapsed == Duration::from_millis(2)
+        ));
+    }
+
+    #[rstest]
+    #[case::active_thread(Some((false, false)), Ok(AppendThreadPreparation::Ready))]
+    #[case::archived_thread(Some((true, false)), Ok(AppendThreadPreparation::Unarchive))]
+    #[case::non_thread(None, Err(AppendThreadPreparationError::NotThreadOrLocked))]
+    #[case::locked_thread(Some((false, true)), Err(AppendThreadPreparationError::NotThreadOrLocked))]
+    #[case::locked_archived_thread(
+        Some((true, true)),
+        Err(AppendThreadPreparationError::NotThreadOrLocked)
+    )]
+    fn append_thread_preparation_rejects_locked_and_unarchives_archived_threads(
+        #[case] metadata: Option<(bool, bool)>,
+        #[case] expected: Result<AppendThreadPreparation, AppendThreadPreparationError>,
+    ) {
+        assert_eq!(append_thread_preparation(metadata), expected);
+    }
+
+    #[rstest]
+    #[case::all_required(
+        Permissions::VIEW_CHANNEL
+            | Permissions::READ_MESSAGE_HISTORY
+            | Permissions::SEND_MESSAGES_IN_THREADS
+            | Permissions::ATTACH_FILES,
+        None
+    )]
+    #[case::missing_view_channel(
+        Permissions::READ_MESSAGE_HISTORY
+            | Permissions::SEND_MESSAGES_IN_THREADS
+            | Permissions::ATTACH_FILES,
+        Some(PermissionAction::ViewChannel)
+    )]
+    #[case::missing_history(
+        Permissions::VIEW_CHANNEL
+            | Permissions::SEND_MESSAGES_IN_THREADS
+            | Permissions::ATTACH_FILES,
+        Some(PermissionAction::ReadMessageHistory)
+    )]
+    #[case::missing_thread_send(
+        Permissions::VIEW_CHANNEL
+            | Permissions::READ_MESSAGE_HISTORY
+            | Permissions::ATTACH_FILES,
+        Some(PermissionAction::SendMessageInChannel)
+    )]
+    #[case::missing_attach_files(
+        Permissions::VIEW_CHANNEL
+            | Permissions::READ_MESSAGE_HISTORY
+            | Permissions::SEND_MESSAGES_IN_THREADS,
+        Some(PermissionAction::AttachFiles)
+    )]
+    fn canonical_append_preflight_reports_first_missing_permission(
+        #[case] permissions: Permissions,
+        #[case] expected: Option<PermissionAction>,
+    ) {
+        assert_eq!(missing_append_permission(permissions), expected);
+    }
+
+    #[rstest]
+    #[case::exact_bytes(b"canonical", b"canonical", Ok(()))]
+    #[case::drifted_bytes(b"canonical", b"tampered", Err(ReadBackAttachmentBytesError::Drift))]
+    fn canonical_append_read_back_requires_exact_authoritative_attachment_bytes(
+        #[case] expected_bytes: &[u8],
+        #[case] actual_bytes: &[u8],
+        #[case] expected: Result<(), ReadBackAttachmentBytesError>,
+    ) {
+        assert_eq!(
+            verify_read_back_attachment_bytes(expected_bytes, actual_bytes),
+            expected
+        );
+    }
+
+    #[tokio::test]
+    async fn write_timeout_helper_returns_ambiguous_write_timeout() {
+        let actual = with_write_timeout(Duration::from_millis(2), async {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            Ok::<(), StoreWriteError>(())
+        })
+        .await;
+
+        assert!(matches!(
+            actual,
+            Err(StoreWriteError::WriteTimeout { elapsed })
+                if elapsed == Duration::from_millis(2)
         ));
     }
 }

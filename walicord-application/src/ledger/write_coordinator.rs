@@ -12,10 +12,32 @@ use tokio::sync::Mutex as AsyncMutex;
 pub const LAZY_RETRY_SCAN_WINDOW: usize = 5;
 pub const UNCERTAIN_WRITE_RETAIN_TTL: Duration = Duration::from_secs(10 * 60);
 
-/// Write addressing key. Each canonical append targets exactly one ledger; the
-/// per-`LedgerId` async mutex serializes them. The adapter issues the identifier
-/// before the first append and reuses it for the entire canonical write lifecycle.
-pub type WriteTargetKey = LedgerId;
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BootstrapWriteTarget {
+    guild_id: u64,
+    tracked_parent_channel_id: u64,
+}
+
+impl BootstrapWriteTarget {
+    pub fn new(guild_id: u64, tracked_parent_channel_id: u64) -> Self {
+        Self {
+            guild_id,
+            tracked_parent_channel_id,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum WriteTargetKey {
+    Bootstrap(BootstrapWriteTarget),
+    Published(LedgerId),
+}
+
+impl From<LedgerId> for WriteTargetKey {
+    fn from(ledger_id: LedgerId) -> Self {
+        Self::Published(ledger_id)
+    }
+}
 
 /// Frozen exact-envelope retain state. After an ambiguous post outcome, the same bytes
 /// (envelope, prepared render, recovery context) must be re-used on retry; a retry can
@@ -34,7 +56,7 @@ pub struct RetainedCanonicalWrite {
 
 impl RetainedCanonicalWrite {
     pub fn new(
-        target: WriteTargetKey,
+        target: impl Into<WriteTargetKey>,
         envelope: &UnverifiedLedgerStoreEnvelope<()>,
         envelope_bytes: Vec<u8>,
         prepared_body: String,
@@ -42,7 +64,7 @@ impl RetainedCanonicalWrite {
         live_since: SystemTime,
     ) -> Self {
         Self {
-            target,
+            target: target.into(),
             entry_id: envelope.payload.entry.id,
             previous_hash: envelope.previous_hash,
             envelope_bytes: Arc::new(envelope_bytes),
@@ -83,12 +105,16 @@ impl RetainedCanonicalWrite {
 pub enum UncertainWriteState {
     /// Retained payload still exists; lazy retry may still clear or confirm.
     Live(RetainedCanonicalWrite),
+    /// The bounded retain interval elapsed without proof that the post either landed
+    /// or stayed absent. A user-visible recovery acknowledgement is required before
+    /// the caller may discard the frozen envelope and start a fresh write.
+    Abandoned(RetainedCanonicalWrite),
 }
 
 impl UncertainWriteState {
     pub fn target(&self) -> WriteTargetKey {
         match self {
-            Self::Live(retained) => retained.target(),
+            Self::Live(retained) | Self::Abandoned(retained) => retained.target(),
         }
     }
 }
@@ -102,8 +128,9 @@ pub enum UncertainWriteResolution {
     /// meaning the retained envelope was not posted. The block clears and a fresh write
     /// path is unblocked.
     ClearedByConclusiveAbsence,
-    /// A complete scan found no retained envelope after the bounded retain window.
-    ClearedByExpiredConclusiveAbsence,
+    /// The bounded retain interval elapsed without conclusive head movement. The
+    /// frozen envelope remains visible until an explicit recovery acknowledgement.
+    Abandoned,
     /// A recent-window no-match cannot prove absence after canonical head movement.
     RequiresFullHistoryScan,
     /// Scan was inconclusive; the block stays live (criteria 217, 248, 276-279, 287).
@@ -162,6 +189,8 @@ pub enum SetLiveError {
         existing_entry_id: LedgerEntryId,
         incoming_entry_id: LedgerEntryId,
     },
+    #[error("target has an abandoned retain awaiting explicit recovery: {entry_id:?}")]
+    AbandonedRetain { entry_id: LedgerEntryId },
 }
 
 /// Tracks the live `uncertain_write` blocks per write target. The registry has no
@@ -183,7 +212,8 @@ impl UncertainWriteRegistry {
         }
     }
 
-    pub fn current(&self, target: WriteTargetKey) -> Option<UncertainWriteState> {
+    pub fn current(&self, target: impl Into<WriteTargetKey>) -> Option<UncertainWriteState> {
+        let target = target.into();
         self.by_target
             .lock()
             .expect("UncertainWriteRegistry mutex poisoned")
@@ -207,6 +237,9 @@ impl UncertainWriteRegistry {
                     incoming_entry_id: retained.entry_id(),
                 })
             }
+            Some(UncertainWriteState::Abandoned(existing)) => Err(SetLiveError::AbandonedRetain {
+                entry_id: existing.entry_id(),
+            }),
             None => {
                 guard.insert(retained.target, UncertainWriteState::Live(retained));
                 Ok(())
@@ -214,7 +247,21 @@ impl UncertainWriteRegistry {
         }
     }
 
-    pub fn clear(&self, target: WriteTargetKey) -> Option<UncertainWriteState> {
+    pub fn abandon(&self, target: impl Into<WriteTargetKey>) -> Option<UncertainWriteState> {
+        let target = target.into();
+        let mut guard = self
+            .by_target
+            .lock()
+            .expect("UncertainWriteRegistry mutex poisoned");
+        let state = guard.get_mut(&target)?;
+        if let UncertainWriteState::Live(retained) = state {
+            *state = UncertainWriteState::Abandoned(retained.clone());
+        }
+        Some(state.clone())
+    }
+
+    pub fn clear(&self, target: impl Into<WriteTargetKey>) -> Option<UncertainWriteState> {
+        let target = target.into();
         self.by_target
             .lock()
             .expect("UncertainWriteRegistry mutex poisoned")
@@ -280,7 +327,7 @@ impl UncertainWriteRegistry {
                 UncertainWriteResolution::RequiresFullHistoryScan
             }
             ExactEnvelopeScanResult::VerifiedNoMatch if retained.requires_full_scan(now) => {
-                UncertainWriteResolution::ClearedByExpiredConclusiveAbsence
+                UncertainWriteResolution::Abandoned
             }
             ExactEnvelopeScanResult::VerifiedNoMatch | ExactEnvelopeScanResult::Inconclusive => {
                 UncertainWriteResolution::StillBlocked
@@ -289,10 +336,10 @@ impl UncertainWriteRegistry {
     }
 }
 
-/// Per-`LedgerId` async-mutex map. Each ledger has its own async mutex; idle entries
+/// Published and bootstrap targets share the same async-mutex registry. Idle entries
 /// are retained without a sweeper (criterion 154).
 pub struct WriteCoordinator {
-    per_ledger_locks: DashMap<LedgerId, Arc<AsyncMutex<()>>>,
+    per_target_locks: DashMap<WriteTargetKey, Arc<AsyncMutex<()>>>,
 }
 
 impl Default for WriteCoordinator {
@@ -304,13 +351,13 @@ impl Default for WriteCoordinator {
 impl WriteCoordinator {
     pub fn new() -> Self {
         Self {
-            per_ledger_locks: DashMap::new(),
+            per_target_locks: DashMap::new(),
         }
     }
 
-    pub fn lock_for(&self, target: WriteTargetKey) -> Arc<AsyncMutex<()>> {
-        self.per_ledger_locks
-            .entry(target)
+    pub fn lock_for(&self, target: impl Into<WriteTargetKey>) -> Arc<AsyncMutex<()>> {
+        self.per_target_locks
+            .entry(target.into())
             .or_insert_with(|| Arc::new(AsyncMutex::new(())))
             .clone()
     }
@@ -335,7 +382,7 @@ pub struct PreparedCanonicalWrite {
 
 impl PreparedCanonicalWrite {
     pub fn new(
-        target: WriteTargetKey,
+        target: impl Into<WriteTargetKey>,
         entry_id: LedgerEntryId,
         previous_hash: EntryHash,
         envelope_bytes: Vec<u8>,
@@ -344,7 +391,7 @@ impl PreparedCanonicalWrite {
         issued_at: SystemTime,
     ) -> Self {
         Self {
-            target,
+            target: target.into(),
             entry_id,
             previous_hash,
             envelope_bytes,
@@ -396,9 +443,13 @@ mod tests {
     use rstest::rstest;
     use std::time::{Duration, UNIX_EPOCH};
 
-    fn retained(target: WriteTargetKey, bytes: Vec<u8>, entry_id: u64) -> RetainedCanonicalWrite {
+    fn retained(
+        target: impl Into<WriteTargetKey>,
+        bytes: Vec<u8>,
+        entry_id: u64,
+    ) -> RetainedCanonicalWrite {
         RetainedCanonicalWrite {
-            target,
+            target: target.into(),
             entry_id: LedgerEntryId(entry_id),
             previous_hash: ledger_chain_genesis_sha256_v1(
                 walicord_ledger::test_fixtures::ledger_id(77),
@@ -495,6 +546,25 @@ mod tests {
         assert_eq!(
             registry.current(walicord_ledger::test_fixtures::ledger_id(77)),
             None
+        );
+    }
+
+    #[test]
+    fn abandon_preserves_frozen_retain_until_explicit_recovery() {
+        let registry = UncertainWriteRegistry::new();
+        let ledger_id = walicord_ledger::test_fixtures::ledger_id(77);
+        let entry = retained(ledger_id, b"X".to_vec(), 1);
+        registry
+            .set_live(entry.clone())
+            .expect("first set_live should succeed");
+
+        assert_eq!(
+            registry.abandon(ledger_id),
+            Some(UncertainWriteState::Abandoned(entry.clone()))
+        );
+        assert_eq!(
+            registry.current(ledger_id),
+            Some(UncertainWriteState::Abandoned(entry))
         );
     }
 
@@ -723,7 +793,7 @@ mod tests {
     }
 
     #[test]
-    fn classify_retry_verified_no_match_after_retain_ttl_clears_by_expired_absence() {
+    fn classify_retry_verified_no_match_after_retain_ttl_requires_explicit_abandoned_recovery() {
         let entry = retained(
             walicord_ledger::test_fixtures::ledger_id(77),
             b"X".to_vec(),
@@ -738,10 +808,7 @@ mod tests {
             UNIX_EPOCH + UNCERTAIN_WRITE_RETAIN_TTL,
         );
 
-        assert_eq!(
-            actual,
-            UncertainWriteResolution::ClearedByExpiredConclusiveAbsence
-        );
+        assert_eq!(actual, UncertainWriteResolution::Abandoned);
     }
 
     #[rstest]
@@ -776,6 +843,16 @@ mod tests {
         let second = coordinator.lock_for(walicord_ledger::test_fixtures::ledger_id(2));
 
         assert!(!Arc::ptr_eq(&first, &second));
+    }
+
+    #[test]
+    fn write_coordinator_keeps_bootstrap_lock_distinct_from_published_lock() {
+        let coordinator = WriteCoordinator::new();
+        let bootstrap =
+            coordinator.lock_for(WriteTargetKey::Bootstrap(BootstrapWriteTarget::new(1, 77)));
+        let published = coordinator.lock_for(walicord_ledger::test_fixtures::ledger_id(77));
+
+        assert!(!Arc::ptr_eq(&bootstrap, &published));
     }
 
     #[tokio::test]

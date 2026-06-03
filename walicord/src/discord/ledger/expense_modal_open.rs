@@ -12,12 +12,18 @@ use walicord_presentation::discord_ledger::{
     validate_text_input_label, validate_text_input_placeholder,
 };
 
-use walicord_application::ledger::expense_modal::RawExpenseModalSubmission;
+use std::{collections::BTreeMap, fmt::Write as _};
+use walicord_application::ledger::{
+    expense_modal::RawExpenseModalSubmission, expense_session::ExpenseParticipantSelection,
+};
+use walicord_domain::model::{MemberId, Weight};
 
 pub const EXPENSE_MODAL_CUSTOM_ID_PREFIX: &str = "ledger:expense:new:";
+pub const EXPENSE_WEIGHT_MODAL_CUSTOM_ID_PREFIX: &str = "ledger:expense:weights:";
 const AMOUNT_FIELD: &str = "amount";
 const NOTE_FIELD: &str = "note";
 const DATE_FIELD: &str = "date";
+const WEIGHTS_FIELD: &str = "weights";
 
 /// Optional prefill state. When the modal is being re-opened after a validation
 /// failure (criterion 124-125 / 205), the caller passes the raw values from the
@@ -47,7 +53,15 @@ pub enum ExpenseModalCustomIdMatch {
 }
 
 pub fn parse_expense_modal_custom_id(custom_id: &str) -> ExpenseModalCustomIdMatch {
-    let Some(remainder) = custom_id.strip_prefix(EXPENSE_MODAL_CUSTOM_ID_PREFIX) else {
+    parse_modal_custom_id(custom_id, EXPENSE_MODAL_CUSTOM_ID_PREFIX)
+}
+
+pub fn parse_expense_weight_modal_custom_id(custom_id: &str) -> ExpenseModalCustomIdMatch {
+    parse_modal_custom_id(custom_id, EXPENSE_WEIGHT_MODAL_CUSTOM_ID_PREFIX)
+}
+
+fn parse_modal_custom_id(custom_id: &str, prefix: &str) -> ExpenseModalCustomIdMatch {
+    let Some(remainder) = custom_id.strip_prefix(prefix) else {
         return ExpenseModalCustomIdMatch::NoMatch;
     };
     let Ok(parsed) = remainder.parse::<u64>() else {
@@ -57,6 +71,57 @@ pub fn parse_expense_modal_custom_id(custom_id: &str) -> ExpenseModalCustomIdMat
         Ok(nonce) => ExpenseModalCustomIdMatch::Match { nonce },
         Err(_) => ExpenseModalCustomIdMatch::Stale,
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ExpenseWeightModalParseError {
+    #[error("weight editor line must use member_id = weight")]
+    InvalidLine,
+    #[error("weight editor contains duplicate member id {0:?}")]
+    DuplicateMember(MemberId),
+}
+
+pub fn parse_expense_weight_modal_submission(
+    modal: &ModalInteraction,
+) -> Result<BTreeMap<MemberId, Weight>, ExpenseWeightModalParseError> {
+    let mut raw = None;
+    for row in &modal.data.components {
+        for component in &row.components {
+            if let ActionRowComponent::InputText(input) = component
+                && input.custom_id == WEIGHTS_FIELD
+            {
+                raw = input.value.as_deref();
+            }
+        }
+    }
+    parse_weight_overrides(raw.unwrap_or_default())
+}
+
+fn parse_weight_overrides(
+    raw: &str,
+) -> Result<BTreeMap<MemberId, Weight>, ExpenseWeightModalParseError> {
+    let mut weights = BTreeMap::new();
+    for line in raw.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        let (member_id, weight) = line
+            .split_once('=')
+            .ok_or(ExpenseWeightModalParseError::InvalidLine)?;
+        let member_id = MemberId(
+            member_id
+                .trim()
+                .parse()
+                .map_err(|_| ExpenseWeightModalParseError::InvalidLine)?,
+        );
+        let weight = Weight(
+            weight
+                .trim()
+                .parse()
+                .map_err(|_| ExpenseWeightModalParseError::InvalidLine)?,
+        );
+        if weights.insert(member_id, weight).is_some() {
+            return Err(ExpenseWeightModalParseError::DuplicateMember(member_id));
+        }
+    }
+    Ok(weights)
 }
 
 /// Extract the raw amount / note / date strings from a Discord modal submission so
@@ -151,9 +216,39 @@ pub fn build_expense_modal_response(
     Ok(CreateInteractionResponse::Modal(modal))
 }
 
+pub fn build_expense_weight_modal_response(
+    nonce: InteractionNonce,
+    participants: &[ExpenseParticipantSelection],
+) -> Result<CreateInteractionResponse, ExpenseModalBuildError> {
+    let custom_id = format!("{EXPENSE_WEIGHT_MODAL_CUSTOM_ID_PREFIX}{nonce}");
+    validate_custom_id(&custom_id).map_err(ExpenseModalBuildError::Budget)?;
+    let title = truncate_component_label(i18n::weight_editor_modal_title());
+    validate_modal_title(&title).map_err(ExpenseModalBuildError::Budget)?;
+    let label = truncate_component_label(i18n::weight_editor_input_label());
+    validate_text_input_label(&label).map_err(ExpenseModalBuildError::Budget)?;
+    let placeholder = truncate_component_label(i18n::weight_editor_placeholder());
+    validate_text_input_placeholder(&placeholder).map_err(ExpenseModalBuildError::Budget)?;
+    let mut value = String::new();
+    for participant in participants {
+        let _ = writeln!(
+            value,
+            "{} = {}",
+            participant.member_id.0, participant.weight.0
+        );
+    }
+    let input = CreateInputText::new(InputTextStyle::Paragraph, label, WEIGHTS_FIELD)
+        .placeholder(placeholder)
+        .value(value)
+        .required(false);
+    Ok(CreateInteractionResponse::Modal(
+        CreateModal::new(custom_id, title).components(vec![CreateActionRow::InputText(input)]),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
     use std::time::SystemTime;
     use walicord_application::ledger::LedgerEffectiveDate;
 
@@ -171,6 +266,24 @@ mod tests {
 
     fn nonce(value: u64) -> InteractionNonce {
         InteractionNonce::new(value).expect("nonce")
+    }
+
+    #[rstest]
+    #[case::empty("", Ok(BTreeMap::new()))]
+    #[case::weights(
+        "42 = 1\n7 = 0\n",
+        Ok(BTreeMap::from([(MemberId(7), Weight(0)), (MemberId(42), Weight(1))]))
+    )]
+    #[case::invalid("42: 1", Err(ExpenseWeightModalParseError::InvalidLine))]
+    #[case::duplicate(
+        "42 = 1\n42 = 2",
+        Err(ExpenseWeightModalParseError::DuplicateMember(MemberId(42)))
+    )]
+    fn weight_override_parser_is_fail_closed(
+        #[case] raw: &str,
+        #[case] expected: Result<BTreeMap<MemberId, Weight>, ExpenseWeightModalParseError>,
+    ) {
+        assert_eq!(parse_weight_overrides(raw), expected);
     }
 
     #[test]

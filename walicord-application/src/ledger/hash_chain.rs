@@ -252,7 +252,10 @@ fn encode_schema_v1(
     payload
         .ledger_id
         .with_canonical_bytes(|bytes| out.extend_from_slice(bytes));
-    out.extend_from_slice(&payload.entry.id.0.to_be_bytes());
+    payload
+        .entry
+        .id
+        .with_canonical_bytes(|bytes| out.extend_from_slice(bytes));
     encode_metadata_v1(&mut out, &payload.entry.metadata)?;
     encode_event_v1(&mut out, &payload.entry.event)?;
     Ok(out)
@@ -478,10 +481,12 @@ fn encode_event_v1(
             encode_transfers(out, e.transfers())?;
         }
         LedgerEvent::LedgerHistorySealed(e) => {
-            out.extend_from_slice(&e.through().0.to_be_bytes());
+            e.through()
+                .with_canonical_bytes(|bytes| out.extend_from_slice(bytes));
         }
         LedgerEvent::EntryVoided(e) => {
-            out.extend_from_slice(&e.target().0.to_be_bytes());
+            e.target()
+                .with_canonical_bytes(|bytes| out.extend_from_slice(bytes));
         }
         LedgerEvent::BalanceAdjusted(e) => {
             encode_balance_adjustments(out, e.adjustments())?;
@@ -536,11 +541,11 @@ fn encode_balance_adjustment_source(out: &mut Vec<u8>, source: &BalanceAdjustmen
         BalanceAdjustmentSource::ExternalCorrection(_) => out.push(0),
         BalanceAdjustmentSource::SealedEntryCorrection(id) => {
             out.push(1);
-            out.extend_from_slice(&id.0.to_be_bytes());
+            id.with_canonical_bytes(|bytes| out.extend_from_slice(bytes));
         }
         BalanceAdjustmentSource::PriorAdjustmentCorrection(id) => {
             out.push(2);
-            out.extend_from_slice(&id.0.to_be_bytes());
+            id.with_canonical_bytes(|bytes| out.extend_from_slice(bytes));
         }
     }
 }

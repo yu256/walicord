@@ -22,6 +22,12 @@ impl TransportChannelId {
     }
 }
 
+impl std::fmt::Display for TransportChannelId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.0, formatter)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum TransportChannelIdError {
     #[error("transport channel id must be non-zero")]

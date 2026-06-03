@@ -81,6 +81,8 @@ WALICORD_LEDGER_WRITER_LINEAGE_ALLOWLIST="YOUR_DISCORD_BOT_USER_ID"
 - `DISCORD_OAUTH_SCOPES`: 招待 URL に含めた OAuth2 scopes。`bot applications.commands` が必須
 - `WALICORD_LEDGER_WRITER_LINEAGE_ALLOWLIST`: canonical 台帳への書き込みを許可する bot user ID。bot を切り替えた場合は、過去の bot user ID から現在の bot user ID の順にカンマ区切りで指定
 
+Discord 台帳の復旧要求を発行する場合は [Discord 台帳保守 runbook](discord-ledger-maintenance.md) を参照してください。
+
 ### チャンネルトピックの設定
 ボットを有効にしたいチャンネルのトピックに `#walicord` を含めてください。
 

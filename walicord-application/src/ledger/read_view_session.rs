@@ -132,6 +132,13 @@ where
             .remove(&key)
     }
 
+    pub fn clear_ledger(&self, ledger_id: LedgerId) {
+        self.by_key
+            .lock()
+            .expect("ReadViewSessionStore mutex poisoned")
+            .retain(|key, _| key.ledger_id != ledger_id);
+    }
+
     pub fn access(
         &self,
         key: ReadViewSessionKey,
@@ -237,5 +244,36 @@ mod tests {
         assert!(matches!(actual, Err(ReadViewSessionAccessError::Expired)));
         let after_expiry = store.access(key(), nonce(1), SystemTime::UNIX_EPOCH);
         assert!(matches!(after_expiry, Ok(None)));
+    }
+
+    #[test]
+    fn clear_ledger_keeps_sessions_for_other_ledgers() {
+        let store: ReadViewSessionStore<&'static str> = ReadViewSessionStore::new();
+        let retained_key = ReadViewSessionKey {
+            ledger_id: walicord_ledger::test_fixtures::ledger_id(8),
+            actor_id: MemberId(11),
+        };
+        store.replace(ReadViewSession::new(
+            key(),
+            nonce(1),
+            vec!["removed"],
+            SystemTime::UNIX_EPOCH,
+        ));
+        store.replace(ReadViewSession::new(
+            retained_key,
+            nonce(2),
+            vec!["retained"],
+            SystemTime::UNIX_EPOCH,
+        ));
+
+        store.clear_ledger(walicord_ledger::test_fixtures::ledger_id(7));
+
+        assert_eq!(store.clear(key()), None);
+        assert_eq!(
+            store
+                .clear(retained_key)
+                .map(|session| session.current_page),
+            Some(0)
+        );
     }
 }

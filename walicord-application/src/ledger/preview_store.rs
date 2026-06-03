@@ -147,6 +147,20 @@ impl PreviewStore {
             .cloned()
     }
 
+    pub fn clear_ledger(&self, ledger_id: LedgerId) {
+        self.by_key
+            .lock()
+            .expect("PreviewStore mutex poisoned")
+            .retain(|key, _| key.ledger_id() != ledger_id);
+    }
+
+    pub fn clear(&self, key: PreviewStoreKey) -> Option<PreviewStoreState> {
+        self.by_key
+            .lock()
+            .expect("PreviewStore mutex poisoned")
+            .remove(&key)
+    }
+
     pub fn transition(
         &self,
         key: PreviewStoreKey,
@@ -426,6 +440,27 @@ mod tests {
         PreviewStoreRecord::new(preview, binding)
     }
 
+    fn record_for(
+        ledger_id: LedgerId,
+        actor_id: MemberId,
+        instance_id: u64,
+        amount: i64,
+    ) -> PreviewStoreRecord {
+        let preview = previewed(amount);
+        let instance = PreviewInstanceId::new(instance_id).expect("instance id non-zero");
+        let binding = PreviewConfirmationBinding::capture(
+            instance,
+            ledger_id,
+            ledger_chain_genesis_sha256_v1(ledger_id),
+            actor_id,
+            UNIX_EPOCH,
+            UNIX_EPOCH + Duration::from_secs(600),
+            &preview,
+        )
+        .expect("binding should capture");
+        PreviewStoreRecord::new(preview, binding)
+    }
+
     fn instance(value: u64) -> PreviewInstanceId {
         PreviewInstanceId::new(value).expect("instance id non-zero")
     }
@@ -456,6 +491,34 @@ mod tests {
         );
 
         assert_eq!(actual, Ok(Some(PreviewStoreState::Ready(second))));
+    }
+
+    #[test]
+    fn clear_ledger_keeps_previews_for_other_ledgers() {
+        let store = PreviewStore::new();
+        let retained_ledger_id = walicord_ledger::test_fixtures::ledger_id(78);
+        let retained_key = PreviewStoreKey::new(retained_ledger_id, actor());
+        let retained = record_for(retained_ledger_id, actor(), 2, 2000);
+        store
+            .transition(
+                key(),
+                PreviewStoreTransition::Replace(Box::new(record(1, 1000))),
+            )
+            .expect("replace");
+        store
+            .transition(
+                retained_key,
+                PreviewStoreTransition::Replace(Box::new(retained.clone())),
+            )
+            .expect("replace");
+
+        store.clear_ledger(ledger_id());
+
+        assert_eq!(store.current(key()), None);
+        assert_eq!(
+            store.current(retained_key),
+            Some(PreviewStoreState::Ready(retained))
+        );
     }
 
     #[test]

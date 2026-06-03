@@ -1,19 +1,9 @@
-#![allow(dead_code)]
-
 use super::{
     sanitizer::SafeLiteralText,
     surfaces::{SurfaceActionRow, SurfaceSelectMenu},
 };
 use walicord_application::ledger::LedgerEffectiveDate;
 use walicord_i18n as i18n;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PickerOption {
-    pub value: String,
-    pub label: SafeLiteralText,
-    pub description: Option<String>,
-    pub selected: bool,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PickerSurfaceModel {
@@ -28,6 +18,7 @@ pub struct PickerSurfaceModel {
     pub ephemeral: bool,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExpenseStepTitle {
     Payer,
@@ -36,6 +27,7 @@ pub enum ExpenseStepTitle {
     Confirm,
 }
 
+#[cfg(test)]
 impl ExpenseStepTitle {
     pub fn render(self) -> &'static str {
         match self {
@@ -70,6 +62,7 @@ impl ExpenseDraftSummary {
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PickerPageChrome {
     pub current_page: usize,
@@ -79,6 +72,7 @@ pub struct PickerPageChrome {
     pub total_items: usize,
 }
 
+#[cfg(test)]
 impl PickerPageChrome {
     pub fn page_indicator(&self) -> String {
         i18n::page_indicator(self.current_page, self.total_pages).to_string()
@@ -156,6 +150,7 @@ impl ExpenseConfirmationParticipantRow {
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExpenseForwardAction {
     Payer,
@@ -164,6 +159,7 @@ pub enum ExpenseForwardAction {
     Confirm,
 }
 
+#[cfg(test)]
 impl ExpenseForwardAction {
     pub fn render(self) -> &'static str {
         match self {
@@ -175,6 +171,7 @@ impl ExpenseForwardAction {
     }
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModalValidationFailure {
     Amount,
@@ -182,6 +179,7 @@ pub enum ModalValidationFailure {
     Date,
 }
 
+#[cfg(test)]
 pub fn first_invalid_modal_field(
     amount_valid: bool,
     note_valid: bool,
@@ -206,6 +204,7 @@ pub fn individual_selection_title(count: usize, names: &[SafeLiteralText]) -> St
         .unwrap_or(base)
 }
 
+#[cfg(test)]
 pub fn payer_picker_utility_labels() -> [&'static str; 4] {
     [
         i18n::picker_previous_page_label(),
@@ -215,6 +214,7 @@ pub fn payer_picker_utility_labels() -> [&'static str; 4] {
     ]
 }
 
+#[cfg(test)]
 pub fn individual_picker_utility_labels() -> [&'static str; 4] {
     [
         i18n::picker_previous_page_label(),
@@ -224,6 +224,7 @@ pub fn individual_picker_utility_labels() -> [&'static str; 4] {
     ]
 }
 
+#[cfg(test)]
 pub fn role_picker_utility_labels() -> [&'static str; 4] {
     [
         i18n::picker_previous_page_label(),
@@ -233,6 +234,7 @@ pub fn role_picker_utility_labels() -> [&'static str; 4] {
     ]
 }
 
+#[cfg(test)]
 pub fn participant_source_entry_labels() -> [&'static str; 3] {
     [
         i18n::participant_source_individual_label(),
@@ -241,6 +243,7 @@ pub fn participant_source_entry_labels() -> [&'static str; 3] {
     ]
 }
 
+#[cfg(test)]
 pub fn participant_source_clear_labels() -> [&'static str; 2] {
     [
         i18n::participant_source_clear_roles_label(),

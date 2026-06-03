@@ -6,10 +6,14 @@ use serenity::{
     prelude::Context,
 };
 use std::{
-    collections::{BTreeMap, BTreeSet, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     sync::Arc,
 };
-use walicord_application::ledger::{LedgerId, participant_resolution::RosterSnapshot};
+use walicord_application::ledger::{
+    LedgerId,
+    participant_resolution::RosterSnapshot,
+    read_singleflight::{ReadSingleflight, SingleflightOutcome},
+};
 use walicord_domain::model::{MemberId, RoleId};
 
 use super::{
@@ -18,6 +22,7 @@ use super::{
         EmptyCanonicalThreadCandidate, LocatorDiscoveryCandidate, LocatorError,
         LocatorRecoveryReference, RediscoveringCanonicalThreadLocatorBackend, TrackedParentKey,
         VerifiedCanonicalThreadCandidate, canonical_thread_candidate_ids,
+        ledger_id_for_canonical_thread,
     },
     observability::PermissionAction,
     router::{
@@ -184,15 +189,22 @@ fn classify_discovered_candidate(
     discovered: Result<Option<LedgerId>, StoreLoadError>,
 ) -> Result<Option<LocatorDiscoveryCandidate>, LocatorError> {
     match discovered {
-        Ok(Some(ledger_id)) => Ok(Some(LocatorDiscoveryCandidate::Verified(
-            VerifiedCanonicalThreadCandidate::new(
+        Ok(Some(ledger_id)) if ledger_id == ledger_id_for_canonical_thread(canonical_thread_id) => {
+            Ok(Some(LocatorDiscoveryCandidate::Verified(
+                VerifiedCanonicalThreadCandidate::new(
+                    canonical_thread_id,
+                    LocatorRecoveryReference::channel(canonical_thread_id, None::<String>),
+                    cached_binding.is_some_and(|binding| {
+                        binding.canonical_thread_id() == canonical_thread_id
+                            && binding.ledger_id() == ledger_id
+                    }),
+                ),
+            )))
+        }
+        Ok(Some(_)) => Ok(Some(LocatorDiscoveryCandidate::Damaged(
+            super::locator::DamagedCanonicalThreadCandidate::new(
                 canonical_thread_id,
-                ledger_id,
                 LocatorRecoveryReference::channel(canonical_thread_id, None::<String>),
-                cached_binding.is_some_and(|binding| {
-                    binding.canonical_thread_id() == canonical_thread_id
-                        && binding.ledger_id() == ledger_id
-                }),
             ),
         ))),
         Ok(None) => Ok(Some(LocatorDiscoveryCandidate::Empty(
@@ -200,10 +212,10 @@ fn classify_discovered_candidate(
                 canonical_thread_id,
                 LocatorRecoveryReference::channel(canonical_thread_id, None::<String>),
             )
-            .with_provisioned_ledger_id(
+            .with_provisioned_binding(
                 cached_binding
                     .filter(|binding| binding.canonical_thread_id() == canonical_thread_id)
-                    .map(CanonicalThreadBinding::ledger_id),
+                    .is_some(),
             ),
         ))),
         Err(error @ (StoreLoadError::Fetch(_) | StoreLoadError::FetchTimeout { .. })) => {
@@ -256,6 +268,8 @@ impl<RP: RosterProvider> RouterRosterFetcher for DiscordRouterRosterFetcher<RP> 
         let display_names = self
             .inner
             .display_names_for_guild(guild_id, port_snapshot.member_ids.iter().copied());
+        let role_display_names =
+            cached_role_display_names(ctx, guild_id, port_snapshot.role_members.keys().copied());
 
         let all_members: BTreeSet<MemberId> = port_snapshot.member_ids.iter().copied().collect();
         let mut role_members: BTreeMap<RoleId, BTreeSet<MemberId>> = BTreeMap::new();
@@ -269,8 +283,31 @@ impl<RP: RosterProvider> RouterRosterFetcher for DiscordRouterRosterFetcher<RP> 
                 role_members,
             },
             display_names,
+            role_display_names,
         })
     }
+}
+
+fn cached_role_display_names<I>(
+    ctx: &Context,
+    guild_id: GuildId,
+    role_ids: I,
+) -> HashMap<RoleId, smol_str::SmolStr>
+where
+    I: IntoIterator<Item = RoleId>,
+{
+    let Some(guild) = ctx.cache.guild(guild_id) else {
+        return HashMap::new();
+    };
+    role_ids
+        .into_iter()
+        .filter_map(|role_id| {
+            guild
+                .roles
+                .get(&serenity::all::RoleId::new(role_id.0))
+                .map(|role| (role_id, smol_str::SmolStr::new(role.name.as_str())))
+        })
+        .collect()
 }
 
 /// Object-safe wrapper around `DiscordCanonicalLedgerStore::load_verified_thread`.
@@ -279,11 +316,17 @@ impl<RP: RosterProvider> RouterRosterFetcher for DiscordRouterRosterFetcher<RP> 
 pub struct DiscordLedgerThreadLoader {
     store: Arc<DiscordCanonicalLedgerStore>,
     route_label: &'static str,
+    singleflight:
+        Arc<ReadSingleflight<(ChannelId, LedgerId), VerifiedLedgerThreadLoad, Arc<StoreLoadError>>>,
 }
 
 impl DiscordLedgerThreadLoader {
     pub fn new(store: Arc<DiscordCanonicalLedgerStore>, route_label: &'static str) -> Self {
-        Self { store, route_label }
+        Self {
+            store,
+            route_label,
+            singleflight: Arc::new(ReadSingleflight::new()),
+        }
     }
 }
 
@@ -294,10 +337,22 @@ impl LedgerThreadLoader for DiscordLedgerThreadLoader {
         ctx: &Context,
         canonical_thread_id: ChannelId,
         ledger_id: LedgerId,
-    ) -> Result<VerifiedLedgerThreadLoad, StoreLoadError> {
-        self.store
-            .load_verified_thread(ctx, canonical_thread_id, ledger_id, self.route_label)
+    ) -> Result<VerifiedLedgerThreadLoad, Arc<StoreLoadError>> {
+        match self
+            .singleflight
+            .do_or_wait((canonical_thread_id, ledger_id), || async {
+                self.store
+                    .load_verified_thread(ctx, canonical_thread_id, ledger_id, self.route_label)
+                    .await
+                    .map_err(Arc::new)
+            })
             .await
+        {
+            SingleflightOutcome::Loaded(result) => result.as_ref().clone(),
+            SingleflightOutcome::LeaderCancelled => Err(Arc::new(StoreLoadError::Fetch(
+                "canonical thread load leader was cancelled".to_owned(),
+            ))),
+        }
     }
 }
 
@@ -319,13 +374,22 @@ mod tests {
     }
 
     #[test]
+    fn discovery_classifies_foreign_ledger_id_as_damaged() {
+        assert!(matches!(
+            classify_discovered_candidate(
+                tracked_parent(),
+                ChannelId::new(20),
+                None,
+                Ok(Some(walicord_ledger::test_fixtures::ledger_id(77))),
+            ),
+            Ok(Some(LocatorDiscoveryCandidate::Damaged(_)))
+        ));
+    }
+
+    #[test]
     fn discovery_preserves_provisioned_binding_when_thread_is_still_empty() {
         let tracked_parent = tracked_parent();
-        let binding = CanonicalThreadBinding::new(
-            tracked_parent,
-            ChannelId::new(20),
-            walicord_ledger::test_fixtures::ledger_id(77),
-        );
+        let binding = CanonicalThreadBinding::new(tracked_parent, ChannelId::new(20));
         let candidate = classify_discovered_candidate(
             tracked_parent,
             ChannelId::new(20),

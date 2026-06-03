@@ -1614,6 +1614,14 @@ pub fn stale_settlement_preview_message() -> &'static str {
     }
 }
 
+pub fn settlement_preview_replaced_message() -> &'static str {
+    if cfg!(feature = "ja") {
+        "前の清算プレビューを新しい内容で置き換えました。"
+    } else {
+        "The previous settlement preview was replaced with the new one."
+    }
+}
+
 pub fn settlement_already_not_needed_message() -> &'static str {
     if cfg!(feature = "ja") {
         "すでに清算は不要です。"
@@ -1709,6 +1717,48 @@ pub fn uncertain_write_preview_preserved_message() -> &'static str {
         "保留中のプレビューは作成から10分間有効です。"
     } else {
         "The pending preview stays valid for 10 minutes from creation."
+    }
+}
+
+pub fn abandoned_uncertain_write_message(
+    last_known_summary: impl std::fmt::Display,
+) -> impl std::fmt::Display {
+    struct Message<T>(T);
+
+    impl<T: std::fmt::Display> std::fmt::Display for Message<T> {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            if cfg!(feature = "ja") {
+                write!(
+                    formatter,
+                    "前回の送信結果を自動確認できませんでした。Discord の台帳スレッドで重複がないことを確認してから解除してください。\n前回の内容: {}",
+                    self.0
+                )
+            } else {
+                write!(
+                    formatter,
+                    "The previous send result could not be verified automatically. Check the Discord ledger thread for duplicates before clearing the block.\nPrevious content: {}",
+                    self.0
+                )
+            }
+        }
+    }
+
+    Message(last_known_summary)
+}
+
+pub fn abandoned_uncertain_write_acknowledge_label() -> &'static str {
+    if cfg!(feature = "ja") {
+        "確認したのでやり直す"
+    } else {
+        "Checked, try again"
+    }
+}
+
+pub fn abandoned_uncertain_write_acknowledged_message() -> &'static str {
+    if cfg!(feature = "ja") {
+        "未確定の送信を確認済みとして解除しました。元の操作からもう一度実行してください。"
+    } else {
+        "The uncertain send block was cleared after acknowledgement. Run the original action again."
     }
 }
 
@@ -1978,6 +2028,22 @@ pub fn expense_session_expired_message() -> &'static str {
     }
 }
 
+pub fn expense_session_wrong_actor_message() -> &'static str {
+    if cfg!(feature = "ja") {
+        "この経費入力は他のユーザーのものです。自分で始めるには /expense または 記録する を使ってください。"
+    } else {
+        "This expense draft belongs to another user. Start your own with /expense or Record."
+    }
+}
+
+pub fn expense_session_replaced_message() -> &'static str {
+    if cfg!(feature = "ja") {
+        "前の経費入力を新しい入力で置き換えました。"
+    } else {
+        "The previous expense draft was replaced with the new input."
+    }
+}
+
 pub fn stale_interaction_message() -> &'static str {
     if cfg!(feature = "ja") {
         "この操作は期限切れです。もう一度やり直してください。"
@@ -2043,6 +2109,22 @@ pub fn stale_void_page_message() -> &'static str {
         "この表示は期限切れです。/void または 取り消し で開き直してください。"
     } else {
         "This view has expired. Reopen it with /void or the Void button."
+    }
+}
+
+pub fn void_session_wrong_actor_message() -> &'static str {
+    if cfg!(feature = "ja") {
+        "この取り消し操作は他のユーザーのものです。自分で始めるには /void または 取り消し を使ってください。"
+    } else {
+        "This void operation belongs to another user. Start your own with /void or Void."
+    }
+}
+
+pub fn void_session_replaced_message() -> &'static str {
+    if cfg!(feature = "ja") {
+        "前の取り消し操作を新しい入力で置き換えました。"
+    } else {
+        "The previous void operation was replaced with the new input."
     }
 }
 
@@ -2448,17 +2530,17 @@ pub fn weight_editor_modal_title() -> &'static str {
 
 pub fn weight_editor_input_label() -> &'static str {
     if cfg!(feature = "ja") {
-        "表示名 = 重み"
+        "メンバーID = 重み"
     } else {
-        "Display Name = Weight"
+        "Member ID = Weight"
     }
 }
 
 pub fn weight_editor_placeholder() -> &'static str {
     if cfg!(feature = "ja") {
-        "例: 山田太郎 = 1"
+        "例: 123456789 = 1"
     } else {
-        "Example: Alice = 1"
+        "Example: 123456789 = 1"
     }
 }
 
@@ -2472,9 +2554,9 @@ pub fn weight_editor_too_many_message() -> &'static str {
 
 pub fn weight_editor_parse_error() -> &'static str {
     if cfg!(feature = "ja") {
-        "表示されている形式のまま、表示名 = 重み で変更してください。例: 山田太郎 = 1"
+        "表示されている形式のまま、メンバーID = 重み で変更してください。例: 123456789 = 1"
     } else {
-        "Keep the displayed format and edit as Display Name = Weight. Example: Alice = 1"
+        "Keep the displayed format and edit as Member ID = Weight. Example: 123456789 = 1"
     }
 }
 

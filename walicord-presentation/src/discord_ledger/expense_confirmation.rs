@@ -151,6 +151,7 @@ pub struct ExpenseSelectionStepButtonIds {
     pub source_roles: String,
     pub source_members: String,
     pub to_weights: String,
+    pub weight_edit: String,
     pub to_confirm: String,
     pub back: String,
     pub cancel: String,
@@ -219,12 +220,20 @@ pub fn build_expense_selection_step_surface(
                 disabled: false,
             },
         ],
-        ExpenseSelectionPhase::WeightEditor => vec![SurfaceButton::Interactive {
-            label: i18n::expense_to_confirm_label().to_owned(),
-            custom_id: button_ids.to_confirm.clone(),
-            style: SurfaceInteractiveButtonStyle::Primary,
-            disabled: false,
-        }],
+        ExpenseSelectionPhase::WeightEditor => vec![
+            SurfaceButton::Interactive {
+                label: i18n::expense_weight_edit_label().to_owned(),
+                custom_id: button_ids.weight_edit.clone(),
+                style: SurfaceInteractiveButtonStyle::Secondary,
+                disabled: false,
+            },
+            SurfaceButton::Interactive {
+                label: i18n::expense_to_confirm_label().to_owned(),
+                custom_id: button_ids.to_confirm.clone(),
+                style: SurfaceInteractiveButtonStyle::Primary,
+                disabled: false,
+            },
+        ],
     };
 
     let mut action_rows = Vec::new();

@@ -24,9 +24,7 @@ pub use projection::{
 pub use record::CanonicalLedgerId;
 #[cfg(feature = "test-fixtures")]
 pub use record::test_fixtures;
-pub use record::{
-    AppendOrderedLedgerRecords, LedgerEntryId, LedgerId, LedgerIdIssuer, LedgerRecord,
-};
+pub use record::{AppendOrderedLedgerRecords, LedgerEntryId, LedgerId, LedgerRecord};
 pub use settlement::{NormalizedSettlementPlanRecorded, NormalizedSettlementPlanRecordedError};
 
 #[cfg(test)]

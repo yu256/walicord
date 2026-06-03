@@ -65,7 +65,7 @@ impl SurfaceButton {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SurfaceSelectOption {
     pub value: String,
-    pub label: String,
+    pub label: SafeLiteralText,
     pub description: Option<String>,
     pub selected: bool,
 }
@@ -1330,14 +1330,15 @@ fn normalize_action_rows(
                     .into_iter()
                     .map(|option| {
                         validate_custom_id(&option.value)?;
-                        let label = truncate_component_label(&option.label);
+                        let label = truncate_component_label(option.label.as_str());
                         validate_component_label(&label)?;
                         if let Some(description) = &option.description {
                             validate_component_description(description)?;
                         }
                         Ok(SurfaceSelectOption {
                             value: option.value,
-                            label,
+                            label: SafeLiteralText::from_roster_label(&label)
+                                .expect("validated component label should sanitize"),
                             description: option.description,
                             selected: option.selected,
                         })
@@ -2169,7 +2170,8 @@ mod tests {
                 placeholder: Some("支払者を選択".to_owned()),
                 options: vec![SurfaceSelectOption {
                     value: "member:1".to_owned(),
-                    label: "Alice".to_owned(),
+                    label: SafeLiteralText::from_roster_label("Alice")
+                        .expect("label should sanitize"),
                     description: None,
                     selected: true,
                 }],
@@ -2190,7 +2192,7 @@ mod tests {
             panic!("expected select menu row");
         };
         assert_eq!(select_menu.placeholder.as_deref(), Some("支払者を選択"));
-        assert_eq!(select_menu.options[0].label, "Alice");
+        assert_eq!(select_menu.options[0].label.as_str(), "Alice");
     }
 
     #[test]
@@ -2207,7 +2209,12 @@ mod tests {
                 placeholder: Some("支払者を選択".to_owned()),
                 options: vec![SurfaceSelectOption {
                     value: "member:1".to_owned(),
-                    label: format!("{}{}", "田中 太郎 / 開発部", " / 追加情報".repeat(20)),
+                    label: SafeLiteralText::from_roster_label(&format!(
+                        "{}{}",
+                        "田中 太郎 / 開発部",
+                        " / 追加情報".repeat(20)
+                    ))
+                    .expect("label should sanitize"),
                     description: None,
                     selected: false,
                 }],
@@ -2226,10 +2233,11 @@ mod tests {
         assert!(
             select_menu.options[0]
                 .label
+                .as_str()
                 .starts_with("田中 太郎 / 開発部")
         );
-        assert!(select_menu.options[0].label.ends_with('…'));
-        assert!(select_menu.options[0].label.chars().count() <= 100);
+        assert!(select_menu.options[0].label.as_str().ends_with('…'));
+        assert!(select_menu.options[0].label.as_str().chars().count() <= 100);
     }
 
     #[test]

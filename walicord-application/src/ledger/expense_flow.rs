@@ -4,9 +4,10 @@ use crate::{
     ledger::{
         expense_session::{
             ExpenseBasicInfo, ExpenseConfirmationSnapshot, ExpenseDraftSnapshot,
-            ExpenseLaunchOrigin, ExpenseParticipantSelection, ExpenseSelectionPhase,
-            ExpenseSelectionState, ExpenseSession, ExpenseSessionConstructionError,
-            ExpenseSessionKey, ExpenseSessionStage,
+            ExpenseLaunchOrigin, ExpenseParticipantSelection, ExpensePickerKind,
+            ExpenseSelectionPhase, ExpenseSelectionState, ExpenseSession,
+            ExpenseSessionConstructionError, ExpenseSessionKey, ExpenseSessionStage,
+            PagedPickerState, PickerSnapshotId,
         },
         participant_resolution::{
             ParticipantDrift, RosterSnapshot, drift_between_snapshot_and_resolution,
@@ -14,7 +15,8 @@ use crate::{
         },
     },
 };
-use walicord_domain::model::MemberId;
+use std::collections::BTreeMap;
+use walicord_domain::model::{MemberId, RoleId, Weight};
 
 /// Construct a fresh [`ExpenseSession`] in `InSelection { Payer }` from a validated
 /// modal submission. The actor is preselected as both payer and the initial individual
@@ -357,6 +359,170 @@ pub fn toggle_members_group(
             phase: ExpenseSelectionPhase::ParticipantSource,
         },
         draft,
+        nonce,
+        clock.now(),
+    )
+    .map_err(NavigationError::ConstructionFailed)
+}
+
+pub fn replace_payer(
+    session: ExpenseSession,
+    payer: Option<MemberId>,
+    clock: &dyn Clock,
+) -> Result<ExpenseSession, NavigationError> {
+    update_selection_in_phase(session, ExpenseSelectionPhase::Payer, clock, |selection| {
+        selection.payer = payer;
+    })
+}
+
+pub fn replace_individual_members(
+    session: ExpenseSession,
+    mut members: Vec<MemberId>,
+    clock: &dyn Clock,
+) -> Result<ExpenseSession, NavigationError> {
+    members.sort_unstable();
+    members.dedup();
+    update_selection_in_phase(
+        session,
+        ExpenseSelectionPhase::IndividualSelection,
+        clock,
+        |selection| {
+            selection.individual_members = members;
+        },
+    )
+}
+
+pub fn replace_selected_roles(
+    session: ExpenseSession,
+    mut roles: Vec<RoleId>,
+    clock: &dyn Clock,
+) -> Result<ExpenseSession, NavigationError> {
+    roles.sort_unstable();
+    roles.dedup();
+    update_selection_in_phase(session, ExpenseSelectionPhase::Roles, clock, |selection| {
+        selection.selected_roles = roles;
+    })
+}
+
+pub fn replace_weight_overrides(
+    session: ExpenseSession,
+    weights: BTreeMap<MemberId, Weight>,
+    clock: &dyn Clock,
+) -> Result<ExpenseSession, NavigationError> {
+    update_selection_in_phase(
+        session,
+        ExpenseSelectionPhase::WeightEditor,
+        clock,
+        |selection| {
+            selection.weight_overrides = weights;
+        },
+    )
+}
+
+pub fn set_picker_view_state(
+    session: ExpenseSession,
+    kind: ExpensePickerKind,
+    snapshot_id: PickerSnapshotId,
+    current_page: usize,
+    query: Option<String>,
+    clock: &dyn Clock,
+) -> Result<ExpenseSession, NavigationError> {
+    update_selection_in_picker_kind(session, kind, clock, |selection| {
+        let selected_values = picker_selection_values(kind, selection);
+        selection.picker_states.insert(
+            kind,
+            PagedPickerState::new(snapshot_id, current_page, query, selected_values),
+        );
+    })
+}
+
+pub fn clear_picker_selection(
+    session: ExpenseSession,
+    kind: ExpensePickerKind,
+    snapshot_id: PickerSnapshotId,
+    clock: &dyn Clock,
+) -> Result<ExpenseSession, NavigationError> {
+    update_selection_in_picker_kind(session, kind, clock, |selection| {
+        match kind {
+            ExpensePickerKind::Payer => selection.payer = None,
+            ExpensePickerKind::Individuals => selection.individual_members.clear(),
+            ExpensePickerKind::Roles => selection.selected_roles.clear(),
+        }
+        selection.picker_states.insert(
+            kind,
+            PagedPickerState::new(snapshot_id, 0, None, Vec::new()),
+        );
+    })
+}
+
+fn update_selection_in_picker_kind(
+    session: ExpenseSession,
+    kind: ExpensePickerKind,
+    clock: &dyn Clock,
+    update: impl FnOnce(&mut ExpenseSelectionState),
+) -> Result<ExpenseSession, NavigationError> {
+    update_selection_in_phase(session, picker_phase(kind), clock, update)
+}
+
+fn picker_phase(kind: ExpensePickerKind) -> ExpenseSelectionPhase {
+    match kind {
+        ExpensePickerKind::Payer => ExpenseSelectionPhase::Payer,
+        ExpensePickerKind::Individuals => ExpenseSelectionPhase::IndividualSelection,
+        ExpensePickerKind::Roles => ExpenseSelectionPhase::Roles,
+    }
+}
+
+fn picker_selection_values(kind: ExpensePickerKind, selection: &ExpenseSelectionState) -> Vec<u64> {
+    match kind {
+        ExpensePickerKind::Payer => selection
+            .payer
+            .map(|member_id| member_id.0)
+            .into_iter()
+            .collect(),
+        ExpensePickerKind::Individuals => selection
+            .individual_members
+            .iter()
+            .map(|member_id| member_id.0)
+            .collect(),
+        ExpensePickerKind::Roles => selection
+            .selected_roles
+            .iter()
+            .map(|role_id| role_id.0)
+            .collect(),
+    }
+}
+
+fn update_selection_in_phase(
+    session: ExpenseSession,
+    expected_phase: ExpenseSelectionPhase,
+    clock: &dyn Clock,
+    update: impl FnOnce(&mut ExpenseSelectionState),
+) -> Result<ExpenseSession, NavigationError> {
+    let ExpenseSessionStage::InSelection { phase } = session.stage() else {
+        return Err(NavigationError::NotInSelection);
+    };
+    if phase != &expected_phase {
+        return Err(NavigationError::NotInSelection);
+    }
+    let key = session.key();
+    let origin = session.origin();
+    let nonce = session.nonce();
+    let mut selection = session.draft().selection_state().clone();
+    update(&mut selection);
+    let basic_info = session
+        .draft()
+        .basic_info()
+        .cloned()
+        .ok_or(NavigationError::BasicInfoMissing)?;
+    ExpenseSession::new(
+        key,
+        origin,
+        ExpenseSessionStage::InSelection {
+            phase: expected_phase,
+        },
+        ExpenseDraftSnapshot::empty()
+            .with_basic_info(basic_info)
+            .with_selection_state(selection),
         nonce,
         clock.now(),
     )
@@ -809,69 +975,64 @@ mod tests {
     #[rstest::rstest]
     #[case::payer_to_participant_source(
         ExpenseSelectionPhase::Payer,
-        ExpenseSelectionPhase::ParticipantSource,
-        true
+        ExpenseSelectionPhase::ParticipantSource
     )]
     #[case::participant_source_to_individual(
         ExpenseSelectionPhase::ParticipantSource,
-        ExpenseSelectionPhase::IndividualSelection,
-        true
+        ExpenseSelectionPhase::IndividualSelection
     )]
     #[case::participant_source_to_roles(
         ExpenseSelectionPhase::ParticipantSource,
-        ExpenseSelectionPhase::Roles,
-        true
+        ExpenseSelectionPhase::Roles
     )]
     #[case::participant_source_to_weight_editor(
         ExpenseSelectionPhase::ParticipantSource,
-        ExpenseSelectionPhase::WeightEditor,
-        true
+        ExpenseSelectionPhase::WeightEditor
     )]
     #[case::individual_to_weight_editor(
         ExpenseSelectionPhase::IndividualSelection,
-        ExpenseSelectionPhase::WeightEditor,
-        true
+        ExpenseSelectionPhase::WeightEditor
     )]
     #[case::roles_to_weight_editor(
         ExpenseSelectionPhase::Roles,
-        ExpenseSelectionPhase::WeightEditor,
-        true
+        ExpenseSelectionPhase::WeightEditor
     )]
+    fn navigate_to_phase_accepts_legal_forward_transitions(
+        #[case] from: ExpenseSelectionPhase,
+        #[case] to: ExpenseSelectionPhase,
+    ) {
+        let actual = navigate_to_phase(session_in_phase(from), to.clone(), &fixed_clock())
+            .expect("transition should succeed");
+
+        assert_eq!(
+            actual.stage(),
+            &ExpenseSessionStage::InSelection { phase: to }
+        );
+    }
+
+    #[rstest::rstest]
     #[case::payer_to_weight_editor_rejected(
         ExpenseSelectionPhase::Payer,
-        ExpenseSelectionPhase::WeightEditor,
-        false
+        ExpenseSelectionPhase::WeightEditor
     )]
     #[case::individual_to_roles_rejected(
         ExpenseSelectionPhase::IndividualSelection,
-        ExpenseSelectionPhase::Roles,
-        false
+        ExpenseSelectionPhase::Roles
     )]
     #[case::weight_editor_has_no_forward_target(
         ExpenseSelectionPhase::WeightEditor,
-        ExpenseSelectionPhase::WeightEditor,
-        false
+        ExpenseSelectionPhase::WeightEditor
     )]
-    fn navigate_to_phase_enforces_legal_forward_transitions(
+    fn navigate_to_phase_rejects_illegal_forward_transitions(
         #[case] from: ExpenseSelectionPhase,
         #[case] to: ExpenseSelectionPhase,
-        #[case] expect_ok: bool,
     ) {
-        let session = session_in_phase(from.clone());
-        let actual = navigate_to_phase(session, to.clone(), &fixed_clock());
+        let actual = navigate_to_phase(session_in_phase(from.clone()), to.clone(), &fixed_clock());
 
-        if expect_ok {
-            let next = actual.expect("transition should succeed");
-            assert_eq!(
-                next.stage(),
-                &ExpenseSessionStage::InSelection { phase: to }
-            );
-        } else {
-            assert_eq!(
-                actual.unwrap_err(),
-                NavigationError::IllegalForwardTransition { from, to }
-            );
-        }
+        assert_eq!(
+            actual,
+            Err(NavigationError::IllegalForwardTransition { from, to })
+        );
     }
 
     #[test]
@@ -909,6 +1070,118 @@ mod tests {
         let session = session_in_phase(ExpenseSelectionPhase::Payer);
         let actual = toggle_members_group(session, &fixed_clock());
         assert_eq!(actual.unwrap_err(), NavigationError::NotInSelection);
+    }
+
+    #[test]
+    fn picker_replacements_update_only_the_active_phase_selection() {
+        let payer = replace_payer(
+            session_in_phase(ExpenseSelectionPhase::Payer),
+            Some(MemberId(7)),
+            &fixed_clock(),
+        )
+        .expect("payer replacement");
+        assert_eq!(payer.draft().selection_state().payer, Some(MemberId(7)));
+
+        let individuals = replace_individual_members(
+            session_in_phase(ExpenseSelectionPhase::IndividualSelection),
+            vec![MemberId(7), MemberId(42), MemberId(7)],
+            &fixed_clock(),
+        )
+        .expect("individual replacement");
+        assert_eq!(
+            individuals.draft().selection_state().individual_members,
+            vec![MemberId(7), MemberId(42)]
+        );
+
+        let roles = replace_selected_roles(
+            session_in_phase(ExpenseSelectionPhase::Roles),
+            vec![
+                walicord_domain::model::RoleId(9),
+                walicord_domain::model::RoleId(3),
+            ],
+            &fixed_clock(),
+        )
+        .expect("role replacement");
+        assert_eq!(
+            roles.draft().selection_state().selected_roles,
+            vec![
+                walicord_domain::model::RoleId(3),
+                walicord_domain::model::RoleId(9)
+            ]
+        );
+
+        let weights = replace_weight_overrides(
+            session_in_phase(ExpenseSelectionPhase::WeightEditor),
+            BTreeMap::from([(MemberId(7), walicord_domain::model::Weight(2))]),
+            &fixed_clock(),
+        )
+        .expect("weight replacement");
+        assert_eq!(
+            weights.draft().selection_state().weight_overrides,
+            BTreeMap::from([(MemberId(7), walicord_domain::model::Weight(2))])
+        );
+    }
+
+    #[test]
+    fn picker_view_state_is_saved_in_the_active_session_phase() {
+        let session = session_in_phase(ExpenseSelectionPhase::IndividualSelection);
+
+        let actual = set_picker_view_state(
+            session,
+            ExpensePickerKind::Individuals,
+            PickerSnapshotId::new(11),
+            2,
+            Some("tanaka".to_owned()),
+            &fixed_clock(),
+        )
+        .expect("picker state update");
+
+        assert_eq!(
+            actual
+                .draft()
+                .selection_state()
+                .picker_states
+                .get(&ExpensePickerKind::Individuals),
+            Some(&PagedPickerState::new(
+                PickerSnapshotId::new(11),
+                2,
+                Some("tanaka".to_owned()),
+                vec![42],
+            ))
+        );
+    }
+
+    #[test]
+    fn picker_clear_updates_the_matching_selection_and_resets_picker_state() {
+        let session = replace_selected_roles(
+            session_in_phase(ExpenseSelectionPhase::Roles),
+            vec![walicord_domain::model::RoleId(7)],
+            &fixed_clock(),
+        )
+        .expect("role selection");
+
+        let actual = clear_picker_selection(
+            session,
+            ExpensePickerKind::Roles,
+            PickerSnapshotId::new(17),
+            &fixed_clock(),
+        )
+        .expect("clear role picker");
+
+        assert!(actual.draft().selection_state().selected_roles.is_empty());
+        assert_eq!(
+            actual
+                .draft()
+                .selection_state()
+                .picker_states
+                .get(&ExpensePickerKind::Roles),
+            Some(&PagedPickerState::new(
+                PickerSnapshotId::new(17),
+                0,
+                None,
+                Vec::new(),
+            ))
+        );
     }
 
     #[test]

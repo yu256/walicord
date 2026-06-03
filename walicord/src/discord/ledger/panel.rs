@@ -7,11 +7,12 @@ use walicord_presentation::{
 
 use super::{
     locator::{CanonicalThreadLocatorState, LocatorRecoveryReference},
-    permissions::{
-        RecoveryOutcomeMessage, recovery_reference_components,
-        render_parent_channel_access_failure_message,
-    },
+    permissions::{RecoveryOutcomeMessage, recovery_reference_components},
     response_writer::rendered_surface_to_message,
+};
+#[cfg(test)]
+use super::{
+    permissions::render_parent_channel_access_failure_message,
     route_guard::outside_tracked_channel_message,
 };
 
@@ -20,6 +21,7 @@ pub(crate) const LEDGER_PANEL_REVIEW_ID: &str = "ledger:panel:review";
 pub(crate) const LEDGER_PANEL_LEDGER_ID: &str = "ledger:panel:ledger";
 pub(crate) const LEDGER_PANEL_VOID_ID: &str = "ledger:panel:void";
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PanelPostFailure {
     MissingParentAccess {
@@ -31,16 +33,7 @@ pub(crate) enum PanelPostFailure {
     DiscordRejected,
 }
 
-pub(crate) fn is_ledger_panel_component_id(custom_id: &str) -> bool {
-    matches!(
-        custom_id,
-        LEDGER_PANEL_EXPENSE_ID
-            | LEDGER_PANEL_REVIEW_ID
-            | LEDGER_PANEL_LEDGER_ID
-            | LEDGER_PANEL_VOID_ID
-    )
-}
-
+#[cfg(test)]
 pub(crate) fn render_panel_post_failure_message(
     failure: &PanelPostFailure,
 ) -> RecoveryOutcomeMessage {
@@ -224,7 +217,6 @@ mod tests {
         let ready = CanonicalThreadLocatorState::ReadyBound(CanonicalThreadBinding::new(
             tracked_parent,
             ChannelId::new(77),
-            walicord_ledger::test_fixtures::ledger_id(88),
         ));
 
         assert_eq!(

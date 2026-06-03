@@ -1,4 +1,5 @@
 use serenity::all::{ChannelId, GuildId, UserId};
+#[cfg(test)]
 use std::sync::Mutex;
 use walicord_application::ledger::{
     LedgerId,
@@ -127,21 +128,25 @@ impl DiscordLedgerObservability for TracingLedgerObservability {
 /// between application-side and Discord-side emissions, which integration tests
 /// covering the split rely on.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(test)]
 pub enum CapturedLedgerObservabilityEvent {
     Application(LedgerObservabilityEvent),
     Discord(DiscordLedgerObservabilityEvent),
 }
 
+#[cfg(test)]
 pub struct CapturingLedgerObservability {
     events: Mutex<Vec<CapturedLedgerObservabilityEvent>>,
 }
 
+#[cfg(test)]
 impl Default for CapturingLedgerObservability {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(test)]
 impl CapturingLedgerObservability {
     pub fn new() -> Self {
         Self {
@@ -157,6 +162,7 @@ impl CapturingLedgerObservability {
     }
 }
 
+#[cfg(test)]
 impl LedgerObservability for CapturingLedgerObservability {
     fn emit(&self, event: LedgerObservabilityEvent) {
         self.events
@@ -166,6 +172,7 @@ impl LedgerObservability for CapturingLedgerObservability {
     }
 }
 
+#[cfg(test)]
 impl DiscordLedgerObservability for CapturingLedgerObservability {
     fn emit_discord(&self, event: DiscordLedgerObservabilityEvent) {
         self.events

@@ -4,11 +4,12 @@ use serenity::{
     async_trait,
     prelude::Context,
 };
-use std::{collections::HashSet, sync::Arc};
+use std::{collections::HashSet, num::NonZeroU64, sync::Arc};
 use tokio::sync::Mutex;
 use walicord_application::ledger::LedgerId;
 use walicord_i18n as i18n;
 
+#[cfg(test)]
 use super::route_guard::startup_channel_is_track_target;
 
 pub(crate) const CANONICAL_LEDGER_THREAD_NAME: &str = "台帳";
@@ -91,6 +92,7 @@ pub(crate) struct TrackedParentKey {
 }
 
 impl TrackedParentKey {
+    #[cfg(test)]
     pub(crate) fn new(
         guild_id: GuildId,
         tracked_parent_channel_id: ChannelId,
@@ -130,15 +132,11 @@ pub(crate) struct CanonicalThreadBinding {
 }
 
 impl CanonicalThreadBinding {
-    pub(crate) fn new(
-        tracked_parent: TrackedParentKey,
-        canonical_thread_id: ChannelId,
-        ledger_id: LedgerId,
-    ) -> Self {
+    pub(crate) fn new(tracked_parent: TrackedParentKey, canonical_thread_id: ChannelId) -> Self {
         Self {
             tracked_parent,
             canonical_thread_id,
-            ledger_id,
+            ledger_id: ledger_id_for_canonical_thread(canonical_thread_id),
         }
     }
 
@@ -155,10 +153,16 @@ impl CanonicalThreadBinding {
     }
 }
 
+pub(crate) fn ledger_id_for_canonical_thread(canonical_thread_id: ChannelId) -> LedgerId {
+    LedgerId::from(
+        NonZeroU64::new(canonical_thread_id.get())
+            .expect("Discord canonical thread identifiers are non-zero"),
+    )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct VerifiedCanonicalThreadCandidate {
     canonical_thread_id: ChannelId,
-    ledger_id: LedgerId,
     recovery_reference: LocatorRecoveryReference,
     was_previously_authoritative: bool,
 }
@@ -166,13 +170,11 @@ pub(crate) struct VerifiedCanonicalThreadCandidate {
 impl VerifiedCanonicalThreadCandidate {
     pub(crate) fn new(
         canonical_thread_id: ChannelId,
-        ledger_id: LedgerId,
         recovery_reference: LocatorRecoveryReference,
         was_previously_authoritative: bool,
     ) -> Self {
         Self {
             canonical_thread_id,
-            ledger_id,
             recovery_reference,
             was_previously_authoritative,
         }
@@ -201,7 +203,7 @@ impl DamagedCanonicalThreadCandidate {
 pub(crate) struct EmptyCanonicalThreadCandidate {
     canonical_thread_id: ChannelId,
     recovery_reference: LocatorRecoveryReference,
-    provisioned_ledger_id: Option<LedgerId>,
+    was_provisioned: bool,
 }
 
 impl EmptyCanonicalThreadCandidate {
@@ -212,12 +214,12 @@ impl EmptyCanonicalThreadCandidate {
         Self {
             canonical_thread_id,
             recovery_reference,
-            provisioned_ledger_id: None,
+            was_provisioned: false,
         }
     }
 
-    pub(crate) fn with_provisioned_ledger_id(mut self, ledger_id: Option<LedgerId>) -> Self {
-        self.provisioned_ledger_id = ledger_id;
+    pub(crate) fn with_provisioned_binding(mut self, was_provisioned: bool) -> Self {
+        self.was_provisioned = was_provisioned;
         self
     }
 }
@@ -252,6 +254,7 @@ pub(crate) enum CanonicalThreadLocatorState {
 }
 
 impl CanonicalThreadLocatorState {
+    #[cfg(test)]
     pub(crate) fn tracked_parent(&self) -> TrackedParentKey {
         match self {
             Self::ReadyNoThread { tracked_parent }
@@ -306,12 +309,8 @@ impl CanonicalThreadLocatorState {
                     ))
                 }
                 LocatorDiscoveryCandidate::Empty(candidate) => {
-                    let provisioned = candidate.provisioned_ledger_id.map(|ledger_id| {
-                        CanonicalThreadBinding::new(
-                            tracked_parent,
-                            candidate.canonical_thread_id,
-                            ledger_id,
-                        )
+                    let provisioned = candidate.was_provisioned.then(|| {
+                        CanonicalThreadBinding::new(tracked_parent, candidate.canonical_thread_id)
                     });
                     Some((
                         candidate.canonical_thread_id,
@@ -334,13 +333,9 @@ impl CanonicalThreadLocatorState {
 
         match usable_candidates.as_slice() {
             [] => CanonicalThreadLocatorState::ReadyNoThread { tracked_parent },
-            [(canonical_thread_id, _, Some(candidate), _)] => {
-                CanonicalThreadLocatorState::ReadyBound(CanonicalThreadBinding::new(
-                    tracked_parent,
-                    *canonical_thread_id,
-                    candidate.ledger_id,
-                ))
-            }
+            [(canonical_thread_id, _, Some(_), _)] => CanonicalThreadLocatorState::ReadyBound(
+                CanonicalThreadBinding::new(tracked_parent, *canonical_thread_id),
+            ),
             [(_, _, None, Some(binding))] => CanonicalThreadLocatorState::Provisioned(*binding),
             [(canonical_thread_id, _, None, None)] => {
                 CanonicalThreadLocatorState::ReadyEmptyThread {
@@ -385,7 +380,6 @@ pub(crate) trait CanonicalThreadLocatorBackend: Send + Sync {
     ) -> Result<CanonicalThreadLocatorState, LocatorError>;
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 #[async_trait]
 pub(crate) trait CanonicalThreadDiscoveryPort: Send + Sync {
     async fn candidate_thread_ids(
@@ -401,12 +395,10 @@ pub(crate) trait CanonicalThreadDiscoveryPort: Send + Sync {
     ) -> Result<Option<LocatorDiscoveryCandidate>, LocatorError>;
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) struct RediscoveringCanonicalThreadLocatorBackend<P> {
     port: P,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 impl<P> RediscoveringCanonicalThreadLocatorBackend<P> {
     pub(crate) fn new(port: P) -> Self {
         Self { port }
@@ -465,6 +457,25 @@ impl<B> CanonicalThreadLocator<B> {
 
     pub(crate) fn clear(&self, tracked_parent: TrackedParentKey) {
         self.cache.remove(&tracked_parent);
+    }
+
+    pub(crate) fn clear_tracked_parent_channel(
+        &self,
+        tracked_parent_channel_id: ChannelId,
+    ) -> Vec<CanonicalThreadBinding> {
+        let bindings = self
+            .cache
+            .iter()
+            .filter(|entry| entry.key().tracked_parent_channel_id() == tracked_parent_channel_id)
+            .filter_map(|entry| entry.value().binding())
+            .collect();
+        self.cache.retain(|tracked_parent, _| {
+            tracked_parent.tracked_parent_channel_id() != tracked_parent_channel_id
+        });
+        self.refresh_locks.retain(|tracked_parent, _| {
+            tracked_parent.tracked_parent_channel_id() != tracked_parent_channel_id
+        });
+        bindings
     }
 
     pub(crate) fn replace_with_damaged_blocked(
@@ -594,28 +605,6 @@ where
     candidates
 }
 
-pub(crate) fn first_verified_canonical_thread_id_for_panel<I>(candidates: I) -> Option<ChannelId>
-where
-    I: IntoIterator<Item = (ChannelId, bool)>,
-{
-    candidates
-        .into_iter()
-        .find_map(|(thread_id, verified)| verified.then_some(thread_id))
-}
-
-#[cfg(test)]
-pub(crate) fn resolved_void_thread_channel_id(
-    interaction_channel_id: ChannelId,
-    parent_channel_id: ChannelId,
-    discovered_thread_id: Option<ChannelId>,
-) -> ChannelId {
-    if interaction_channel_id != parent_channel_id {
-        interaction_channel_id
-    } else {
-        discovered_thread_id.unwrap_or(parent_channel_id)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -640,11 +629,7 @@ mod tests {
     }
 
     fn canonical_binding() -> CanonicalThreadBinding {
-        CanonicalThreadBinding::new(
-            tracked_parent_key(),
-            ChannelId::new(20),
-            walicord_ledger::test_fixtures::ledger_id(77),
-        )
+        CanonicalThreadBinding::new(tracked_parent_key(), ChannelId::new(20))
     }
 
     fn ledger_recovery_reference(label: &str) -> LocatorRecoveryReference {
@@ -889,7 +874,6 @@ mod tests {
             vec![LocatorDiscoveryCandidate::Verified(
                 VerifiedCanonicalThreadCandidate::new(
                     ChannelId::new(42),
-                    walicord_ledger::test_fixtures::ledger_id(77),
                     ledger_recovery_reference("ready"),
                     false,
                 ),
@@ -901,22 +885,17 @@ mod tests {
             CanonicalThreadLocatorState::ReadyBound(CanonicalThreadBinding::new(
                 tracked_parent,
                 ChannelId::new(42),
-                walicord_ledger::test_fixtures::ledger_id(77),
             ))
         );
     }
 
     #[test]
-    fn canonical_thread_binding_preserves_verified_ledger_id() {
-        let binding = CanonicalThreadBinding::new(
-            tracked_parent_key(),
-            ChannelId::new(42),
-            walicord_ledger::test_fixtures::ledger_id(77),
-        );
+    fn canonical_thread_binding_derives_ledger_id_from_thread_id() {
+        let binding = CanonicalThreadBinding::new(tracked_parent_key(), ChannelId::new(42));
 
         assert_eq!(
             binding.ledger_id(),
-            walicord_ledger::test_fixtures::ledger_id(77)
+            walicord_ledger::test_fixtures::ledger_id(42)
         );
     }
 
@@ -959,7 +938,6 @@ mod tests {
             vec![
                 LocatorDiscoveryCandidate::Verified(VerifiedCanonicalThreadCandidate::new(
                     ChannelId::new(20),
-                    walicord_ledger::test_fixtures::ledger_id(200),
                     ledger_recovery_reference("verified"),
                     false,
                 )),
@@ -987,19 +965,16 @@ mod tests {
             vec![
                 LocatorDiscoveryCandidate::Verified(VerifiedCanonicalThreadCandidate::new(
                     ChannelId::new(30),
-                    walicord_ledger::test_fixtures::ledger_id(300),
                     ledger_recovery_reference("later"),
                     false,
                 )),
                 LocatorDiscoveryCandidate::Verified(VerifiedCanonicalThreadCandidate::new(
                     ChannelId::new(20),
-                    walicord_ledger::test_fixtures::ledger_id(200),
                     ledger_recovery_reference("keep"),
                     true,
                 )),
                 LocatorDiscoveryCandidate::Verified(VerifiedCanonicalThreadCandidate::new(
                     ChannelId::new(10),
-                    walicord_ledger::test_fixtures::ledger_id(100),
                     ledger_recovery_reference("earliest"),
                     false,
                 )),
@@ -1028,7 +1003,6 @@ mod tests {
             vec![
                 LocatorDiscoveryCandidate::Verified(VerifiedCanonicalThreadCandidate::new(
                     ChannelId::new(20),
-                    walicord_ledger::test_fixtures::ledger_id(77),
                     ledger_recovery_reference("ready"),
                     true,
                 )),
@@ -1120,6 +1094,26 @@ mod tests {
             .expect("stale lookup should trigger revalidation");
 
         assert_eq!(backend.calls(), vec![(tracked_parent, None)]);
+    }
+
+    #[test]
+    fn clear_tracked_parent_channel_removes_only_matching_cached_bindings() {
+        let locator = CanonicalThreadLocator::new(());
+        let matching = canonical_binding();
+        let retained_parent =
+            TrackedParentKey::from_guarded_parent(GuildId::new(1), ChannelId::new(11));
+        let retained = CanonicalThreadBinding::new(retained_parent, ChannelId::new(21));
+        locator.replace_with_ready_binding(matching);
+        locator.replace_with_ready_binding(retained);
+
+        let cleared = locator.clear_tracked_parent_channel(ChannelId::new(10));
+
+        assert_eq!(cleared, vec![matching]);
+        assert_eq!(locator.cached(tracked_parent_key()), None);
+        assert_eq!(
+            locator.cached(retained_parent),
+            Some(CanonicalThreadLocatorState::ReadyBound(retained))
+        );
     }
 
     #[tokio::test]
@@ -1217,7 +1211,6 @@ mod tests {
             Ok(Some(LocatorDiscoveryCandidate::Verified(
                 VerifiedCanonicalThreadCandidate::new(
                     ChannelId::new(20),
-                    walicord_ledger::test_fixtures::ledger_id(77),
                     ledger_recovery_reference("ready"),
                     true,
                 ),
@@ -1228,7 +1221,6 @@ mod tests {
             Ok(Some(LocatorDiscoveryCandidate::Verified(
                 VerifiedCanonicalThreadCandidate::new(
                     ChannelId::new(30),
-                    walicord_ledger::test_fixtures::ledger_id(88),
                     ledger_recovery_reference("other"),
                     false,
                 ),

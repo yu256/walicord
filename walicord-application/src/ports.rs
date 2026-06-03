@@ -1,8 +1,5 @@
 use crate::{
-    Script,
-    error::ProgramParseError,
-    ledger::{LedgerEffectiveDate, LedgerId},
-    settle_up::PreviewInstanceId,
+    Script, error::ProgramParseError, ledger::LedgerEffectiveDate, settle_up::PreviewInstanceId,
 };
 use std::{collections::HashMap, num::NonZeroU64, time::SystemTime};
 use walicord_domain::{
@@ -100,10 +97,6 @@ pub trait NonceProvider: Send + Sync {
     fn next_interaction_nonce(&self) -> InteractionNonce;
 
     fn next_preview_instance_id(&self) -> PreviewInstanceId;
-}
-
-pub trait LedgerIdProvider: Send + Sync {
-    fn next_ledger_id(&self) -> LedgerId;
 }
 
 pub trait MemberDirectory: Send + Sync {
