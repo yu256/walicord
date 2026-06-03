@@ -9,7 +9,7 @@ use walicord_presentation::discord_ledger::{
     RenderedSurface, SurfaceActionRow, SurfaceButton, SurfaceInteractiveButtonStyle,
 };
 
-fn suppressed_allowed_mentions() -> CreateAllowedMentions {
+pub(crate) fn suppressed_allowed_mentions() -> CreateAllowedMentions {
     CreateAllowedMentions::new()
         .all_users(false)
         .all_roles(false)

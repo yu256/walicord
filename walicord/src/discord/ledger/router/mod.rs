@@ -32,16 +32,16 @@ use walicord_domain::model::{MemberId, RoleId};
 use walicord_i18n as i18n;
 use walicord_presentation::discord_ledger::{
     DiscordLedgerPresenter, ExpenseConfirmationButtonIds, ExpenseSelectionStepButtonIds,
-    LedgerPageInputs, ReadViewBuildError, ReadViewPageModel, ReadViewRoute, RenderBudgetError,
-    RenderedCanonicalMessage, SurfaceActionRow, SurfaceMemberLabels, SurfaceSelectMenu,
-    VoidRetargetReason, build_expense_confirmation_surface, build_expense_selection_step_surface,
-    build_ledger_empty_page_model, build_ledger_page_model, paginate_read_view_model,
+    ReadViewBuildError, ReadViewPageModel, ReadViewRoute, RenderBudgetError,
+    RenderedCanonicalMessage, SurfaceActionRow, SurfaceSelectMenu, VoidRetargetReason,
+    build_expense_confirmation_surface, build_expense_selection_step_surface,
 };
 
 use crate::channel::ChannelManager;
 
 mod canonical_message;
 mod expense_picker;
+mod ledger;
 mod review;
 #[cfg(test)]
 use review::review_route_guidance_lines_with_replacement_notice;
@@ -118,8 +118,8 @@ use walicord_application::ledger::{
         build_canonical_envelope, compose_expense_entry,
     },
     preview_store::{PreviewStore, PreviewStoreError, PreviewStoreKey},
-    projection::{NextLedgerEntryIdError, project_verified_entries},
-    read_view_session::{ReadViewSession, ReadViewSessionKey, ReadViewSessionStore},
+    projection::NextLedgerEntryIdError,
+    read_view_session::{ReadViewSessionKey, ReadViewSessionStore},
     settle_flow::{PreviewAttemptError, SettleAttemptError},
     void_flow::{
         VoidCandidateEnumerationError, VoidComposeError, VoidConfirmTransitionError,
@@ -546,7 +546,7 @@ impl From<ReadViewBuildError> for LedgerRouteError {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ReadViewNavigation {
+pub(super) enum ReadViewNavigation {
     Previous,
     Next,
 }
@@ -1402,112 +1402,6 @@ impl LedgerRouter {
         Ok(InteractionDispatch::Handled)
     }
 
-    async fn dispatch_ledger_command(
-        &self,
-        ctx: &Context,
-        command: &CommandInteraction,
-    ) -> Result<InteractionDispatch, LedgerRouteError> {
-        let scope = match self
-            .guard_scope(ctx, command.guild_id, command.channel_id, command)
-            .await
-        {
-            Ok(scope) => scope,
-            Err(LedgerRouteError::NotInTrackedChannel) => {
-                return Err(LedgerRouteError::NotInTrackedChannel);
-            }
-            Err(error) => return Err(error),
-        };
-        self.dispatch_ledger(
-            ctx,
-            scope,
-            DeferredEphemeralInteraction::Command(command),
-            ReadViewRoute::LedgerCommand,
-        )
-        .await
-    }
-
-    async fn dispatch_ledger(
-        &self,
-        ctx: &Context,
-        scope: super::route_guard::LedgerInteractionScope,
-        interaction: DeferredEphemeralInteraction<'_>,
-        route: ReadViewRoute,
-    ) -> Result<InteractionDispatch, LedgerRouteError> {
-        interaction
-            .defer(ctx, DiscordCallSite::LedgerDeferEphemeral)
-            .await?;
-        let Some(binding) = self.resolve_readable_ledger(ctx, scope).await? else {
-            let rendered = DiscordLedgerPresenter::render_read_view_page(
-                &build_ledger_empty_page_model(route, false),
-            )?;
-            let (body, components) = rendered_surface_to_message(rendered);
-            return interaction
-                .edit(ctx, body, components, DiscordCallSite::LedgerEditResponse)
-                .await;
-        };
-        let uncertain_write = self
-            .deps
-            .uncertain_writes
-            .current(binding.ledger_id())
-            .is_some();
-        let load = self
-            .load_verified_thread(ctx, binding, CanonicalLoadRoute::Read)
-            .await?;
-
-        let roster = self
-            .deps
-            .roster_fetcher
-            .fetch(ctx, scope.guild_id(), scope.channel_id())
-            .await?;
-        let labels = SurfaceMemberLabels::from_member_names(
-            roster
-                .display_names
-                .iter()
-                .map(|(member_id, name)| (*member_id, Some(name.as_str()))),
-        );
-
-        let views = project_verified_entries(&load).map_err(LedgerRouteError::from)?;
-
-        let pages = if views.is_empty() {
-            vec![build_ledger_empty_page_model(route, uncertain_write)]
-        } else {
-            let model = build_ledger_page_model(LedgerPageInputs {
-                route,
-                views: &views,
-                state: load.snapshot().projected().state(),
-                labels: &labels,
-                ledger_id: binding.ledger_id(),
-                uncertain_write,
-            })?;
-            paginate_read_view_model(model)
-        };
-
-        let nonce = self.deps.nonce_provider.next_interaction_nonce();
-        let actor_id = MemberId(interaction.user_id().get());
-        let session = ReadViewSession::new(
-            ReadViewSessionKey {
-                ledger_id: binding.ledger_id(),
-                actor_id,
-            },
-            nonce,
-            pages.clone(),
-            self.deps.clock.now(),
-        );
-        let total_pages = pages.len();
-        self.deps.read_view_sessions.replace(session);
-
-        let rendered = DiscordLedgerPresenter::render_read_view_page(&pages[0])
-            .map_err(LedgerRouteError::from)?;
-        let (body, mut components) = rendered_surface_to_message(rendered);
-        if total_pages > 1 {
-            components.push(read_view_navigation_row(nonce, 0, total_pages));
-        }
-
-        interaction
-            .edit(ctx, body, components, DiscordCallSite::LedgerEditResponse)
-            .await
-    }
-
     /// Component (button / select-menu) dispatch for every ledger-owned custom id.
     pub async fn handle_component(
         &self,
@@ -1735,70 +1629,6 @@ impl LedgerRouter {
             return self.dispatch_void_cancel(ctx, component, nonce).await;
         }
         Ok(InteractionDispatch::Ignored)
-    }
-
-    async fn dispatch_read_view_navigate(
-        &self,
-        ctx: &Context,
-        component: &ComponentInteraction,
-        nonce: walicord_application::InteractionNonce,
-        direction: ReadViewNavigation,
-    ) -> Result<InteractionDispatch, LedgerRouteError> {
-        let scope = self
-            .guard_scope(ctx, component.guild_id, component.channel_id, component)
-            .await?;
-        let binding = self.resolve_existing_ledger(ctx, scope).await?;
-        let actor_id = MemberId(component.user.id.get());
-
-        let key = ReadViewSessionKey {
-            ledger_id: binding.ledger_id(),
-            actor_id,
-        };
-        let now = self.deps.clock.now();
-        let session_opt = self
-            .deps
-            .read_view_sessions
-            .access(key, nonce, now)
-            .unwrap_or_default();
-        let Some(mut session) = session_opt else {
-            return self
-                .reply_component_ephemeral(
-                    ctx,
-                    component,
-                    i18n::stale_interaction_message(),
-                    DiscordCallSite::ReadViewNavUpdateResponse,
-                )
-                .await;
-        };
-
-        let _moved = match direction {
-            ReadViewNavigation::Previous => session.retreat(now),
-            ReadViewNavigation::Next => session.advance(now),
-        };
-        let index = session.current_index();
-        let total_pages = session.page_count();
-        let rendered = DiscordLedgerPresenter::render_read_view_page(session.current_page())
-            .map_err(LedgerRouteError::from)?;
-        let (body, mut components) = rendered_surface_to_message(rendered);
-        if total_pages > 1 {
-            components.push(read_view_navigation_row(nonce, index, total_pages));
-        }
-        self.deps.read_view_sessions.replace(session);
-
-        component
-            .create_response(
-                &ctx.http,
-                CreateInteractionResponse::UpdateMessage(
-                    safe_interaction_response_message()
-                        .content(body)
-                        .components(components),
-                ),
-            )
-            .await
-            .map_err(discord_call_error(
-                DiscordCallSite::ReadViewNavUpdateResponse,
-            ))?;
-        Ok(InteractionDispatch::Handled)
     }
 
     async fn dispatch_abandoned_uncertain_write_acknowledge(
