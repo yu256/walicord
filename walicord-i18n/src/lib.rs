@@ -1794,22 +1794,6 @@ pub fn panel_title() -> &'static str {
     }
 }
 
-pub fn panel_posted_message() -> &'static str {
-    if cfg!(feature = "ja") {
-        "操作パネルを投稿しました。"
-    } else {
-        "Posted the control panel."
-    }
-}
-
-pub fn panel_post_in_progress_message() -> &'static str {
-    if cfg!(feature = "ja") {
-        "パネルを投稿中です。少し待ってからもう一度試してください。"
-    } else {
-        "A panel is already being posted. Please wait a moment and try again."
-    }
-}
-
 pub fn panel_post_retry_message() -> &'static str {
     if cfg!(feature = "ja") {
         "パネルを投稿できませんでした。少し待ってからもう一度試してください。続く場合は管理者に連絡してください。"

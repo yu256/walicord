@@ -251,4 +251,17 @@ mod tests {
         assert!(manager.mark_fetch_succeeded(channel_id));
         assert!(!manager.has_fetch_failed(channel_id));
     }
+
+    #[test]
+    fn clone_shares_underlying_map() {
+        let manager = ChannelManager::new();
+        let cloned = manager.clone();
+        let channel_id = ChannelId::new(1);
+
+        manager.track(channel_id);
+        assert!(cloned.is_tracked(channel_id));
+
+        manager.untrack(channel_id);
+        assert!(!cloned.is_tracked(channel_id));
+    }
 }
