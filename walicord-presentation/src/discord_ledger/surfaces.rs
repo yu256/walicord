@@ -845,19 +845,21 @@ impl DiscordLedgerPresenter {
                 ReadViewKind::Review => {
                     let balances_section = render_review_balances_section(model);
                     let transfers_section = render_review_transfers_section(model);
-                    let route_guidance = if model.route_guidance_lines.is_empty() {
+                    let route_guidance: Vec<&str> = if model.route_guidance_lines.is_empty() {
                         match model.route {
-                            ReadViewRoute::ReviewThread => {
-                                vec![i18n::route_task_guidance().to_owned()]
-                            }
+                            ReadViewRoute::ReviewThread => vec![i18n::route_task_guidance()],
                             ReadViewRoute::ReviewParent => vec![
-                                i18n::route_task_guidance().to_owned(),
-                                i18n::parent_preview_entry_guidance().to_owned(),
+                                i18n::route_task_guidance(),
+                                i18n::parent_preview_entry_guidance(),
                             ],
-                            _ => vec![i18n::route_task_guidance().to_owned()],
+                            _ => vec![i18n::route_task_guidance()],
                         }
                     } else {
-                        model.route_guidance_lines.clone()
+                        model
+                            .route_guidance_lines
+                            .iter()
+                            .map(String::as_str)
+                            .collect()
                     };
                     let review_instruction = if model.uncertain_write {
                         i18n::review_preview_blocked_instruction()
@@ -2148,7 +2150,7 @@ mod tests {
 
         assert_eq!(
             actual.body,
-            "清算確認\n\nℹ️ この台帳は現在書き込み確認中です。記録・取り消し・清算は一時的に制限されています。\n\n残高\n確認済み履歴と残高補正を含む現在差額\n- Alice: 受け取り 300円\n- Bob: 支払い 300円\n\n送金予定\n- Bob -> Alice 300円\n\n参加者 = これまで記録に出た人、残高 = 確認済み履歴と残高補正を含む現在差額です。\n\nこの台帳は書き込み状態を確認中です。台帳スレッドを確認し、復旧後に /settle を実行してください。\n\n経費を記録・台帳を見る・取り消す はこのチャンネルで行います。清算プランの確認は親チャンネルの 清算確認 または台帳スレッドの /review で作成し、確定は台帳スレッドの /settle で行います。親チャンネルの /review は従来機能です。"
+            "清算確認\n\nℹ️ この台帳は現在書き込み確認中です。記録・取り消し・清算は一時的に制限されています。\n\n残高\n確認済み履歴と残高補正を含む現在差額\n- Alice: 受け取り 300円\n- Bob: 支払い 300円\n\n送金予定\n- Bob -> Alice 300円\n\n-# 参加者 = これまで記録に出た人、残高 = 確認済み履歴と残高補正を含む現在差額です。\n\nこの台帳は書き込み状態を確認中です。台帳スレッドを確認し、復旧後に /settle を実行してください。\n\n-# 経費を記録・台帳を見る・取り消す はこのチャンネルで行います。清算プランの確認は親チャンネルの 清算確認 または台帳スレッドの /review で作成し、確定は台帳スレッドの /settle で行います。親チャンネルの /review は従来機能です。"
         );
         let SurfaceActionRow::Buttons(buttons) = &actual.action_rows[0] else {
             panic!("expected recovery button row");

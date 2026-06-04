@@ -1552,17 +1552,17 @@ pub fn void_window_handoff_line(reference_hint: impl std::fmt::Display) -> impl 
 
 pub fn route_task_guidance() -> &'static str {
     if cfg!(feature = "ja") {
-        "経費を記録・台帳を見る・取り消す はこのチャンネルで行います。清算プランの確認は親チャンネルの 清算確認 または台帳スレッドの /review で作成し、確定は台帳スレッドの /settle で行います。親チャンネルの /review は従来機能です。"
+        "-# 経費を記録・台帳を見る・取り消す はこのチャンネルで行います。清算プランの確認は親チャンネルの 清算確認 または台帳スレッドの /review で作成し、確定は台帳スレッドの /settle で行います。親チャンネルの /review は従来機能です。"
     } else {
-        "Record expenses, view the ledger, and void entries in this channel. Create settlement previews from the parent channel button or the ledger thread's /review, and confirm them with /settle in the ledger thread. The parent-channel /review remains the legacy behavior."
+        "-# Record expenses, view the ledger, and void entries in this channel. Create settlement previews from the parent channel button or the ledger thread's /review, and confirm them with /settle in the ledger thread. The parent-channel /review remains the legacy behavior."
     }
 }
 
 pub fn parent_preview_entry_guidance() -> &'static str {
     if cfg!(feature = "ja") {
-        "清算確認 ボタンは親チャンネルでプレビューを作成し、その後 台帳スレッドを開く ボタンで /settle に進む入口です。"
+        "-# 清算確認 ボタンは親チャンネルでプレビューを作成し、その後 台帳スレッドを開く ボタンで /settle に進む入口です。"
     } else {
-        "The settlement button creates the preview in the parent channel, then hands off to /settle from the ledger-thread button."
+        "-# The settlement button creates the preview in the parent channel, then hands off to /settle from the ledger-thread button."
     }
 }
 
@@ -1656,9 +1656,9 @@ pub fn settlement_preview_not_delivered_message() -> &'static str {
 
 pub fn review_explainer() -> &'static str {
     if cfg!(feature = "ja") {
-        "参加者 = これまで記録に出た人、残高 = 確認済み履歴と残高補正を含む現在差額です。"
+        "-# 参加者 = これまで記録に出た人、残高 = 確認済み履歴と残高補正を含む現在差額です。"
     } else {
-        "Participants are everyone who has appeared in recorded history, and balances include confirmed history plus balance adjustments."
+        "-# Participants are everyone who has appeared in recorded history, and balances include confirmed history plus balance adjustments."
     }
 }
 
@@ -1740,17 +1740,17 @@ pub fn abandoned_uncertain_write_acknowledged_message() -> &'static str {
 
 pub fn panel_deletion_warning() -> &'static str {
     if cfg!(feature = "ja") {
-        "注意: 台帳スレッドや台帳メッセージを削除すると復旧できません。削除してしまった場合は管理者に連絡し、新しい台帳の作成を相談してください。"
+        "-# 注意: 台帳スレッドや台帳メッセージを削除すると復旧できません。削除してしまった場合は管理者に連絡し、新しい台帳の作成を相談してください。"
     } else {
-        "Warning: deleting the ledger thread or ledger messages cannot be recovered. Contact an administrator if it happens."
+        "-# Warning: deleting the ledger thread or ledger messages cannot be recovered. Contact an administrator if it happens."
     }
 }
 
 pub fn panel_reply_notice() -> &'static str {
     if cfg!(feature = "ja") {
-        "補足: 台帳スレッドで普通に返信しても台帳の記録は増えません。"
+        "-# 補足: 台帳スレッドで普通に返信しても台帳の記録は増えません。"
     } else {
-        "Note: ordinary replies in the ledger thread do not add ledger records."
+        "-# Note: ordinary replies in the ledger thread do not add ledger records."
     }
 }
 
