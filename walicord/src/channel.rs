@@ -1,5 +1,6 @@
 use dashmap::DashMap;
 use serenity::model::id::ChannelId;
+use std::sync::Arc;
 
 const CHANNEL_TOPIC_FLAG: &str = "#walicord";
 
@@ -41,7 +42,7 @@ pub enum FetchStatus {
 
 #[derive(Clone, Default)]
 pub struct ChannelManager {
-    channels: DashMap<ChannelId, FetchStatus>,
+    channels: Arc<DashMap<ChannelId, FetchStatus>>,
 }
 
 impl ChannelManager {
