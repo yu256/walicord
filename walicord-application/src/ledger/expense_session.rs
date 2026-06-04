@@ -814,9 +814,56 @@ pub struct ExpenseSessionStore {
     state: Mutex<ExpenseSessionStoreState>,
 }
 
+/// Secondary-index key for `active_owner_by_nonce` lookups. Carries the
+/// `(draft_scope_id, nonce)` pair as named fields so the lookup intent stays
+/// explicit at every callsite instead of leaking a bare tuple.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct ExpenseSessionNonceKey {
+    draft_scope_id: ExpenseDraftScopeId,
+    nonce: InteractionNonce,
+}
+
+impl ExpenseSessionNonceKey {
+    fn for_session(session: &ExpenseSession) -> Self {
+        Self {
+            draft_scope_id: session.key.draft_scope_id(),
+            nonce: session.nonce,
+        }
+    }
+}
+
 struct ExpenseSessionStoreState {
     by_key: HashMap<ExpenseSessionKey, ExpenseSessionSlot>,
+    /// Secondary index `(draft_scope_id, nonce) -> actor_id` so
+    /// `active_owner_by_nonce` is O(1) instead of O(N). Must stay in sync with
+    /// `by_key` on every lifecycle transition (`replace` / `clear` /
+    /// `clear_draft_scope` / `claim` removal / `resolve_claim`).
+    by_nonce: HashMap<ExpenseSessionNonceKey, MemberId>,
     next_claim_token: u64,
+}
+
+impl ExpenseSessionStoreState {
+    fn insert_session(&mut self, slot: ExpenseSessionSlot) -> Option<ExpenseSession> {
+        let nonce_key = ExpenseSessionNonceKey::for_session(slot.session());
+        let session_key = slot.session().key();
+        let actor_id = session_key.actor_id();
+        let displaced = self.by_key.insert(session_key, slot);
+        if let Some(prior) = displaced.as_ref() {
+            let prior_nonce_key = ExpenseSessionNonceKey::for_session(prior.session());
+            if prior_nonce_key != nonce_key {
+                self.by_nonce.remove(&prior_nonce_key);
+            }
+        }
+        self.by_nonce.insert(nonce_key, actor_id);
+        displaced.map(ExpenseSessionSlot::into_session)
+    }
+
+    fn remove_session(&mut self, key: ExpenseSessionKey) -> Option<ExpenseSession> {
+        let removed = self.by_key.remove(&key)?.into_session();
+        self.by_nonce
+            .remove(&ExpenseSessionNonceKey::for_session(&removed));
+        Some(removed)
+    }
 }
 
 enum ExpenseSessionSlot {
@@ -874,6 +921,7 @@ impl ExpenseSessionStore {
         Self {
             state: Mutex::new(ExpenseSessionStoreState {
                 by_key: HashMap::new(),
+                by_nonce: HashMap::new(),
                 next_claim_token: 1,
             }),
         }
@@ -883,26 +931,33 @@ impl ExpenseSessionStore {
         self.state
             .lock()
             .expect("ExpenseSessionStore mutex poisoned")
-            .by_key
-            .insert(session.key(), ExpenseSessionSlot::Available(session))
-            .map(ExpenseSessionSlot::into_session)
+            .insert_session(ExpenseSessionSlot::Available(session))
     }
 
     pub fn clear_draft_scope(&self, draft_scope_id: ExpenseDraftScopeId) {
-        self.state
+        let mut guard = self
+            .state
             .lock()
-            .expect("ExpenseSessionStore mutex poisoned")
+            .expect("ExpenseSessionStore mutex poisoned");
+        let drained_nonce_keys: Vec<ExpenseSessionNonceKey> = guard
+            .by_key
+            .iter()
+            .filter(|(_, slot)| slot.session().key().draft_scope_id() == draft_scope_id)
+            .map(|(_, slot)| ExpenseSessionNonceKey::for_session(slot.session()))
+            .collect();
+        guard
             .by_key
             .retain(|_, slot| slot.session().key().draft_scope_id() != draft_scope_id);
+        for nonce_key in drained_nonce_keys {
+            guard.by_nonce.remove(&nonce_key);
+        }
     }
 
     pub fn clear(&self, key: ExpenseSessionKey) -> Option<ExpenseSession> {
         self.state
             .lock()
             .expect("ExpenseSessionStore mutex poisoned")
-            .by_key
-            .remove(&key)
-            .map(ExpenseSessionSlot::into_session)
+            .remove_session(key)
     }
 
     pub fn claim(
@@ -924,7 +979,7 @@ impl ExpenseSessionStore {
         };
         let elapsed = now.duration_since(session.last_touched).unwrap_or_default();
         if elapsed >= EXPENSE_SESSION_TTL {
-            guard.by_key.remove(&key);
+            guard.remove_session(key);
             return Err(SessionAccessError::Expired);
         }
         if session.nonce != observed_nonce {
@@ -941,13 +996,10 @@ impl ExpenseSessionStore {
             .next_claim_token
             .checked_add(1)
             .expect("expense session claim token space exhausted");
-        guard.by_key.insert(
-            key,
-            ExpenseSessionSlot::Claimed {
-                token,
-                session: session.clone(),
-            },
-        );
+        guard.insert_session(ExpenseSessionSlot::Claimed {
+            token,
+            session: session.clone(),
+        });
         Ok(Some(ClaimedExpenseSession { token, session }))
     }
 
@@ -957,18 +1009,23 @@ impl ExpenseSessionStore {
         observed_nonce: InteractionNonce,
         now: SystemTime,
     ) -> Option<MemberId> {
-        self.state
+        let guard = self
+            .state
             .lock()
-            .expect("ExpenseSessionStore mutex poisoned")
-            .by_key
-            .iter()
-            .filter(|(key, _)| key.draft_scope_id() == draft_scope_id)
-            .find_map(|(key, slot)| {
-                let session = slot.session();
-                let elapsed = now.duration_since(session.last_touched).unwrap_or_default();
-                (elapsed < EXPENSE_SESSION_TTL && session.nonce == observed_nonce)
-                    .then(|| key.actor_id())
-            })
+            .expect("ExpenseSessionStore mutex poisoned");
+        let actor_id = *guard.by_nonce.get(&ExpenseSessionNonceKey {
+            draft_scope_id,
+            nonce: observed_nonce,
+        })?;
+        // O(1) TTL verification through by_key — by_nonce can host an entry
+        // that is still pending lazy removal until the next lifecycle event.
+        let session_key = ExpenseSessionKey::new(draft_scope_id, actor_id);
+        guard.by_key.get(&session_key).and_then(|slot| {
+            let session = slot.session();
+            (now.duration_since(session.last_touched).unwrap_or_default() < EXPENSE_SESSION_TTL
+                && session.nonce == observed_nonce)
+                .then_some(actor_id)
+        })
     }
 
     pub fn has_active_session(&self, key: ExpenseSessionKey, now: SystemTime) -> bool {
@@ -1014,12 +1071,10 @@ impl ExpenseSessionStore {
                     token.key,
                     "expense session claim replacement key changed"
                 );
-                guard
-                    .by_key
-                    .insert(token.key, ExpenseSessionSlot::Available(session));
+                guard.insert_session(ExpenseSessionSlot::Available(session));
             }
             None => {
-                guard.by_key.remove(&token.key);
+                guard.remove_session(token.key);
             }
         }
         true
@@ -1027,7 +1082,55 @@ impl ExpenseSessionStore {
 }
 
 pub struct VoidSessionStore {
-    by_key: Mutex<HashMap<VoidSessionKey, VoidSession>>,
+    state: Mutex<VoidSessionStoreState>,
+}
+
+/// Secondary-index key for `active_owner_by_nonce` lookups. Named fields keep
+/// the lookup intent explicit instead of a bare tuple key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct VoidSessionNonceKey {
+    ledger_id: LedgerId,
+    nonce: InteractionNonce,
+}
+
+impl VoidSessionNonceKey {
+    fn for_session(session: &VoidSession) -> Self {
+        Self {
+            ledger_id: session.key.ledger_id(),
+            nonce: session.nonce,
+        }
+    }
+}
+
+struct VoidSessionStoreState {
+    by_key: HashMap<VoidSessionKey, VoidSession>,
+    /// Secondary index `(ledger_id, nonce) -> actor_id`; kept in sync with
+    /// `by_key` on every lifecycle transition so `active_owner_by_nonce` is O(1).
+    by_nonce: HashMap<VoidSessionNonceKey, MemberId>,
+}
+
+impl VoidSessionStoreState {
+    fn insert_session(&mut self, session: VoidSession) -> Option<VoidSession> {
+        let nonce_key = VoidSessionNonceKey::for_session(&session);
+        let session_key = session.key();
+        let actor_id = session_key.actor_id();
+        let displaced = self.by_key.insert(session_key, session);
+        if let Some(prior) = displaced.as_ref() {
+            let prior_nonce_key = VoidSessionNonceKey::for_session(prior);
+            if prior_nonce_key != nonce_key {
+                self.by_nonce.remove(&prior_nonce_key);
+            }
+        }
+        self.by_nonce.insert(nonce_key, actor_id);
+        displaced
+    }
+
+    fn remove_session(&mut self, key: VoidSessionKey) -> Option<VoidSession> {
+        let removed = self.by_key.remove(&key)?;
+        self.by_nonce
+            .remove(&VoidSessionNonceKey::for_session(&removed));
+        Some(removed)
+    }
 }
 
 impl Default for VoidSessionStore {
@@ -1039,29 +1142,39 @@ impl Default for VoidSessionStore {
 impl VoidSessionStore {
     pub fn new() -> Self {
         Self {
-            by_key: Mutex::new(HashMap::new()),
+            state: Mutex::new(VoidSessionStoreState {
+                by_key: HashMap::new(),
+                by_nonce: HashMap::new(),
+            }),
         }
     }
 
     pub fn replace(&self, session: VoidSession) -> Option<VoidSession> {
-        self.by_key
+        self.state
             .lock()
             .expect("VoidSessionStore mutex poisoned")
-            .insert(session.key(), session)
+            .insert_session(session)
     }
 
     pub fn clear(&self, key: VoidSessionKey) -> Option<VoidSession> {
-        self.by_key
+        self.state
             .lock()
             .expect("VoidSessionStore mutex poisoned")
-            .remove(&key)
+            .remove_session(key)
     }
 
     pub fn clear_ledger(&self, ledger_id: LedgerId) {
-        self.by_key
-            .lock()
-            .expect("VoidSessionStore mutex poisoned")
-            .retain(|key, _| key.ledger_id() != ledger_id);
+        let mut guard = self.state.lock().expect("VoidSessionStore mutex poisoned");
+        let drained_nonce_keys: Vec<VoidSessionNonceKey> = guard
+            .by_key
+            .iter()
+            .filter(|(key, _)| key.ledger_id() == ledger_id)
+            .map(|(_, session)| VoidSessionNonceKey::for_session(session))
+            .collect();
+        guard.by_key.retain(|key, _| key.ledger_id() != ledger_id);
+        for nonce_key in drained_nonce_keys {
+            guard.by_nonce.remove(&nonce_key);
+        }
     }
 
     pub fn access(
@@ -1070,13 +1183,13 @@ impl VoidSessionStore {
         observed_nonce: InteractionNonce,
         now: SystemTime,
     ) -> Result<Option<VoidSession>, SessionAccessError> {
-        let mut guard = self.by_key.lock().expect("VoidSessionStore mutex poisoned");
-        let Some(session) = guard.get(&key).cloned() else {
+        let mut guard = self.state.lock().expect("VoidSessionStore mutex poisoned");
+        let Some(session) = guard.by_key.get(&key).cloned() else {
             return Ok(None);
         };
         let elapsed = now.duration_since(session.last_touched).unwrap_or_default();
         if elapsed >= VOID_SESSION_TTL {
-            guard.remove(&key);
+            guard.remove_session(key);
             return Err(SessionAccessError::Expired);
         }
         if session.nonce != observed_nonce {
@@ -1094,22 +1207,24 @@ impl VoidSessionStore {
         observed_nonce: InteractionNonce,
         now: SystemTime,
     ) -> Option<MemberId> {
-        self.by_key
-            .lock()
-            .expect("VoidSessionStore mutex poisoned")
-            .iter()
-            .filter(|(key, _)| key.ledger_id() == ledger_id)
-            .find_map(|(key, session)| {
-                let elapsed = now.duration_since(session.last_touched).unwrap_or_default();
-                (elapsed < VOID_SESSION_TTL && session.nonce == observed_nonce)
-                    .then(|| key.actor_id())
-            })
+        let guard = self.state.lock().expect("VoidSessionStore mutex poisoned");
+        let actor_id = *guard.by_nonce.get(&VoidSessionNonceKey {
+            ledger_id,
+            nonce: observed_nonce,
+        })?;
+        let session_key = VoidSessionKey::new(ledger_id, actor_id);
+        guard.by_key.get(&session_key).and_then(|session| {
+            (now.duration_since(session.last_touched).unwrap_or_default() < VOID_SESSION_TTL
+                && session.nonce == observed_nonce)
+                .then_some(actor_id)
+        })
     }
 
     pub fn has_active_session(&self, key: VoidSessionKey, now: SystemTime) -> bool {
-        self.by_key
+        self.state
             .lock()
             .expect("VoidSessionStore mutex poisoned")
+            .by_key
             .get(&key)
             .is_some_and(|session| {
                 now.duration_since(session.last_touched).unwrap_or_default() < VOID_SESSION_TTL
@@ -1538,6 +1653,103 @@ mod tests {
 
         assert_eq!(actual, Some(key.actor_id()));
         assert_eq!(store.access(key, nonce(1), UNIX_EPOCH), Ok(Some(session)));
+    }
+
+    #[test]
+    fn expense_session_replace_evicts_prior_nonce_from_secondary_index() {
+        let store = ExpenseSessionStore::new();
+        let first = fresh_expense_session(UNIX_EPOCH, 1);
+        let draft_scope_id = first.key().draft_scope_id();
+        store.replace(first);
+        let replacement = fresh_expense_session(UNIX_EPOCH, 9);
+        store.replace(replacement);
+
+        assert_eq!(
+            store.active_owner_by_nonce(draft_scope_id, nonce(1), UNIX_EPOCH),
+            None,
+            "stale nonce-index entry must not survive a replace at the same session key"
+        );
+        assert!(
+            store
+                .active_owner_by_nonce(draft_scope_id, nonce(9), UNIX_EPOCH)
+                .is_some(),
+            "current nonce-index entry should resolve to the actor"
+        );
+    }
+
+    #[test]
+    fn expense_session_clear_removes_nonce_lookup_for_that_key() {
+        let store = ExpenseSessionStore::new();
+        let session = fresh_expense_session(UNIX_EPOCH, 1);
+        let key = session.key();
+        store.replace(session);
+
+        store.clear(key);
+
+        assert_eq!(
+            store.active_owner_by_nonce(key.draft_scope_id(), nonce(1), UNIX_EPOCH),
+            None,
+            "cleared session must no longer be discoverable via the nonce index"
+        );
+    }
+
+    #[test]
+    fn void_session_replace_evicts_prior_nonce_from_secondary_index() {
+        let store = VoidSessionStore::new();
+        let first = VoidSession::new(
+            void_key(),
+            VoidSessionStage::SelectingCandidate,
+            None,
+            nonce(1),
+            UNIX_EPOCH,
+        )
+        .expect("session");
+        let ledger = first.key().ledger_id();
+        store.replace(first);
+        let replacement = VoidSession::new(
+            void_key(),
+            VoidSessionStage::SelectingCandidate,
+            None,
+            nonce(9),
+            UNIX_EPOCH,
+        )
+        .expect("session");
+        store.replace(replacement);
+
+        assert_eq!(
+            store.active_owner_by_nonce(ledger, nonce(1), UNIX_EPOCH),
+            None,
+            "stale nonce-index entry must not survive a replace at the same session key"
+        );
+        assert!(
+            store
+                .active_owner_by_nonce(ledger, nonce(9), UNIX_EPOCH)
+                .is_some(),
+            "current nonce-index entry should resolve to the actor"
+        );
+    }
+
+    #[test]
+    fn void_session_clear_removes_nonce_lookup_for_that_key() {
+        let store = VoidSessionStore::new();
+        let session = VoidSession::new(
+            void_key(),
+            VoidSessionStage::SelectingCandidate,
+            None,
+            nonce(1),
+            UNIX_EPOCH,
+        )
+        .expect("session");
+        let key = session.key();
+        store.replace(session);
+
+        store.clear(key);
+
+        assert_eq!(
+            store.active_owner_by_nonce(key.ledger_id(), nonce(1), UNIX_EPOCH),
+            None,
+            "cleared void session must no longer be discoverable via the nonce index"
+        );
     }
 
     #[test]
