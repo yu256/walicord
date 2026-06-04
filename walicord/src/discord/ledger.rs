@@ -23,10 +23,7 @@ pub(crate) use self::{
         discord_canonical_thread_locator,
     },
     observability::TracingLedgerObservability,
-    permissions::{
-        StartupReadinessFailure, ledger_refresh_command, required_gateway_intents,
-        validate_startup_readiness,
-    },
+    permissions::ledger_refresh_command,
     response_writer::{safe_edit_interaction_response, safe_interaction_response_message},
     route_guard::{
         ChannelFlagAction, SlashScopeError, channel_flag_action, slash_scope_channel_id,

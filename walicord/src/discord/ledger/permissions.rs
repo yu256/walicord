@@ -1,23 +1,9 @@
 use super::locator::LocatorRecoveryReference;
 use serenity::{
-    all::{GatewayIntents, Permissions},
+    all::Permissions,
     builder::{CreateActionRow, CreateButton, CreateCommand},
 };
-use std::collections::HashSet;
 use walicord_i18n as i18n;
-
-pub(crate) const REQUIRED_OAUTH_SCOPES: &[&str] = &["bot", "applications.commands"];
-
-const REQUIRED_GATEWAY_INTENTS: &[(GatewayIntents, &str)] = &[
-    (GatewayIntents::GUILDS, "GUILDS"),
-    (GatewayIntents::GUILD_MESSAGES, "GUILD_MESSAGES"),
-    (GatewayIntents::MESSAGE_CONTENT, "MESSAGE_CONTENT"),
-    (GatewayIntents::GUILD_MEMBERS, "GUILD_MEMBERS"),
-    (
-        GatewayIntents::GUILD_MESSAGE_REACTIONS,
-        "GUILD_MESSAGE_REACTIONS",
-    ),
-];
 
 const CANONICAL_SURFACE_PERMISSIONS: &[(Permissions, &str)] =
     &[(Permissions::VIEW_CHANNEL, "View Channel")];
@@ -289,65 +275,6 @@ pub(crate) fn ledger_refresh_command() -> CreateCommand {
     CreateCommand::new("ledger-refresh").description(i18n::slash_ledger_refresh_description())
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error(
-    "startup readiness failed: missing oauth_scopes={missing_oauth_scopes:?}, missing gateway_intents={missing_gateway_intents:?}"
-)]
-pub(crate) struct StartupReadinessFailure {
-    pub missing_oauth_scopes: Vec<&'static str>,
-    pub missing_gateway_intents: Vec<&'static str>,
-}
-
-pub(crate) fn required_gateway_intents() -> GatewayIntents {
-    REQUIRED_GATEWAY_INTENTS
-        .iter()
-        .fold(GatewayIntents::empty(), |acc, (intent, _)| acc | *intent)
-}
-
-pub(crate) fn missing_required_oauth_scopes<I, S>(oauth_scopes: I) -> Vec<&'static str>
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<str>,
-{
-    let present = oauth_scopes
-        .into_iter()
-        .map(|scope| scope.as_ref().trim().to_ascii_lowercase())
-        .collect::<HashSet<_>>();
-
-    REQUIRED_OAUTH_SCOPES
-        .iter()
-        .copied()
-        .filter(|scope| !present.contains(*scope))
-        .collect()
-}
-
-pub(crate) fn missing_required_gateway_intents(intents: GatewayIntents) -> Vec<&'static str> {
-    REQUIRED_GATEWAY_INTENTS
-        .iter()
-        .filter_map(|(required, name)| (!intents.contains(*required)).then_some(*name))
-        .collect()
-}
-
-pub(crate) fn validate_startup_readiness<I, S>(
-    oauth_scopes: I,
-    intents: GatewayIntents,
-) -> Result<(), StartupReadinessFailure>
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<str>,
-{
-    let failure = StartupReadinessFailure {
-        missing_oauth_scopes: missing_required_oauth_scopes(oauth_scopes),
-        missing_gateway_intents: missing_required_gateway_intents(intents),
-    };
-
-    if failure.missing_oauth_scopes.is_empty() && failure.missing_gateway_intents.is_empty() {
-        Ok(())
-    } else {
-        Err(failure)
-    }
-}
-
 pub(crate) fn missing_runtime_permissions_for(
     scope: RuntimePermissionScope,
     current: Permissions,
@@ -414,31 +341,6 @@ mod tests {
         #[case] expected: &[NativeAdminCapability],
     ) {
         assert_eq!(native_admin_capabilities(operation), expected);
-    }
-
-    #[rstest]
-    #[case::ready(
-        vec!["bot", "applications.commands"],
-        required_gateway_intents(),
-        Ok(())
-    )]
-    #[case::missing_scope_and_intent(
-        vec!["bot"],
-        GatewayIntents::GUILDS
-            | GatewayIntents::GUILD_MESSAGES
-            | GatewayIntents::GUILD_MEMBERS
-            | GatewayIntents::GUILD_MESSAGE_REACTIONS,
-        Err(StartupReadinessFailure {
-            missing_oauth_scopes: vec!["applications.commands"],
-            missing_gateway_intents: vec!["MESSAGE_CONTENT"],
-        })
-    )]
-    fn missing_scopes_or_intents_fail_startup_or_readiness(
-        #[case] oauth_scopes: Vec<&str>,
-        #[case] intents: GatewayIntents,
-        #[case] expected: Result<(), StartupReadinessFailure>,
-    ) {
-        assert_eq!(validate_startup_readiness(oauth_scopes, intents), expected);
     }
 
     #[test]
