@@ -2491,8 +2491,8 @@ mod tests {
     #[test]
     fn panel_surface_uses_the_fixed_body_and_launcher_order() {
         let actual = DiscordLedgerPresenter::render_panel(&PanelSurfaceModel {
-            thread_cue: i18n::panel_thread_cue_pending().to_owned(),
-            status_line: Some(i18n::panel_first_record_prompt().to_owned()),
+            thread_cue: String::new(),
+            status_line: None,
             button_states: PanelButtonStates::default(),
             ephemeral: false,
         })
@@ -2500,8 +2500,12 @@ mod tests {
 
         assert_eq!(
             actual.body,
-            "台帳スレッド: 最初の記録時に作成されます.\n\nまず 記録する で最初の経費を記録してください。\n\n注意: 台帳スレッドや台帳メッセージを削除すると復旧できません。削除してしまった場合は管理者に連絡し、新しい台帳の作成を相談してください。\n\n補足: 台帳スレッドで普通に返信しても台帳の記録は増えません。\n\n経費を記録・台帳を見る・取り消す はこのチャンネルで行います。清算プランの確認は親チャンネルの 清算確認 または台帳スレッドの /review で作成し、確定は台帳スレッドの /settle で行います。親チャンネルの /review は従来機能です。"
-                .replace("作成されます.", "作成されます。")
+            [
+                i18n::panel_deletion_warning(),
+                i18n::panel_reply_notice(),
+                i18n::route_task_guidance(),
+            ]
+            .join("\n\n")
         );
         let SurfaceActionRow::Buttons(buttons) = &actual.action_rows[0] else {
             panic!("expected button row");

@@ -1672,30 +1672,6 @@ pub fn panel_thread_cue_known(thread_mention: impl std::fmt::Display) -> impl st
     })
 }
 
-pub fn panel_thread_cue_pending() -> &'static str {
-    if cfg!(feature = "ja") {
-        "台帳スレッド: 最初の記録時に作成されます。"
-    } else {
-        "Ledger thread: created when the first record is written."
-    }
-}
-
-pub fn panel_first_record_prompt() -> &'static str {
-    if cfg!(feature = "ja") {
-        "まず 記録する で最初の経費を記録してください。"
-    } else {
-        "Start by recording the first expense."
-    }
-}
-
-pub fn panel_bootstrap_diagnosis() -> &'static str {
-    if cfg!(feature = "ja") {
-        "前回の最初の記録結果を確認中です。"
-    } else {
-        "The result of the previous first record is still being checked."
-    }
-}
-
 pub fn uncertain_write_block_message() -> &'static str {
     if cfg!(feature = "ja") {
         "この台帳の書き込み状態が確認できません。しばらく待ってからもう一度お試しください。"
@@ -1855,14 +1831,6 @@ pub fn bot_cannot_operate_parent_channel_message() -> &'static str {
         "ボットが親チャンネルを操作できません。チャンネルまたはロールの権限を管理できる管理者にBotの必要な権限を確認してもらってください。"
     } else {
         "The bot cannot operate on the parent channel. Ask an administrator who can manage channel or role permissions to verify the bot's required permissions."
-    }
-}
-
-pub fn panel_cache_warmup_required_message() -> &'static str {
-    if cfg!(feature = "ja") {
-        "台帳スレッドの状態をまだ確認できていません。管理者が /ledger-refresh を実行してからもう一度試してください。"
-    } else {
-        "The ledger thread state has not been confirmed yet. Ask an administrator to run /ledger-refresh and try again."
     }
 }
 

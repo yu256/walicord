@@ -54,30 +54,16 @@ pub(crate) fn render_panel_post_failure_message(
 
 pub(crate) fn render_panel_post_message(
     canonical_thread_id: Option<ChannelId>,
-    bootstrap_uncertain_write: bool,
 ) -> Result<(String, Vec<CreateActionRow>), RecoveryOutcomeMessage> {
-    let (thread_cue, status_line) = if bootstrap_uncertain_write && canonical_thread_id.is_none() {
-        (
-            i18n::panel_thread_cue_pending().to_owned(),
-            Some(i18n::panel_bootstrap_diagnosis().to_owned()),
+    let thread_cue = canonical_thread_id.map_or_else(String::new, |id| {
+        format!(
+            "{}",
+            i18n::panel_thread_cue_known(format!("<#{}>", id.get()))
         )
-    } else if let Some(thread_id) = canonical_thread_id {
-        (
-            format!(
-                "{}",
-                i18n::panel_thread_cue_known(format!("<#{}>", thread_id.get()))
-            ),
-            None,
-        )
-    } else {
-        (
-            i18n::panel_thread_cue_pending().to_owned(),
-            Some(i18n::panel_first_record_prompt().to_owned()),
-        )
-    };
+    });
     DiscordLedgerPresenter::render_panel(&PanelSurfaceModel {
         thread_cue,
-        status_line,
+        status_line: None,
         button_states: PanelButtonStates::default(),
         ephemeral: false,
     })
@@ -86,38 +72,21 @@ pub(crate) fn render_panel_post_message(
 }
 
 pub(crate) fn render_panel_post_message_for_locator_state(
-    locator_state: Option<&CanonicalThreadLocatorState>,
-    bootstrap_uncertain_write: bool,
+    locator_state: &CanonicalThreadLocatorState,
 ) -> Result<(String, Vec<CreateActionRow>), RecoveryOutcomeMessage> {
     match locator_state {
-        None => Err(RecoveryOutcomeMessage::from_body(
-            i18n::panel_cache_warmup_required_message(),
-        )),
-        Some(CanonicalThreadLocatorState::ReadyNoThread { .. }) => {
-            render_panel_post_message(None, bootstrap_uncertain_write)
-        }
-        Some(CanonicalThreadLocatorState::ReadyEmptyThread {
-            canonical_thread_id,
-            ..
-        }) => render_panel_post_message(Some(*canonical_thread_id), bootstrap_uncertain_write),
-        Some(
-            CanonicalThreadLocatorState::Provisioned(binding)
-            | CanonicalThreadLocatorState::ReadyBound(binding),
-        ) => render_panel_post_message(
-            Some(binding.canonical_thread_id()),
-            bootstrap_uncertain_write,
-        ),
-        Some(CanonicalThreadLocatorState::DuplicateBlocked {
+        CanonicalThreadLocatorState::DuplicateBlocked {
             authoritative_candidate_known,
             recovery_references,
             ..
-        }) => Err(render_duplicate_blocked_message(
+        } => Err(render_duplicate_blocked_message(
             *authoritative_candidate_known,
             recovery_references,
         )),
-        Some(CanonicalThreadLocatorState::DamagedBlocked {
+        CanonicalThreadLocatorState::DamagedBlocked {
             recovery_reference, ..
-        }) => Err(render_damaged_blocked_message(recovery_reference)),
+        } => Err(render_damaged_blocked_message(recovery_reference)),
+        state => render_panel_post_message(state.known_thread_id()),
     }
 }
 
@@ -203,16 +172,7 @@ mod tests {
     }
 
     #[test]
-    fn panel_post_requires_warm_locator_cache_before_posting() {
-        let message = render_panel_post_message_for_locator_state(None, false)
-            .expect_err("warm-cache miss should block panel posting");
-
-        assert_eq!(message.body(), i18n::panel_cache_warmup_required_message());
-        assert!(message.components().is_empty());
-    }
-
-    #[test]
-    fn panel_post_uses_locator_binding_when_cache_is_ready() {
+    fn panel_post_shows_thread_link_for_bound_locator_state() {
         let tracked_parent = tracked_parent_key();
         let ready = CanonicalThreadLocatorState::ReadyBound(CanonicalThreadBinding::new(
             tracked_parent,
@@ -220,9 +180,9 @@ mod tests {
         ));
 
         assert_eq!(
-            render_panel_post_message_for_locator_state(Some(&ready), false)
+            render_panel_post_message_for_locator_state(&ready)
                 .expect("ready binding should render panel"),
-            render_panel_post_message(Some(ChannelId::new(77)), false)
+            render_panel_post_message(Some(ChannelId::new(77)))
                 .expect("known canonical thread should render panel")
         );
     }
@@ -239,7 +199,7 @@ mod tests {
             ],
         };
 
-        let message = render_panel_post_message_for_locator_state(Some(&duplicate), false)
+        let message = render_panel_post_message_for_locator_state(&duplicate)
             .expect_err("duplicate blocked state should block panel posting");
 
         assert_eq!(
@@ -269,7 +229,7 @@ mod tests {
             ),
         };
 
-        let message = render_panel_post_message_for_locator_state(Some(&damaged), false)
+        let message = render_panel_post_message_for_locator_state(&damaged)
             .expect_err("damaged blocked state should block panel posting");
 
         assert_eq!(

@@ -275,6 +275,23 @@ impl CanonicalThreadLocatorState {
         }
     }
 
+    /// Returns the canonical thread id if the thread is known to exist,
+    /// regardless of whether a full binding has been established.
+    pub(crate) fn known_thread_id(&self) -> Option<ChannelId> {
+        match self {
+            Self::Provisioned(binding) | Self::ReadyBound(binding) => {
+                Some(binding.canonical_thread_id())
+            }
+            Self::ReadyEmptyThread {
+                canonical_thread_id,
+                ..
+            } => Some(*canonical_thread_id),
+            Self::ReadyNoThread { .. }
+            | Self::DuplicateBlocked { .. }
+            | Self::DamagedBlocked { .. } => None,
+        }
+    }
+
     pub(crate) fn derive_locator_state(
         tracked_parent: TrackedParentKey,
         candidates: Vec<LocatorDiscoveryCandidate>,

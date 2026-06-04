@@ -89,7 +89,7 @@ use super::{
     observability::{
         DiscordLedgerObservability, DiscordLedgerObservabilityEvent, PermissionAction,
     },
-    panel::render_panel_post_message_for_locator_state,
+    panel::{render_panel_post_message, render_panel_post_message_for_locator_state},
     permissions::{
         LedgerRefreshAcknowledgement, RuntimePermissionScope, missing_runtime_permissions_for,
         render_ledger_refresh_acknowledgement, render_ledger_refresh_uncertain_write_message,
@@ -1274,7 +1274,7 @@ impl LedgerRouter {
                 ),
                 state @ (CanonicalThreadLocatorState::DuplicateBlocked { .. }
                 | CanonicalThreadLocatorState::DamagedBlocked { .. }) => {
-                    render_panel_post_message_for_locator_state(Some(&state), false)
+                    render_panel_post_message_for_locator_state(&state)
                         .expect_err("blocked locator state must render a recovery response")
                         .into_parts()
                 }
@@ -3327,10 +3327,9 @@ impl LedgerRouter {
         Ok(InteractionDispatch::Handled)
     }
 
-    /// /panel: post the operations panel with the 4 fixed launcher buttons. Panel
-    /// posts are direct responses (no defer) per criterion 178, and the body /
-    /// thread cue come straight from i18n + presentation, not from any per-channel
-    /// computation in the router.
+    /// /panel: post the operations panel with the 4 fixed launcher buttons. Resolves
+    /// the locator state to show the canonical thread link when it exists; the panel
+    /// is always posted regardless of whether a thread has been created yet.
     async fn dispatch_panel_command(
         &self,
         ctx: &Context,
@@ -3339,15 +3338,16 @@ impl LedgerRouter {
         let scope = self
             .guard_scope(ctx, command.guild_id, command.channel_id, command)
             .await?;
-        let locator_state = self.deps.locator.cached(scope.tracked_parent());
-        if let Some(state) = locator_state.as_ref() {
-            self.observe_blocked_locator_state(state);
-        }
-        let (body, components) =
-            match render_panel_post_message_for_locator_state(locator_state.as_ref(), false) {
-                Ok(rendered) => rendered,
-                Err(message) => message.into_parts(),
-            };
+        let canonical_thread_id = self
+            .deps
+            .locator
+            .resolve(ctx, scope.tracked_parent())
+            .await?
+            .known_thread_id();
+        let (body, components) = match render_panel_post_message(canonical_thread_id) {
+            Ok(rendered) => rendered,
+            Err(message) => message.into_parts(),
+        };
         let response = CreateInteractionResponse::Message(
             safe_interaction_response_message()
                 .content(body)
