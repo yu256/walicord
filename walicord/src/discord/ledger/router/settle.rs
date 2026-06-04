@@ -1,29 +1,30 @@
-//! Settle dispatch entry point and the closed taxonomy of `/settle` recovery messages.
+//! Settle dispatch entry point.
 //!
-//! The single `dispatch_settle_command` impl method coordinates preview validation,
-//! per-ledger lock acquisition, retain freezing via `commit_canonical_authoritative`,
-//! and preview commit / abort. The two free helpers
-//! (`settle_attempt_error_message`, `should_clear_preview_after_settle_error`) map
-//! `SettleAttemptError` into the user-facing copy and clear-policy decisions that the
-//! dispatcher applies.
+//! `dispatch_settle_command` is a thin adapter shim over the application
+//! `settle_execute_v1` use case: it defers the interaction, builds per-request
+//! ports + command DTO, calls the use case, and translates the typed outcome
+//! into the matching Discord response. The `settle_attempt_error_message`
+//! helper maps `SettleAttemptError` into user-facing copy on the
+//! `AttemptFailed` branch.
 
 use serenity::{all::CommandInteraction, prelude::Context};
 use walicord_application::ledger::{
     DiscordLedgerSourceDescriptor,
-    preview_store::{
-        PreviewCommitGuard, PreviewStoreError, PreviewStoreKey, PreviewStoreTransition,
-    },
-    settle_flow::{
-        SettleAttemptError, SettleAttemptOutcome, compose_settlement_entry_from_preview,
-    },
+    preview_store::PreviewStoreError,
+    settle_execute::{SettleExecuteCommand, SettleExecuteOutcome, settle_execute_v1},
+    settle_flow::SettleAttemptError,
     write_coordinator::WriteTargetKey,
 };
 use walicord_domain::model::MemberId;
 use walicord_i18n as i18n;
 
 use super::{
-    CanonicalLoadRoute, CommitOutcome, DiscordCallSite, InteractionDispatch, LedgerRouteError,
-    LedgerRouter, canonical_message::render_public_settlement_message, discord_call_error,
+    CanonicalLoadRoute, DiscordCallSite, InteractionDispatch, LedgerRouteError, LedgerRouter,
+    canonical_message::DiscordSettlementEntryRenderer, discord_call_error,
+};
+use crate::discord::ledger::{
+    locator::RequestBoundLocatorPublisher,
+    store::{RequestBoundCanonicalAppender, RequestBoundCanonicalReader},
 };
 
 impl LedgerRouter {
@@ -54,147 +55,53 @@ impl LedgerRouter {
         let binding = self.resolve_existing_ledger(ctx, scope).await?;
         let ledger_id = binding.ledger_id();
         let actor_id = MemberId(command.user.id.get());
-        let key = PreviewStoreKey::new(ledger_id, actor_id);
-        // Pre-lock fast bail: avoid taking the per-ledger lock when uncertain_write
-        // is already unresolvable. Cheap when no retain exists (DashMap read only).
-        if !self.clear_resolved_uncertain_write(ctx, binding).await {
-            let (message, components) = self.uncertain_write_block_response(ledger_id, false, true);
-            return self
-                .edit_command_response_with_components(
-                    ctx,
-                    command,
-                    message,
-                    components,
-                    DiscordCallSite::SettleEditResponse,
-                )
-                .await;
-        }
-
-        let lock = self.deps.write_coordinator.lock_for(ledger_id);
-        let _guard = lock.lock().await;
-        // Post-lock recheck: another writer may have set a fresh uncertain_write
-        // between the pre-lock check and acquiring the lock; revalidate inside the
-        // critical section before committing to set_live / append.
-        if !self.clear_resolved_uncertain_write(ctx, binding).await {
-            let (message, components) = self.uncertain_write_block_response(ledger_id, false, true);
-            return self
-                .edit_command_response_with_components(
-                    ctx,
-                    command,
-                    message,
-                    components,
-                    DiscordCallSite::SettleEditResponse,
-                )
-                .await;
-        }
-
-        let load = self
-            .load_verified_thread(ctx, binding, CanonicalLoadRoute::WritePrelude)
-            .await?;
-        let next_entry_id = load.next_entry_id()?;
-        let Some(preview_instance_id) = self
-            .deps
-            .preview_store
-            .current(key)
-            .map(|state| state.preview_instance_id())
-        else {
-            return self
-                .edit_command_response(
-                    ctx,
-                    command,
-                    i18n::review_preview_required_message(),
-                    DiscordCallSite::SettleEditResponse,
-                )
-                .await;
-        };
-        let outcome = match compose_settlement_entry_from_preview(
-            load.snapshot(),
-            ledger_id,
-            actor_id,
-            next_entry_id,
-            DiscordLedgerSourceDescriptor::settle_thread_v1(),
-            self.deps.preview_store.as_ref(),
-            self.deps.clock.as_ref(),
-        ) {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                if should_clear_preview_after_settle_error(&error) {
-                    // Intentional swallow: ClearMatching only removes when the stored
-                    // instance still matches; a mismatch means another interaction
-                    // already replaced the preview and we must not touch it.
-                    let _ = self.deps.preview_store.transition(
-                        key,
-                        PreviewStoreTransition::ClearMatching {
-                            preview_instance_id,
-                        },
-                    );
-                }
-                return self
-                    .edit_command_response(
-                        ctx,
-                        command,
-                        settle_attempt_error_message(&error),
-                        DiscordCallSite::SettleEditResponse,
-                    )
-                    .await;
-            }
-        };
-
-        let SettleAttemptOutcome::RecordableEntry { entry, envelope } = outcome else {
-            self.deps.preview_store.transition(
-                key,
-                PreviewStoreTransition::ClearMatching {
-                    preview_instance_id,
-                },
-            )?;
-            return self
-                .edit_command_response(
-                    ctx,
-                    command,
-                    i18n::settlement_no_transfer_message(),
-                    DiscordCallSite::SettleEditResponse,
-                )
-                .await;
-        };
 
         let roster = self
             .deps
             .roster_fetcher
             .fetch(ctx, scope.guild_id(), scope.channel_id())
             .await?;
-        let rendered_message =
-            render_public_settlement_message(&entry, ledger_id, &roster.display_names)?;
-        let preview_commit = match PreviewCommitGuard::begin(
-            self.deps.preview_store.as_ref(),
-            key,
-            preview_instance_id,
-        ) {
-            Ok(preview_commit) => preview_commit,
-            Err(error) => {
-                return self
-                    .edit_command_response(
-                        ctx,
-                        command,
-                        settle_attempt_error_message(&SettleAttemptError::Store(error)),
-                        DiscordCallSite::SettleEditResponse,
-                    )
-                    .await;
-            }
+        let appender = RequestBoundCanonicalAppender {
+            ctx,
+            store: self.deps.canonical_store.as_ref(),
+            canonical_thread_id: binding.canonical_thread_id(),
         };
+        let publisher = RequestBoundLocatorPublisher {
+            locator: self.deps.locator.as_ref(),
+            binding,
+        };
+        let reader = RequestBoundCanonicalReader {
+            ctx,
+            store: self.deps.canonical_store.as_ref(),
+            canonical_thread_id: binding.canonical_thread_id(),
+            ledger_id,
+            load_route_label: CanonicalLoadRoute::WritePrelude.label(),
+        };
+        let renderer = DiscordSettlementEntryRenderer {
+            display_names: &roster.display_names,
+        };
+        let outcome = settle_execute_v1(
+            &appender,
+            &publisher,
+            &reader,
+            &renderer,
+            self.deps.preview_store.as_ref(),
+            self.deps.uncertain_writes.as_ref(),
+            self.deps.write_coordinator.as_ref(),
+            self.deps.observability.as_ref(),
+            self.deps.clock.as_ref(),
+            SettleExecuteCommand {
+                ledger_id,
+                actor_id,
+                write_target: WriteTargetKey::Published(ledger_id),
+                source_descriptor: DiscordLedgerSourceDescriptor::settle_thread_v1(),
+            },
+        )
+        .await
+        .map_err(LedgerRouteError::from)?;
 
-        match self
-            .commit_canonical_authoritative(
-                ctx,
-                WriteTargetKey::Published(ledger_id),
-                binding,
-                entry.entry(),
-                &envelope,
-                &rendered_message,
-            )
-            .await?
-        {
-            CommitOutcome::Recorded => {
-                preview_commit.finish()?;
+        match outcome {
+            SettleExecuteOutcome::Recorded { .. } => {
                 self.edit_command_response(
                     ctx,
                     command,
@@ -203,7 +110,26 @@ impl LedgerRouter {
                 )
                 .await
             }
-            CommitOutcome::UncertainAppendFailed => {
+            SettleExecuteOutcome::NoPreviewRequired => {
+                self.edit_command_response(
+                    ctx,
+                    command,
+                    i18n::review_preview_required_message(),
+                    DiscordCallSite::SettleEditResponse,
+                )
+                .await
+            }
+            SettleExecuteOutcome::NoTransferNeeded => {
+                self.edit_command_response(
+                    ctx,
+                    command,
+                    i18n::settlement_no_transfer_message(),
+                    DiscordCallSite::SettleEditResponse,
+                )
+                .await
+            }
+            SettleExecuteOutcome::UncertainBlocked
+            | SettleExecuteOutcome::UncertainAppendFailed => {
                 let (message, components) =
                     self.uncertain_write_block_response(ledger_id, false, true);
                 self.edit_command_response_with_components(
@@ -211,6 +137,15 @@ impl LedgerRouter {
                     command,
                     message,
                     components,
+                    DiscordCallSite::SettleEditResponse,
+                )
+                .await
+            }
+            SettleExecuteOutcome::AttemptFailed { error } => {
+                self.edit_command_response(
+                    ctx,
+                    command,
+                    settle_attempt_error_message(&error),
                     DiscordCallSite::SettleEditResponse,
                 )
                 .await
@@ -235,17 +170,4 @@ pub(super) fn settle_attempt_error_message(error: &SettleAttemptError) -> &'stat
         | SettleAttemptError::Record(_)
         | SettleAttemptError::EnvelopeEncode(_) => i18n::settlement_confirmation_failed_message(),
     }
-}
-
-pub(super) fn should_clear_preview_after_settle_error(error: &SettleAttemptError) -> bool {
-    matches!(
-        error,
-        SettleAttemptError::StaleHead { .. }
-            | SettleAttemptError::Expired { .. }
-            | SettleAttemptError::Record(
-                walicord_application::ledger::SettlementRecordError::PreviewNotDelivered
-            )
-            | SettleAttemptError::Record(_)
-            | SettleAttemptError::EnvelopeEncode(_)
-    )
 }

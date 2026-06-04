@@ -28,6 +28,7 @@ use crate::{
         ledger_chain_genesis_sha256_v1,
         observability::LedgerObservability,
         participant_resolution::{ParticipantDrift, RosterSnapshot},
+        projection::NextLedgerEntryIdError,
         write_coordinator::{
             UncertainWriteRegistry, WriteCoordinator, WriteTargetKey, resolve_uncertain_write_v1,
         },
@@ -119,6 +120,8 @@ pub enum RecordExpenseError {
     Compose(#[from] ExpenseWriteOrchestrationError),
     #[error("read: {0}")]
     Read(#[from] CanonicalReadError),
+    #[error("next entry id: {0}")]
+    NextEntryId(#[from] NextLedgerEntryIdError),
     #[error("body render: {0}")]
     Render(#[from] ExpenseRenderError),
     #[error("commit: {0}")]
@@ -173,15 +176,17 @@ where
         return Ok(RecordExpenseOutcome::UncertainBlocked);
     }
 
-    let head = reader.load_ledger_head().await?;
-    let previous_hash = head
-        .head_hash
+    let load = reader.load_verified_thread().await?;
+    let next_entry_id = load.next_entry_id()?;
+    let previous_hash = load
+        .snapshot()
+        .current_head_hash()
         .unwrap_or_else(|| ledger_chain_genesis_sha256_v1(ledger_id));
 
     let compose = compose_expense_entry(
         session,
         roster,
-        head.next_entry_id,
+        next_entry_id,
         source_descriptor,
         actor_id,
         clock,

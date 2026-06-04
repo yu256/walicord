@@ -16,10 +16,10 @@ use walicord_application::ledger::{
     DiscordLedgerSourceDescriptor, LedgerEntry, LedgerEntryId, LedgerEvent, LedgerId,
     expense_session::{SessionAccessError, VoidSession, VoidSessionKey, VoidSessionStage},
     projection::VerifiedLedgerEntryView,
+    void_execute::{VoidExecuteCommand, VoidExecuteOutcome, void_execute_v1},
     void_flow::{
         VoidComposeError, VoidConfirmTransitionError, VoidSessionBootstrapError,
-        bootstrap_void_session, compose_void_entry, enumerate_void_candidates,
-        transition_to_confirm,
+        bootstrap_void_session, enumerate_void_candidates, transition_to_confirm,
     },
     write_coordinator::WriteTargetKey,
 };
@@ -33,15 +33,15 @@ use walicord_presentation::discord_ledger::{
 };
 
 use super::{
-    CanonicalLoadRoute, CommitOutcome, DeferredEphemeralInteraction, DiscordCallSite,
-    InteractionDispatch, InternalLedgerRouteError, LedgerRouteError, LedgerRouter,
-    VOID_CANCEL_CUSTOM_ID_PREFIX, VOID_CONFIRM_CUSTOM_ID_PREFIX, VOID_PICK_CUSTOM_ID_PREFIX,
-    VOID_RESELECT_CUSTOM_ID_PREFIX, VoidSelectionRenderKind,
-    canonical_message::render_public_void_message, discord_call_error,
+    CanonicalLoadRoute, DeferredEphemeralInteraction, DiscordCallSite, InteractionDispatch,
+    InternalLedgerRouteError, LedgerRouteError, LedgerRouter, VOID_CANCEL_CUSTOM_ID_PREFIX,
+    VOID_CONFIRM_CUSTOM_ID_PREFIX, VOID_PICK_CUSTOM_ID_PREFIX, VOID_RESELECT_CUSTOM_ID_PREFIX,
+    VoidSelectionRenderKind, canonical_message::DiscordVoidEntryRenderer, discord_call_error,
 };
 use crate::discord::ledger::{
-    locator::{CanonicalThreadBinding, TrackedParentKey},
+    locator::{CanonicalThreadBinding, RequestBoundLocatorPublisher, TrackedParentKey},
     response_writer::{rendered_surface_to_message, safe_edit_interaction_response},
+    store::{RequestBoundCanonicalAppender, RequestBoundCanonicalReader},
 };
 
 pub(super) fn selected_void_target(component: &ComponentInteraction) -> Option<LedgerEntryId> {
@@ -510,69 +510,6 @@ impl LedgerRouter {
             .await
             .map_err(discord_call_error(DiscordCallSite::VoidDeferComponent))?;
 
-        // Pre-lock fast bail: avoid taking the per-ledger lock when uncertain_write
-        // is already unresolvable. Cheap when no retain exists (DashMap read only).
-        if !self.clear_resolved_uncertain_write(ctx, binding).await {
-            let (message, components) = self.uncertain_write_block_response(ledger_id, true, false);
-            return self
-                .edit_component_response_with_components(
-                    ctx,
-                    component,
-                    message,
-                    components,
-                    DiscordCallSite::VoidEditResponse,
-                )
-                .await;
-        }
-
-        let lock = self.deps.write_coordinator.lock_for(ledger_id);
-        let _guard = lock.lock().await;
-        // Post-lock recheck: another writer may have set a fresh uncertain_write
-        // between the pre-lock check and acquiring the lock; revalidate inside the
-        // critical section before committing to set_live / append.
-        if !self.clear_resolved_uncertain_write(ctx, binding).await {
-            let (message, components) = self.uncertain_write_block_response(ledger_id, true, false);
-            return self
-                .edit_component_response_with_components(
-                    ctx,
-                    component,
-                    message,
-                    components,
-                    DiscordCallSite::VoidEditResponse,
-                )
-                .await;
-        }
-        let load = self
-            .load_verified_thread(ctx, binding, CanonicalLoadRoute::WritePrelude)
-            .await?;
-        let next_entry_id = load.next_entry_id()?;
-        let target_id = session
-            .selection()
-            .map(|selection| selection.target_entry_id())
-            .ok_or(VoidComposeError::SessionNotConfirming)?;
-        let Some(target_view) = enumerate_void_candidates(&load)?
-            .into_iter()
-            .find(|view| view.entry().id == target_id)
-        else {
-            self.deps.void_sessions.clear(key);
-            return self
-                .edit_component_response(
-                    ctx,
-                    component,
-                    i18n::void_target_updated_message(),
-                    DiscordCallSite::VoidEditResponse,
-                )
-                .await;
-        };
-        let (entry, envelope) = compose_void_entry(
-            &session,
-            &load,
-            ledger_id,
-            actor_id,
-            next_entry_id,
-            DiscordLedgerSourceDescriptor::void_parent_v1(),
-            self.deps.clock.as_ref(),
-        )?;
         let roster = self
             .deps
             .roster_fetcher
@@ -584,21 +521,48 @@ impl LedgerRouter {
                 .iter()
                 .map(|(member_id, name)| (*member_id, Some(name.as_str()))),
         );
-        let rendered_message =
-            render_public_void_message(&entry, &target_view, ledger_id, &labels)?;
-        match self
-            .commit_canonical_authoritative(
-                ctx,
-                WriteTargetKey::Published(ledger_id),
-                binding,
-                &entry,
-                &envelope,
-                &rendered_message,
-            )
-            .await?
-        {
-            CommitOutcome::Recorded => {
-                self.deps.void_sessions.clear(key);
+
+        let appender = RequestBoundCanonicalAppender {
+            ctx,
+            store: self.deps.canonical_store.as_ref(),
+            canonical_thread_id: binding.canonical_thread_id(),
+        };
+        let publisher = RequestBoundLocatorPublisher {
+            locator: self.deps.locator.as_ref(),
+            binding,
+        };
+        let reader = RequestBoundCanonicalReader {
+            ctx,
+            store: self.deps.canonical_store.as_ref(),
+            canonical_thread_id: binding.canonical_thread_id(),
+            ledger_id,
+            load_route_label: CanonicalLoadRoute::WritePrelude.label(),
+        };
+        let renderer = DiscordVoidEntryRenderer { labels: &labels };
+        let outcome = void_execute_v1(
+            &appender,
+            &publisher,
+            &reader,
+            &renderer,
+            self.deps.void_sessions.as_ref(),
+            self.deps.uncertain_writes.as_ref(),
+            self.deps.write_coordinator.as_ref(),
+            self.deps.observability.as_ref(),
+            self.deps.clock.as_ref(),
+            VoidExecuteCommand {
+                session: &session,
+                session_key: key,
+                ledger_id,
+                actor_id,
+                write_target: WriteTargetKey::Published(ledger_id),
+                source_descriptor: DiscordLedgerSourceDescriptor::void_parent_v1(),
+            },
+        )
+        .await
+        .map_err(LedgerRouteError::from)?;
+
+        match outcome {
+            VoidExecuteOutcome::Recorded { .. } => {
                 self.edit_component_with_void_model(
                     ctx,
                     component,
@@ -611,7 +575,16 @@ impl LedgerRouter {
                 )
                 .await
             }
-            CommitOutcome::UncertainAppendFailed => {
+            VoidExecuteOutcome::TargetGone => {
+                self.edit_component_response(
+                    ctx,
+                    component,
+                    i18n::void_target_updated_message(),
+                    DiscordCallSite::VoidEditResponse,
+                )
+                .await
+            }
+            VoidExecuteOutcome::UncertainBlocked | VoidExecuteOutcome::UncertainAppendFailed => {
                 let (message, components) =
                     self.uncertain_write_block_response(ledger_id, true, false);
                 self.edit_component_response_with_components(

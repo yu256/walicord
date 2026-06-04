@@ -111,6 +111,21 @@ impl<ExternalId> VerifiedLedgerThreadLoad<ExternalId> {
                 .map(|envelope| envelope.payload().entry.id),
         )
     }
+
+    /// Drop the transport-specific external id from every verified envelope so
+    /// the load can cross the application boundary without carrying e.g.
+    /// `serenity::MessageId`. The snapshot + transport index are preserved.
+    pub fn forget_external_ids(self) -> VerifiedLedgerThreadLoad<()> {
+        VerifiedLedgerThreadLoad {
+            snapshot: self.snapshot,
+            transport_index: self.transport_index,
+            verified: self
+                .verified
+                .into_iter()
+                .map(|envelope| envelope.forget_external_id())
+                .collect(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

@@ -12,11 +12,12 @@ use serenity::{
     prelude::Context,
 };
 use std::{borrow::Cow, collections::HashMap, fmt::Write as _, sync::Arc, time::Duration};
+#[cfg(test)]
+use walicord_application::ledger::LedgerEntry;
 use walicord_application::{
     Clock, NonceProvider, SettlementPlanner,
     ledger::{
-        DiscordLedgerSourceDescriptor, ExpenseAuthoringError, LedgerEntry, LedgerId,
-        UnverifiedLedgerStoreEnvelope,
+        DiscordLedgerSourceDescriptor, ExpenseAuthoringError, LedgerId,
         expense_session::{
             ClaimedExpenseSession, ExpenseConfirmationSnapshot, ExpenseDraftScopeId,
             ExpenseDraftSnapshot, ExpenseLaunchOrigin, ExpenseModalIntent,
@@ -38,9 +39,8 @@ use walicord_i18n as i18n;
 use walicord_presentation::discord_ledger::ReadViewRoute;
 use walicord_presentation::discord_ledger::{
     DiscordLedgerPresenter, ExpenseConfirmationButtonIds, ExpenseSelectionStepButtonIds,
-    ReadViewBuildError, ReadViewPageModel, RenderBudgetError, RenderedCanonicalMessage,
-    SurfaceActionRow, SurfaceSelectMenu, VoidRetargetReason, build_expense_confirmation_surface,
-    build_expense_selection_step_surface,
+    ReadViewBuildError, ReadViewPageModel, RenderBudgetError, SurfaceActionRow, SurfaceSelectMenu,
+    VoidRetargetReason, build_expense_confirmation_surface, build_expense_selection_step_surface,
 };
 
 use crate::channel::ChannelManager;
@@ -72,7 +72,9 @@ use expense_picker::{
     parse_expense_picker_selection_custom_id, picker_kind_for_phase,
 };
 #[cfg(test)]
-use settle::{settle_attempt_error_message, should_clear_preview_after_settle_error};
+use settle::settle_attempt_error_message;
+#[cfg(test)]
+use walicord_application::ledger::settle_execute::should_clear_preview_after_settle_error;
 
 use super::{
     adapters::DiscordCanonicalThreadLocator,
@@ -112,7 +114,7 @@ use super::{
 
 use walicord_application::ledger::{
     canonical_read::CanonicalReadError,
-    canonical_write::{CommitOrchestrationError, CommitOutcome, commit_authoritative_v1},
+    canonical_write::CommitOrchestrationError,
     expense_flow::{
         ConfirmationBuildError, NavigationError, apply_modified_basic_info,
         bootstrap_expense_session, build_confirmation_for_session, clear_picker_selection,
@@ -129,7 +131,9 @@ use walicord_application::ledger::{
         ExpenseRenderError, RecordExpenseCommand, RecordExpenseError, RecordExpenseOutcome,
         record_expense_v1,
     },
+    settle_execute::{SettleExecuteError, SettlementRenderError},
     settle_flow::{PreviewAttemptError, SettleAttemptError},
+    void_execute::{VoidExecuteError, VoidRenderError},
     void_flow::{
         VoidCandidateEnumerationError, VoidComposeError, VoidConfirmTransitionError,
         VoidSessionBootstrapError,
@@ -385,6 +389,10 @@ pub enum InternalLedgerRouteError {
     CanonicalRead(#[source] CanonicalReadError),
     #[error("expense canonical body render: {0}")]
     ExpenseRender(#[source] ExpenseRenderError),
+    #[error("settlement canonical body render: {0}")]
+    SettlementRender(#[source] SettlementRenderError),
+    #[error("void canonical body render: {0}")]
+    VoidRender(#[source] VoidRenderError),
     #[error("expense modal submission missing required fields")]
     ModalSubmissionMissingFields,
     #[error("expense navigation landed on non-selection stage: {observed_stage:?}")]
@@ -562,11 +570,48 @@ impl From<ExpenseRenderError> for LedgerRouteError {
     }
 }
 
+impl From<SettlementRenderError> for LedgerRouteError {
+    fn from(error: SettlementRenderError) -> Self {
+        Self::Internal(InternalLedgerRouteError::SettlementRender(error))
+    }
+}
+
+impl From<SettleExecuteError> for LedgerRouteError {
+    fn from(error: SettleExecuteError) -> Self {
+        match error {
+            SettleExecuteError::Read(inner) => inner.into(),
+            SettleExecuteError::NextEntryId(inner) => inner.into(),
+            SettleExecuteError::Render(inner) => inner.into(),
+            SettleExecuteError::Commit(inner) => inner.into(),
+        }
+    }
+}
+
+impl From<VoidRenderError> for LedgerRouteError {
+    fn from(error: VoidRenderError) -> Self {
+        Self::Internal(InternalLedgerRouteError::VoidRender(error))
+    }
+}
+
+impl From<VoidExecuteError> for LedgerRouteError {
+    fn from(error: VoidExecuteError) -> Self {
+        match error {
+            VoidExecuteError::Read(inner) => inner.into(),
+            VoidExecuteError::NextEntryId(inner) => inner.into(),
+            VoidExecuteError::Candidates(inner) => inner.into(),
+            VoidExecuteError::Compose(inner) => inner.into(),
+            VoidExecuteError::Render(inner) => inner.into(),
+            VoidExecuteError::Commit(inner) => inner.into(),
+        }
+    }
+}
+
 impl From<RecordExpenseError> for LedgerRouteError {
     fn from(error: RecordExpenseError) -> Self {
         match error {
             RecordExpenseError::Compose(inner) => inner.into(),
             RecordExpenseError::Read(inner) => inner.into(),
+            RecordExpenseError::NextEntryId(inner) => inner.into(),
             RecordExpenseError::Render(inner) => inner.into(),
             RecordExpenseError::Commit(inner) => inner.into(),
         }
@@ -1877,47 +1922,6 @@ impl LedgerRouter {
             ))?;
         claim.replace(refreshed_session);
         Ok(InteractionDispatch::Handled)
-    }
-
-    /// Shared write-path orchestration: freeze the retain payload via `set_live`, hand
-    /// the envelope + rendered body to `DiscordCanonicalLedgerStore::append_authoritative`,
-    /// then on success refresh the locator and clear the retain. On Discord-side append
-    /// failure the retain stays `Live`; the caller renders the criterion-217 / 279
-    /// uncertain-write block. Owning this sequence in one place is the AC18 contract
-    /// for `WriteCoordinator` + `UncertainWriteRegistry`: settle / void / expense all
-    /// commit through the same critical section.
-    pub(super) async fn commit_canonical_authoritative(
-        &self,
-        ctx: &Context,
-        write_target: WriteTargetKey,
-        binding: CanonicalThreadBinding,
-        entry: &LedgerEntry,
-        envelope: &UnverifiedLedgerStoreEnvelope<()>,
-        rendered: &RenderedCanonicalMessage,
-    ) -> Result<CommitOutcome, LedgerRouteError> {
-        let appender = RequestBoundCanonicalAppender {
-            ctx,
-            store: self.deps.canonical_store.as_ref(),
-            canonical_thread_id: binding.canonical_thread_id(),
-        };
-        let publisher = RequestBoundLocatorPublisher {
-            locator: self.deps.locator.as_ref(),
-            binding,
-        };
-        commit_authoritative_v1(
-            &appender,
-            &publisher,
-            self.deps.uncertain_writes.as_ref(),
-            self.deps.observability.as_ref(),
-            self.deps.clock.as_ref(),
-            write_target,
-            binding.ledger_id(),
-            entry,
-            envelope,
-            rendered.body(),
-        )
-        .await
-        .map_err(LedgerRouteError::from)
     }
 
     async fn respond_record_success(

@@ -21,7 +21,7 @@ use walicord_application::ledger::{
     LedgerEntry, LedgerEntryId, LedgerEvent, LedgerId, LedgerLoadError, LedgerReplayError,
     UnverifiedLedgerStoreEnvelope, VerifiedLedgerStoreEnvelope,
     canonical_attachment::{AttachmentCodecError, CanonicalAttachmentCodec},
-    canonical_read::{CanonicalReadError, CanonicalThreadReader, LedgerHead},
+    canonical_read::{CanonicalReadError, CanonicalThreadReader},
     canonical_write::{CanonicalAppendError, CanonicalThreadAppender},
     observability::LedgerObservabilityEvent,
     projection::VerifiedEntryTransport,
@@ -1573,7 +1573,12 @@ impl RequestBoundCanonicalReader<'_> {
 }
 
 impl CanonicalThreadReader for RequestBoundCanonicalReader<'_> {
-    async fn load_ledger_head(&self) -> Result<LedgerHead, CanonicalReadError> {
+    async fn load_verified_thread(
+        &self,
+    ) -> Result<
+        walicord_application::ledger::projection::VerifiedLedgerThreadLoad<()>,
+        CanonicalReadError,
+    > {
         match self
             .store
             .load_verified_thread(
@@ -1584,21 +1589,9 @@ impl CanonicalThreadReader for RequestBoundCanonicalReader<'_> {
             )
             .await
         {
-            Ok(load) => {
-                let next_entry_id = load.next_entry_id().map_err(|error| {
-                    self.log_read_failure_with_message(
-                        "load_ledger_head/next_entry_id",
-                        &error.to_string(),
-                    );
-                    CanonicalReadError::with_source(error)
-                })?;
-                Ok(LedgerHead {
-                    head_hash: load.snapshot().current_head_hash(),
-                    next_entry_id,
-                })
-            }
+            Ok(load) => Ok(load.forget_external_ids()),
             Err(error) => {
-                self.log_read_failure("load_ledger_head", &error);
+                self.log_read_failure("load_verified_thread", &error);
                 Err(CanonicalReadError::with_source(error))
             }
         }

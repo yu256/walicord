@@ -115,6 +115,19 @@ impl<ExternalId> VerifiedLedgerStoreEnvelope<ExternalId> {
     pub fn into_unverified(self) -> UnverifiedLedgerStoreEnvelope<ExternalId> {
         self.0
     }
+
+    /// Drop the transport-specific external id so the verified envelope can cross
+    /// the application boundary without carrying e.g. `serenity::MessageId`. The
+    /// returned value preserves every chain-integrity field (`previous_hash`,
+    /// `entry_hash`, `payload`); only the external transport key is replaced.
+    pub fn forget_external_id(self) -> VerifiedLedgerStoreEnvelope<()> {
+        VerifiedLedgerStoreEnvelope(UnverifiedLedgerStoreEnvelope {
+            payload: self.0.payload,
+            previous_hash: self.0.previous_hash,
+            entry_hash: self.0.entry_hash,
+            external_id: (),
+        })
+    }
 }
 
 /// Encodes the canonical byte sequence that the entry hash protects. **Crate-private**:

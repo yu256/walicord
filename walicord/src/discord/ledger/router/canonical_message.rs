@@ -12,7 +12,9 @@ use walicord_application::ledger::{
     expense_write::RecordableExpenseEntry,
     projection::VerifiedLedgerEntryView,
     record_expense::{ExpenseEntryRenderer, ExpenseRenderError},
+    settle_execute::{SettlementEntryRenderer, SettlementRenderError},
     settle_flow::RecordableSettlementEntry,
+    void_execute::{VoidEntryRenderer, VoidRenderError},
 };
 use walicord_domain::model::MemberId;
 use walicord_i18n as i18n;
@@ -48,6 +50,62 @@ impl ExpenseEntryRenderer for DiscordExpenseEntryRenderer<'_> {
                     "expense canonical body render failed",
                 );
                 ExpenseRenderError::with_source(error)
+            })?;
+        Ok(rendered.body().to_owned())
+    }
+}
+
+/// Per-request adapter that translates the application
+/// [`SettlementEntryRenderer`] port into the existing presentation-layer
+/// settlement-message renderer.
+pub(crate) struct DiscordSettlementEntryRenderer<'a> {
+    pub(crate) display_names: &'a HashMap<MemberId, smol_str::SmolStr>,
+}
+
+impl SettlementEntryRenderer for DiscordSettlementEntryRenderer<'_> {
+    fn render_public_body(
+        &self,
+        recordable: &RecordableSettlementEntry,
+        ledger_id: LedgerId,
+    ) -> Result<String, SettlementRenderError> {
+        let rendered = render_public_settlement_message(recordable, ledger_id, self.display_names)
+            .map_err(|error| {
+                tracing::error!(
+                    ledger_id = ?ledger_id,
+                    entry_id = ?recordable.id(),
+                    error = %error,
+                    "settlement canonical body render failed",
+                );
+                SettlementRenderError::with_source(error)
+            })?;
+        Ok(rendered.body().to_owned())
+    }
+}
+
+/// Per-request adapter that translates the application [`VoidEntryRenderer`]
+/// port into the existing presentation-layer void-message renderer. The
+/// adapter binds the roster-derived labels per interaction so the application
+/// use case calls a single `render_public_body(&entry, &target, ledger_id)`.
+pub(crate) struct DiscordVoidEntryRenderer<'a> {
+    pub(crate) labels: &'a SurfaceMemberLabels,
+}
+
+impl VoidEntryRenderer for DiscordVoidEntryRenderer<'_> {
+    fn render_public_body(
+        &self,
+        entry: &LedgerEntry,
+        target: &VerifiedLedgerEntryView,
+        ledger_id: LedgerId,
+    ) -> Result<String, VoidRenderError> {
+        let rendered =
+            render_public_void_message(entry, target, ledger_id, self.labels).map_err(|error| {
+                tracing::error!(
+                    ledger_id = ?ledger_id,
+                    entry_id = ?entry.id,
+                    error = %error,
+                    "void canonical body render failed",
+                );
+                VoidRenderError::with_source(error)
             })?;
         Ok(rendered.body().to_owned())
     }
