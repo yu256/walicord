@@ -11,7 +11,7 @@ use walicord_application::ledger::{
 /// depend on serenity types through the trait surface.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DiscordLedgerObservabilityEvent {
-    ActiveActiveMisconfiguration {
+    UnauthorizedWriterDetected {
         ledger_id: Option<LedgerId>,
         observed_writer: UserId,
         expected_writer: UserId,
@@ -124,7 +124,7 @@ impl LedgerObservability for TracingLedgerObservability {
 impl DiscordLedgerObservability for TracingLedgerObservability {
     fn emit_discord(&self, event: DiscordLedgerObservabilityEvent) {
         match &event {
-            DiscordLedgerObservabilityEvent::ActiveActiveMisconfiguration { .. }
+            DiscordLedgerObservabilityEvent::UnauthorizedWriterDetected { .. }
             | DiscordLedgerObservabilityEvent::DuplicateThreadBlocked { .. }
             | DiscordLedgerObservabilityEvent::DamagedThreadBlocked { .. } => {
                 tracing::error!(?event, "ledger observability event");

@@ -29,7 +29,7 @@ use serenity::{
     },
     prelude::*,
 };
-use std::{collections::HashMap, env, sync::Arc};
+use std::{collections::HashMap, sync::Arc};
 use walicord_application::{
     Command as ProgramCommand, MessageProcessor, ProgramParseError, RoleVisibilityDiagnostics,
     Script, ScriptStatement, filtered_empty_role_parse_error, warnings_for_program_prefix,
@@ -37,41 +37,6 @@ use walicord_application::{
 use walicord_domain::model::{MemberId, RoleId, RoleMembers};
 use walicord_infrastructure::HighsSettlementPlanner;
 use walicord_presentation::{VariablesPresenter, format_program_parse_error};
-
-const WRITER_LINEAGE_ALLOWLIST_ENV: &str = "WALICORD_LEDGER_WRITER_LINEAGE_ALLOWLIST";
-
-fn writer_lineage_policy_from_allowlist(
-    active_writer: serenity::all::UserId,
-    raw_allowlist: &str,
-) -> Result<crate::discord::ledger::WriterLineagePolicy, String> {
-    let approved_writers = raw_allowlist
-        .split(',')
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|value| {
-            value
-                .parse::<u64>()
-                .map(serenity::all::UserId::new)
-                .map_err(|_| {
-                    format!("invalid bot user id in {WRITER_LINEAGE_ALLOWLIST_ENV}: {value}")
-                })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    crate::discord::ledger::WriterLineagePolicy::load(Some(active_writer), Some(approved_writers))
-        .map_err(|error| format!("failed to initialize writer lineage policy: {error}"))
-}
-
-fn writer_lineage_policy_from_env(
-    active_writer: serenity::all::UserId,
-) -> Result<crate::discord::ledger::WriterLineagePolicy, String> {
-    let raw_allowlist = env::var(WRITER_LINEAGE_ALLOWLIST_ENV).map_err(|error| match error {
-        env::VarError::NotPresent => format!("{WRITER_LINEAGE_ALLOWLIST_ENV} is not set"),
-        env::VarError::NotUnicode(_) => {
-            format!("{WRITER_LINEAGE_ALLOWLIST_ENV} must be valid UTF-8")
-        }
-    })?;
-    writer_lineage_policy_from_allowlist(active_writer, &raw_allowlist)
-}
 
 /// Result of attempting to load channel cache.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1060,8 +1025,8 @@ where
         &self,
         bot_user_id: serenity::all::UserId,
         http: Arc<serenity::http::Http>,
-    ) -> Result<(), String> {
-        let writer_lineage = writer_lineage_policy_from_env(bot_user_id)?;
+    ) {
+        let writer_lineage = crate::discord::ledger::WriterLineagePolicy::new(bot_user_id);
         let observability = Arc::new(crate::discord::ledger::TracingLedgerObservability);
         let canonical_store = Arc::new(crate::discord::ledger::DiscordCanonicalLedgerStore::new(
             writer_lineage,
@@ -1104,7 +1069,6 @@ where
         if self.ledger_router.set(router).is_err() {
             tracing::warn!("ledger router was already initialized; ignoring duplicate ready event");
         }
-        Ok(())
     }
 }
 
@@ -1281,10 +1245,7 @@ where
 
     async fn ready(&self, ctx: Context, ready: Ready) {
         tracing::info!("Connected as {}", ready.user.name);
-        if let Err(error) = self.initialize_ledger_router(ready.user.id, Arc::clone(&ctx.http)) {
-            tracing::error!(%error, "discord-ledger writer lineage readiness failed closed");
-            std::process::exit(1);
-        }
+        self.initialize_ledger_router(ready.user.id, Arc::clone(&ctx.http));
         self.initialize_enabled_channels(&ctx, &ready).await;
 
         use serenity::model::application::Command;
@@ -1603,41 +1564,6 @@ mod tests {
     fn empty_roles() -> &'static RoleMembers {
         static ROLES: OnceLock<RoleMembers> = OnceLock::new();
         ROLES.get_or_init(RoleMembers::default)
-    }
-
-    #[test]
-    fn writer_lineage_allowlist_accepts_historical_and_active_writers() {
-        let actual = writer_lineage_policy_from_allowlist(UserId::new(900), "800, 900");
-        let expected = crate::discord::ledger::WriterLineagePolicy::load(
-            Some(UserId::new(900)),
-            Some([UserId::new(800), UserId::new(900)]),
-        )
-        .map_err(|error| error.to_string());
-
-        assert_eq!(actual, expected);
-    }
-
-    #[rstest]
-    #[case::active_writer_missing(
-        "800",
-        "failed to initialize writer lineage policy: active writer 900 is not present in the approved writer lineage"
-    )]
-    #[case::invalid_writer_id(
-        "800,not-a-user-id,900",
-        "invalid bot user id in WALICORD_LEDGER_WRITER_LINEAGE_ALLOWLIST: not-a-user-id"
-    )]
-    #[case::empty(
-        "",
-        "failed to initialize writer lineage policy: writer lineage allowlist is empty"
-    )]
-    fn writer_lineage_allowlist_rejects_invalid_configuration(
-        #[case] raw_allowlist: &str,
-        #[case] expected: &str,
-    ) {
-        assert_eq!(
-            writer_lineage_policy_from_allowlist(UserId::new(900), raw_allowlist),
-            Err(expected.to_owned())
-        );
     }
 
     fn role_expr(role_id: u64) -> MemberSetExpr<'static> {

@@ -9,7 +9,7 @@ use serenity::{
 };
 use sha2::{Digest as _, Sha256};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     future::Future,
     sync::{
         Arc,
@@ -223,21 +223,7 @@ pub enum MetadataCoherenceFailure {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum WriterLineagePolicyError {
-    #[error("writer lineage allowlist is unavailable")]
-    MissingAllowlist,
-    #[error("writer lineage active writer is unavailable")]
-    MissingActiveWriter,
-    #[error("writer lineage allowlist is empty")]
-    EmptyAllowlist,
-    #[error("active writer {active_writer} is not present in the approved writer lineage")]
-    ActiveWriterNotApproved { active_writer: UserId },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum WriterLineageFailure {
-    #[error("{0}")]
-    PolicyUnavailable(#[from] WriterLineagePolicyError),
     #[error("webhook-authored canonical candidate found at message {message_id}")]
     WebhookAuthor {
         message_id: MessageId,
@@ -248,77 +234,33 @@ pub enum WriterLineageFailure {
         message_id: MessageId,
         author_id: UserId,
     },
-    #[error(
-        "historical writer {author_id} reappeared after active writer {active_writer} at message {message_id}"
-    )]
-    NonActiveWriterAfterCutover {
-        message_id: MessageId,
-        author_id: UserId,
-        active_writer: UserId,
-    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WriterLineagePolicy {
     active_writer: UserId,
-    approved_writers: BTreeSet<UserId>,
 }
 
 impl WriterLineagePolicy {
-    pub fn load<I>(
-        active_writer: Option<UserId>,
-        approved_writers: Option<I>,
-    ) -> Result<Self, WriterLineagePolicyError>
-    where
-        I: IntoIterator<Item = UserId>,
-    {
-        let active_writer = active_writer.ok_or(WriterLineagePolicyError::MissingActiveWriter)?;
-        let approved_writers: BTreeSet<UserId> = approved_writers
-            .ok_or(WriterLineagePolicyError::MissingAllowlist)?
-            .into_iter()
-            .collect();
-        if approved_writers.is_empty() {
-            return Err(WriterLineagePolicyError::EmptyAllowlist);
-        }
-        if !approved_writers.contains(&active_writer) {
-            return Err(WriterLineagePolicyError::ActiveWriterNotApproved { active_writer });
-        }
-
-        Ok(Self {
-            active_writer,
-            approved_writers,
-        })
+    pub fn new(active_writer: UserId) -> Self {
+        Self { active_writer }
     }
 
-    fn validate_records<R>(&self, records: &[R]) -> Result<(), WriterLineageFailure>
+    fn validate_record<R>(&self, record: &R) -> Result<(), WriterLineageFailure>
     where
         R: LineageRecord,
     {
-        let mut seen_active_writer = false;
-        for record in records {
-            if record.webhook_id().is_some() {
-                return Err(WriterLineageFailure::WebhookAuthor {
-                    message_id: record.message_id(),
-                    author_id: record.author_id(),
-                });
-            }
-            if !self.approved_writers.contains(&record.author_id()) {
-                return Err(WriterLineageFailure::UnapprovedAuthor {
-                    message_id: record.message_id(),
-                    author_id: record.author_id(),
-                });
-            }
-            if record.author_id() == self.active_writer {
-                seen_active_writer = true;
-                continue;
-            }
-            if seen_active_writer {
-                return Err(WriterLineageFailure::NonActiveWriterAfterCutover {
-                    message_id: record.message_id(),
-                    author_id: record.author_id(),
-                    active_writer: self.active_writer,
-                });
-            }
+        if record.webhook_id().is_some() {
+            return Err(WriterLineageFailure::WebhookAuthor {
+                message_id: record.message_id(),
+                author_id: record.author_id(),
+            });
+        }
+        if record.author_id() != self.active_writer {
+            return Err(WriterLineageFailure::UnapprovedAuthor {
+                message_id: record.message_id(),
+                author_id: record.author_id(),
+            });
         }
         Ok(())
     }
@@ -551,28 +493,23 @@ impl DiscordCanonicalLedgerStore {
     where
         R: LineageRecord,
     {
-        self.writer_lineage
-            .validate_records(records)
-            .map_err(|failure| {
+        for record in records {
+            if let Err(failure) = self.writer_lineage.validate_record(record) {
                 let observed_writer = match &failure {
                     WriterLineageFailure::UnapprovedAuthor { author_id, .. }
-                    | WriterLineageFailure::NonActiveWriterAfterCutover { author_id, .. } => {
-                        Some(*author_id)
-                    }
-                    WriterLineageFailure::WebhookAuthor { author_id, .. } => Some(*author_id),
-                    WriterLineageFailure::PolicyUnavailable(_) => None,
+                    | WriterLineageFailure::WebhookAuthor { author_id, .. } => *author_id,
                 };
-                if let Some(observed_writer) = observed_writer {
-                    self.observability.emit_discord(
-                        DiscordLedgerObservabilityEvent::ActiveActiveMisconfiguration {
-                            ledger_id,
-                            observed_writer,
-                            expected_writer: self.writer_lineage.active_writer,
-                        },
-                    );
-                }
-                StoreLoadError::WriterLineage(failure)
-            })
+                self.observability.emit_discord(
+                    DiscordLedgerObservabilityEvent::UnauthorizedWriterDetected {
+                        ledger_id,
+                        observed_writer,
+                        expected_writer: self.writer_lineage.active_writer,
+                    },
+                );
+                return Err(StoreLoadError::WriterLineage(failure));
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn observe_permission_failure(
@@ -1812,8 +1749,7 @@ pub(super) fn verified_thread_load_for_test(
     }
 
     DiscordCanonicalLedgerStore::new_with_display_drift_guard(
-        WriterLineagePolicy::load(Some(UserId::new(900)), Some([UserId::new(900)]))
-            .expect("lineage should build"),
+        WriterLineagePolicy::new(UserId::new(900)),
         reject_edited_messages,
         Arc::new(CapturingLedgerObservability::new()),
     )
@@ -2044,11 +1980,7 @@ mod tests {
 
     fn store() -> DiscordCanonicalLedgerStore {
         DiscordCanonicalLedgerStore::new_with_display_drift_guard(
-            WriterLineagePolicy::load(
-                Some(UserId::new(900)),
-                Some([UserId::new(800), UserId::new(900)]),
-            )
-            .expect("lineage should build"),
+            WriterLineagePolicy::new(UserId::new(900)),
             reject_edited_messages,
             Arc::new(CapturingLedgerObservability::new()),
         )
@@ -2202,78 +2134,13 @@ mod tests {
     }
 
     #[test]
-    fn writer_lineage_policy_rejects_missing_allowlist() {
-        let actual = WriterLineagePolicy::load::<Vec<UserId>>(Some(UserId::new(900)), None);
-
-        assert_eq!(actual, Err(WriterLineagePolicyError::MissingAllowlist));
-    }
-
-    #[test]
-    fn writer_lineage_policy_rejects_missing_active_writer() {
-        let actual = WriterLineagePolicy::load::<Vec<UserId>>(None, Some(vec![UserId::new(900)]));
-
-        assert_eq!(actual, Err(WriterLineagePolicyError::MissingActiveWriter));
-    }
-
-    #[test]
-    fn writer_lineage_policy_rejects_empty_allowlist() {
-        let actual = WriterLineagePolicy::load(Some(UserId::new(900)), Some(Vec::<UserId>::new()));
-
-        assert_eq!(actual, Err(WriterLineagePolicyError::EmptyAllowlist));
-    }
-
-    #[test]
-    fn writer_lineage_policy_rejects_active_writer_outside_allowlist() {
-        let actual = WriterLineagePolicy::load(Some(UserId::new(900)), Some([UserId::new(800)]));
-
-        assert_eq!(
-            actual,
-            Err(WriterLineagePolicyError::ActiveWriterNotApproved {
-                active_writer: UserId::new(900),
-            })
-        );
-    }
-
-    #[test]
-    fn writer_lineage_policy_rejects_non_active_writer_after_cutover() {
-        let policy = WriterLineagePolicy::load(
-            Some(UserId::new(900)),
-            Some([UserId::new(800), UserId::new(900)]),
-        )
-        .expect("lineage should build");
-        let records = vec![
-            canonical_record(1, 800, 500, 77, 1, Vec::new()),
-            canonical_record(2, 900, 500, 77, 2, Vec::new()),
-            canonical_record(3, 800, 500, 77, 3, Vec::new()),
-        ];
-
-        let actual = policy.validate_records(&records);
-
-        assert_eq!(
-            actual,
-            Err(WriterLineageFailure::NonActiveWriterAfterCutover {
-                message_id: MessageId::new(3),
-                author_id: UserId::new(800),
-                active_writer: UserId::new(900),
-            })
-        );
-    }
-
-    #[test]
-    fn store_observes_non_active_writer_after_cutover() {
+    fn store_observes_unapproved_author() {
         let observability = Arc::new(CapturingLedgerObservability::new());
         let store = DiscordCanonicalLedgerStore::new(
-            WriterLineagePolicy::load(
-                Some(UserId::new(900)),
-                Some([UserId::new(800), UserId::new(900)]),
-            )
-            .expect("lineage should build"),
+            WriterLineagePolicy::new(UserId::new(900)),
             observability.clone(),
         );
-        let records = vec![
-            canonical_record(1, 900, 500, 77, 1, Vec::new()),
-            canonical_record(2, 800, 500, 77, 2, Vec::new()),
-        ];
+        let records = vec![canonical_record(1, 800, 500, 77, 1, Vec::new())];
 
         let _ = store.validate_writer_lineage(
             Some(walicord_ledger::test_fixtures::ledger_id(77)),
@@ -2284,7 +2151,7 @@ mod tests {
             observability.snapshot(),
             vec![
                 super::super::observability::CapturedLedgerObservabilityEvent::Discord(
-                    DiscordLedgerObservabilityEvent::ActiveActiveMisconfiguration {
+                    DiscordLedgerObservabilityEvent::UnauthorizedWriterDetected {
                         ledger_id: Some(walicord_ledger::test_fixtures::ledger_id(77)),
                         observed_writer: UserId::new(800),
                         expected_writer: UserId::new(900),
@@ -2298,8 +2165,7 @@ mod tests {
     fn store_observes_lineage_failure_before_ledger_id_discovery() {
         let observability = Arc::new(CapturingLedgerObservability::new());
         let store = DiscordCanonicalLedgerStore::new(
-            WriterLineagePolicy::load(Some(UserId::new(900)), Some([UserId::new(900)]))
-                .expect("lineage should build"),
+            WriterLineagePolicy::new(UserId::new(900)),
             observability.clone(),
         );
         let records = vec![canonical_record(1, 800, 500, 77, 1, Vec::new())];
@@ -2310,7 +2176,7 @@ mod tests {
             observability.snapshot(),
             vec![
                 super::super::observability::CapturedLedgerObservabilityEvent::Discord(
-                    DiscordLedgerObservabilityEvent::ActiveActiveMisconfiguration {
+                    DiscordLedgerObservabilityEvent::UnauthorizedWriterDetected {
                         ledger_id: None,
                         observed_writer: UserId::new(800),
                         expected_writer: UserId::new(900),
@@ -2324,8 +2190,7 @@ mod tests {
     fn store_observes_webhook_authored_candidate() {
         let observability = Arc::new(CapturingLedgerObservability::new());
         let store = DiscordCanonicalLedgerStore::new(
-            WriterLineagePolicy::load(Some(UserId::new(900)), Some([UserId::new(900)]))
-                .expect("lineage should build"),
+            WriterLineagePolicy::new(UserId::new(900)),
             observability.clone(),
         );
         let mut records = vec![canonical_record(1, 900, 500, 77, 1, Vec::new())];
@@ -2340,7 +2205,7 @@ mod tests {
             observability.snapshot(),
             vec![
                 super::super::observability::CapturedLedgerObservabilityEvent::Discord(
-                    DiscordLedgerObservabilityEvent::ActiveActiveMisconfiguration {
+                    DiscordLedgerObservabilityEvent::UnauthorizedWriterDetected {
                         ledger_id: Some(walicord_ledger::test_fixtures::ledger_id(77)),
                         observed_writer: UserId::new(900),
                         expected_writer: UserId::new(900),
@@ -2354,8 +2219,7 @@ mod tests {
     fn store_observes_permission_failure_with_transport_context() {
         let observability = Arc::new(CapturingLedgerObservability::new());
         let store = DiscordCanonicalLedgerStore::new(
-            WriterLineagePolicy::load(Some(UserId::new(900)), Some([UserId::new(900)]))
-                .expect("lineage should build"),
+            WriterLineagePolicy::new(UserId::new(900)),
             observability.clone(),
         );
 
@@ -2554,29 +2418,6 @@ mod tests {
                 ..
             })) if message_id == MessageId::new(1)
         ));
-    }
-
-    #[test]
-    fn load_verified_thread_accepts_historical_writers_before_active_cutover() {
-        let mut records = encode_entries_as_records(vec![
-            expense_entry(1, 1, &[(1, 5_000), (2, 5_000)]),
-            expense_entry(2, 1, &[(1, 1_000), (2, 1_000)]),
-        ]);
-        records[0].author_id = UserId::new(800);
-
-        let actual = store().load_verified_thread_from_records(
-            ChannelId::new(77),
-            walicord_ledger::test_fixtures::ledger_id(77),
-            records,
-        );
-
-        assert_eq!(
-            actual
-                .expect("load should succeed")
-                .snapshot()
-                .canonical_entry_count(),
-            2
-        );
     }
 
     #[test]
