@@ -1,4 +1,3 @@
-#[cfg(test)]
 use crate::discord::ledger::panel::{
     LEDGER_PANEL_EXPENSE_ID, LEDGER_PANEL_LEDGER_ID, LEDGER_PANEL_REVIEW_ID, LEDGER_PANEL_VOID_ID,
 };
@@ -25,7 +24,8 @@ use walicord_application::{
             ExpenseParticipantSelection, ExpensePickerKind, ExpenseSelectionPhase, ExpenseSession,
             ExpenseSessionConstructionError, ExpenseSessionKey, ExpenseSessionStage,
             ExpenseSessionStore, ModalRetryBinding, ModalRetryBindingStore, ModalRetryPreserved,
-            PickerSnapshotId, SessionAccessError, VoidSessionKey, VoidSessionStore,
+            PickerSnapshotId, SessionAccessError, VoidSession, VoidSessionKey, VoidSessionStage,
+            VoidSessionStore,
         },
         observability::LedgerObservabilityEvent,
         participant_resolution::{
@@ -35,29 +35,26 @@ use walicord_application::{
 };
 use walicord_domain::model::{MemberId, RoleId};
 use walicord_i18n as i18n;
-#[cfg(test)]
-use walicord_presentation::discord_ledger::ReadViewRoute;
 use walicord_presentation::discord_ledger::{
     DiscordLedgerPresenter, ExpenseConfirmationButtonIds, ExpenseSelectionStepButtonIds,
-    ReadViewBuildError, ReadViewPageModel, RenderBudgetError, SurfaceActionRow, SurfaceSelectMenu,
-    VoidRetargetReason, build_expense_confirmation_surface, build_expense_selection_step_surface,
+    LedgerPageInputs, ReadViewBuildError, ReadViewPageModel, ReadViewRoute, RecoveryCta,
+    RenderBudgetError, ReviewPageInputs, SurfaceActionRow, SurfaceMemberLabels, SurfaceSelectMenu,
+    VoidRetargetReason, VoidSurfaceModel, build_expense_confirmation_surface,
+    build_expense_selection_step_surface, build_ledger_empty_page_model, build_ledger_page_model,
+    build_review_empty_page_model, build_review_no_transfers_page_model, build_review_page_model,
+    paginate_read_view_model,
 };
 
 use crate::channel::ChannelManager;
 
 mod canonical_message;
 mod expense_picker;
-mod ledger;
-mod panel;
-mod review;
-use panel::{PanelLauncher, panel_launcher};
-#[cfg(test)]
-use review::review_route_guidance_lines_with_replacement_notice;
-mod settle;
 mod void;
 #[cfg(test)]
 use self::void::void_confirmation_total_amount;
-use canonical_message::DiscordExpenseEntryRenderer;
+use canonical_message::{
+    DiscordExpenseEntryRenderer, DiscordSettlementEntryRenderer, DiscordVoidEntryRenderer,
+};
 #[cfg(test)]
 use expense_picker::expense_picker_custom_id;
 use expense_picker::{
@@ -71,8 +68,9 @@ use expense_picker::{
     extract_expense_picker_search_query, merge_paged_selection, parse_expense_picker_custom_id,
     parse_expense_picker_selection_custom_id, picker_kind_for_phase,
 };
-#[cfg(test)]
-use settle::settle_attempt_error_message;
+use void::{
+    selected_void_target, void_candidate_rows, void_confirmation_model, void_selection_action_rows,
+};
 #[cfg(test)]
 use walicord_application::ledger::settle_execute::should_clear_preview_after_settle_error;
 
@@ -86,7 +84,7 @@ use super::{
     },
     locator::{
         CanonicalThreadBinding, CanonicalThreadLocatorState, LocatorError,
-        LocatorRecoveryReference, RequestBoundLocatorPublisher,
+        LocatorRecoveryReference, RequestBoundLocatorPublisher, TrackedParentKey,
     },
     observability::{
         DiscordLedgerObservability, DiscordLedgerObservabilityEvent, PermissionAction,
@@ -124,19 +122,28 @@ use walicord_application::ledger::{
     },
     expense_modal::{ExpenseModalValidationError, validate_expense_modal_submission},
     expense_write::ExpenseWriteOrchestrationError,
-    preview_store::{PreviewStore, PreviewStoreError, PreviewStoreKey},
-    projection::NextLedgerEntryIdError,
-    read_view_session::{ReadViewSessionKey, ReadViewSessionStore},
+    preview_store::{PreviewStore, PreviewStoreError, PreviewStoreKey, PreviewStoreTransition},
+    projection::{NextLedgerEntryIdError, project_verified_entries},
+    read_view_session::{ReadViewSession, ReadViewSessionKey, ReadViewSessionStore},
     record_expense::{
         ExpenseRenderError, RecordExpenseCommand, RecordExpenseError, RecordExpenseOutcome,
         record_expense_v1,
     },
-    settle_execute::{SettleExecuteError, SettlementRenderError},
-    settle_flow::{PreviewAttemptError, SettleAttemptError},
-    void_execute::{VoidExecuteError, VoidRenderError},
+    settle_execute::{
+        SettleExecuteCommand, SettleExecuteError, SettleExecuteOutcome, SettlementRenderError,
+        settle_execute_v1,
+    },
+    settle_flow::{
+        PreviewAttemptError, PreviewAttemptOutcome, SettleAttemptError, compose_and_store_preview,
+        mark_preview_delivered,
+    },
+    void_execute::{
+        VoidExecuteCommand, VoidExecuteError, VoidExecuteOutcome, VoidRenderError, void_execute_v1,
+    },
     void_flow::{
         VoidCandidateEnumerationError, VoidComposeError, VoidConfirmTransitionError,
-        VoidSessionBootstrapError,
+        VoidSessionBootstrapError, bootstrap_void_session, enumerate_void_candidates,
+        transition_to_confirm,
     },
     write_coordinator::{
         BootstrapWriteTarget, UncertainWriteRegistry, UncertainWriteState, WriteCoordinator,
@@ -3315,6 +3322,1192 @@ impl LedgerRouter {
             .map_err(discord_call_error(site))?;
         Ok(InteractionDispatch::Handled)
     }
+
+    /// /panel: post the operations panel with the 4 fixed launcher buttons. Panel
+    /// posts are direct responses (no defer) per criterion 178, and the body /
+    /// thread cue come straight from i18n + presentation, not from any per-channel
+    /// computation in the router.
+    async fn dispatch_panel_command(
+        &self,
+        ctx: &Context,
+        command: &CommandInteraction,
+    ) -> Result<InteractionDispatch, LedgerRouteError> {
+        let scope = self
+            .guard_scope(ctx, command.guild_id, command.channel_id, command)
+            .await?;
+        let locator_state = self.deps.locator.cached(scope.tracked_parent());
+        if let Some(state) = locator_state.as_ref() {
+            self.observe_blocked_locator_state(state);
+        }
+        let (body, components) =
+            match render_panel_post_message_for_locator_state(locator_state.as_ref(), false) {
+                Ok(rendered) => rendered,
+                Err(message) => message.into_parts(),
+            };
+        let response = CreateInteractionResponse::Message(
+            safe_interaction_response_message()
+                .content(body)
+                .components(components),
+        );
+        command
+            .create_response(&ctx.http, response)
+            .await
+            .map_err(discord_call_error(DiscordCallSite::PanelCreateResponse))?;
+        Ok(InteractionDispatch::Handled)
+    }
+
+    async fn dispatch_panel_expense_launcher(
+        &self,
+        ctx: &Context,
+        component: &ComponentInteraction,
+    ) -> Result<InteractionDispatch, LedgerRouteError> {
+        let scope = self
+            .guard_scope(ctx, component.guild_id, component.channel_id, component)
+            .await?;
+        if let Some(ledger_id) = self.blocked_expense_launcher_ledger(ctx, scope).await? {
+            let (message, components) =
+                self.uncertain_write_block_response(ledger_id, false, false);
+            return self
+                .reply_component_ephemeral_with_components(
+                    ctx,
+                    component,
+                    message,
+                    components,
+                    DiscordCallSite::ExpenseUncertainWriteReply,
+                )
+                .await;
+        }
+        let nonce = self.deps.nonce_provider.next_interaction_nonce();
+        self.store_expense_modal_submission(
+            nonce,
+            MemberId(component.user.id.get()),
+            scope.expense_draft_scope_id(),
+            ExpenseModalIntent::Create {
+                origin: ExpenseLaunchOrigin::PanelButton,
+            },
+        );
+        let response = build_expense_modal_response(
+            self.deps.clock.as_ref(),
+            nonce,
+            &ExpenseModalPrefill::default(),
+        )
+        .map_err(LedgerRouteError::from)?;
+        component
+            .create_response(&ctx.http, response)
+            .await
+            .map_err(discord_call_error(
+                DiscordCallSite::PanelExpenseLauncherCreateResponse,
+            ))?;
+        Ok(InteractionDispatch::Handled)
+    }
+
+    async fn dispatch_panel_review_launcher(
+        &self,
+        ctx: &Context,
+        component: &ComponentInteraction,
+    ) -> Result<InteractionDispatch, LedgerRouteError> {
+        let scope = self
+            .guard_scope(ctx, component.guild_id, component.channel_id, component)
+            .await?;
+        self.dispatch_review(
+            ctx,
+            scope,
+            DeferredEphemeralInteraction::Component(component),
+            ReadViewRoute::ReviewParent,
+        )
+        .await
+    }
+
+    async fn dispatch_panel_ledger_launcher(
+        &self,
+        ctx: &Context,
+        component: &ComponentInteraction,
+    ) -> Result<InteractionDispatch, LedgerRouteError> {
+        let scope = self
+            .guard_scope(ctx, component.guild_id, component.channel_id, component)
+            .await?;
+        self.dispatch_ledger(
+            ctx,
+            scope,
+            DeferredEphemeralInteraction::Component(component),
+            ReadViewRoute::LedgerPanel,
+        )
+        .await
+    }
+
+    async fn dispatch_panel_void_launcher(
+        &self,
+        ctx: &Context,
+        component: &ComponentInteraction,
+    ) -> Result<InteractionDispatch, LedgerRouteError> {
+        let scope = self
+            .guard_scope(ctx, component.guild_id, component.channel_id, component)
+            .await?;
+        self.dispatch_void(
+            ctx,
+            scope,
+            DeferredEphemeralInteraction::Component(component),
+        )
+        .await
+    }
+
+    async fn dispatch_ledger_command(
+        &self,
+        ctx: &Context,
+        command: &CommandInteraction,
+    ) -> Result<InteractionDispatch, LedgerRouteError> {
+        let scope = match self
+            .guard_scope(ctx, command.guild_id, command.channel_id, command)
+            .await
+        {
+            Ok(scope) => scope,
+            Err(LedgerRouteError::NotInTrackedChannel) => {
+                return Err(LedgerRouteError::NotInTrackedChannel);
+            }
+            Err(error) => return Err(error),
+        };
+        self.dispatch_ledger(
+            ctx,
+            scope,
+            DeferredEphemeralInteraction::Command(command),
+            ReadViewRoute::LedgerCommand,
+        )
+        .await
+    }
+
+    pub(super) async fn dispatch_ledger(
+        &self,
+        ctx: &Context,
+        scope: LedgerInteractionScope,
+        interaction: DeferredEphemeralInteraction<'_>,
+        route: ReadViewRoute,
+    ) -> Result<InteractionDispatch, LedgerRouteError> {
+        interaction
+            .defer(ctx, DiscordCallSite::LedgerDeferEphemeral)
+            .await?;
+        let Some(binding) = self.resolve_readable_ledger(ctx, scope).await? else {
+            let rendered = DiscordLedgerPresenter::render_read_view_page(
+                &build_ledger_empty_page_model(route, false),
+            )?;
+            let (body, components) = rendered_surface_to_message(rendered);
+            return interaction
+                .edit(ctx, body, components, DiscordCallSite::LedgerEditResponse)
+                .await;
+        };
+        let uncertain_write = self
+            .deps
+            .uncertain_writes
+            .current(binding.ledger_id())
+            .is_some();
+        let load = self
+            .load_verified_thread(ctx, binding, CanonicalLoadRoute::Read)
+            .await?;
+
+        let roster = self
+            .deps
+            .roster_fetcher
+            .fetch(ctx, scope.guild_id(), scope.channel_id())
+            .await?;
+        let labels = SurfaceMemberLabels::from_member_names(
+            roster
+                .display_names
+                .iter()
+                .map(|(member_id, name)| (*member_id, Some(name.as_str()))),
+        );
+
+        let views = project_verified_entries(&load).map_err(LedgerRouteError::from)?;
+
+        let pages = if views.is_empty() {
+            vec![build_ledger_empty_page_model(route, uncertain_write)]
+        } else {
+            let model = build_ledger_page_model(LedgerPageInputs {
+                route,
+                views: &views,
+                state: load.snapshot().projected().state(),
+                labels: &labels,
+                ledger_id: binding.ledger_id(),
+                uncertain_write,
+            })?;
+            paginate_read_view_model(model)
+        };
+
+        let nonce = self.deps.nonce_provider.next_interaction_nonce();
+        let actor_id = MemberId(interaction.user_id().get());
+        let session = ReadViewSession::new(
+            ReadViewSessionKey {
+                ledger_id: binding.ledger_id(),
+                actor_id,
+            },
+            nonce,
+            pages.clone(),
+            self.deps.clock.now(),
+        );
+        let total_pages = pages.len();
+        self.deps.read_view_sessions.replace(session);
+
+        let rendered = DiscordLedgerPresenter::render_read_view_page(&pages[0])
+            .map_err(LedgerRouteError::from)?;
+        let (body, mut components) = rendered_surface_to_message(rendered);
+        if total_pages > 1 {
+            components.push(read_view_navigation_row(nonce, 0, total_pages));
+        }
+
+        interaction
+            .edit(ctx, body, components, DiscordCallSite::LedgerEditResponse)
+            .await
+    }
+
+    async fn dispatch_review_command(
+        &self,
+        ctx: &Context,
+        command: &CommandInteraction,
+    ) -> Result<InteractionDispatch, LedgerRouteError> {
+        let scope = match self
+            .guard_scope(ctx, command.guild_id, command.channel_id, command)
+            .await
+        {
+            Ok(scope) => scope,
+            Err(LedgerRouteError::NotInTrackedChannel) => {
+                return Ok(InteractionDispatch::Ignored);
+            }
+            Err(error) => return Err(error),
+        };
+        if !scope.is_thread_interaction() {
+            return Ok(InteractionDispatch::Ignored);
+        }
+        self.dispatch_review(
+            ctx,
+            scope,
+            DeferredEphemeralInteraction::Command(command),
+            ReadViewRoute::ReviewThread,
+        )
+        .await
+    }
+
+    pub(super) async fn dispatch_review(
+        &self,
+        ctx: &Context,
+        scope: LedgerInteractionScope,
+        interaction: DeferredEphemeralInteraction<'_>,
+        route: ReadViewRoute,
+    ) -> Result<InteractionDispatch, LedgerRouteError> {
+        interaction
+            .defer(ctx, DiscordCallSite::ReviewDeferEphemeral)
+            .await?;
+        let Some(binding) = self.resolve_readable_ledger(ctx, scope).await? else {
+            let rendered = DiscordLedgerPresenter::render_read_view_page(
+                &build_review_empty_page_model(route, false, None),
+            )?;
+            let (body, components) = rendered_surface_to_message(rendered);
+            return interaction
+                .edit(ctx, body, components, DiscordCallSite::ReviewEditResponse)
+                .await;
+        };
+        let ledger_id = binding.ledger_id();
+        let uncertain_write = self.deps.uncertain_writes.current(ledger_id).is_some();
+        let load = self
+            .load_verified_thread(ctx, binding, CanonicalLoadRoute::Preview)
+            .await?;
+        let roster = self
+            .deps
+            .roster_fetcher
+            .fetch(ctx, scope.guild_id(), scope.channel_id())
+            .await?;
+        let labels = SurfaceMemberLabels::from_member_names(
+            roster
+                .display_names
+                .iter()
+                .map(|(member_id, name)| (*member_id, Some(name.as_str()))),
+        );
+        let views = project_verified_entries(&load).map_err(LedgerRouteError::from)?;
+
+        let mut stored_preview_instance_id = None;
+        let key = PreviewStoreKey::new(ledger_id, MemberId(interaction.user_id().get()));
+        let prior_preview_instance_id = self
+            .deps
+            .preview_store
+            .current(key)
+            .map(|state| state.preview_instance_id());
+
+        let pages = if views.is_empty() {
+            if let Some(preview_instance_id) = prior_preview_instance_id {
+                // Intentional swallow: ClearMatching only removes when the stored
+                // instance still matches; a mismatch means another interaction
+                // already replaced the preview and we must not touch it.
+                let _ = self.deps.preview_store.transition(
+                    key,
+                    PreviewStoreTransition::ClearMatching {
+                        preview_instance_id,
+                    },
+                );
+            }
+            vec![build_review_empty_page_model(route, uncertain_write, None)]
+        } else {
+            let actor_id = MemberId(interaction.user_id().get());
+            match compose_and_store_preview(
+                load.snapshot(),
+                ledger_id,
+                actor_id,
+                self.deps.planner.as_ref(),
+                self.deps.clock.as_ref(),
+                self.deps.nonce_provider.as_ref(),
+                self.deps.preview_store.as_ref(),
+            ) {
+                Err(error) => {
+                    if let Some(preview_instance_id) = prior_preview_instance_id {
+                        // Intentional swallow: see comment on the empty-views branch above.
+                        let _ = self.deps.preview_store.transition(
+                            key,
+                            PreviewStoreTransition::ClearMatching {
+                                preview_instance_id,
+                            },
+                        );
+                    }
+                    let message = match error {
+                        PreviewAttemptError::Store(PreviewStoreError::CommitInProgress {
+                            ..
+                        }) => uncertain_write_block_message(false, true),
+                        _ => i18n::review_render_failed_message().to_owned(),
+                    };
+                    return interaction
+                        .edit(
+                            ctx,
+                            message,
+                            Vec::new(),
+                            DiscordCallSite::ReviewEditResponse,
+                        )
+                        .await;
+                }
+                Ok(outcome) => match outcome {
+                    PreviewAttemptOutcome::NoTransfersNeeded => {
+                        if let Some(preview_instance_id) = prior_preview_instance_id {
+                            // Intentional swallow: see comment on the empty-views branch above.
+                            let _ = self.deps.preview_store.transition(
+                                key,
+                                PreviewStoreTransition::ClearMatching {
+                                    preview_instance_id,
+                                },
+                            );
+                        }
+                        vec![build_review_no_transfers_page_model(route, uncertain_write)]
+                    }
+                    PreviewAttemptOutcome::Stored {
+                        record,
+                        preview_instance_id,
+                    } => {
+                        stored_preview_instance_id = Some(preview_instance_id);
+                        let mut model = build_review_page_model(ReviewPageInputs {
+                            route,
+                            state: load.snapshot().projected().state(),
+                            previewed: record.previewed(),
+                            labels: &labels,
+                            uncertain_write,
+                            recovery_cta: RecoveryCta::ParentLink,
+                            recovery_url: None,
+                        });
+                        if prior_preview_instance_id.is_some() {
+                            model.route_guidance_lines =
+                                review_route_guidance_lines_with_replacement_notice(route);
+                        }
+                        paginate_read_view_model(model)
+                    }
+                },
+            }
+        };
+
+        let nonce = self.deps.nonce_provider.next_interaction_nonce();
+        let actor_id = MemberId(interaction.user_id().get());
+        self.deps.read_view_sessions.replace(ReadViewSession::new(
+            ReadViewSessionKey {
+                ledger_id,
+                actor_id,
+            },
+            nonce,
+            pages.clone(),
+            self.deps.clock.now(),
+        ));
+
+        let total_pages = pages.len();
+        let rendered = DiscordLedgerPresenter::render_read_view_page(&pages[0])
+            .map_err(LedgerRouteError::from)?;
+        let (body, mut components) = rendered_surface_to_message(rendered);
+        if total_pages > 1 {
+            components.push(read_view_navigation_row(nonce, 0, total_pages));
+        }
+        interaction
+            .edit(ctx, body, components, DiscordCallSite::ReviewEditResponse)
+            .await?;
+
+        if let Some(preview_instance_id) = stored_preview_instance_id {
+            mark_preview_delivered(self.deps.preview_store.as_ref(), key, preview_instance_id)?;
+        }
+
+        Ok(InteractionDispatch::Handled)
+    }
+
+    async fn dispatch_settle_command(
+        &self,
+        ctx: &Context,
+        command: &CommandInteraction,
+    ) -> Result<InteractionDispatch, LedgerRouteError> {
+        let scope = match self
+            .guard_scope(ctx, command.guild_id, command.channel_id, command)
+            .await
+        {
+            Ok(scope) => scope,
+            Err(LedgerRouteError::NotInTrackedChannel) => {
+                return Err(LedgerRouteError::NotInTrackedChannel);
+            }
+            Err(error) => return Err(error),
+        };
+        if !scope.is_thread_interaction() {
+            return Err(LedgerRouteError::SettleThreadOnly);
+        }
+
+        command
+            .defer_ephemeral(&ctx.http)
+            .await
+            .map_err(discord_call_error(DiscordCallSite::SettleDeferEphemeral))?;
+
+        let binding = self.resolve_existing_ledger(ctx, scope).await?;
+        let ledger_id = binding.ledger_id();
+        let actor_id = MemberId(command.user.id.get());
+
+        let roster = self
+            .deps
+            .roster_fetcher
+            .fetch(ctx, scope.guild_id(), scope.channel_id())
+            .await?;
+        let appender = RequestBoundCanonicalAppender {
+            ctx,
+            store: self.deps.canonical_store.as_ref(),
+            canonical_thread_id: binding.canonical_thread_id(),
+        };
+        let publisher = RequestBoundLocatorPublisher {
+            locator: self.deps.locator.as_ref(),
+            binding,
+        };
+        let reader = RequestBoundCanonicalReader {
+            ctx,
+            store: self.deps.canonical_store.as_ref(),
+            canonical_thread_id: binding.canonical_thread_id(),
+            ledger_id,
+            load_route_label: CanonicalLoadRoute::WritePrelude.label(),
+        };
+        let renderer = DiscordSettlementEntryRenderer {
+            display_names: &roster.display_names,
+        };
+        let outcome = settle_execute_v1(
+            &appender,
+            &publisher,
+            &reader,
+            &renderer,
+            self.deps.preview_store.as_ref(),
+            self.deps.uncertain_writes.as_ref(),
+            self.deps.write_coordinator.as_ref(),
+            self.deps.observability.as_ref(),
+            self.deps.clock.as_ref(),
+            SettleExecuteCommand {
+                ledger_id,
+                actor_id,
+                write_target: WriteTargetKey::Published(ledger_id),
+                source_descriptor: DiscordLedgerSourceDescriptor::settle_thread_v1(),
+            },
+        )
+        .await
+        .map_err(LedgerRouteError::from)?;
+
+        match outcome {
+            SettleExecuteOutcome::Recorded { .. } => {
+                self.edit_command_response(
+                    ctx,
+                    command,
+                    i18n::settlement_recorded_message(),
+                    DiscordCallSite::SettleEditResponse,
+                )
+                .await
+            }
+            SettleExecuteOutcome::NoPreviewRequired => {
+                self.edit_command_response(
+                    ctx,
+                    command,
+                    i18n::review_preview_required_message(),
+                    DiscordCallSite::SettleEditResponse,
+                )
+                .await
+            }
+            SettleExecuteOutcome::NoTransferNeeded => {
+                self.edit_command_response(
+                    ctx,
+                    command,
+                    i18n::settlement_no_transfer_message(),
+                    DiscordCallSite::SettleEditResponse,
+                )
+                .await
+            }
+            SettleExecuteOutcome::UncertainBlocked
+            | SettleExecuteOutcome::UncertainAppendFailed => {
+                let (message, components) =
+                    self.uncertain_write_block_response(ledger_id, false, true);
+                self.edit_command_response_with_components(
+                    ctx,
+                    command,
+                    message,
+                    components,
+                    DiscordCallSite::SettleEditResponse,
+                )
+                .await
+            }
+            SettleExecuteOutcome::AttemptFailed { error } => {
+                self.edit_command_response(
+                    ctx,
+                    command,
+                    settle_attempt_error_message(&error),
+                    DiscordCallSite::SettleEditResponse,
+                )
+                .await
+            }
+        }
+    }
+
+    pub(super) async fn dispatch_void_command(
+        &self,
+        ctx: &Context,
+        command: &CommandInteraction,
+    ) -> Result<InteractionDispatch, LedgerRouteError> {
+        let scope = match self
+            .guard_scope(ctx, command.guild_id, command.channel_id, command)
+            .await
+        {
+            Ok(scope) => scope,
+            Err(LedgerRouteError::NotInTrackedChannel) => {
+                return Err(LedgerRouteError::NotInTrackedChannel);
+            }
+            Err(error) => return Err(error),
+        };
+        self.dispatch_void(ctx, scope, DeferredEphemeralInteraction::Command(command))
+            .await
+    }
+
+    pub(super) async fn dispatch_void(
+        &self,
+        ctx: &Context,
+        scope: LedgerInteractionScope,
+        interaction: DeferredEphemeralInteraction<'_>,
+    ) -> Result<InteractionDispatch, LedgerRouteError> {
+        interaction
+            .defer(ctx, DiscordCallSite::VoidDeferEphemeral)
+            .await?;
+        let Some(binding) = self.resolve_readable_ledger(ctx, scope).await? else {
+            return self
+                .edit_initial_void_model(
+                    ctx,
+                    interaction,
+                    VoidSurfaceModel::empty(i18n::panel_void_button_label(), Vec::new(), true),
+                )
+                .await;
+        };
+        let ledger_id = binding.ledger_id();
+        if !self.clear_resolved_uncertain_write(ctx, binding).await {
+            let (message, components) =
+                self.uncertain_write_block_response(ledger_id, false, false);
+            return interaction
+                .edit(ctx, message, components, DiscordCallSite::VoidEditResponse)
+                .await;
+        }
+
+        let load = self
+            .load_verified_thread(ctx, binding, CanonicalLoadRoute::Read)
+            .await?;
+        if load.snapshot().canonical_entry_count() == 0 {
+            return self
+                .edit_initial_void_model(
+                    ctx,
+                    interaction,
+                    VoidSurfaceModel::empty(i18n::panel_void_button_label(), Vec::new(), true),
+                )
+                .await;
+        }
+
+        let actor_id = MemberId(interaction.user_id().get());
+        let key = VoidSessionKey::new(ledger_id, actor_id);
+        let (session, nonce, candidates) = match bootstrap_void_session(
+            key,
+            &load,
+            self.deps.clock.as_ref(),
+            self.deps.nonce_provider.as_ref(),
+        ) {
+            Ok(outcome) => outcome,
+            Err(VoidSessionBootstrapError::NoVoidableCandidates) => {
+                return self
+                    .edit_initial_void_model(
+                        ctx,
+                        interaction,
+                        VoidSurfaceModel::no_candidates(
+                            i18n::panel_void_button_label(),
+                            Vec::new(),
+                            true,
+                        ),
+                    )
+                    .await;
+            }
+            Err(error) => return Err(error.into()),
+        };
+
+        let roster = self
+            .deps
+            .roster_fetcher
+            .fetch(ctx, scope.guild_id(), scope.channel_id())
+            .await?;
+        let labels = SurfaceMemberLabels::from_member_names(
+            roster
+                .display_names
+                .iter()
+                .map(|(member_id, name)| (*member_id, Some(name.as_str()))),
+        );
+        let rows = void_candidate_rows(&candidates, &labels, ledger_id)?;
+        let action_rows = void_selection_action_rows(nonce, &candidates, &labels);
+        let replaced = self
+            .deps
+            .void_sessions
+            .has_active_session(key, self.deps.clock.now());
+        self.deps.void_sessions.replace(session);
+        let mut model =
+            VoidSurfaceModel::selection(i18n::panel_void_button_label(), rows, action_rows, true);
+        if replaced {
+            model
+                .phase_copy
+                .insert(0, i18n::void_session_replaced_message().to_owned());
+        }
+        self.edit_initial_void_model(ctx, interaction, model).await
+    }
+
+    async fn dispatch_void_pick(
+        &self,
+        ctx: &Context,
+        component: &ComponentInteraction,
+        nonce: walicord_application::InteractionNonce,
+    ) -> Result<InteractionDispatch, LedgerRouteError> {
+        let scope = self
+            .guard_scope(ctx, component.guild_id, component.channel_id, component)
+            .await?;
+        let binding = self.resolve_existing_ledger(ctx, scope).await?;
+        let ledger_id = binding.ledger_id();
+        let key = VoidSessionKey::new(ledger_id, MemberId(component.user.id.get()));
+        let Some(session) = self
+            .void_session_or_stale_update(ctx, component, key, nonce)
+            .await?
+        else {
+            return Ok(InteractionDispatch::Handled);
+        };
+        let Some(target_entry_id) = selected_void_target(component) else {
+            return self
+                .refresh_void_selection(
+                    ctx,
+                    component,
+                    scope.guild_id(),
+                    scope.channel_id(),
+                    binding.canonical_thread_id(),
+                    ledger_id,
+                    session,
+                    VoidSelectionRenderKind::MissingSelection,
+                )
+                .await;
+        };
+
+        let load = self
+            .load_verified_thread(ctx, binding, CanonicalLoadRoute::Read)
+            .await?;
+        let candidates = enumerate_void_candidates(&load)?;
+        match transition_to_confirm(
+            session.clone(),
+            target_entry_id,
+            &candidates,
+            self.deps.clock.as_ref(),
+        ) {
+            Ok(next_session) => {
+                let roster = self
+                    .deps
+                    .roster_fetcher
+                    .fetch(ctx, scope.guild_id(), scope.channel_id())
+                    .await?;
+                let labels = SurfaceMemberLabels::from_member_names(
+                    roster
+                        .display_names
+                        .iter()
+                        .map(|(member_id, name)| (*member_id, Some(name.as_str()))),
+                );
+                let target = candidates
+                    .iter()
+                    .find(|view| view.entry().id == target_entry_id)
+                    .expect("transition_to_confirm verified target is present");
+                let model =
+                    void_confirmation_model(target, &labels, ledger_id, next_session.nonce())?;
+                self.deps.void_sessions.replace(next_session);
+                self.update_component_with_void_model(ctx, component, model)
+                    .await
+            }
+            Err(VoidConfirmTransitionError::CandidateNotFound { .. }) => {
+                self.refresh_void_selection(
+                    ctx,
+                    component,
+                    scope.guild_id(),
+                    scope.channel_id(),
+                    binding.canonical_thread_id(),
+                    ledger_id,
+                    session,
+                    VoidSelectionRenderKind::StaleTarget(
+                        VoidRetargetReason::ExcludedFromCandidates,
+                    ),
+                )
+                .await
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    async fn dispatch_void_reselect(
+        &self,
+        ctx: &Context,
+        component: &ComponentInteraction,
+        nonce: walicord_application::InteractionNonce,
+    ) -> Result<InteractionDispatch, LedgerRouteError> {
+        let scope = self
+            .guard_scope(ctx, component.guild_id, component.channel_id, component)
+            .await?;
+        let binding = self.resolve_existing_ledger(ctx, scope).await?;
+        let key = VoidSessionKey::new(binding.ledger_id(), MemberId(component.user.id.get()));
+        let Some(session) = self
+            .void_session_or_stale_update(ctx, component, key, nonce)
+            .await?
+        else {
+            return Ok(InteractionDispatch::Handled);
+        };
+        self.refresh_void_selection(
+            ctx,
+            component,
+            scope.guild_id(),
+            scope.channel_id(),
+            binding.canonical_thread_id(),
+            binding.ledger_id(),
+            session,
+            VoidSelectionRenderKind::Normal,
+        )
+        .await
+    }
+
+    async fn dispatch_void_cancel(
+        &self,
+        ctx: &Context,
+        component: &ComponentInteraction,
+        nonce: walicord_application::InteractionNonce,
+    ) -> Result<InteractionDispatch, LedgerRouteError> {
+        let scope = self
+            .guard_scope(ctx, component.guild_id, component.channel_id, component)
+            .await?;
+        let binding = self.resolve_existing_ledger(ctx, scope).await?;
+        let key = VoidSessionKey::new(binding.ledger_id(), MemberId(component.user.id.get()));
+        let Some(_session) = self
+            .void_session_or_stale_update(ctx, component, key, nonce)
+            .await?
+        else {
+            return Ok(InteractionDispatch::Handled);
+        };
+        self.deps.void_sessions.clear(key);
+        self.update_component_message(
+            ctx,
+            component,
+            i18n::void_cancelled_message(),
+            Vec::new(),
+            DiscordCallSite::VoidUpdateResponse,
+        )
+        .await
+    }
+
+    async fn dispatch_void_confirm(
+        &self,
+        ctx: &Context,
+        component: &ComponentInteraction,
+        nonce: walicord_application::InteractionNonce,
+    ) -> Result<InteractionDispatch, LedgerRouteError> {
+        let scope = self
+            .guard_scope(ctx, component.guild_id, component.channel_id, component)
+            .await?;
+        let binding = self.resolve_existing_ledger(ctx, scope).await?;
+        let ledger_id = binding.ledger_id();
+        let actor_id = MemberId(component.user.id.get());
+        let key = VoidSessionKey::new(ledger_id, actor_id);
+        let Some(session) = self
+            .void_session_or_stale_update(ctx, component, key, nonce)
+            .await?
+        else {
+            return Ok(InteractionDispatch::Handled);
+        };
+        if !matches!(session.stage(), VoidSessionStage::Confirming) {
+            return self
+                .reply_component_ephemeral(
+                    ctx,
+                    component,
+                    i18n::void_wrong_stage_copy(),
+                    DiscordCallSite::VoidUpdateResponse,
+                )
+                .await;
+        }
+
+        component
+            .defer(&ctx.http)
+            .await
+            .map_err(discord_call_error(DiscordCallSite::VoidDeferComponent))?;
+
+        let roster = self
+            .deps
+            .roster_fetcher
+            .fetch(ctx, scope.guild_id(), scope.channel_id())
+            .await?;
+        let labels = SurfaceMemberLabels::from_member_names(
+            roster
+                .display_names
+                .iter()
+                .map(|(member_id, name)| (*member_id, Some(name.as_str()))),
+        );
+
+        let appender = RequestBoundCanonicalAppender {
+            ctx,
+            store: self.deps.canonical_store.as_ref(),
+            canonical_thread_id: binding.canonical_thread_id(),
+        };
+        let publisher = RequestBoundLocatorPublisher {
+            locator: self.deps.locator.as_ref(),
+            binding,
+        };
+        let reader = RequestBoundCanonicalReader {
+            ctx,
+            store: self.deps.canonical_store.as_ref(),
+            canonical_thread_id: binding.canonical_thread_id(),
+            ledger_id,
+            load_route_label: CanonicalLoadRoute::WritePrelude.label(),
+        };
+        let renderer = DiscordVoidEntryRenderer { labels: &labels };
+        let outcome = void_execute_v1(
+            &appender,
+            &publisher,
+            &reader,
+            &renderer,
+            self.deps.void_sessions.as_ref(),
+            self.deps.uncertain_writes.as_ref(),
+            self.deps.write_coordinator.as_ref(),
+            self.deps.observability.as_ref(),
+            self.deps.clock.as_ref(),
+            VoidExecuteCommand {
+                session: &session,
+                session_key: key,
+                ledger_id,
+                actor_id,
+                write_target: WriteTargetKey::Published(ledger_id),
+                source_descriptor: DiscordLedgerSourceDescriptor::void_parent_v1(),
+            },
+        )
+        .await
+        .map_err(LedgerRouteError::from)?;
+
+        match outcome {
+            VoidExecuteOutcome::Recorded { .. } => {
+                self.edit_component_with_void_model(
+                    ctx,
+                    component,
+                    VoidSurfaceModel::success(
+                        i18n::void_success_title(),
+                        format!("<#{}>", binding.canonical_thread_id().get()),
+                        Vec::new(),
+                        true,
+                    ),
+                )
+                .await
+            }
+            VoidExecuteOutcome::TargetGone => {
+                self.edit_component_response(
+                    ctx,
+                    component,
+                    i18n::void_target_updated_message(),
+                    DiscordCallSite::VoidEditResponse,
+                )
+                .await
+            }
+            VoidExecuteOutcome::UncertainBlocked | VoidExecuteOutcome::UncertainAppendFailed => {
+                let (message, components) =
+                    self.uncertain_write_block_response(ledger_id, true, false);
+                self.edit_component_response_with_components(
+                    ctx,
+                    component,
+                    message,
+                    components,
+                    DiscordCallSite::VoidEditResponse,
+                )
+                .await
+            }
+        }
+    }
+
+    async fn edit_initial_void_model(
+        &self,
+        ctx: &Context,
+        interaction: DeferredEphemeralInteraction<'_>,
+        model: VoidSurfaceModel,
+    ) -> Result<InteractionDispatch, LedgerRouteError> {
+        let rendered =
+            DiscordLedgerPresenter::render_void_flow(&model).map_err(LedgerRouteError::from)?;
+        let (body, components) = rendered_surface_to_message(rendered);
+        interaction
+            .edit(ctx, body, components, DiscordCallSite::VoidEditResponse)
+            .await
+    }
+
+    async fn update_component_with_void_model(
+        &self,
+        ctx: &Context,
+        component: &ComponentInteraction,
+        model: VoidSurfaceModel,
+    ) -> Result<InteractionDispatch, LedgerRouteError> {
+        let rendered =
+            DiscordLedgerPresenter::render_void_flow(&model).map_err(LedgerRouteError::from)?;
+        let (body, components) = rendered_surface_to_message(rendered);
+        self.update_component_message(
+            ctx,
+            component,
+            body,
+            components,
+            DiscordCallSite::VoidUpdateResponse,
+        )
+        .await
+    }
+
+    async fn edit_component_with_void_model(
+        &self,
+        ctx: &Context,
+        component: &ComponentInteraction,
+        model: VoidSurfaceModel,
+    ) -> Result<InteractionDispatch, LedgerRouteError> {
+        let rendered =
+            DiscordLedgerPresenter::render_void_flow(&model).map_err(LedgerRouteError::from)?;
+        let (body, components) = rendered_surface_to_message(rendered);
+        component
+            .edit_response(
+                &ctx.http,
+                safe_edit_interaction_response()
+                    .content(body)
+                    .components(components),
+            )
+            .await
+            .map_err(discord_call_error(DiscordCallSite::VoidEditResponse))?;
+        Ok(InteractionDispatch::Handled)
+    }
+
+    async fn void_session_or_stale_update(
+        &self,
+        ctx: &Context,
+        component: &ComponentInteraction,
+        key: VoidSessionKey,
+        nonce: walicord_application::InteractionNonce,
+    ) -> Result<Option<VoidSession>, LedgerRouteError> {
+        let now = self.deps.clock.now();
+        match self.deps.void_sessions.access(key, nonce, now) {
+            Ok(Some(session)) => Ok(Some(session)),
+            Ok(None) | Err(SessionAccessError::Expired | SessionAccessError::Superseded { .. }) => {
+                let owner =
+                    self.deps
+                        .void_sessions
+                        .active_owner_by_nonce(key.ledger_id(), nonce, now);
+                if owner.is_some() && owner != Some(key.actor_id()) {
+                    self.reply_component_ephemeral(
+                        ctx,
+                        component,
+                        i18n::void_session_wrong_actor_message(),
+                        DiscordCallSite::VoidEditResponse,
+                    )
+                    .await?;
+                } else {
+                    self.update_component_with_void_model(
+                        ctx,
+                        component,
+                        VoidSurfaceModel::stale_page(
+                            i18n::panel_void_button_label(),
+                            RecoveryCta::None,
+                            None,
+                            false,
+                            Vec::new(),
+                            true,
+                        ),
+                    )
+                    .await?;
+                }
+                Ok(None)
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn refresh_void_selection(
+        &self,
+        ctx: &Context,
+        component: &ComponentInteraction,
+        guild_id: GuildId,
+        tracked_parent_channel_id: ChannelId,
+        canonical_thread_id: ChannelId,
+        ledger_id: LedgerId,
+        session: VoidSession,
+        render_kind: VoidSelectionRenderKind,
+    ) -> Result<InteractionDispatch, LedgerRouteError> {
+        let binding = CanonicalThreadBinding::new(
+            TrackedParentKey::from_guarded_parent(guild_id, tracked_parent_channel_id),
+            canonical_thread_id,
+        );
+        let load = self
+            .load_verified_thread(ctx, binding, CanonicalLoadRoute::Read)
+            .await?;
+        let candidates = enumerate_void_candidates(&load)?;
+        if candidates.is_empty() {
+            self.deps.void_sessions.clear(session.key());
+            return self
+                .update_component_with_void_model(
+                    ctx,
+                    component,
+                    VoidSurfaceModel::no_candidates(
+                        i18n::panel_void_button_label(),
+                        Vec::new(),
+                        true,
+                    ),
+                )
+                .await;
+        }
+        let roster = self
+            .deps
+            .roster_fetcher
+            .fetch(ctx, guild_id, tracked_parent_channel_id)
+            .await?;
+        let labels = SurfaceMemberLabels::from_member_names(
+            roster
+                .display_names
+                .iter()
+                .map(|(member_id, name)| (*member_id, Some(name.as_str()))),
+        );
+        let refreshed = VoidSession::new(
+            session.key(),
+            VoidSessionStage::SelectingCandidate,
+            None,
+            session.nonce(),
+            self.deps.clock.now(),
+        )
+        .expect("selecting void session has no required selection");
+        let rows = void_candidate_rows(&candidates, &labels, ledger_id)?;
+        let action_rows = void_selection_action_rows(session.nonce(), &candidates, &labels);
+        self.deps.void_sessions.replace(refreshed);
+        let model = match render_kind {
+            VoidSelectionRenderKind::Normal => VoidSurfaceModel::selection(
+                i18n::panel_void_button_label(),
+                rows,
+                action_rows,
+                true,
+            ),
+            VoidSelectionRenderKind::MissingSelection => VoidSurfaceModel::missing_selection(
+                i18n::panel_void_button_label(),
+                rows,
+                action_rows,
+                true,
+            ),
+            VoidSelectionRenderKind::StaleTarget(reason) => VoidSurfaceModel::stale_target(
+                i18n::panel_void_button_label(),
+                reason,
+                rows,
+                action_rows,
+                true,
+            ),
+        };
+        self.update_component_with_void_model(ctx, component, model)
+            .await
+    }
+
+    async fn dispatch_read_view_navigate(
+        &self,
+        ctx: &Context,
+        component: &ComponentInteraction,
+        nonce: walicord_application::InteractionNonce,
+        direction: ReadViewNavigation,
+    ) -> Result<InteractionDispatch, LedgerRouteError> {
+        let scope = self
+            .guard_scope(ctx, component.guild_id, component.channel_id, component)
+            .await?;
+        let binding = self.resolve_existing_ledger(ctx, scope).await?;
+        let actor_id = MemberId(component.user.id.get());
+
+        let key = ReadViewSessionKey {
+            ledger_id: binding.ledger_id(),
+            actor_id,
+        };
+        let now = self.deps.clock.now();
+        let session_opt = self
+            .deps
+            .read_view_sessions
+            .access(key, nonce, now)
+            .unwrap_or_default();
+        let Some(mut session) = session_opt else {
+            return self
+                .reply_component_ephemeral(
+                    ctx,
+                    component,
+                    i18n::stale_interaction_message(),
+                    DiscordCallSite::ReadViewNavUpdateResponse,
+                )
+                .await;
+        };
+
+        let _moved = match direction {
+            ReadViewNavigation::Previous => session.retreat(now),
+            ReadViewNavigation::Next => session.advance(now),
+        };
+        let index = session.current_index();
+        let total_pages = session.page_count();
+        let rendered = DiscordLedgerPresenter::render_read_view_page(session.current_page())
+            .map_err(LedgerRouteError::from)?;
+        let (body, mut components) = rendered_surface_to_message(rendered);
+        if total_pages > 1 {
+            components.push(read_view_navigation_row(nonce, index, total_pages));
+        }
+        self.deps.read_view_sessions.replace(session);
+
+        component
+            .create_response(
+                &ctx.http,
+                CreateInteractionResponse::UpdateMessage(
+                    safe_interaction_response_message()
+                        .content(body)
+                        .components(components),
+                ),
+            )
+            .await
+            .map_err(discord_call_error(
+                DiscordCallSite::ReadViewNavUpdateResponse,
+            ))?;
+        Ok(InteractionDispatch::Handled)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PanelLauncher {
+    Expense,
+    Review,
+    Ledger,
+    Void,
+}
+
+fn panel_launcher(custom_id: &str) -> Option<PanelLauncher> {
+    match custom_id {
+        LEDGER_PANEL_EXPENSE_ID => Some(PanelLauncher::Expense),
+        LEDGER_PANEL_REVIEW_ID => Some(PanelLauncher::Review),
+        LEDGER_PANEL_LEDGER_ID => Some(PanelLauncher::Ledger),
+        LEDGER_PANEL_VOID_ID => Some(PanelLauncher::Void),
+        _ => None,
+    }
 }
 
 /// Discord-call failures need both a static `DiscordCallSite` (known at the call
@@ -3350,6 +4543,35 @@ pub(crate) const VOID_PICK_CUSTOM_ID_PREFIX: &str = "ledger:void:pick:";
 pub(crate) const VOID_CONFIRM_CUSTOM_ID_PREFIX: &str = "ledger:void:confirm:";
 pub(crate) const VOID_RESELECT_CUSTOM_ID_PREFIX: &str = "ledger:void:reselect:";
 pub(crate) const VOID_CANCEL_CUSTOM_ID_PREFIX: &str = "ledger:void:cancel:";
+
+fn settle_attempt_error_message(error: &SettleAttemptError) -> &'static str {
+    match error {
+        SettleAttemptError::NoPreviewStored => i18n::review_preview_required_message(),
+        SettleAttemptError::StaleHead { .. } | SettleAttemptError::Expired { .. } => {
+            i18n::stale_settlement_preview_message()
+        }
+        SettleAttemptError::Record(
+            walicord_application::ledger::SettlementRecordError::PreviewNotDelivered,
+        ) => i18n::settlement_preview_not_delivered_message(),
+        SettleAttemptError::Store(PreviewStoreError::CommitInProgress { .. }) => {
+            i18n::uncertain_write_block_message()
+        }
+        SettleAttemptError::Store(_)
+        | SettleAttemptError::Record(_)
+        | SettleAttemptError::EnvelopeEncode(_) => i18n::settlement_confirmation_failed_message(),
+    }
+}
+
+fn review_route_guidance_lines_with_replacement_notice(route: ReadViewRoute) -> Vec<String> {
+    let mut lines = vec![
+        i18n::settlement_preview_replaced_message().to_owned(),
+        i18n::route_task_guidance().to_owned(),
+    ];
+    if matches!(route, ReadViewRoute::ReviewParent) {
+        lines.push(i18n::parent_preview_entry_guidance().to_owned());
+    }
+    lines
+}
 
 pub(super) fn read_view_navigation_row(
     nonce: walicord_application::InteractionNonce,
