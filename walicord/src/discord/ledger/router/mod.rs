@@ -322,6 +322,10 @@ impl LedgerRouteError {
             Self::Internal(_) => i18n::ledger_thread_prepare_failed_message(),
         }
     }
+
+    pub fn is_internal_failure(&self) -> bool {
+        matches!(self, Self::Internal(_))
+    }
 }
 
 /// Closed enumeration of every internal failure the router can encounter. Each variant

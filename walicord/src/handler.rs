@@ -951,7 +951,11 @@ where
         Some(match result {
             Ok(dispatch) => dispatch,
             Err(error) => {
-                tracing::error!(error = %error, "ledger router dispatch failed");
+                if error.is_internal_failure() {
+                    tracing::error!(error = %error, "ledger router internal failure");
+                } else {
+                    tracing::warn!(error = %error, "ledger router guard rejected interaction");
+                }
                 self.respond_to_ledger_router_error(ctx, interaction, error.user_message())
                     .await;
                 crate::discord::ledger::InteractionDispatch::Handled
