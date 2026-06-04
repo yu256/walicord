@@ -485,11 +485,12 @@ pub async fn resolve_uncertain_write_v1(
             reader.scan_recent().await
         }
     };
-    let Ok((head_hash, probes)) = tokio::try_join!(reader.load_verified_head_hash(), scan_future)
-    else {
+    let Ok((head, probes)) = tokio::try_join!(reader.load_ledger_head(), scan_future) else {
         return false;
     };
-    let observed_head = head_hash.unwrap_or_else(|| ledger_chain_genesis_sha256_v1(ledger_id));
+    let observed_head = head
+        .head_hash
+        .unwrap_or_else(|| ledger_chain_genesis_sha256_v1(ledger_id));
 
     let scan = UncertainWriteRegistry::scan_for_exact_envelope(
         &retained,

@@ -57,7 +57,7 @@ mod settle;
 mod void;
 #[cfg(test)]
 use self::void::void_confirmation_total_amount;
-use canonical_message::render_public_expense_message;
+use canonical_message::DiscordExpenseEntryRenderer;
 #[cfg(test)]
 use expense_picker::expense_picker_custom_id;
 use expense_picker::{
@@ -111,6 +111,7 @@ use super::{
 };
 
 use walicord_application::ledger::{
+    canonical_read::CanonicalReadError,
     canonical_write::{CommitOrchestrationError, CommitOutcome, commit_authoritative_v1},
     expense_flow::{
         ConfirmationBuildError, NavigationError, apply_modified_basic_info,
@@ -120,13 +121,14 @@ use walicord_application::ledger::{
         toggle_members_group,
     },
     expense_modal::{ExpenseModalValidationError, validate_expense_modal_submission},
-    expense_write::{
-        ExpenseWriteOrchestrationError, RecordTimeOutcome, RecordableExpenseEntry,
-        build_canonical_envelope, compose_expense_entry,
-    },
+    expense_write::ExpenseWriteOrchestrationError,
     preview_store::{PreviewStore, PreviewStoreError, PreviewStoreKey},
     projection::NextLedgerEntryIdError,
     read_view_session::{ReadViewSessionKey, ReadViewSessionStore},
+    record_expense::{
+        ExpenseRenderError, RecordExpenseCommand, RecordExpenseError, RecordExpenseOutcome,
+        record_expense_v1,
+    },
     settle_flow::{PreviewAttemptError, SettleAttemptError},
     void_flow::{
         VoidCandidateEnumerationError, VoidComposeError, VoidConfirmTransitionError,
@@ -379,6 +381,10 @@ pub enum InternalLedgerRouteError {
     VoidSessionAccess(#[from] SessionAccessError),
     #[error("uncertain write already live for ledger {ledger_id:?}")]
     UncertainWriteAlreadyLive { ledger_id: LedgerId },
+    #[error("canonical read: {0}")]
+    CanonicalRead(#[source] CanonicalReadError),
+    #[error("expense canonical body render: {0}")]
+    ExpenseRender(#[source] ExpenseRenderError),
     #[error("expense modal submission missing required fields")]
     ModalSubmissionMissingFields,
     #[error("expense navigation landed on non-selection stage: {observed_stage:?}")]
@@ -540,6 +546,29 @@ impl From<CommitOrchestrationError> for LedgerRouteError {
             CommitOrchestrationError::UncertainWriteAlreadyLive { ledger_id, .. } => {
                 Self::Internal(InternalLedgerRouteError::UncertainWriteAlreadyLive { ledger_id })
             }
+        }
+    }
+}
+
+impl From<CanonicalReadError> for LedgerRouteError {
+    fn from(error: CanonicalReadError) -> Self {
+        Self::Internal(InternalLedgerRouteError::CanonicalRead(error))
+    }
+}
+
+impl From<ExpenseRenderError> for LedgerRouteError {
+    fn from(error: ExpenseRenderError) -> Self {
+        Self::Internal(InternalLedgerRouteError::ExpenseRender(error))
+    }
+}
+
+impl From<RecordExpenseError> for LedgerRouteError {
+    fn from(error: RecordExpenseError) -> Self {
+        match error {
+            RecordExpenseError::Compose(inner) => inner.into(),
+            RecordExpenseError::Read(inner) => inner.into(),
+            RecordExpenseError::Render(inner) => inner.into(),
+            RecordExpenseError::Commit(inner) => inner.into(),
         }
     }
 }
@@ -1695,69 +1724,65 @@ impl LedgerRouter {
         let ledger_id = binding.ledger_id();
         let write_target = WriteTargetKey::Published(ledger_id);
 
-        // Pre-lock fast bail: avoid taking the per-ledger lock when uncertain_write
-        // is already unresolvable. Cheap when no retain exists (DashMap read only).
-        if !self.clear_resolved_uncertain_write(ctx, binding).await {
-            let (message, components) = self.uncertain_write_block_response(ledger_id, true, false);
-            return self
-                .reply_component_ephemeral_with_components(
-                    ctx,
-                    component,
-                    message,
-                    components,
-                    DiscordCallSite::ExpenseUncertainWriteReply,
-                )
-                .await;
-        }
+        // Roster lives on Discord guild state independent of the canonical
+        // ledger, so fetching outside the per-ledger lock keeps the same
+        // semantics — record_expense_v1 still drift-detects against this
+        // snapshot at compose time (criterion 81 / 111).
+        let roster_snapshot = self
+            .deps
+            .roster_fetcher
+            .fetch(ctx, guild_id, channel_id)
+            .await?;
 
-        // Per-ledger serialization (criterion 53 / 115 / 155 / 182): every canonical
-        // append for this ledger holds the same async mutex for its whole lifecycle.
-        let lock = self.deps.write_coordinator.lock_for(write_target);
-        let _guard = lock.lock().await;
-        // Post-lock recheck: another writer may have set a fresh uncertain_write
-        // between the pre-lock check and acquiring the lock; revalidate inside the
-        // critical section before committing to set_live / append.
-        if !self.clear_resolved_uncertain_write(ctx, binding).await {
-            let (message, components) = self.uncertain_write_block_response(ledger_id, true, false);
-            return self
-                .reply_component_ephemeral_with_components(
-                    ctx,
-                    component,
-                    message,
-                    components,
-                    DiscordCallSite::ExpenseUncertainWriteReply,
-                )
-                .await;
-        }
-
-        let load_future = self.load_verified_thread(ctx, binding, CanonicalLoadRoute::WritePrelude);
-        let roster_future = self.deps.roster_fetcher.fetch(ctx, guild_id, channel_id);
-        let (load_result, roster_result) = tokio::join!(load_future, roster_future);
-        let snapshot_load = load_result?;
-        let roster_snapshot = roster_result?;
-
-        let next_entry_id = snapshot_load.next_entry_id()?;
-        let previous_hash = snapshot_load
-            .snapshot()
-            .current_head_hash()
-            .unwrap_or_else(|| {
-                walicord_application::ledger::ledger_chain_genesis_sha256_v1(ledger_id)
-            });
-        let outcome = compose_expense_entry(
-            claim.session(),
-            &roster_snapshot.roster,
-            next_entry_id,
-            expense_source_descriptor(claim.session().origin()),
-            actor_id,
+        let appender = RequestBoundCanonicalAppender {
+            ctx,
+            store: self.deps.canonical_store.as_ref(),
+            canonical_thread_id: binding.canonical_thread_id(),
+        };
+        let publisher = RequestBoundLocatorPublisher {
+            locator: self.deps.locator.as_ref(),
+            binding,
+        };
+        let reader = RequestBoundCanonicalReader {
+            ctx,
+            store: self.deps.canonical_store.as_ref(),
+            canonical_thread_id: binding.canonical_thread_id(),
+            ledger_id,
+            load_route_label: CanonicalLoadRoute::WritePrelude.label(),
+        };
+        let renderer = DiscordExpenseEntryRenderer {
+            display_names: &roster_snapshot.display_names,
+        };
+        let outcome = record_expense_v1(
+            &appender,
+            &publisher,
+            &reader,
+            &renderer,
+            self.deps.uncertain_writes.as_ref(),
+            self.deps.write_coordinator.as_ref(),
+            self.deps.observability.as_ref(),
             self.deps.clock.as_ref(),
-        )?;
+            RecordExpenseCommand {
+                session: claim.session(),
+                roster: &roster_snapshot.roster,
+                source_descriptor: expense_source_descriptor(claim.session().origin()),
+                actor_id,
+                ledger_id,
+                write_target,
+            },
+        )
+        .await
+        .map_err(LedgerRouteError::from)?;
 
         match outcome {
-            RecordTimeOutcome::DriftDetected {
+            RecordExpenseOutcome::Recorded { .. } => {
+                claim.discard();
+                self.respond_record_success(ctx, component).await
+            }
+            RecordExpenseOutcome::DriftDetected {
                 drift,
                 refreshed,
                 defaulted_members,
-                dropped_overrides: _,
             } => {
                 let session = claim.session().clone();
                 self.refresh_confirmation_for_drift(
@@ -1772,16 +1797,16 @@ impl LedgerRouter {
                 )
                 .await
             }
-            RecordTimeOutcome::Ready { entry, .. } => {
-                self.commit_recorded_entry(
+            RecordExpenseOutcome::UncertainBlocked
+            | RecordExpenseOutcome::UncertainAppendFailed => {
+                let (message, components) =
+                    self.uncertain_write_block_response(ledger_id, true, false);
+                self.reply_component_ephemeral_with_components(
                     ctx,
                     component,
-                    &mut claim,
-                    write_target,
-                    binding,
-                    previous_hash,
-                    entry,
-                    &roster_snapshot.display_names,
+                    message,
+                    components,
+                    DiscordCallSite::ExpenseUncertainWriteReply,
                 )
                 .await
             }
@@ -1852,57 +1877,6 @@ impl LedgerRouter {
             ))?;
         claim.replace(refreshed_session);
         Ok(InteractionDispatch::Handled)
-    }
-
-    /// Build the canonical envelope + attachment, register the retain (set_live), post
-    /// via `append_authoritative`, then clear the retain on a verified read-back.
-    /// Any failure between `set_live` and `clear` leaves the retain Live so lazy retry
-    /// (criterion 217 / 279) can later determine whether the post landed.
-    #[allow(clippy::too_many_arguments)]
-    async fn commit_recorded_entry(
-        &self,
-        ctx: &Context,
-        component: &ComponentInteraction,
-        claim: &mut ExpenseSessionClaim<'_>,
-        write_target: WriteTargetKey,
-        binding: CanonicalThreadBinding,
-        previous_hash: walicord_application::ledger::EntryHash,
-        entry: RecordableExpenseEntry,
-        display_names: &HashMap<MemberId, smol_str::SmolStr>,
-    ) -> Result<InteractionDispatch, LedgerRouteError> {
-        let ledger_id = binding.ledger_id();
-        let envelope: UnverifiedLedgerStoreEnvelope<()> =
-            build_canonical_envelope(ledger_id, previous_hash, entry.entry().clone())?;
-
-        let rendered_message = render_public_expense_message(&entry, ledger_id, display_names)?;
-        match self
-            .commit_canonical_authoritative(
-                ctx,
-                write_target,
-                binding,
-                entry.entry(),
-                &envelope,
-                &rendered_message,
-            )
-            .await?
-        {
-            CommitOutcome::Recorded => {
-                claim.discard();
-                self.respond_record_success(ctx, component).await
-            }
-            CommitOutcome::UncertainAppendFailed => {
-                let (message, components) =
-                    self.uncertain_write_block_response(ledger_id, true, false);
-                self.reply_component_ephemeral_with_components(
-                    ctx,
-                    component,
-                    message,
-                    components,
-                    DiscordCallSite::ExpenseUncertainWriteReply,
-                )
-                .await
-            }
-        }
     }
 
     /// Shared write-path orchestration: freeze the retain payload via `set_live`, hand

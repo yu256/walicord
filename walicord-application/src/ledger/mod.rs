@@ -17,6 +17,7 @@ pub mod preview_store;
 pub mod projection;
 pub mod read_singleflight;
 pub mod read_view_session;
+pub mod record_expense;
 mod seal;
 pub mod settle_flow;
 pub mod void_flow;

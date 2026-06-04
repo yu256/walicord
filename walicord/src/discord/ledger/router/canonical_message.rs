@@ -7,8 +7,11 @@
 use std::collections::HashMap;
 
 use walicord_application::ledger::{
-    LedgerEntry, LedgerId, MemberAmount, expense_flow::ConfirmationBuildError,
-    expense_write::RecordableExpenseEntry, projection::VerifiedLedgerEntryView,
+    LedgerEntry, LedgerId, MemberAmount,
+    expense_flow::ConfirmationBuildError,
+    expense_write::RecordableExpenseEntry,
+    projection::VerifiedLedgerEntryView,
+    record_expense::{ExpenseEntryRenderer, ExpenseRenderError},
     settle_flow::RecordableSettlementEntry,
 };
 use walicord_domain::model::MemberId;
@@ -21,6 +24,34 @@ use walicord_presentation::discord_ledger::{
 };
 
 use super::{InternalLedgerRouteError, LedgerRouteError, format_money_for_modal};
+
+/// Per-request adapter that translates the application
+/// [`ExpenseEntryRenderer`] port into the existing presentation-layer
+/// expense-message renderer. The display names map is bound per interaction so
+/// the application use case calls a single `render_public_body(&entry, ledger_id)`.
+pub(crate) struct DiscordExpenseEntryRenderer<'a> {
+    pub(crate) display_names: &'a HashMap<MemberId, smol_str::SmolStr>,
+}
+
+impl ExpenseEntryRenderer for DiscordExpenseEntryRenderer<'_> {
+    fn render_public_body(
+        &self,
+        recordable: &RecordableExpenseEntry,
+        ledger_id: LedgerId,
+    ) -> Result<String, ExpenseRenderError> {
+        let rendered = render_public_expense_message(recordable, ledger_id, self.display_names)
+            .map_err(|error| {
+                tracing::error!(
+                    ledger_id = ?ledger_id,
+                    entry_id = ?recordable.id(),
+                    error = %error,
+                    "expense canonical body render failed",
+                );
+                ExpenseRenderError::with_source(error)
+            })?;
+        Ok(rendered.body().to_owned())
+    }
+}
 
 /// Render the public canonical message for a freshly composed expense entry. Returns
 /// the budget-validated `RenderedCanonicalMessage` newtype so the canonical recovery

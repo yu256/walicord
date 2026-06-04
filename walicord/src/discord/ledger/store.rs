@@ -18,10 +18,10 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use walicord_application::ledger::{
-    EntryHash, LedgerEntry, LedgerEntryId, LedgerEvent, LedgerId, LedgerLoadError,
-    LedgerReplayError, UnverifiedLedgerStoreEnvelope, VerifiedLedgerStoreEnvelope,
+    LedgerEntry, LedgerEntryId, LedgerEvent, LedgerId, LedgerLoadError, LedgerReplayError,
+    UnverifiedLedgerStoreEnvelope, VerifiedLedgerStoreEnvelope,
     canonical_attachment::{AttachmentCodecError, CanonicalAttachmentCodec},
-    canonical_read::{CanonicalReadError, CanonicalThreadReader},
+    canonical_read::{CanonicalReadError, CanonicalThreadReader, LedgerHead},
     canonical_write::{CanonicalAppendError, CanonicalThreadAppender},
     observability::LedgerObservabilityEvent,
     projection::VerifiedEntryTransport,
@@ -1558,18 +1558,22 @@ pub(crate) struct RequestBoundCanonicalReader<'a> {
 
 impl RequestBoundCanonicalReader<'_> {
     fn log_read_failure(&self, operation: &'static str, error: &StoreLoadError) {
+        self.log_read_failure_with_message(operation, &error.to_string());
+    }
+
+    fn log_read_failure_with_message(&self, operation: &'static str, message: &str) {
         tracing::warn!(
             canonical_thread_id = ?self.canonical_thread_id,
             ledger_id = ?self.ledger_id,
             operation,
-            error = %error,
-            "canonical read failed; uncertain_write resolution returning false",
+            error = message,
+            "canonical read failed; downstream use case will surface CanonicalReadError",
         );
     }
 }
 
 impl CanonicalThreadReader for RequestBoundCanonicalReader<'_> {
-    async fn load_verified_head_hash(&self) -> Result<Option<EntryHash>, CanonicalReadError> {
+    async fn load_ledger_head(&self) -> Result<LedgerHead, CanonicalReadError> {
         match self
             .store
             .load_verified_thread(
@@ -1580,9 +1584,21 @@ impl CanonicalThreadReader for RequestBoundCanonicalReader<'_> {
             )
             .await
         {
-            Ok(load) => Ok(load.snapshot().current_head_hash()),
+            Ok(load) => {
+                let next_entry_id = load.next_entry_id().map_err(|error| {
+                    self.log_read_failure_with_message(
+                        "load_ledger_head/next_entry_id",
+                        &error.to_string(),
+                    );
+                    CanonicalReadError::with_source(error)
+                })?;
+                Ok(LedgerHead {
+                    head_hash: load.snapshot().current_head_hash(),
+                    next_entry_id,
+                })
+            }
             Err(error) => {
-                self.log_read_failure("load_verified_head_hash", &error);
+                self.log_read_failure("load_ledger_head", &error);
                 Err(CanonicalReadError::with_source(error))
             }
         }

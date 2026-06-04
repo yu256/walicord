@@ -8,7 +8,20 @@
 
 use std::future::Future;
 
-use crate::ledger::{EntryHash, write_coordinator::CanonicalMessageProbe};
+use crate::ledger::{EntryHash, LedgerEntryId, write_coordinator::CanonicalMessageProbe};
+
+/// Verified-load summary the application use cases need on the write path:
+/// the canonical head hash to seal the next envelope against, and the next
+/// available [`LedgerEntryId`]. Adapters compute this once from a full
+/// `VerifiedLedgerThreadLoad` so the application boundary never sees the
+/// transport-bound `VerifiedLedgerStoreEnvelope<ExternalId>` collection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LedgerHead {
+    /// `None` for an empty / fresh chain — callers fall back to the per-ledger
+    /// genesis hash.
+    pub head_hash: Option<EntryHash>,
+    pub next_entry_id: LedgerEntryId,
+}
 
 /// Application-pure error returned by [`CanonicalThreadReader`] methods.
 ///
@@ -47,11 +60,12 @@ impl Default for CanonicalReadError {
 /// so the transport context (`serenity::Context`, target `ChannelId`, ledger
 /// id) is bound at the boundary and never leaks into application code.
 pub trait CanonicalThreadReader: Send + Sync {
-    /// Verified canonical head hash. `None` indicates an empty / fresh chain
-    /// — callers are expected to fall back to the per-ledger genesis hash.
-    fn load_verified_head_hash(
+    /// Verified [`LedgerHead`] summary (head hash + next entry id). Adapters
+    /// derive this from a full `VerifiedLedgerThreadLoad` so the application
+    /// boundary never sees the transport-bound envelope collection.
+    fn load_ledger_head(
         &self,
-    ) -> impl Future<Output = Result<Option<EntryHash>, CanonicalReadError>> + Send;
+    ) -> impl Future<Output = Result<LedgerHead, CanonicalReadError>> + Send;
 
     /// Recent-window scan used by lazy retry — bounded by the criterion-176
     /// retain window. Probes are returned in canonical order.
