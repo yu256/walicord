@@ -2299,7 +2299,7 @@ mod tests {
 
         assert_eq!(
             actual.body,
-            "台帳\n\nℹ️ この台帳は現在書き込み確認中です。記録・取り消し・清算は一時的に制限されています。\n\n残高\n確認済み履歴と残高補正を含む現在差額\n- Alice: 受け取り 300円\n- Bob: 支払い 300円\n\n参加者\nこれまで記録に出た人\nAlice\nBob\n\n取り消し済み\n[#9] Alice が 2026-05-25 18:55 に取り消し: 2026-05-24 Bob の支払い 1200円 メモ: ランチ | 復旧用の参照: ledger:abcd1234/entry:9 | <https://discord.com/channels/1/2/9>\n\n確認済み\n確認済み: [#4] 2026-05-20 清算 Alice -> Bob ほか1件 まで\n残高補正 Operator: 差額補正 (Alice 受け取り 300円)\n\n(確認済み = これより前の履歴が確定済み、残高補正 = 管理上の調整です。このUIでは操作できません。)\n表示範囲: 最新の検証済み台帳"
+            "台帳\n\nℹ️ この台帳は現在書き込み確認中です。記録・取り消し・清算は一時的に制限されています。\n\n残高\n確認済み履歴と残高補正を含む現在差額\n- Alice: 受け取り 300円\n- Bob: 支払い 300円\n\n参加者\nこれまで記録に出た人\nAlice\nBob\n\n取り消し済み\n[#9] Alice が 2026-05-25 18:55 に取り消し: 2026-05-24 Bob の支払い 1200円 メモ: ランチ | 復旧用の参照: ledger:abcd1234/entry:9 | <https://discord.com/channels/1/2/9>\n\n確認済み\n確認済み: [#4] 2026-05-20 清算 Alice -> Bob ほか1件 まで\n残高補正 Operator: 差額補正 (Alice 受け取り 300円)\n\n-# 確認済み = これより前の履歴が確定済み、残高補正 = 管理上の調整です。このUIでは操作できません。\n表示範囲: 最新の検証済み台帳"
         );
     }
 
@@ -2416,7 +2416,7 @@ mod tests {
 
         assert_eq!(
             stale_read.body,
-            "台帳\n\nこの表示は期限切れです。/ledger または 台帳 で開き直してください。\n\nまだ台帳スレッドはありません。最初の記録後に全件確認できます。"
+            "台帳\n\nこの表示は期限切れです。/ledger または 台帳 で開き直してください。\n\n-# まだ台帳スレッドはありません。最初の記録後に全件確認できます。"
         );
         assert_eq!(
             stale_void.body,
@@ -2486,7 +2486,7 @@ mod tests {
 
         assert_eq!(
             actual.body,
-            "台帳\n\nページ 1/2\n\nこの表示は固定スナップショットです。更新するには開き直してください。\n\n参加者\nこれまで記録に出た人\nAlice\nBob\n\n取り消し済み\n[#9] Alice が 2026-05-25 18:55 に取り消し: 2026-05-24 Bob の支払い 1200円 メモ: ランチ | 復旧用の参照: ledger:abcd1234/entry:9 | <https://discord.com/channels/1/2/9>"
+            "台帳\n\nページ 1/2\n\n-# この表示は固定スナップショットです。更新するには開き直してください。\n\n参加者\nこれまで記録に出た人\nAlice\nBob\n\n取り消し済み\n[#9] Alice が 2026-05-25 18:55 に取り消し: 2026-05-24 Bob の支払い 1200円 メモ: ランチ | 復旧用の参照: ledger:abcd1234/entry:9 | <https://discord.com/channels/1/2/9>"
         );
     }
 
@@ -2582,7 +2582,7 @@ mod tests {
 
         assert_eq!(
             actual.body,
-            "取り消し\n\n最新20件から選択できます。古い記録はこのUIから取り消せません。運用担当者に連絡してください。\n\n2026-05-24 Bob の支払い 1200円 メモ: ランチの会計 | 復旧用の参照: ledger:abcd1234/entry:7 | <https://discord.com/channels/1/2/7>\n2026-05-25 清算 Alice->Bob 300円 ほか2件 | 復旧用の参照: ledger:abcd1234/entry:8 | <https://discord.com/channels/1/2/8>"
+            "取り消し\n\n-# 最新20件から選択できます。古い記録はこのUIから取り消せません。運用担当者に連絡してください。\n\n2026-05-24 Bob の支払い 1200円 メモ: ランチの会計 | 復旧用の参照: ledger:abcd1234/entry:7 | <https://discord.com/channels/1/2/7>\n2026-05-25 清算 Alice->Bob 300円 ほか2件 | 復旧用の参照: ledger:abcd1234/entry:8 | <https://discord.com/channels/1/2/8>"
         );
         assert_eq!(model.primary_action_label.as_deref(), Some("確認へ"));
     }
@@ -2609,7 +2609,7 @@ mod tests {
 
         assert_eq!(
             actual.body,
-            "取り消し確認\n\n元の記録は 取り消し済み として残ります。確認すると履歴を変更せず、新しい取り消し記録を追加します。\n\n日付: 2026-05-24\n対象: Bob の支払い\n金額: 1200円\nメモ: ランチの会計\n復旧用の参照: ledger:abcd1234/entry:7 | <https://discord.com/channels/1/2/7>"
+            "取り消し確認\n\n-# 元の記録は 取り消し済み として残ります。確認すると履歴を変更せず、新しい取り消し記録を追加します。\n\n日付: 2026-05-24\n対象: Bob の支払い\n金額: 1200円\nメモ: ランチの会計\n復旧用の参照: ledger:abcd1234/entry:7 | <https://discord.com/channels/1/2/7>"
         );
         assert_eq!(model.primary_action_label.as_deref(), Some("取り消す"));
         assert_eq!(model.secondary_action_label.as_deref(), Some("選び直す"));

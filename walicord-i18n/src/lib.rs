@@ -1318,25 +1318,25 @@ pub fn review_thread_empty_state() -> &'static str {
 
 pub fn ledger_scope_footer() -> &'static str {
     if cfg!(feature = "ja") {
-        "(確認済み = これより前の履歴が確定済み、残高補正 = 管理上の調整です。このUIでは操作できません。)"
+        "-# 確認済み = これより前の履歴が確定済み、残高補正 = 管理上の調整です。このUIでは操作できません。"
     } else {
-        "(Confirmed = earlier history is finalized, balance adjustments are operator-only maintenance and cannot be changed from this UI.)"
+        "-# Confirmed = earlier history is finalized, balance adjustments are operator-only maintenance and cannot be changed from this UI."
     }
 }
 
 pub fn void_selection_window_guidance() -> &'static str {
     if cfg!(feature = "ja") {
-        "最新20件から選択できます。古い記録はこのUIから取り消せません。運用担当者に連絡してください。"
+        "-# 最新20件から選択できます。古い記録はこのUIから取り消せません。運用担当者に連絡してください。"
     } else {
-        "You can choose from the latest 20 entries. Older records cannot be voided from this UI. Contact an operator."
+        "-# You can choose from the latest 20 entries. Older records cannot be voided from this UI. Contact an operator."
     }
 }
 
 pub fn void_confirm_append_only_line() -> &'static str {
     if cfg!(feature = "ja") {
-        "元の記録は 取り消し済み として残ります。確認すると履歴を変更せず、新しい取り消し記録を追加します。"
+        "-# 元の記録は 取り消し済み として残ります。確認すると履歴を変更せず、新しい取り消し記録を追加します。"
     } else {
-        "The original record remains visible as voided. Confirmation appends a new void entry instead of mutating history."
+        "-# The original record remains visible as voided. Confirmation appends a new void entry instead of mutating history."
     }
 }
 
@@ -1786,14 +1786,6 @@ pub fn panel_void_button_label() -> &'static str {
     }
 }
 
-pub fn panel_title() -> &'static str {
-    if cfg!(feature = "ja") {
-        "Walicord 操作パネル"
-    } else {
-        "Walicord Control Panel"
-    }
-}
-
 pub fn panel_post_retry_message() -> &'static str {
     if cfg!(feature = "ja") {
         "パネルを投稿できませんでした。少し待ってからもう一度試してください。続く場合は管理者に連絡してください。"
@@ -2034,9 +2026,9 @@ pub fn page_range_indicator(start: usize, end: usize, total: usize) -> impl std:
 
 pub fn snapshot_notice() -> &'static str {
     if cfg!(feature = "ja") {
-        "この表示は固定スナップショットです。更新するには開き直してください。"
+        "-# この表示は固定スナップショットです。更新するには開き直してください。"
     } else {
-        "This view is a fixed snapshot. Reopen it to refresh."
+        "-# This view is a fixed snapshot. Reopen it to refresh."
     }
 }
 
@@ -2082,9 +2074,9 @@ pub fn void_session_replaced_message() -> &'static str {
 
 pub fn no_ledger_thread_yet_note() -> &'static str {
     if cfg!(feature = "ja") {
-        "まだ台帳スレッドはありません。最初の記録後に全件確認できます。"
+        "-# まだ台帳スレッドはありません。最初の記録後に全件確認できます。"
     } else {
-        "There is no ledger thread yet. You can review everything after the first record is written."
+        "-# There is no ledger thread yet. You can review everything after the first record is written."
     }
 }
 

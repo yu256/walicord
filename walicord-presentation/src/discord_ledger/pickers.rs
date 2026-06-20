@@ -377,7 +377,7 @@ mod tests {
         assert_eq!(chrome.range_indicator(), "26-50 / 73人");
         assert_eq!(
             chrome.snapshot_notice(),
-            "この表示は固定スナップショットです。更新するには開き直してください。"
+            "-# この表示は固定スナップショットです。更新するには開き直してください。"
         );
     }
 
