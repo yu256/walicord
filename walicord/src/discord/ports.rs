@@ -71,6 +71,14 @@ pub trait RosterProvider: Clone + Send + Sync + 'static {
     ) -> std::collections::HashMap<MemberId, smol_str::SmolStr>
     where
         I: IntoIterator<Item = MemberId>;
+
+    fn usernames_for_guild<I>(
+        &self,
+        guild_id: serenity::model::id::GuildId,
+        member_ids: I,
+    ) -> std::collections::HashMap<MemberId, smol_str::SmolStr>
+    where
+        I: IntoIterator<Item = MemberId>;
 }
 
 #[derive(Clone, Default)]

@@ -10,7 +10,13 @@ use serenity::{
     async_trait,
     prelude::Context,
 };
-use std::{borrow::Cow, collections::HashMap, fmt::Write as _, sync::Arc, time::Duration};
+use std::{
+    borrow::Cow,
+    collections::{BTreeMap, HashMap},
+    fmt::Write as _,
+    sync::Arc,
+    time::Duration,
+};
 #[cfg(test)]
 use walicord_application::ledger::LedgerEntry;
 use walicord_application::{
@@ -78,7 +84,7 @@ use super::{
     adapters::DiscordCanonicalThreadLocator,
     expense_modal_open::{
         ExpenseModalBuildError, ExpenseModalCustomIdMatch, ExpenseModalPrefill,
-        build_expense_modal_response, build_expense_weight_modal_response,
+        WeightEditorParticipant, build_expense_modal_response, build_expense_weight_modal_response,
         extract_raw_expense_modal_submission, parse_expense_modal_custom_id,
         parse_expense_weight_modal_custom_id, parse_expense_weight_modal_submission,
     },
@@ -238,6 +244,7 @@ pub trait LedgerCanonicalThreadCreator: Send + Sync {
 pub struct RouterRosterSnapshot {
     pub roster: RosterSnapshot,
     pub display_names: HashMap<MemberId, smol_str::SmolStr>,
+    pub usernames: HashMap<MemberId, smol_str::SmolStr>,
     pub role_display_names: HashMap<RoleId, smol_str::SmolStr>,
 }
 
@@ -2398,12 +2405,12 @@ impl LedgerRouter {
             .roster_fetcher
             .fetch(ctx, scope.guild_id(), scope.channel_id())
             .await?;
-        let participants = resolve_selection_against_roster(
+        let resolved = resolve_selection_against_roster(
             claim.session().draft().selection_state(),
             &roster.roster,
         )
         .resolved;
-        if participants.len() > 40 {
+        if resolved.len() > 40 {
             return self
                 .reply_component_ephemeral(
                     ctx,
@@ -2413,6 +2420,17 @@ impl LedgerRouter {
                 )
                 .await;
         }
+        let participants: Vec<WeightEditorParticipant<'_>> = resolved
+            .iter()
+            .map(|p| WeightEditorParticipant {
+                username: roster
+                    .usernames
+                    .get(&p.member_id)
+                    .map(smol_str::SmolStr::as_str)
+                    .unwrap_or("?"),
+                weight: p.weight,
+            })
+            .collect();
         let response = build_expense_weight_modal_response(observed_nonce, &participants)?;
         component
             .create_response(&ctx.http, response)
@@ -2871,7 +2889,17 @@ impl LedgerRouter {
             store: self.deps.expense_sessions.as_ref(),
             original: Some(claimed),
         };
-        let weights = match parse_expense_weight_modal_submission(modal) {
+        let roster = self
+            .deps
+            .roster_fetcher
+            .fetch(ctx, scope.guild_id(), scope.channel_id())
+            .await?;
+        let username_to_member: BTreeMap<&str, MemberId> = roster
+            .usernames
+            .iter()
+            .map(|(id, name)| (name.as_str(), *id))
+            .collect();
+        let weights = match parse_expense_weight_modal_submission(modal, &username_to_member) {
             Ok(weights) => weights,
             Err(_) => {
                 modal
@@ -5302,12 +5330,16 @@ mod tests {
                 )
             })
             .collect::<HashMap<_, _>>();
+        let usernames = (1..=member_count)
+            .map(|id| (MemberId(id), smol_str::SmolStr::new(format!("user{id}"))))
+            .collect::<HashMap<_, _>>();
         RouterRosterSnapshot {
             roster: RosterSnapshot {
                 all_members,
                 role_members: BTreeMap::new(),
             },
             display_names,
+            usernames,
             role_display_names: HashMap::new(),
         }
     }
@@ -5367,6 +5399,7 @@ mod tests {
                 role_members: BTreeMap::from([(RoleId(10), BTreeSet::from([MemberId(1)]))]),
             },
             display_names: HashMap::new(),
+            usernames: HashMap::new(),
             role_display_names: HashMap::new(),
         };
 
@@ -5390,6 +5423,7 @@ mod tests {
                 role_members: BTreeMap::from([(RoleId(10), BTreeSet::from([MemberId(1)]))]),
             },
             display_names: HashMap::new(),
+            usernames: HashMap::new(),
             role_display_names: HashMap::from([(RoleId(10), smol_str::SmolStr::new("開発"))]),
         };
 
@@ -5413,6 +5447,7 @@ mod tests {
                 MemberId(1),
                 smol_str::SmolStr::new(" \nA=@everyone <@123> `x`\u{202E} "),
             )]),
+            usernames: HashMap::new(),
             role_display_names: HashMap::new(),
         };
 
@@ -5436,6 +5471,7 @@ mod tests {
                 role_members: BTreeMap::from([(RoleId(10), BTreeSet::from([MemberId(1)]))]),
             },
             display_names: HashMap::new(),
+            usernames: HashMap::new(),
             role_display_names: HashMap::from([(
                 RoleId(10),
                 smol_str::SmolStr::new(" \nRole=@everyone <@123> `x`\u{202E} "),

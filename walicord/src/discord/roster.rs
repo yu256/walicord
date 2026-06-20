@@ -213,14 +213,37 @@ impl MemberRosterProvider {
     where
         I: IntoIterator<Item = MemberId>,
     {
+        self.member_field_for_guild(guild_id, member_ids, |m| m.effective_name().into())
+    }
+
+    pub fn usernames_for_guild<I>(
+        &self,
+        guild_id: GuildId,
+        member_ids: I,
+    ) -> HashMap<MemberId, smol_str::SmolStr>
+    where
+        I: IntoIterator<Item = MemberId>,
+    {
+        self.member_field_for_guild(guild_id, member_ids, |m| m.username.clone())
+    }
+
+    fn member_field_for_guild<I, F>(
+        &self,
+        guild_id: GuildId,
+        member_ids: I,
+        extract: F,
+    ) -> HashMap<MemberId, smol_str::SmolStr>
+    where
+        I: IntoIterator<Item = MemberId>,
+        F: Fn(&MemberInfo) -> smol_str::SmolStr,
+    {
         let Some(members) = self.members.get(&guild_id) else {
             return HashMap::new();
         };
-
         let mut result = HashMap::new();
         for member_id in member_ids {
             if let Some(member) = members.get(&member_id) {
-                result.insert(member_id, member.effective_name().into());
+                result.insert(member_id, extract(member));
             }
         }
         result
@@ -269,6 +292,17 @@ impl super::ports::RosterProvider for MemberRosterProvider {
         I: IntoIterator<Item = MemberId>,
     {
         MemberRosterProvider::display_names_for_guild(self, guild_id, member_ids)
+    }
+
+    fn usernames_for_guild<I>(
+        &self,
+        guild_id: GuildId,
+        member_ids: I,
+    ) -> HashMap<MemberId, smol_str::SmolStr>
+    where
+        I: IntoIterator<Item = MemberId>,
+    {
+        MemberRosterProvider::usernames_for_guild(self, guild_id, member_ids)
     }
 }
 

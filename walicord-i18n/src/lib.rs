@@ -2418,17 +2418,17 @@ pub fn weight_editor_modal_title() -> &'static str {
 
 pub fn weight_editor_input_label() -> &'static str {
     if cfg!(feature = "ja") {
-        "メンバーID = 重み"
+        "ユーザー名 = 重み"
     } else {
-        "Member ID = Weight"
+        "Username = Weight"
     }
 }
 
 pub fn weight_editor_placeholder() -> &'static str {
     if cfg!(feature = "ja") {
-        "例: 123456789 = 1"
+        "例: alice = 2"
     } else {
-        "Example: 123456789 = 1"
+        "Example: alice = 2"
     }
 }
 
@@ -2442,9 +2442,9 @@ pub fn weight_editor_too_many_message() -> &'static str {
 
 pub fn weight_editor_parse_error() -> &'static str {
     if cfg!(feature = "ja") {
-        "表示されている形式のまま、メンバーID = 重み で変更してください。例: 123456789 = 1"
+        "ユーザー名 = 重み の形式で入力してください。例: alice = 2"
     } else {
-        "Keep the displayed format and edit as Member ID = Weight. Example: 123456789 = 1"
+        "Enter as username = weight. Example: alice = 2"
     }
 }
 

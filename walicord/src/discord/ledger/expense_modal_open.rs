@@ -13,9 +13,7 @@ use walicord_presentation::discord_ledger::{
 };
 
 use std::{collections::BTreeMap, fmt::Write as _};
-use walicord_application::ledger::{
-    expense_modal::RawExpenseModalSubmission, expense_session::ExpenseParticipantSelection,
-};
+use walicord_application::ledger::expense_modal::RawExpenseModalSubmission;
 use walicord_domain::model::{MemberId, Weight};
 
 pub const EXPENSE_MODAL_CUSTOM_ID_PREFIX: &str = "ledger:expense:new:";
@@ -73,16 +71,24 @@ fn parse_modal_custom_id(custom_id: &str, prefix: &str) -> ExpenseModalCustomIdM
     }
 }
 
+pub struct WeightEditorParticipant<'a> {
+    pub username: &'a str,
+    pub weight: Weight,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ExpenseWeightModalParseError {
-    #[error("weight editor line must use member_id = weight")]
+    #[error("weight line is malformed")]
     InvalidLine,
-    #[error("weight editor contains duplicate member id {0:?}")]
-    DuplicateMember(MemberId),
+    #[error("unknown username in weight editor")]
+    UnknownUsername,
+    #[error("weight editor contains duplicate username")]
+    DuplicateUsername,
 }
 
 pub fn parse_expense_weight_modal_submission(
     modal: &ModalInteraction,
+    username_to_member: &BTreeMap<&str, MemberId>,
 ) -> Result<BTreeMap<MemberId, Weight>, ExpenseWeightModalParseError> {
     let mut raw = None;
     for row in &modal.data.components {
@@ -94,31 +100,31 @@ pub fn parse_expense_weight_modal_submission(
             }
         }
     }
-    parse_weight_overrides(raw.unwrap_or_default())
+    parse_weight_overrides(raw.unwrap_or_default(), username_to_member)
 }
 
 fn parse_weight_overrides(
     raw: &str,
+    username_to_member: &BTreeMap<&str, MemberId>,
 ) -> Result<BTreeMap<MemberId, Weight>, ExpenseWeightModalParseError> {
     let mut weights = BTreeMap::new();
     for line in raw.lines().map(str::trim).filter(|line| !line.is_empty()) {
-        let (member_id, weight) = line
+        let (username, weight_str) = line
             .split_once('=')
             .ok_or(ExpenseWeightModalParseError::InvalidLine)?;
-        let member_id = MemberId(
-            member_id
-                .trim()
-                .parse()
-                .map_err(|_| ExpenseWeightModalParseError::InvalidLine)?,
-        );
+        let username = username.trim();
+        let member_id = username_to_member
+            .get(username)
+            .copied()
+            .ok_or(ExpenseWeightModalParseError::UnknownUsername)?;
         let weight = Weight(
-            weight
+            weight_str
                 .trim()
                 .parse()
                 .map_err(|_| ExpenseWeightModalParseError::InvalidLine)?,
         );
         if weights.insert(member_id, weight).is_some() {
-            return Err(ExpenseWeightModalParseError::DuplicateMember(member_id));
+            return Err(ExpenseWeightModalParseError::DuplicateUsername);
         }
     }
     Ok(weights)
@@ -218,7 +224,7 @@ pub fn build_expense_modal_response(
 
 pub fn build_expense_weight_modal_response(
     nonce: InteractionNonce,
-    participants: &[ExpenseParticipantSelection],
+    participants: &[WeightEditorParticipant<'_>],
 ) -> Result<CreateInteractionResponse, ExpenseModalBuildError> {
     let custom_id = format!("{EXPENSE_WEIGHT_MODAL_CUSTOM_ID_PREFIX}{nonce}");
     validate_custom_id(&custom_id).map_err(ExpenseModalBuildError::Budget)?;
@@ -230,11 +236,7 @@ pub fn build_expense_weight_modal_response(
     validate_text_input_placeholder(&placeholder).map_err(ExpenseModalBuildError::Budget)?;
     let mut value = String::new();
     for participant in participants {
-        let _ = writeln!(
-            value,
-            "{} = {}",
-            participant.member_id.0, participant.weight.0
-        );
+        let _ = writeln!(value, "{} = {}", participant.username, participant.weight);
     }
     let input = CreateInputText::new(InputTextStyle::Paragraph, label, WEIGHTS_FIELD)
         .placeholder(placeholder)
@@ -268,22 +270,27 @@ mod tests {
         InteractionNonce::new(value).expect("nonce")
     }
 
+    fn username_map() -> BTreeMap<&'static str, MemberId> {
+        BTreeMap::from([("alice", MemberId(42)), ("bob", MemberId(7))])
+    }
+
     #[rstest]
     #[case::empty("", Ok(BTreeMap::new()))]
     #[case::weights(
-        "42 = 1\n7 = 0\n",
+        "alice = 1\nbob = 0\n",
         Ok(BTreeMap::from([(MemberId(7), Weight(0)), (MemberId(42), Weight(1))]))
     )]
-    #[case::invalid("42: 1", Err(ExpenseWeightModalParseError::InvalidLine))]
+    #[case::invalid("alice: 1", Err(ExpenseWeightModalParseError::InvalidLine))]
+    #[case::unknown_username("charlie = 1", Err(ExpenseWeightModalParseError::UnknownUsername))]
     #[case::duplicate(
-        "42 = 1\n42 = 2",
-        Err(ExpenseWeightModalParseError::DuplicateMember(MemberId(42)))
+        "alice = 1\nalice = 2",
+        Err(ExpenseWeightModalParseError::DuplicateUsername)
     )]
     fn weight_override_parser_is_fail_closed(
         #[case] raw: &str,
         #[case] expected: Result<BTreeMap<MemberId, Weight>, ExpenseWeightModalParseError>,
     ) {
-        assert_eq!(parse_weight_overrides(raw), expected);
+        assert_eq!(parse_weight_overrides(raw, &username_map()), expected);
     }
 
     #[test]

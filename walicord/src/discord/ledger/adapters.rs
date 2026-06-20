@@ -268,6 +268,9 @@ impl<RP: RosterProvider> RouterRosterFetcher for DiscordRouterRosterFetcher<RP> 
         let display_names = self
             .inner
             .display_names_for_guild(guild_id, port_snapshot.member_ids.iter().copied());
+        let usernames = self
+            .inner
+            .usernames_for_guild(guild_id, port_snapshot.member_ids.iter().copied());
         let role_display_names =
             cached_role_display_names(ctx, guild_id, port_snapshot.role_members.keys().copied());
 
@@ -283,6 +286,7 @@ impl<RP: RosterProvider> RouterRosterFetcher for DiscordRouterRosterFetcher<RP> 
                 role_members,
             },
             display_names,
+            usernames,
             role_display_names,
         })
     }

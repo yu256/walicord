@@ -163,6 +163,25 @@ impl RosterProvider for MockRosterProvider {
         }
         result
     }
+
+    fn usernames_for_guild<I>(
+        &self,
+        guild_id: GuildId,
+        member_ids: I,
+    ) -> HashMap<MemberId, smol_str::SmolStr>
+    where
+        I: IntoIterator<Item = MemberId>,
+    {
+        let mut result = HashMap::new();
+        if let Some(guild_members) = self.members.get(&guild_id) {
+            for member_id in member_ids {
+                if let Some(member) = guild_members.get(&member_id) {
+                    result.insert(member_id, member.username.clone());
+                }
+            }
+        }
+        result
+    }
 }
 
 /// Helper to create a MemberInfo for testing
