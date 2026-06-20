@@ -40,9 +40,9 @@ pub enum TransportChannelIdError {
 /// session state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MaintenanceCommand {
-    /// Recover an unsealed expense or settlement that is older than the latest-20
-    /// voidable window (criterion 106 / 289). The replacement entry is appended after
-    /// the void via the same canonical-thread store boundary.
+    /// Recover an unsealed expense or settlement that is older than the
+    /// `VOID_CANDIDATE_WINDOW` voidable window (criterion 106 / 289). The replacement
+    /// entry is appended after the void via the same canonical-thread store boundary.
     OlderThanTwentyVoidRecovery(OlderThanTwentyVoidRecoveryRequest),
     /// Repair a tracked parent that locator reported `DuplicateBlocked` for; the
     /// operator confirms which candidate thread is the canonical one (criterion 140 /
@@ -109,9 +109,9 @@ pub enum MaintenanceValidationError {
 }
 
 /// Validate that the older-than-window void recovery target is in the ledger,
-/// unsealed, unvoided, and strictly older than the latest-20 voidable window
-/// (criterion 289). The latest-20 path is owned by the end-user `/void` UI; operators
-/// are not allowed to bypass it.
+/// unsealed, unvoided, and strictly older than the `VOID_CANDIDATE_WINDOW`
+/// voidable window (criterion 289). The end-user `/void` UI owns the in-window
+/// path; operators are not allowed to bypass it.
 pub fn validate_older_than_twenty_void<ExternalId>(
     target_entry_id: LedgerEntryId,
     load: &VerifiedLedgerThreadLoad<ExternalId>,

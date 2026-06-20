@@ -2755,7 +2755,7 @@ mod tests {
     }
 
     #[test]
-    fn void_operator_handoff_surface_covers_the_latest_twenty_limit() {
+    fn void_operator_handoff_surface_covers_the_window_limit() {
         let actual =
             DiscordLedgerPresenter::render_void_flow(&VoidSurfaceModel::older_than_window(
                 "取り消し",
@@ -2767,7 +2767,7 @@ mod tests {
 
         assert_eq!(
             actual.body,
-            "取り消し\n\n対象がありません (このUIで選べるのは新しい20件までです。古い記録はこのUIから取り消せません。運用担当者に連絡してください)。\n連絡時は対象の公開台帳メッセージのリンク、または控えている 復旧用の参照: ledger:abcd1234/entry:7 | <https://discord.com/channels/1/2/7> と、わかる範囲の日時・支払者・金額・メモ抜粋を伝えてください。"
+            "取り消し\n\n対象がありません (このUIで選べるのは新しい25件までです。古い記録はこのUIから取り消せません。運用担当者に連絡してください)。\n連絡時は対象の公開台帳メッセージのリンク、または控えている 復旧用の参照: ledger:abcd1234/entry:7 | <https://discord.com/channels/1/2/7> と、わかる範囲の日時・支払者・金額・メモ抜粋を伝えてください。"
         );
     }
 

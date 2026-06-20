@@ -1512,9 +1512,9 @@ pub fn no_voidable_entries_message() -> &'static str {
 
 pub fn void_window_empty_state() -> &'static str {
     if cfg!(feature = "ja") {
-        "対象がありません (このUIで選べるのは新しい20件までです。古い記録はこのUIから取り消せません。運用担当者に連絡してください)。"
+        "対象がありません (このUIで選べるのは新しい25件までです。古い記録はこのUIから取り消せません。運用担当者に連絡してください)。"
     } else {
-        "No target is available (this UI can only choose from the latest 20 entries; older records require operator help)."
+        "No target is available (this UI can only choose from the latest 25 entries; older records require operator help)."
     }
 }
 

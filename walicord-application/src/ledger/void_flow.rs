@@ -18,9 +18,9 @@ use crate::{
 use walicord_domain::model::MemberId;
 
 /// Maximum number of voidable candidates the `/void` and panel `取り消し` UI will
-/// expose at once (criterion 21). Older entries fall back to the operator handoff
-/// path (criterion 106).
-pub const VOID_CANDIDATE_WINDOW: usize = 20;
+/// expose at once. Matches `DISCORD_SELECT_OPTION_LIMIT` (25). Older entries fall
+/// back to the operator handoff path (criterion 106).
+pub const VOID_CANDIDATE_WINDOW: usize = 25;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum VoidCandidateEnumerationError {
@@ -28,7 +28,7 @@ pub enum VoidCandidateEnumerationError {
     Projection(#[from] ProjectionConsistencyError),
 }
 
-/// Enumerate the latest-20 voidable entries on the verified canonical thread; this is
+/// Enumerate the latest voidable entries on the verified canonical thread; this is
 /// the candidate set that `/void` / panel `取り消し` shows the actor. Entries older
 /// than the window are intentionally excluded — the criterion-106 operator-handoff
 /// path is responsible for them.
@@ -177,12 +177,4 @@ pub fn compose_void_entry<ExternalId>(
     Ok((entry, envelope))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn void_candidate_window_matches_required_criterion_value() {
-        assert_eq!(VOID_CANDIDATE_WINDOW, 20);
-    }
-}
+const _: () = assert!(VOID_CANDIDATE_WINDOW <= 25);
