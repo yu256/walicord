@@ -89,7 +89,7 @@ use super::{
     observability::{
         DiscordLedgerObservability, DiscordLedgerObservabilityEvent, PermissionAction,
     },
-    panel::{render_panel_post_message, render_panel_post_message_for_locator_state},
+    panel::render_panel_post_message_for_locator_state,
     permissions::{
         LedgerRefreshAcknowledgement, RuntimePermissionScope, missing_runtime_permissions_for,
         render_ledger_refresh_acknowledgement, render_ledger_refresh_uncertain_write_message,
@@ -714,6 +714,10 @@ impl DeferredEphemeralInteraction<'_> {
 pub enum DiscordCallSite {
     #[error("panel create_response")]
     PanelCreateResponse,
+    #[error("panel defer")]
+    PanelDefer,
+    #[error("panel edit response")]
+    PanelEditResponse,
     #[error("expense modal create_response")]
     ExpenseModalCreateResponse,
     #[error("panel expense launcher create_response")]
@@ -3327,9 +3331,11 @@ impl LedgerRouter {
         Ok(InteractionDispatch::Handled)
     }
 
-    /// /panel: post the operations panel with the 4 fixed launcher buttons. Resolves
-    /// the locator state to show the canonical thread link when it exists; the panel
-    /// is always posted regardless of whether a thread has been created yet.
+    /// /panel: post the operations panel with the 4 fixed launcher buttons. A warm
+    /// locator cache answers directly; a cold cache defers first because resolving
+    /// rediscovers threads through Discord API calls and can exceed the 3-second
+    /// interaction window. Duplicate/damaged locator states post the recovery
+    /// message instead of the panel.
     async fn dispatch_panel_command(
         &self,
         ctx: &Context,
@@ -3338,25 +3344,49 @@ impl LedgerRouter {
         let scope = self
             .guard_scope(ctx, command.guild_id, command.channel_id, command)
             .await?;
-        let canonical_thread_id = self
-            .deps
-            .locator
-            .resolve(ctx, scope.tracked_parent())
-            .await?
-            .known_thread_id();
-        let (body, components) = match render_panel_post_message(canonical_thread_id) {
+        let (locator_state, deferred) = match self.deps.locator.cached(scope.tracked_parent()) {
+            Some(state) => (state, false),
+            None => {
+                command
+                    .defer(&ctx.http)
+                    .await
+                    .map_err(discord_call_error(DiscordCallSite::PanelDefer))?;
+                let state = self
+                    .deps
+                    .locator
+                    .resolve(ctx, scope.tracked_parent())
+                    .await?;
+                (state, true)
+            }
+        };
+        self.observe_blocked_locator_state(&locator_state);
+        let (body, components) = match render_panel_post_message_for_locator_state(&locator_state) {
             Ok(rendered) => rendered,
             Err(message) => message.into_parts(),
         };
-        let response = CreateInteractionResponse::Message(
-            safe_interaction_response_message()
-                .content(body)
-                .components(components),
-        );
-        command
-            .create_response(&ctx.http, response)
-            .await
-            .map_err(discord_call_error(DiscordCallSite::PanelCreateResponse))?;
+        if deferred {
+            command
+                .edit_response(
+                    &ctx.http,
+                    safe_edit_interaction_response()
+                        .content(body)
+                        .components(components),
+                )
+                .await
+                .map_err(discord_call_error(DiscordCallSite::PanelEditResponse))?;
+        } else {
+            command
+                .create_response(
+                    &ctx.http,
+                    CreateInteractionResponse::Message(
+                        safe_interaction_response_message()
+                            .content(body)
+                            .components(components),
+                    ),
+                )
+                .await
+                .map_err(discord_call_error(DiscordCallSite::PanelCreateResponse))?;
+        }
         Ok(InteractionDispatch::Handled)
     }
 
