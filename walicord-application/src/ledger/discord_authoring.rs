@@ -52,6 +52,13 @@ impl DiscordLedgerSourceDescriptor {
         }
     }
 
+    pub fn settle_review_v1() -> Self {
+        Self {
+            family: DiscordLedgerSourceFamily::Settle,
+            canonical: "settle/review/v1",
+        }
+    }
+
     pub fn settle_thread_v1() -> Self {
         Self {
             family: DiscordLedgerSourceFamily::Settle,

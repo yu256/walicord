@@ -850,12 +850,7 @@ impl DiscordLedgerPresenter {
                     let review_instruction = if model.uncertain_write {
                         i18n::review_preview_blocked_instruction()
                     } else {
-                        match model.route {
-                            ReadViewRoute::ReviewParent => {
-                                i18n::review_parent_preview_instruction()
-                            }
-                            _ => i18n::review_preview_instruction(),
-                        }
+                        i18n::review_preview_instruction()
                     };
                     render_sections([
                         Some(model.title.as_ref()),
@@ -2348,11 +2343,7 @@ mod tests {
         })
         .expect("surface should render");
 
-        assert!(
-            actual
-                .body
-                .contains(i18n::review_parent_preview_instruction())
-        );
+        assert!(actual.body.contains(i18n::review_preview_instruction()));
         let SurfaceActionRow::Buttons(buttons) = &actual.action_rows[0] else {
             panic!("expected thread handoff button");
         };

@@ -1536,17 +1536,17 @@ pub fn void_window_handoff_line(reference_hint: impl std::fmt::Display) -> impl 
 
 pub fn review_preview_instruction() -> &'static str {
     if cfg!(feature = "ja") {
-        "これはプレビューです。このスレッドで /settle を実行してください。10分以内に、プレビューを作成した本人だけが確定できます。あとから同じ台帳でプレビューを作り直すと、最新のプレビューだけが確定対象になります。"
+        "-# これはプレビューです。10分以内に、作成した本人だけが確定できます。あとから同じ台帳でプレビューを作り直すと、最新のプレビューだけが確定対象になります。"
     } else {
-        "This is a preview. Run /settle in this thread. Within 10 minutes, only the actor who created the preview can confirm it. If a newer preview is created for the same ledger, only the newest preview remains confirmable."
+        "-# This is a preview. Within 10 minutes, only the creator can confirm. If a newer preview is created for the same ledger, only the newest remains confirmable."
     }
 }
 
-pub fn review_parent_preview_instruction() -> &'static str {
+pub fn review_settle_button_label() -> &'static str {
     if cfg!(feature = "ja") {
-        "これはプレビューです。台帳スレッドを開いて、そのスレッドで /settle を実行してください。10分以内に、プレビューを作成したあなた本人だけが確定できます。あとから同じ台帳でプレビューを作り直すと、最新のプレビューだけが確定対象になります。"
+        "確定する"
     } else {
-        "This is a preview. Open the ledger thread and run /settle there. Within 10 minutes, only you, the actor who created this preview, can confirm it. If a newer preview is created for the same ledger, only the newest preview remains confirmable."
+        "Confirm"
     }
 }
 
@@ -2667,6 +2667,14 @@ pub fn settlement_recorded_message() -> &'static str {
         "清算を記録しました。"
     } else {
         "Recorded the settlement."
+    }
+}
+
+pub fn settlement_preview_expired_or_confirmed_message() -> &'static str {
+    if cfg!(feature = "ja") {
+        "プレビューの期限が切れたか、既に確定済みです。必要であれば清算確認からやり直してください。"
+    } else {
+        "The preview has expired or was already confirmed. Start from the settlement review if needed."
     }
 }
 
