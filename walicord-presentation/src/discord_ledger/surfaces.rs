@@ -724,9 +724,6 @@ impl DiscordLedgerPresenter {
             render_sections([
                 Some(model.thread_cue.as_str()),
                 model.status_line.as_deref(),
-                Some(i18n::panel_deletion_warning()),
-                Some(i18n::panel_reply_notice()),
-                Some(i18n::route_task_guidance()),
             ]),
             vec![SurfaceActionRow::Buttons(vec![
                 SurfaceButton::Interactive {
@@ -845,22 +842,11 @@ impl DiscordLedgerPresenter {
                 ReadViewKind::Review => {
                     let balances_section = render_review_balances_section(model);
                     let transfers_section = render_review_transfers_section(model);
-                    let route_guidance: Vec<&str> = if model.route_guidance_lines.is_empty() {
-                        match model.route {
-                            ReadViewRoute::ReviewThread => vec![i18n::route_task_guidance()],
-                            ReadViewRoute::ReviewParent => vec![
-                                i18n::route_task_guidance(),
-                                i18n::parent_preview_entry_guidance(),
-                            ],
-                            _ => vec![i18n::route_task_guidance()],
-                        }
-                    } else {
-                        model
-                            .route_guidance_lines
-                            .iter()
-                            .map(String::as_str)
-                            .collect()
-                    };
+                    let route_guidance: Vec<&str> = model
+                        .route_guidance_lines
+                        .iter()
+                        .map(String::as_str)
+                        .collect();
                     let review_instruction = if model.uncertain_write {
                         i18n::review_preview_blocked_instruction()
                     } else {
@@ -884,7 +870,6 @@ impl DiscordLedgerPresenter {
                             .visible_sections
                             .transfers
                             .then_some(transfers_section.as_str()),
-                        Some(i18n::review_explainer()),
                         Some(review_instruction),
                         model
                             .visible_sections
@@ -1401,9 +1386,7 @@ fn render_voided_row(row: &VoidedEntryRow) -> String {
 }
 
 fn render_ledger_footer(model: &ReadViewPageModel) -> Option<String> {
-    let mut footer_lines = vec![i18n::ledger_scope_footer().to_owned()];
-    footer_lines.extend(model.footer_lines.clone());
-    non_empty_join(&footer_lines)
+    non_empty_join(&model.footer_lines)
 }
 
 fn render_sealed_range(sealed_range: Option<&SealedRangeSummary>) -> String {
@@ -2150,7 +2133,7 @@ mod tests {
 
         assert_eq!(
             actual.body,
-            "清算確認\n\nℹ️ この台帳は現在書き込み確認中です。記録・取り消し・清算は一時的に制限されています。\n\n残高\n確認済み履歴と残高補正を含む現在差額\n- Alice: 受け取り 300円\n- Bob: 支払い 300円\n\n送金予定\n- Bob -> Alice 300円\n\n-# 参加者 = これまで記録に出た人、残高 = 確認済み履歴と残高補正を含む現在差額です。\n\nこの台帳は書き込み状態を確認中です。台帳スレッドを確認し、復旧後に /settle を実行してください。\n\n-# 経費を記録・台帳を見る・取り消す はこのチャンネルで行います。清算プランの確認は親チャンネルの 清算確認 または台帳スレッドの /review で作成し、確定は台帳スレッドの /settle で行います。親チャンネルの /review は従来機能です。"
+            "清算確認\n\nℹ️ この台帳は現在書き込み確認中です。記録・取り消し・清算は一時的に制限されています。\n\n残高\n確認済み履歴と残高補正を含む現在差額\n- Alice: 受け取り 300円\n- Bob: 支払い 300円\n\n送金予定\n- Bob -> Alice 300円\n\nこの台帳は書き込み状態を確認中です。台帳スレッドを確認し、復旧後に /settle を実行してください。"
         );
         let SurfaceActionRow::Buttons(buttons) = &actual.action_rows[0] else {
             panic!("expected recovery button row");
@@ -2299,7 +2282,7 @@ mod tests {
 
         assert_eq!(
             actual.body,
-            "台帳\n\nℹ️ この台帳は現在書き込み確認中です。記録・取り消し・清算は一時的に制限されています。\n\n残高\n確認済み履歴と残高補正を含む現在差額\n- Alice: 受け取り 300円\n- Bob: 支払い 300円\n\n参加者\nこれまで記録に出た人\nAlice\nBob\n\n取り消し済み\n[#9] Alice が 2026-05-25 18:55 に取り消し: 2026-05-24 Bob の支払い 1200円 メモ: ランチ | 復旧用の参照: ledger:abcd1234/entry:9 | <https://discord.com/channels/1/2/9>\n\n確認済み\n確認済み: [#4] 2026-05-20 清算 Alice -> Bob ほか1件 まで\n残高補正 Operator: 差額補正 (Alice 受け取り 300円)\n\n-# 確認済み = これより前の履歴が確定済み、残高補正 = 管理上の調整です。このUIでは操作できません。\n表示範囲: 最新の検証済み台帳"
+            "台帳\n\nℹ️ この台帳は現在書き込み確認中です。記録・取り消し・清算は一時的に制限されています。\n\n残高\n確認済み履歴と残高補正を含む現在差額\n- Alice: 受け取り 300円\n- Bob: 支払い 300円\n\n参加者\nこれまで記録に出た人\nAlice\nBob\n\n取り消し済み\n[#9] Alice が 2026-05-25 18:55 に取り消し: 2026-05-24 Bob の支払い 1200円 メモ: ランチ | 復旧用の参照: ledger:abcd1234/entry:9 | <https://discord.com/channels/1/2/9>\n\n確認済み\n確認済み: [#4] 2026-05-20 清算 Alice -> Bob ほか1件 まで\n残高補正 Operator: 差額補正 (Alice 受け取り 300円)\n\n表示範囲: 最新の検証済み台帳"
         );
     }
 
@@ -2370,7 +2353,6 @@ mod tests {
                 .body
                 .contains(i18n::review_parent_preview_instruction())
         );
-        assert!(actual.body.contains(i18n::parent_preview_entry_guidance()));
         let SurfaceActionRow::Buttons(buttons) = &actual.action_rows[0] else {
             panic!("expected thread handoff button");
         };
@@ -2491,7 +2473,7 @@ mod tests {
     }
 
     #[test]
-    fn panel_surface_uses_the_fixed_body_and_launcher_order() {
+    fn panel_surface_has_no_body_text_and_uses_fixed_launcher_order() {
         let actual = DiscordLedgerPresenter::render_panel(&PanelSurfaceModel {
             thread_cue: String::new(),
             status_line: None,
@@ -2500,15 +2482,7 @@ mod tests {
         })
         .expect("surface should render");
 
-        assert_eq!(
-            actual.body,
-            [
-                i18n::panel_deletion_warning(),
-                i18n::panel_reply_notice(),
-                i18n::route_task_guidance(),
-            ]
-            .join("\n\n")
-        );
+        assert!(actual.body.is_empty());
         let SurfaceActionRow::Buttons(buttons) = &actual.action_rows[0] else {
             panic!("expected button row");
         };
@@ -2582,7 +2556,7 @@ mod tests {
 
         assert_eq!(
             actual.body,
-            "取り消し\n\n-# 最新20件から選択できます。古い記録はこのUIから取り消せません。運用担当者に連絡してください。\n\n2026-05-24 Bob の支払い 1200円 メモ: ランチの会計 | 復旧用の参照: ledger:abcd1234/entry:7 | <https://discord.com/channels/1/2/7>\n2026-05-25 清算 Alice->Bob 300円 ほか2件 | 復旧用の参照: ledger:abcd1234/entry:8 | <https://discord.com/channels/1/2/8>"
+            "取り消し\n\n2026-05-24 Bob の支払い 1200円 メモ: ランチの会計 | 復旧用の参照: ledger:abcd1234/entry:7 | <https://discord.com/channels/1/2/7>\n2026-05-25 清算 Alice->Bob 300円 ほか2件 | 復旧用の参照: ledger:abcd1234/entry:8 | <https://discord.com/channels/1/2/8>"
         );
         assert_eq!(model.primary_action_label.as_deref(), Some("確認へ"));
     }
@@ -2609,7 +2583,7 @@ mod tests {
 
         assert_eq!(
             actual.body,
-            "取り消し確認\n\n-# 元の記録は 取り消し済み として残ります。確認すると履歴を変更せず、新しい取り消し記録を追加します。\n\n日付: 2026-05-24\n対象: Bob の支払い\n金額: 1200円\nメモ: ランチの会計\n復旧用の参照: ledger:abcd1234/entry:7 | <https://discord.com/channels/1/2/7>"
+            "取り消し確認\n\n-# 元の記録は取り消し済みとして残ります。\n\n日付: 2026-05-24\n対象: Bob の支払い\n金額: 1200円\nメモ: ランチの会計\n復旧用の参照: ledger:abcd1234/entry:7 | <https://discord.com/channels/1/2/7>"
         );
         assert_eq!(model.primary_action_label.as_deref(), Some("取り消す"));
         assert_eq!(model.secondary_action_label.as_deref(), Some("選び直す"));

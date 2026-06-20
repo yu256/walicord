@@ -3741,7 +3741,7 @@ impl LedgerRouter {
                         });
                         if prior_preview_instance_id.is_some() {
                             model.route_guidance_lines =
-                                review_route_guidance_lines_with_replacement_notice(route);
+                                review_route_guidance_lines_with_replacement_notice();
                         }
                         paginate_read_view_model(model)
                     }
@@ -4596,15 +4596,8 @@ fn settle_attempt_error_message(error: &SettleAttemptError) -> &'static str {
     }
 }
 
-fn review_route_guidance_lines_with_replacement_notice(route: ReadViewRoute) -> Vec<String> {
-    let mut lines = vec![
-        i18n::settlement_preview_replaced_message().to_owned(),
-        i18n::route_task_guidance().to_owned(),
-    ];
-    if matches!(route, ReadViewRoute::ReviewParent) {
-        lines.push(i18n::parent_preview_entry_guidance().to_owned());
-    }
-    lines
+fn review_route_guidance_lines_with_replacement_notice() -> Vec<String> {
+    vec![i18n::settlement_preview_replaced_message().to_owned()]
 }
 
 pub(super) fn read_view_navigation_row(
@@ -5516,29 +5509,11 @@ mod tests {
         assert_eq!(actual, expected);
     }
 
-    #[rstest]
-    #[case::thread(
-        ReadViewRoute::ReviewThread,
-        vec![
-            i18n::settlement_preview_replaced_message().to_owned(),
-            i18n::route_task_guidance().to_owned(),
-        ]
-    )]
-    #[case::parent(
-        ReadViewRoute::ReviewParent,
-        vec![
-            i18n::settlement_preview_replaced_message().to_owned(),
-            i18n::route_task_guidance().to_owned(),
-            i18n::parent_preview_entry_guidance().to_owned(),
-        ]
-    )]
-    fn replacement_review_guidance_preserves_route_guidance(
-        #[case] route: ReadViewRoute,
-        #[case] expected: Vec<String>,
-    ) {
+    #[test]
+    fn replacement_review_guidance_contains_only_replaced_notice() {
         assert_eq!(
-            review_route_guidance_lines_with_replacement_notice(route),
-            expected
+            review_route_guidance_lines_with_replacement_notice(),
+            vec![i18n::settlement_preview_replaced_message().to_owned()]
         );
     }
 

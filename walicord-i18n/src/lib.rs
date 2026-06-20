@@ -1316,27 +1316,11 @@ pub fn review_thread_empty_state() -> &'static str {
     }
 }
 
-pub fn ledger_scope_footer() -> &'static str {
-    if cfg!(feature = "ja") {
-        "-# 確認済み = これより前の履歴が確定済み、残高補正 = 管理上の調整です。このUIでは操作できません。"
-    } else {
-        "-# Confirmed = earlier history is finalized, balance adjustments are operator-only maintenance and cannot be changed from this UI."
-    }
-}
-
-pub fn void_selection_window_guidance() -> &'static str {
-    if cfg!(feature = "ja") {
-        "-# 最新20件から選択できます。古い記録はこのUIから取り消せません。運用担当者に連絡してください。"
-    } else {
-        "-# You can choose from the latest 20 entries. Older records cannot be voided from this UI. Contact an operator."
-    }
-}
-
 pub fn void_confirm_append_only_line() -> &'static str {
     if cfg!(feature = "ja") {
-        "-# 元の記録は 取り消し済み として残ります。確認すると履歴を変更せず、新しい取り消し記録を追加します。"
+        "-# 元の記録は取り消し済みとして残ります。"
     } else {
-        "-# The original record remains visible as voided. Confirmation appends a new void entry instead of mutating history."
+        "-# The original record remains visible as voided."
     }
 }
 
@@ -1550,22 +1534,6 @@ pub fn void_window_handoff_line(reference_hint: impl std::fmt::Display) -> impl 
     })
 }
 
-pub fn route_task_guidance() -> &'static str {
-    if cfg!(feature = "ja") {
-        "-# 経費を記録・台帳を見る・取り消す はこのチャンネルで行います。清算プランの確認は親チャンネルの 清算確認 または台帳スレッドの /review で作成し、確定は台帳スレッドの /settle で行います。親チャンネルの /review は従来機能です。"
-    } else {
-        "-# Record expenses, view the ledger, and void entries in this channel. Create settlement previews from the parent channel button or the ledger thread's /review, and confirm them with /settle in the ledger thread. The parent-channel /review remains the legacy behavior."
-    }
-}
-
-pub fn parent_preview_entry_guidance() -> &'static str {
-    if cfg!(feature = "ja") {
-        "-# 清算確認 ボタンは親チャンネルでプレビューを作成し、その後 台帳スレッドを開く ボタンで /settle に進む入口です。"
-    } else {
-        "-# The settlement button creates the preview in the parent channel, then hands off to /settle from the ledger-thread button."
-    }
-}
-
 pub fn review_preview_instruction() -> &'static str {
     if cfg!(feature = "ja") {
         "これはプレビューです。このスレッドで /settle を実行してください。10分以内に、プレビューを作成した本人だけが確定できます。あとから同じ台帳でプレビューを作り直すと、最新のプレビューだけが確定対象になります。"
@@ -1654,14 +1622,6 @@ pub fn settlement_preview_not_delivered_message() -> &'static str {
     }
 }
 
-pub fn review_explainer() -> &'static str {
-    if cfg!(feature = "ja") {
-        "-# 参加者 = これまで記録に出た人、残高 = 確認済み履歴と残高補正を含む現在差額です。"
-    } else {
-        "-# Participants are everyone who has appeared in recorded history, and balances include confirmed history plus balance adjustments."
-    }
-}
-
 pub fn panel_thread_cue_known(thread_mention: impl std::fmt::Display) -> impl std::fmt::Display {
     std::fmt::from_fn(move |f| {
         if cfg!(feature = "ja") {
@@ -1735,22 +1695,6 @@ pub fn abandoned_uncertain_write_acknowledged_message() -> &'static str {
         "未確定の送信を確認済みとして解除しました。元の操作からもう一度実行してください。"
     } else {
         "The uncertain send block was cleared after acknowledgement. Run the original action again."
-    }
-}
-
-pub fn panel_deletion_warning() -> &'static str {
-    if cfg!(feature = "ja") {
-        "-# 注意: 台帳スレッドや台帳メッセージを削除すると復旧できません。削除してしまった場合は管理者に連絡し、新しい台帳の作成を相談してください。"
-    } else {
-        "-# Warning: deleting the ledger thread or ledger messages cannot be recovered. Contact an administrator if it happens."
-    }
-}
-
-pub fn panel_reply_notice() -> &'static str {
-    if cfg!(feature = "ja") {
-        "-# 補足: 台帳スレッドで普通に返信しても台帳の記録は増えません。"
-    } else {
-        "-# Note: ordinary replies in the ledger thread do not add ledger records."
     }
 }
 
