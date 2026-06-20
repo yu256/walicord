@@ -97,12 +97,6 @@ pub(super) fn expense_picker_page(
         items[page_start..page_end].to_vec()
     };
     let mut detail_lines = Vec::new();
-    match kind {
-        ExpensePickerKind::Payer | ExpensePickerKind::Individuals => {
-            detail_lines.push(i18n::member_picker_help().to_owned());
-        }
-        ExpensePickerKind::Roles => detail_lines.push(i18n::role_picker_help().to_owned()),
-    }
     if let Some(query) = query.as_deref() {
         detail_lines.push(i18n::expense_search_line(query).to_string());
         if total_items == 0 {
@@ -117,8 +111,8 @@ pub(super) fn expense_picker_page(
             );
         }
     }
-    detail_lines.push(i18n::page_indicator(current_page + 1, total_pages).to_string());
-    if total_items > 0 {
+    if total_pages > 1 {
+        detail_lines.push(i18n::page_indicator(current_page + 1, total_pages).to_string());
         detail_lines
             .push(i18n::page_range_indicator(page_start + 1, page_end, total_items).to_string());
     }
@@ -250,8 +244,9 @@ pub(super) fn expense_picker_utility_row(
     current_page: usize,
     total_pages: usize,
 ) -> SurfaceActionRow {
-    SurfaceActionRow::Buttons(vec![
-        SurfaceButton::Interactive {
+    let mut buttons = Vec::new();
+    if total_pages > 1 {
+        buttons.push(SurfaceButton::Interactive {
             label: i18n::picker_previous_page_label().to_owned(),
             custom_id: expense_picker_custom_id(
                 EXPENSE_PICKER_PREV_CUSTOM_ID_PREFIX,
@@ -261,8 +256,8 @@ pub(super) fn expense_picker_utility_row(
             ),
             style: SurfaceInteractiveButtonStyle::Secondary,
             disabled: current_page == 0,
-        },
-        SurfaceButton::Interactive {
+        });
+        buttons.push(SurfaceButton::Interactive {
             label: i18n::picker_next_page_label().to_owned(),
             custom_id: expense_picker_custom_id(
                 EXPENSE_PICKER_NEXT_CUSTOM_ID_PREFIX,
@@ -272,30 +267,31 @@ pub(super) fn expense_picker_utility_row(
             ),
             style: SurfaceInteractiveButtonStyle::Secondary,
             disabled: current_page + 1 >= total_pages,
-        },
-        SurfaceButton::Interactive {
-            label: i18n::picker_search_label().to_owned(),
-            custom_id: expense_picker_custom_id(
-                EXPENSE_PICKER_SEARCH_CUSTOM_ID_PREFIX,
-                kind,
-                nonce,
-                snapshot_id,
-            ),
-            style: SurfaceInteractiveButtonStyle::Secondary,
-            disabled: false,
-        },
-        SurfaceButton::Interactive {
-            label: picker_clear_label(kind).to_owned(),
-            custom_id: expense_picker_custom_id(
-                EXPENSE_PICKER_CLEAR_CUSTOM_ID_PREFIX,
-                kind,
-                nonce,
-                snapshot_id,
-            ),
-            style: SurfaceInteractiveButtonStyle::Secondary,
-            disabled: false,
-        },
-    ])
+        });
+    }
+    buttons.push(SurfaceButton::Interactive {
+        label: i18n::picker_search_label().to_owned(),
+        custom_id: expense_picker_custom_id(
+            EXPENSE_PICKER_SEARCH_CUSTOM_ID_PREFIX,
+            kind,
+            nonce,
+            snapshot_id,
+        ),
+        style: SurfaceInteractiveButtonStyle::Secondary,
+        disabled: false,
+    });
+    buttons.push(SurfaceButton::Interactive {
+        label: picker_clear_label(kind).to_owned(),
+        custom_id: expense_picker_custom_id(
+            EXPENSE_PICKER_CLEAR_CUSTOM_ID_PREFIX,
+            kind,
+            nonce,
+            snapshot_id,
+        ),
+        style: SurfaceInteractiveButtonStyle::Secondary,
+        disabled: false,
+    });
+    SurfaceActionRow::Buttons(buttons)
 }
 
 fn picker_clear_label(kind: ExpensePickerKind) -> &'static str {
