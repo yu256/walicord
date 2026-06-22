@@ -7,9 +7,8 @@
 //! only owns the conversion from `RenderedSurface` to serenity types.
 
 use crate::discord_ledger::{
-    ExpenseConfirmationParticipantRow, ExpenseDraftSummary, ExpenseParticipantSourceBadge,
-    ExpenseSurfaceModel, SafeLiteralText, SurfaceActionRow, SurfaceButton,
-    SurfaceInteractiveButtonStyle, SurfaceMemberLabels, confirmation_source_disclosure_line,
+    ExpenseConfirmationParticipantRow, ExpenseDraftSummary, ExpenseSurfaceModel, SafeLiteralText,
+    SurfaceActionRow, SurfaceButton, SurfaceInteractiveButtonStyle, SurfaceMemberLabels,
 };
 use smol_str::SmolStr;
 use std::collections::{BTreeSet, HashMap};
@@ -42,7 +41,7 @@ pub fn build_expense_confirmation_surface(
     display_names: &HashMap<MemberId, SmolStr>,
     button_ids: &ExpenseConfirmationButtonIds,
 ) -> Result<ExpenseSurfaceModel, ExpenseAuthoringError> {
-    let defaulted: BTreeSet<MemberId> = defaulted_members.iter().copied().collect();
+    let _defaulted: BTreeSet<MemberId> = defaulted_members.iter().copied().collect();
     let labels = SurfaceMemberLabels::from_member_names(participants.iter().map(|row| {
         (
             row.member_id,
@@ -75,6 +74,9 @@ pub fn build_expense_confirmation_surface(
         .map(|amount| (amount.member_id, amount.amount))
         .collect();
 
+    let show_weight = !participants
+        .iter()
+        .all(|p| p.weight == participants[0].weight);
     let mut detail_lines: Vec<String> = Vec::new();
     for row in participants {
         let display_name = labels
@@ -93,12 +95,9 @@ pub fn build_expense_confirmation_surface(
             display_name,
             share_amount,
             weight: row.weight.0,
-            badges: vec![ExpenseParticipantSourceBadge::DirectSelection],
-            defaulted_weight: defaulted.contains(&row.member_id),
         };
-        detail_lines.push(confirmation_row.render());
+        detail_lines.push(confirmation_row.render(show_weight));
     }
-    detail_lines.push(confirmation_source_disclosure_line().to_owned());
 
     let summary_lines: Vec<String> = summary.render_lines().to_vec();
 

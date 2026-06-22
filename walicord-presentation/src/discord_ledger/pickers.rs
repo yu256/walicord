@@ -87,66 +87,43 @@ impl PickerPageChrome {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ExpenseParticipantSourceBadge {
-    DirectSelection,
-    RoleExpansion,
-    AllMembers,
-}
-
-impl ExpenseParticipantSourceBadge {
-    fn render(self) -> &'static str {
-        match self {
-            Self::DirectSelection => i18n::direct_selection_badge(),
-            Self::RoleExpansion => i18n::role_expansion_badge(),
-            Self::AllMembers => i18n::members_badge(),
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExpenseConfirmationParticipantRow {
     pub display_name: SafeLiteralText,
     pub share_amount: Option<String>,
-    /// Per-member weight. Matches the domain `Weight(u64)` so the presentation row
-    /// never has to lossily cast and presentation never silently saturates an
-    /// out-of-range weight from the domain.
     pub weight: u64,
-    pub badges: Vec<ExpenseParticipantSourceBadge>,
-    pub defaulted_weight: bool,
 }
 
 impl ExpenseConfirmationParticipantRow {
-    pub fn render(&self) -> String {
-        let mut badges = self.badges.clone();
-        badges.sort_by_key(|badge| match badge {
-            ExpenseParticipantSourceBadge::DirectSelection => 0,
-            ExpenseParticipantSourceBadge::RoleExpansion => 1,
-            ExpenseParticipantSourceBadge::AllMembers => 2,
-        });
-        let badge_list = badges
-            .iter()
-            .map(|badge| badge.render())
-            .collect::<Vec<_>>()
-            .join(", ");
-
-        let mut line = match (self.weight, self.share_amount.as_deref()) {
-            (0, _) => i18n::expense_confirmation_zero_weight_row(&self.display_name).to_string(),
-            (_, Some("0")) | (_, None) => {
-                i18n::expense_confirmation_rounded_zero_row(&self.display_name, self.weight)
-                    .to_string()
+    pub fn render(&self, show_weight: bool) -> String {
+        if show_weight {
+            match (self.weight, self.share_amount.as_deref()) {
+                (0, _) => {
+                    i18n::expense_confirmation_zero_weight_row(&self.display_name).to_string()
+                }
+                (_, Some("0")) | (_, None) => {
+                    i18n::expense_confirmation_rounded_zero_row(&self.display_name, self.weight)
+                        .to_string()
+                }
+                (_, Some(share_amount)) => i18n::expense_confirmation_share_row(
+                    &self.display_name,
+                    share_amount,
+                    self.weight,
+                )
+                .to_string(),
             }
-            (_, Some(share_amount)) => {
-                i18n::expense_confirmation_share_row(&self.display_name, share_amount, self.weight)
-                    .to_string()
+        } else {
+            match self.share_amount.as_deref() {
+                Some(share_amount) => {
+                    i18n::expense_confirmation_equal_row(&self.display_name, share_amount)
+                        .to_string()
+                }
+                None => {
+                    i18n::expense_confirmation_rounded_zero_row(&self.display_name, self.weight)
+                        .to_string()
+                }
             }
-        };
-
-        line.push_str(&format!(" [{badge_list}]"));
-        if self.defaulted_weight {
-            line.push_str(&format!(" [{}]", i18n::weight_default_badge()));
         }
-        line
     }
 }
 
@@ -251,14 +228,6 @@ pub fn participant_source_clear_labels() -> [&'static str; 2] {
     ]
 }
 
-pub fn participant_source_help_line() -> &'static str {
-    i18n::participant_source_help()
-}
-
-pub fn confirmation_source_disclosure_line() -> &'static str {
-    i18n::confirmation_source_disclosure()
-}
-
 const SELECTED_SUMMARY_LABEL_LIMIT: usize = 32;
 
 fn summarize_label(label: &SafeLiteralText) -> String {
@@ -304,12 +273,10 @@ pub fn summarize_selected_names(names: &[SafeLiteralText]) -> Option<String> {
 mod tests {
     use super::{
         ExpenseConfirmationParticipantRow, ExpenseDraftSummary, ExpenseForwardAction,
-        ExpenseParticipantSourceBadge, ExpenseStepTitle, ModalValidationFailure, PickerPageChrome,
-        confirmation_source_disclosure_line, first_invalid_modal_field,
+        ExpenseStepTitle, ModalValidationFailure, PickerPageChrome, first_invalid_modal_field,
         individual_picker_utility_labels, individual_selection_title,
         participant_source_clear_labels, participant_source_entry_labels,
-        participant_source_help_line, payer_picker_utility_labels, role_picker_utility_labels,
-        summarize_selected_names,
+        payer_picker_utility_labels, role_picker_utility_labels, summarize_selected_names,
     };
     use crate::discord_ledger::{
         budgets::{validate_button_label, validate_component_placeholder},
@@ -415,61 +382,33 @@ mod tests {
     }
 
     #[test]
-    fn participant_confirmation_row_renders_badges_and_weight_reset_marker() {
-        let ordinary = ExpenseConfirmationParticipantRow {
+    fn confirmation_row_hides_weight_when_equal() {
+        let row = ExpenseConfirmationParticipantRow {
             display_name: name("Alice"),
-            share_amount: Some("750".to_owned()),
-            weight: 2,
-            badges: vec![
-                ExpenseParticipantSourceBadge::DirectSelection,
-                ExpenseParticipantSourceBadge::RoleExpansion,
-            ],
-            defaulted_weight: false,
-        };
-        let zero_share = ExpenseConfirmationParticipantRow {
-            display_name: name("Bob"),
-            share_amount: Some("0".to_owned()),
+            share_amount: Some("500".to_owned()),
             weight: 1,
-            badges: vec![ExpenseParticipantSourceBadge::AllMembers],
-            defaulted_weight: true,
         };
-        let explicit_x0 = ExpenseConfirmationParticipantRow {
-            display_name: name("Carol"),
-            share_amount: None,
-            weight: 0,
-            badges: vec![ExpenseParticipantSourceBadge::DirectSelection],
-            defaulted_weight: false,
-        };
-
-        assert_eq!(
-            ordinary.render(),
-            "- Alice: 750円 (×2) [直接選択, ロール展開]"
-        );
-        assert_eq!(
-            zero_share.render(),
-            "- Bob ×1 (端数で0) [全メンバー (MEMBERS)] [既定値 1]"
-        );
-        assert_eq!(explicit_x0.render(), "- Carol ×0 (取り分なし) [直接選択]");
+        assert_eq!(row.render(false), "- Alice: 500円");
     }
 
     #[test]
-    fn participant_confirmation_badges_render_in_the_fixed_source_order() {
+    fn confirmation_row_shows_weight_when_requested() {
         let row = ExpenseConfirmationParticipantRow {
             display_name: name("Alice"),
             share_amount: Some("750".to_owned()),
             weight: 2,
-            badges: vec![
-                ExpenseParticipantSourceBadge::AllMembers,
-                ExpenseParticipantSourceBadge::DirectSelection,
-                ExpenseParticipantSourceBadge::RoleExpansion,
-            ],
-            defaulted_weight: false,
         };
+        assert_eq!(row.render(true), "- Alice: 750円 (×2)");
+    }
 
-        assert_eq!(
-            row.render(),
-            "- Alice: 750円 (×2) [直接選択, ロール展開, 全メンバー (MEMBERS)]"
-        );
+    #[test]
+    fn confirmation_row_shows_zero_weight() {
+        let row = ExpenseConfirmationParticipantRow {
+            display_name: name("Carol"),
+            share_amount: None,
+            weight: 0,
+        };
+        assert_eq!(row.render(true), "- Carol: 0円 (×0)");
     }
 
     #[test]
@@ -522,31 +461,7 @@ mod tests {
     }
 
     #[test]
-    fn participant_source_help_and_confirmation_disclosure_use_fixed_copy() {
-        assert_eq!(
-            participant_source_help_line(),
-            "全メンバー (MEMBERS) = このチャンネルで今選べるメンバー全員。記録時に現在のメンバーで再評価されます。"
-        );
-        assert_eq!(
-            confirmation_source_disclosure_line(),
-            "ロールと 全メンバー (MEMBERS) は記録時に再評価されます。"
-        );
-    }
-
-    #[test]
-    fn fixed_picker_and_weight_editor_copy_routes_through_i18n() {
-        assert_eq!(
-            i18n::member_picker_help(),
-            "個別選択には最大25人まで表示されます。ページを移動しても選択は保持されます。検索で表示名の一部から探せます。見つからない場合はロールまたは 全メンバー (MEMBERS) を使ってください。ロールと MEMBERS は記録時に現在の参加者で再評価されます。"
-        );
-        assert_eq!(
-            i18n::role_picker_help(),
-            "ロールは最大25件まで表示されます。ページを移動しても選択は保持されます。検索でロール名の一部から探せます。見つからない場合は個別選択または 全メンバー (MEMBERS) を使ってください。ロールと MEMBERS は記録時に現在の参加者で再評価されます。"
-        );
-        assert_eq!(
-            i18n::weight_editor_help(),
-            "1 が標準、0 にするとその人の負担は 0円です (x0)。その人は今回の残高計算に影響しません。負の値は使えません。"
-        );
+    fn fixed_picker_copy_routes_through_i18n() {
         assert_eq!(i18n::weight_editor_reset_label(), "均等割りに戻す");
         assert_eq!(i18n::search_blank_error(), "検索語を入力してください。");
         assert_eq!(

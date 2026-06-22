@@ -2672,9 +2672,9 @@ pub fn settlement_recorded_message() -> &'static str {
 
 pub fn settlement_preview_expired_or_confirmed_message() -> &'static str {
     if cfg!(feature = "ja") {
-        "プレビューの期限が切れたか、既に確定済みです。必要であれば清算確認からやり直してください。"
+        "プレビューの期限切れ・確定済み・作り直しにより無効です。必要であれば清算確認からやり直してください。"
     } else {
-        "The preview has expired or was already confirmed. Start from the settlement review if needed."
+        "The preview is no longer valid (expired, already confirmed, or replaced). Start from the settlement review if needed."
     }
 }
 
@@ -2788,14 +2788,27 @@ pub fn expense_confirmation_share_row(
     })
 }
 
+pub fn expense_confirmation_equal_row(
+    display_name: impl std::fmt::Display,
+    share_amount: impl std::fmt::Display,
+) -> impl std::fmt::Display {
+    std::fmt::from_fn(move |f| {
+        if cfg!(feature = "ja") {
+            write!(f, "- {display_name}: {share_amount}円")
+        } else {
+            write!(f, "- {display_name}: {share_amount} JPY")
+        }
+    })
+}
+
 pub fn expense_confirmation_zero_weight_row(
     display_name: impl std::fmt::Display,
 ) -> impl std::fmt::Display {
     std::fmt::from_fn(move |f| {
         if cfg!(feature = "ja") {
-            write!(f, "- {display_name} ×0 (取り分なし)")
+            write!(f, "- {display_name}: 0円 (×0)")
         } else {
-            write!(f, "- {display_name} x0 (no share)")
+            write!(f, "- {display_name}: 0 JPY (x0)")
         }
     })
 }

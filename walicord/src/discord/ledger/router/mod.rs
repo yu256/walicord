@@ -4,8 +4,8 @@ use crate::discord::ledger::panel::{
 use serenity::{
     all::{
         ChannelId, CommandInteraction, ComponentInteraction, ComponentInteractionDataKind,
-        CreateActionRow, CreateButton, CreateInteractionResponse, CreateInteractionResponseMessage,
-        GuildId, ModalInteraction, Permissions, UserId,
+        CreateActionRow, CreateButton, CreateInteractionResponse, GuildId, ModalInteraction,
+        Permissions, UserId,
     },
     async_trait,
     prelude::Context,
@@ -44,11 +44,11 @@ use walicord_i18n as i18n;
 use walicord_presentation::discord_ledger::{
     DiscordLedgerPresenter, ExpenseConfirmationButtonIds, ExpenseSelectionStepButtonIds,
     LedgerPageInputs, ReadViewBuildError, ReadViewPageModel, ReadViewRoute, RecoveryCta,
-    RenderBudgetError, ReviewPageInputs, SurfaceActionRow, SurfaceMemberLabels, SurfaceSelectMenu,
-    VoidRetargetReason, VoidSurfaceModel, build_expense_confirmation_surface,
-    build_expense_selection_step_surface, build_ledger_empty_page_model, build_ledger_page_model,
-    build_review_empty_page_model, build_review_no_transfers_page_model, build_review_page_model,
-    paginate_read_view_model,
+    RenderBudgetError, ReviewPageInputs, SurfaceActionRow, SurfaceButton,
+    SurfaceInteractiveButtonStyle, SurfaceMemberLabels, SurfaceSelectMenu, VoidRetargetReason,
+    VoidSurfaceModel, build_expense_confirmation_surface, build_expense_selection_step_surface,
+    build_ledger_empty_page_model, build_ledger_page_model, build_review_empty_page_model,
+    build_review_no_transfers_page_model, build_review_page_model, paginate_read_view_model,
 };
 
 use crate::channel::ChannelManager;
@@ -3778,6 +3778,16 @@ impl LedgerRouter {
                             model.route_guidance_lines =
                                 review_route_guidance_lines_with_replacement_notice();
                         }
+                        if !uncertain_write {
+                            model.action_rows.push(SurfaceActionRow::Buttons(vec![
+                                SurfaceButton::Interactive {
+                                    label: i18n::review_settle_button_label().to_owned(),
+                                    custom_id: REVIEW_SETTLE_CUSTOM_ID.to_owned(),
+                                    style: SurfaceInteractiveButtonStyle::Primary,
+                                    disabled: false,
+                                },
+                            ]));
+                        }
                         paginate_read_view_model(model)
                     }
                 },
@@ -3800,13 +3810,6 @@ impl LedgerRouter {
         let rendered = DiscordLedgerPresenter::render_read_view_page(&pages[0])
             .map_err(LedgerRouteError::from)?;
         let (body, mut components) = rendered_surface_to_message(rendered);
-        if stored_preview_instance_id.is_some() && !uncertain_write {
-            components.push(CreateActionRow::Buttons(vec![
-                CreateButton::new(REVIEW_SETTLE_CUSTOM_ID)
-                    .label(i18n::review_settle_button_label())
-                    .style(serenity::all::ButtonStyle::Primary),
-            ]));
-        }
         if total_pages > 1 {
             components.push(read_view_navigation_row(nonce, 0, total_pages));
         }
@@ -3956,17 +3959,7 @@ impl LedgerRouter {
             .await?;
 
         component
-            .create_response(
-                &ctx.http,
-                CreateInteractionResponse::UpdateMessage(
-                    CreateInteractionResponseMessage::default().button(
-                        CreateButton::new(REVIEW_SETTLE_CUSTOM_ID)
-                            .label(i18n::review_settle_button_label())
-                            .style(serenity::all::ButtonStyle::Primary)
-                            .disabled(true),
-                    ),
-                ),
-            )
+            .create_response(&ctx.http, CreateInteractionResponse::Acknowledge)
             .await
             .map_err(discord_call_error(DiscordCallSite::ReviewSettleDefer))?;
 
@@ -4022,33 +4015,49 @@ impl LedgerRouter {
             ledger_id,
             actor_id,
         };
-        let (message, components) = match &outcome {
+        let response = match &outcome {
             SettleExecuteOutcome::Recorded { .. } => {
-                self.render_settled_review(session_key, i18n::settlement_recorded_message())
+                let (body, components) =
+                    self.render_settled_review(session_key, i18n::settlement_recorded_message());
+                safe_edit_interaction_response()
+                    .content(body)
+                    .components(components)
             }
-            SettleExecuteOutcome::NoPreviewRequired => self.render_settled_review(
-                session_key,
-                i18n::settlement_preview_expired_or_confirmed_message(),
-            ),
+            SettleExecuteOutcome::NoPreviewRequired => {
+                let (body, components) = self.render_settled_review(
+                    session_key,
+                    i18n::settlement_preview_expired_or_confirmed_message(),
+                );
+                safe_edit_interaction_response()
+                    .content(body)
+                    .components(components)
+            }
             SettleExecuteOutcome::NoTransferNeeded => {
-                self.render_settled_review(session_key, i18n::settlement_no_transfer_message())
+                let (body, components) =
+                    self.render_settled_review(session_key, i18n::settlement_no_transfer_message());
+                safe_edit_interaction_response()
+                    .content(body)
+                    .components(components)
             }
             SettleExecuteOutcome::UncertainBlocked
             | SettleExecuteOutcome::UncertainAppendFailed => {
                 self.deps.read_view_sessions.clear(session_key);
-                self.uncertain_write_block_response(ledger_id, false, true)
+                let (body, components) =
+                    self.uncertain_write_block_response(ledger_id, false, true);
+                safe_edit_interaction_response()
+                    .content(body)
+                    .components(components)
             }
             SettleExecuteOutcome::AttemptFailed { error } => {
-                self.render_settled_review(session_key, settle_attempt_error_message(error))
+                let (body, components) =
+                    self.render_settled_review(session_key, settle_attempt_error_message(error));
+                safe_edit_interaction_response()
+                    .content(body)
+                    .components(components)
             }
         };
         component
-            .edit_response(
-                &ctx.http,
-                safe_edit_interaction_response()
-                    .content(message)
-                    .components(components),
-            )
+            .edit_response(&ctx.http, response)
             .await
             .map_err(discord_call_error(
                 DiscordCallSite::ReviewSettleEditResponse,
@@ -4061,13 +4070,15 @@ impl LedgerRouter {
         session_key: ReadViewSessionKey,
         status: &str,
     ) -> (String, Vec<CreateActionRow>) {
-        let session = self.deps.read_view_sessions.clear(session_key);
-        if let Some(session) = session {
+        if let Some(session) = self.deps.read_view_sessions.clear(session_key) {
             let mut model = session.current_page().clone();
             model.route_guidance_lines = vec![status.to_owned()];
             model.action_rows = Vec::new();
-            if let Ok(rendered) = DiscordLedgerPresenter::render_read_view_page(&model) {
-                return rendered_surface_to_message(rendered);
+            match DiscordLedgerPresenter::render_read_view_page(&model) {
+                Ok(rendered) => return rendered_surface_to_message(rendered),
+                Err(error) => {
+                    tracing::warn!(%error, "settled review re-render failed, falling back to status only");
+                }
             }
         }
         (status.to_owned(), Vec::new())

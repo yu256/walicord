@@ -30,9 +30,8 @@ pub use budgets::{
 };
 pub use member_labels::{SurfaceMemberLabel, SurfaceMemberLabels, unknown_member_label};
 pub use pickers::{
-    ExpenseConfirmationParticipantRow, ExpenseDraftSummary, ExpenseParticipantSourceBadge,
-    PickerSurfaceModel, confirmation_source_disclosure_line, individual_selection_title,
-    participant_source_help_line,
+    ExpenseConfirmationParticipantRow, ExpenseDraftSummary, PickerSurfaceModel,
+    individual_selection_title,
 };
 pub use sanitizer::{BusinessDateTime, SafeLiteralText};
 pub use surfaces::{
