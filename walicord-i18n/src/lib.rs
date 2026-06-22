@@ -160,7 +160,7 @@ pub const SLASH_PANEL_DESCRIPTION: &str = if cfg!(feature = "ja") {
 };
 
 pub const SLASH_EXPENSE_DESCRIPTION: &str = if cfg!(feature = "ja") {
-    "このチャンネルで経費を記録します。"
+    "このチャンネルで支出を記録します。"
 } else {
     "Record an expense in this channel."
 };
@@ -1211,7 +1211,7 @@ pub const REVIEW_ZERO_BALANCES: &str = if cfg!(feature = "ja") {
 };
 
 pub const LEDGER_ZERO_BALANCES: &str = if cfg!(feature = "ja") {
-    "残高なし (新しい経費は 記録する ボタン (/expense コマンド) で記録できます。)"
+    "残高なし (新しい支出は 記録する ボタン (/expense コマンド) で記録できます。)"
 } else {
     "No balances (You can record a new expense with the Record button or /expense.)"
 };
@@ -1223,19 +1223,19 @@ pub const VOIDED_NONE: &str = if cfg!(feature = "ja") {
 };
 
 pub const LEDGER_EMPTY_STATE: &str = if cfg!(feature = "ja") {
-    "まだ記録がありません。/expense または 記録する ボタンで最初の経費を記録してみましょう。"
+    "まだ記録がありません。/expense または 記録する ボタンで最初の支出を記録してみましょう。"
 } else {
     "No records exist yet. Try recording the first expense with /expense or the Record button."
 };
 
 pub const REVIEW_PARENT_EMPTY_STATE: &str = if cfg!(feature = "ja") {
-    "まだ記録がありません。/expense または 記録する ボタンで最初の経費を記録してみましょう。"
+    "まだ記録がありません。/expense または 記録する ボタンで最初の支出を記録してみましょう。"
 } else {
     "No records exist yet. Try recording the first expense with /expense or the Record button."
 };
 
 pub const REVIEW_THREAD_EMPTY_STATE: &str = if cfg!(feature = "ja") {
-    "まだ記録がありません。親チャンネルで /expense または 記録する ボタンから最初の経費を記録してみましょう。"
+    "まだ記録がありません。親チャンネルで /expense または 記録する ボタンから最初の支出を記録してみましょう。"
 } else {
     "No records exist yet. Try recording the first expense from the parent channel with /expense or the Record button."
 };
@@ -1379,7 +1379,7 @@ pub const VOID_SUCCESS_THREAD_LINE_WITHOUT_MENTION: &str = if cfg!(feature = "ja
 };
 
 pub const VOID_EMPTY_STATE: &str = if cfg!(feature = "ja") {
-    "まだ記録がありません。/expense または 記録する ボタンで最初の経費を記録してみましょう。"
+    "まだ記録がありません。/expense または 記録する ボタンで最初の支出を記録してみましょう。"
 } else {
     "No records exist yet. Try recording the first expense with /expense or the Record button."
 };
@@ -1701,13 +1701,13 @@ pub const EXPENSE_SESSION_EXPIRED_MESSAGE: &str = if cfg!(feature = "ja") {
 };
 
 pub const EXPENSE_SESSION_WRONG_ACTOR_MESSAGE: &str = if cfg!(feature = "ja") {
-    "この経費入力は他のユーザーのものです。自分で始めるには /expense または 記録する を使ってください。"
+    "この入力は他のユーザーのものです。自分で始めるには /expense または 記録する を使ってください。"
 } else {
     "This expense draft belongs to another user. Start your own with /expense or Record."
 };
 
 pub const EXPENSE_SESSION_REPLACED_MESSAGE: &str = if cfg!(feature = "ja") {
-    "前の経費入力を新しい入力で置き換えました。"
+    "前の入力を新しい入力で置き換えました。"
 } else {
     "The previous expense draft was replaced with the new input."
 };
@@ -1829,7 +1829,7 @@ pub const EXPENSE_RECORD_LABEL: &str = if cfg!(feature = "ja") {
 };
 
 pub const EXPENSE_MODAL_TITLE: &str = if cfg!(feature = "ja") {
-    "経費を記録"
+    "支出を記録"
 } else {
     "Record Expense"
 };
@@ -2121,7 +2121,7 @@ pub const EXPENSE_MODAL_RETRY_BUTTON_LABEL: &str = if cfg!(feature = "ja") {
 };
 
 pub const EXPENSE_RECORDED_MESSAGE: &str = if cfg!(feature = "ja") {
-    "経費を記録しました。"
+    "支出を記録しました。"
 } else {
     "Recorded the expense."
 };

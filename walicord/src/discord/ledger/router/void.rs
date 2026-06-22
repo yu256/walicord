@@ -128,8 +128,8 @@ fn void_candidate_select_label(
                 .map(|paid| paid.amount)
                 .sum::<Money>();
             let _ = match payer {
-                Some(payer) => write!(label, "#{} 経費 {amount}円 {payer}", view.entry().id.0),
-                None => write!(label, "#{} 経費 {amount}円", view.entry().id.0),
+                Some(payer) => write!(label, "#{} 支出 {amount}円 {payer}", view.entry().id.0),
+                None => write!(label, "#{} 支出 {amount}円", view.entry().id.0),
             };
         }
         LedgerEvent::NormalizedSettlementPlanRecorded(event) => {

@@ -2311,7 +2311,7 @@ mod tests {
 
         assert_eq!(
             actual.body,
-            "台帳\n\nまだ記録がありません。/expense または 記録する ボタンで最初の経費を記録してみましょう。"
+            "台帳\n\nまだ記録がありません。/expense または 記録する ボタンで最初の支出を記録してみましょう。"
         );
     }
 
@@ -2737,7 +2737,7 @@ mod tests {
 
         assert_eq!(
             empty.body,
-            "取り消し\n\nまだ記録がありません。/expense または 記録する ボタンで最初の経費を記録してみましょう。"
+            "取り消し\n\nまだ記録がありません。/expense または 記録する ボタンで最初の支出を記録してみましょう。"
         );
         assert_eq!(
             no_candidates.body,
