@@ -1834,7 +1834,7 @@ impl LedgerRouter {
         let (body, components) = rendered_surface_to_message(rendered);
 
         let response = CreateInteractionResponse::UpdateMessage(
-            safe_ephemeral_interaction_response_message()
+            safe_interaction_response_message()
                 .content(body)
                 .components(components),
         );
@@ -2029,7 +2029,7 @@ impl LedgerRouter {
         }
 
         let response = CreateInteractionResponse::UpdateMessage(
-            safe_ephemeral_interaction_response_message()
+            safe_interaction_response_message()
                 .content(body)
                 .components(components),
         );
@@ -2049,7 +2049,7 @@ impl LedgerRouter {
         component: &ComponentInteraction,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
         let response = CreateInteractionResponse::UpdateMessage(
-            safe_ephemeral_interaction_response_message()
+            safe_interaction_response_message()
                 .content(i18n::EXPENSE_RECORDED_MESSAGE)
                 .components(Vec::new()),
         );
@@ -2277,7 +2277,7 @@ impl LedgerRouter {
         let rendered = DiscordLedgerPresenter::render_expense_step(&model)?;
         let (body, components) = rendered_surface_to_message(rendered);
         let response = CreateInteractionResponse::UpdateMessage(
-            safe_ephemeral_interaction_response_message()
+            safe_interaction_response_message()
                 .content(body)
                 .components(components),
         );
@@ -2745,7 +2745,8 @@ impl LedgerRouter {
                 if Self::modal_originated_from_ephemeral(modal) {
                     CreateInteractionResponse::UpdateMessage(
                         safe_interaction_response_message()
-                            .content(i18n::STALE_INTERACTION_MESSAGE),
+                            .content(i18n::STALE_INTERACTION_MESSAGE)
+                            .components(vec![]),
                     )
                 } else {
                     CreateInteractionResponse::Message(
@@ -2916,12 +2917,23 @@ impl LedgerRouter {
                 model.validation_message = Some(error_message.to_owned());
                 let rendered = DiscordLedgerPresenter::render_expense_step(&model)?;
                 let (body, components) = rendered_surface_to_message(rendered);
-                CreateInteractionResponse::UpdateMessage(
-                    safe_interaction_response_message()
-                        .content(body)
-                        .components(components),
-                )
+                if Self::modal_originated_from_ephemeral(modal) {
+                    CreateInteractionResponse::UpdateMessage(
+                        safe_interaction_response_message()
+                            .content(body)
+                            .components(components),
+                    )
+                } else {
+                    CreateInteractionResponse::Message(
+                        safe_ephemeral_interaction_response_message()
+                            .content(body)
+                            .components(components),
+                    )
+                }
             }
+            // Defensive: build_expense_step_model should not fail here (session is
+            // InSelection, roster is cached, nonce exists). If it does, show the
+            // validation error without the surrounding UI rather than propagating.
             Err(error) => {
                 tracing::warn!(%error, "modal validation re-render failed, falling back to content-only update");
                 if Self::modal_originated_from_ephemeral(modal) {
@@ -3006,7 +3018,7 @@ impl LedgerRouter {
         component: &ComponentInteraction,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
         let response = CreateInteractionResponse::UpdateMessage(
-            safe_ephemeral_interaction_response_message()
+            safe_interaction_response_message()
                 .content(walicord_i18n::EXPENSE_CANCELLED_MESSAGE)
                 .components(Vec::new()),
         );
@@ -3209,15 +3221,21 @@ impl LedgerRouter {
         let model = self.build_expense_step_model(ctx, scope, &updated).await?;
         let rendered = DiscordLedgerPresenter::render_expense_step(&model)?;
         let (body, components) = rendered_surface_to_message(rendered);
-        modal
-            .create_response(
-                &ctx.http,
-                CreateInteractionResponse::UpdateMessage(
-                    safe_ephemeral_interaction_response_message()
-                        .content(body)
-                        .components(components),
-                ),
+        let response = if Self::modal_originated_from_ephemeral(modal) {
+            CreateInteractionResponse::UpdateMessage(
+                safe_interaction_response_message()
+                    .content(body)
+                    .components(components),
             )
+        } else {
+            CreateInteractionResponse::Message(
+                safe_ephemeral_interaction_response_message()
+                    .content(body)
+                    .components(components),
+            )
+        };
+        modal
+            .create_response(&ctx.http, response)
             .await
             .map_err(discord_call_error(DiscordCallSite::ExpenseStepRefresh))?;
         claim.replace(updated);
