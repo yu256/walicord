@@ -210,7 +210,6 @@ impl VoidSurfaceModel {
                         i18n::void_success_thread_line(thread_mention).to_string()
                     })
                     .unwrap_or_else(|| i18n::void_success_thread_line_without_mention().to_owned()),
-                i18n::void_success_retry_line().to_owned(),
             ],
             warning_lines: Vec::new(),
             recovery_cta,

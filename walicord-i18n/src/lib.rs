@@ -1470,14 +1470,6 @@ pub fn void_success_thread_line_without_mention() -> &'static str {
     }
 }
 
-pub fn void_success_retry_line() -> &'static str {
-    if cfg!(feature = "ja") {
-        "修正して再記録する場合は /expense または 記録する を使ってください。"
-    } else {
-        "Use /expense or the Record button to correct and re-record it."
-    }
-}
-
 pub fn void_empty_state() -> &'static str {
     if cfg!(feature = "ja") {
         "まだ記録がありません。/expense または 記録する ボタンで最初の経費を記録してみましょう。"
@@ -1491,22 +1483,6 @@ pub fn void_no_candidate_state() -> &'static str {
         "取り消せる対象がありません。確認済みや既に取り消した記録は対象外です。/ledger または 台帳 で状態を確認してください。"
     } else {
         "No voidable targets exist. Confirmed or already voided records are excluded. Check /ledger or the ledger panel."
-    }
-}
-
-pub fn no_recorded_expenses_yet_message() -> &'static str {
-    if cfg!(feature = "ja") {
-        "まだ経費が記録されていません。先に /expense を実行してください。"
-    } else {
-        "No expenses have been recorded yet. Run /expense first."
-    }
-}
-
-pub fn no_voidable_entries_message() -> &'static str {
-    if cfg!(feature = "ja") {
-        "取り消せる台帳記録がありません。"
-    } else {
-        "There are no ledger entries that can be voided."
     }
 }
 
@@ -1560,9 +1536,9 @@ pub fn review_preview_blocked_instruction() -> &'static str {
 
 pub fn review_preview_required_message() -> &'static str {
     if cfg!(feature = "ja") {
-        "清算確認 または /review で清算プランを確認してから /settle を実行してください。個別の支出は 記録する ボタン (/expense コマンド) で記録できます。"
+        "先に清算確認でプレビューを作成してください。"
     } else {
-        "Create a settlement preview from the settlement button or /review before running /settle. Individual expenses can still be recorded from the record button or /expense."
+        "Create a settlement preview first."
     }
 }
 
@@ -1576,9 +1552,9 @@ pub fn review_render_failed_message() -> &'static str {
 
 pub fn stale_settlement_preview_message() -> &'static str {
     if cfg!(feature = "ja") {
-        "プレビューの有効期限が切れました。台帳スレッドの /review でプレビューを作成し直してください。\nパネルを使う場合は親チャンネルの 清算確認 ボタンからも作り直せます。"
+        "プレビューの有効期限が切れました。清算確認からやり直してください。"
     } else {
-        "The preview expired. Recreate it from /review in the ledger thread.\nIf you use the panel, you can also recreate it from the parent channel settlement button."
+        "The preview expired. Start from the settlement review again."
     }
 }
 
@@ -1608,17 +1584,17 @@ pub fn settlement_preview_not_saved_message() -> &'static str {
 
 pub fn settlement_confirmation_failed_message() -> &'static str {
     if cfg!(feature = "ja") {
-        "確認に失敗しました。台帳スレッドの /review でプレビューを作成し直してください。\nパネルを使う場合は親チャンネルの 清算確認 ボタンからも作り直せます。"
+        "確認に失敗しました。清算確認からやり直してください。"
     } else {
-        "Confirmation failed. Recreate the preview from /review in the ledger thread.\nIf you use the panel, you can also recreate it from the parent channel settlement button."
+        "Confirmation failed. Start from the settlement review again."
     }
 }
 
 pub fn settlement_preview_not_delivered_message() -> &'static str {
     if cfg!(feature = "ja") {
-        "プレビューが届かなかったようです。台帳スレッドの /review を再実行してください。\nパネルを使う場合は親チャンネルの 清算確認 ボタンからも作り直せます。"
+        "プレビューが届かなかったようです。清算確認からやり直してください。"
     } else {
-        "It looks like the preview was not delivered. Run /review again in the ledger thread.\nIf you use the panel, you can also recreate it from the parent channel settlement button."
+        "The preview was not delivered. Start from the settlement review again."
     }
 }
 
@@ -1884,27 +1860,11 @@ pub fn ledger_refresh_uncertain_write_message() -> &'static str {
     }
 }
 
-pub fn guild_only_channel_message() -> &'static str {
-    if cfg!(feature = "ja") {
-        "サーバー内のチャンネルで実行してください。"
-    } else {
-        "Run this inside a server channel."
-    }
-}
-
 pub fn guild_only_command_message() -> &'static str {
     if cfg!(feature = "ja") {
         "このコマンドはサーバー内でのみ使えます。"
     } else {
         "This command can only be used inside a server."
-    }
-}
-
-pub fn expense_draft_missing_message() -> &'static str {
-    if cfg!(feature = "ja") {
-        "入力内容が見つかりません。もう一度「記録する」から始めてください。"
-    } else {
-        "The draft input was not found. Start again from Record."
     }
 }
 
@@ -1937,14 +1897,6 @@ pub fn stale_interaction_message() -> &'static str {
         "この操作は期限切れです。もう一度やり直してください。"
     } else {
         "This interaction has expired. Please try again."
-    }
-}
-
-pub fn void_candidate_label_too_long_message() -> &'static str {
-    if cfg!(feature = "ja") {
-        "取り消し候補の表示が長すぎるため一覧を表示できません。表示名やメモを短くしてからやり直してください。"
-    } else {
-        "The void-candidate label is too long to display. Shorten the display name or note and try again."
     }
 }
 
@@ -2288,14 +2240,6 @@ pub fn participant_source_members_label() -> &'static str {
     }
 }
 
-pub fn participant_source_help() -> &'static str {
-    if cfg!(feature = "ja") {
-        "全メンバー (MEMBERS) = このチャンネルで今選べるメンバー全員。記録時に現在のメンバーで再評価されます。"
-    } else {
-        "All Members (MEMBERS) means everyone currently selectable in this channel and is re-evaluated at record time."
-    }
-}
-
 pub fn participant_source_clear_roles_label() -> &'static str {
     if cfg!(feature = "ja") {
         "ロール選択をクリア"
@@ -2309,22 +2253,6 @@ pub fn participant_source_clear_members_label() -> &'static str {
         "全メンバー (MEMBERS) を外す"
     } else {
         "Remove All Members (MEMBERS)"
-    }
-}
-
-pub fn member_picker_help() -> &'static str {
-    if cfg!(feature = "ja") {
-        "個別選択には最大25人まで表示されます。ページを移動しても選択は保持されます。検索で表示名の一部から探せます。見つからない場合はロールまたは 全メンバー (MEMBERS) を使ってください。ロールと MEMBERS は記録時に現在の参加者で再評価されます。"
-    } else {
-        "Individual selection shows up to 25 members per page. Selection persists across pages. Search by part of a display name. If not found, use a role or MEMBERS; roles and MEMBERS are re-evaluated at record time."
-    }
-}
-
-pub fn role_picker_help() -> &'static str {
-    if cfg!(feature = "ja") {
-        "ロールは最大25件まで表示されます。ページを移動しても選択は保持されます。検索でロール名の一部から探せます。見つからない場合は個別選択または 全メンバー (MEMBERS) を使ってください。ロールと MEMBERS は記録時に現在の参加者で再評価されます。"
-    } else {
-        "Roles are shown up to 25 per page. Selection persists across pages. Search by part of a role name. If not found, use individual selection or MEMBERS; roles and MEMBERS are re-evaluated at record time."
     }
 }
 
@@ -2400,14 +2328,6 @@ pub fn role_search_not_found_error() -> &'static str {
     }
 }
 
-pub fn weight_editor_help() -> &'static str {
-    if cfg!(feature = "ja") {
-        "1 が標準、0 にするとその人の負担は 0円です (x0)。その人は今回の残高計算に影響しません。負の値は使えません。"
-    } else {
-        "1 is standard. With 0, that person owes 0 JPY (x0) and does not affect this balance calculation. Negative values are not allowed."
-    }
-}
-
 pub fn weight_editor_modal_title() -> &'static str {
     if cfg!(feature = "ja") {
         "重みを編集"
@@ -2456,104 +2376,12 @@ pub fn weight_editor_reset_label() -> &'static str {
     }
 }
 
-pub fn weight_default_badge() -> &'static str {
-    if cfg!(feature = "ja") {
-        "既定値 1"
-    } else {
-        "Default 1"
-    }
-}
-
 pub fn expense_note_none() -> &'static str {
     if cfg!(feature = "ja") {
         "なし"
     } else {
         "none"
     }
-}
-
-pub fn expense_editor_title() -> &'static str {
-    if cfg!(feature = "ja") {
-        "🧾 経費入力中"
-    } else {
-        "🧾 Entering Expense"
-    }
-}
-
-pub fn expense_unselected_label() -> &'static str {
-    if cfg!(feature = "ja") {
-        "未選択"
-    } else {
-        "Not selected"
-    }
-}
-
-pub fn expense_current_participants_heading() -> &'static str {
-    if cfg!(feature = "ja") {
-        "現在の対象者"
-    } else {
-        "Current Participants"
-    }
-}
-
-pub fn expense_current_participants_empty_line() -> &'static str {
-    if cfg!(feature = "ja") {
-        "- まだ選択されていません"
-    } else {
-        "- No one selected yet"
-    }
-}
-
-pub fn expense_members_group_line() -> &'static str {
-    if cfg!(feature = "ja") {
-        "グループ: MEMBERS"
-    } else {
-        "Group: MEMBERS"
-    }
-}
-
-pub fn expense_selected_roles_prefix() -> &'static str {
-    if cfg!(feature = "ja") {
-        "ロール追加済み"
-    } else {
-        "Selected Roles"
-    }
-}
-
-pub fn expense_confirmation_title() -> &'static str {
-    if cfg!(feature = "ja") {
-        "✅ 内容確認"
-    } else {
-        "✅ Confirmation"
-    }
-}
-
-pub fn expense_confirmation_participants_heading() -> &'static str {
-    if cfg!(feature = "ja") {
-        "対象者と重み"
-    } else {
-        "Participants and Weights"
-    }
-}
-
-pub fn expense_payer_line(value: impl std::fmt::Display) -> impl std::fmt::Display {
-    std::fmt::from_fn(move |f| {
-        if cfg!(feature = "ja") {
-            write!(f, "支払者: {value}")
-        } else {
-            write!(f, "Payer: {value}")
-        }
-    })
-}
-
-pub fn expense_current_selection_line(value: impl std::fmt::Display) -> impl std::fmt::Display {
-    std::fmt::from_fn(move |f| {
-        if cfg!(feature = "ja") {
-            write!(f, "現在の選択: {value}")
-        } else {
-            write!(f, "Current selection: {value}")
-        }
-    })
 }
 
 pub fn expense_search_line(value: impl std::fmt::Display) -> impl std::fmt::Display {
@@ -2564,30 +2392,6 @@ pub fn expense_search_line(value: impl std::fmt::Display) -> impl std::fmt::Disp
             write!(f, "Search: {value}")
         }
     })
-}
-
-pub fn expense_select_payer_message() -> &'static str {
-    if cfg!(feature = "ja") {
-        "支払者を選択してください。"
-    } else {
-        "Select a payer."
-    }
-}
-
-pub fn expense_select_participants_message() -> &'static str {
-    if cfg!(feature = "ja") {
-        "対象者を 1 人以上選択してください。"
-    } else {
-        "Select at least one participant."
-    }
-}
-
-pub fn expense_missing_amount_message() -> &'static str {
-    if cfg!(feature = "ja") {
-        "金額が見つかりませんでした。"
-    } else {
-        "The amount was not found."
-    }
 }
 
 pub fn expense_invalid_amount_message() -> &'static str {
@@ -2619,30 +2423,6 @@ pub fn expense_modal_retry_button_label() -> &'static str {
         "入力を修正する"
     } else {
         "Edit input"
-    }
-}
-
-pub fn member_roster_load_failed_message() -> &'static str {
-    if cfg!(feature = "ja") {
-        "メンバー一覧を取得できませんでした。"
-    } else {
-        "Failed to load the member roster."
-    }
-}
-
-pub fn initiator_only_continuation_message() -> &'static str {
-    if cfg!(feature = "ja") {
-        "この入力は起動した本人だけが続行できます。"
-    } else {
-        "Only the user who started this can continue."
-    }
-}
-
-pub fn expense_already_recording_message() -> &'static str {
-    if cfg!(feature = "ja") {
-        "この経費はすでに記録中です。"
-    } else {
-        "This expense is already being recorded."
     }
 }
 
@@ -2686,22 +2466,6 @@ pub fn settlement_no_transfer_message() -> &'static str {
     }
 }
 
-pub fn expense_invalid_weight_configuration_message() -> &'static str {
-    if cfg!(feature = "ja") {
-        "対象者の重みは 1 人以上を 1 以上にしてください。"
-    } else {
-        "Keep at least one participant with a weight of 1 or more."
-    }
-}
-
-pub fn expense_build_failed_message() -> &'static str {
-    if cfg!(feature = "ja") {
-        "経費の台帳記録を作成できませんでした。"
-    } else {
-        "Failed to build the expense ledger record."
-    }
-}
-
 pub fn expense_draft_amount_line(value: impl std::fmt::Display) -> impl std::fmt::Display {
     std::fmt::from_fn(move |f| {
         if cfg!(feature = "ja") {
@@ -2740,38 +2504,6 @@ pub fn individual_selection_prefix(count: usize) -> impl std::fmt::Display {
             write!(f, "Individual Selection ({count})")
         }
     })
-}
-
-pub fn confirmation_source_disclosure() -> &'static str {
-    if cfg!(feature = "ja") {
-        "ロールと 全メンバー (MEMBERS) は記録時に再評価されます。"
-    } else {
-        "Roles and MEMBERS are re-evaluated at record time."
-    }
-}
-
-pub fn direct_selection_badge() -> &'static str {
-    if cfg!(feature = "ja") {
-        "直接選択"
-    } else {
-        "Direct"
-    }
-}
-
-pub fn role_expansion_badge() -> &'static str {
-    if cfg!(feature = "ja") {
-        "ロール展開"
-    } else {
-        "Role Expansion"
-    }
-}
-
-pub fn members_badge() -> &'static str {
-    if cfg!(feature = "ja") {
-        "全メンバー (MEMBERS)"
-    } else {
-        "All Members (MEMBERS)"
-    }
 }
 
 pub fn expense_confirmation_share_row(
@@ -2898,34 +2630,10 @@ pub fn void_success_title() -> &'static str {
     }
 }
 
-pub fn void_draft_missing_message() -> &'static str {
-    if cfg!(feature = "ja") {
-        "取り消し操作の入力状態が見つかりません。"
-    } else {
-        "The void draft state was not found."
-    }
-}
-
 pub fn void_target_updated_message() -> &'static str {
     if cfg!(feature = "ja") {
         "取り消し対象が更新されました。最新の表示でもう一度「取り消す」を押してください。"
     } else {
         "The void target changed. Press Void again from the latest view."
-    }
-}
-
-pub fn void_select_target_message() -> &'static str {
-    if cfg!(feature = "ja") {
-        "取り消し対象を選択してください。"
-    } else {
-        "Select a record to void."
-    }
-}
-
-pub fn void_build_failed_message() -> &'static str {
-    if cfg!(feature = "ja") {
-        "取り消し記録を作成できませんでした。"
-    } else {
-        "Failed to build the void ledger record."
     }
 }
