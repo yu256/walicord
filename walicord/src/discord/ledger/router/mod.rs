@@ -1,6 +1,7 @@
 use crate::discord::ledger::panel::{
     LEDGER_PANEL_EXPENSE_ID, LEDGER_PANEL_LEDGER_ID, LEDGER_PANEL_REVIEW_ID, LEDGER_PANEL_VOID_ID,
 };
+use dashmap::DashMap;
 use serenity::{
     all::{
         ChannelId, CommandInteraction, ComponentInteraction, ComponentInteractionDataKind,
@@ -170,6 +171,7 @@ pub struct LedgerRouterDependencies {
     pub locator: Arc<DiscordCanonicalThreadLocator>,
     pub thread_creator: Arc<dyn LedgerCanonicalThreadCreator>,
     pub expense_sessions: Arc<ExpenseSessionStore>,
+    pub expense_nonces: Arc<ExpenseNonceRegistry>,
     pub void_sessions: Arc<VoidSessionStore>,
     pub modal_retries: Arc<ModalRetryBindingStore>,
     pub modal_submissions: Arc<ExpenseModalSubmissionBindingStore>,
@@ -415,6 +417,8 @@ pub enum InternalLedgerRouteError {
     ModalSubmissionMissingFields,
     #[error("expense navigation landed on non-selection stage: {observed_stage:?}")]
     PostNavigationStageInvariant { observed_stage: ExpenseSessionStage },
+    #[error("expense nonce missing for session key {key:?}")]
+    MissingExpenseNonce { key: ExpenseSessionKey },
     #[error("component selection parse: {0}")]
     ComponentSelectionParse(#[from] ComponentSelectionParseError),
     #[error("discord call ({site}) failed: {error}")]
@@ -781,8 +785,78 @@ pub struct LedgerRouter {
     deps: LedgerRouterDependencies,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct ExpenseNonceLookupKey {
+    draft_scope_id: ExpenseDraftScopeId,
+    nonce: walicord_application::InteractionNonce,
+}
+
+pub struct ExpenseNonceRegistry {
+    by_key: DashMap<ExpenseSessionKey, walicord_application::InteractionNonce>,
+    by_nonce: DashMap<ExpenseNonceLookupKey, MemberId>,
+}
+
+impl ExpenseNonceRegistry {
+    pub fn new() -> Self {
+        Self {
+            by_key: DashMap::new(),
+            by_nonce: DashMap::new(),
+        }
+    }
+
+    pub fn insert(&self, key: ExpenseSessionKey, nonce: walicord_application::InteractionNonce) {
+        if let Some(old_nonce) = self.by_key.insert(key, nonce) {
+            self.by_nonce.remove(&ExpenseNonceLookupKey {
+                draft_scope_id: key.draft_scope_id(),
+                nonce: old_nonce,
+            });
+        }
+        self.by_nonce.insert(
+            ExpenseNonceLookupKey {
+                draft_scope_id: key.draft_scope_id(),
+                nonce,
+            },
+            key.actor_id(),
+        );
+    }
+
+    pub fn remove(&self, key: &ExpenseSessionKey) {
+        if let Some((_, nonce)) = self.by_key.remove(key) {
+            self.by_nonce.remove(&ExpenseNonceLookupKey {
+                draft_scope_id: key.draft_scope_id(),
+                nonce,
+            });
+        }
+    }
+
+    pub fn get(&self, key: &ExpenseSessionKey) -> Option<walicord_application::InteractionNonce> {
+        self.by_key.get(key).map(|entry| *entry)
+    }
+
+    pub fn owner_by_nonce(
+        &self,
+        draft_scope_id: ExpenseDraftScopeId,
+        nonce: walicord_application::InteractionNonce,
+    ) -> Option<MemberId> {
+        self.by_nonce
+            .get(&ExpenseNonceLookupKey {
+                draft_scope_id,
+                nonce,
+            })
+            .map(|entry| *entry)
+    }
+
+    pub fn clear_draft_scope(&self, draft_scope_id: ExpenseDraftScopeId) {
+        self.by_key
+            .retain(|k, _| k.draft_scope_id() != draft_scope_id);
+        self.by_nonce
+            .retain(|k, _| k.draft_scope_id != draft_scope_id);
+    }
+}
+
 struct ExpenseSessionClaim<'a> {
     store: &'a ExpenseSessionStore,
+    nonces: &'a ExpenseNonceRegistry,
     original: Option<ClaimedExpenseSession>,
 }
 
@@ -802,6 +876,7 @@ impl ExpenseSessionClaim<'_> {
 
     fn discard(&mut self) {
         if let Some(claimed) = self.original.take() {
+            self.nonces.remove(&claimed.session().key());
             self.store.resolve_claim(claimed.token(), None);
         }
     }
@@ -883,6 +958,7 @@ impl LedgerRouter {
         let draft_scope_id = ExpenseDraftScopeId::new(tracked_parent_channel_id.get())
             .expect("serenity channel IDs are always non-zero");
         self.deps.expense_sessions.clear_draft_scope(draft_scope_id);
+        self.deps.expense_nonces.clear_draft_scope(draft_scope_id);
         self.deps.modal_retries.clear_draft_scope(draft_scope_id);
         self.deps
             .modal_submissions
@@ -1739,7 +1815,7 @@ impl LedgerRouter {
             self.deps.clock.as_ref(),
         )?;
 
-        let nonce = outcome.session.nonce();
+        let nonce = self.require_expense_nonce(key)?;
         let basic_info = outcome.session.draft().basic_info().cloned().ok_or(
             InternalLedgerRouteError::ConfirmationBuild(ConfirmationBuildError::BasicInfoMissing),
         )?;
@@ -1931,10 +2007,9 @@ impl LedgerRouter {
             session.origin(),
             ExpenseSessionStage::InConfirmation,
             next_draft,
-            session.nonce(),
             self.deps.clock.now(),
         )?;
-        let nonce = refreshed_session.nonce();
+        let nonce = self.require_expense_nonce(session.key())?;
         let button_ids = build_confirmation_button_ids(nonce);
         let model = build_expense_confirmation_surface(
             &basic_info,
@@ -2220,7 +2295,7 @@ impl LedgerRouter {
             }
             .into());
         };
-        let nonce = session.nonce();
+        let nonce = self.require_expense_nonce(session.key())?;
         let button_ids = build_selection_step_button_ids(nonce);
         let mut model = build_expense_selection_step_surface(phase, &button_ids);
         let picker = self
@@ -2735,17 +2810,24 @@ impl LedgerRouter {
         observed_nonce: walicord_application::InteractionNonce,
     ) -> Result<Option<ExpenseSessionClaim<'_>>, LedgerRouteError> {
         let now = self.deps.clock.now();
-        match self.deps.expense_sessions.claim(key, observed_nonce, now) {
+        if let Some(err) = self.check_expense_nonce(key, observed_nonce) {
+            let owner = self.expense_session_nonce_owner(key, observed_nonce, now);
+            if owner.is_some() && owner != Some(key.actor_id()) {
+                self.respond_expense_session_wrong_actor(ctx, component)
+                    .await?;
+            } else {
+                self.respond_expense_session_missing(ctx, component).await?;
+            }
+            let _ = err;
+            return Ok(None);
+        }
+        match self.deps.expense_sessions.claim(key, now) {
             Ok(Some(session)) => Ok(Some(ExpenseSessionClaim {
                 store: self.deps.expense_sessions.as_ref(),
+                nonces: self.deps.expense_nonces.as_ref(),
                 original: Some(session),
             })),
-            Ok(None)
-            | Err(
-                SessionAccessError::Expired
-                | SessionAccessError::Superseded { .. }
-                | SessionAccessError::InFlight,
-            ) => {
+            Ok(None) | Err(SessionAccessError::Expired | SessionAccessError::InFlight) => {
                 let owner = self.expense_session_nonce_owner(key, observed_nonce, now);
                 if owner.is_some() && owner != Some(key.actor_id()) {
                     self.respond_expense_session_wrong_actor(ctx, component)
@@ -2755,7 +2837,34 @@ impl LedgerRouter {
                 }
                 Ok(None)
             }
+            Err(err) => Err(err.into()),
         }
+    }
+
+    fn check_expense_nonce(
+        &self,
+        key: ExpenseSessionKey,
+        observed_nonce: walicord_application::InteractionNonce,
+    ) -> Option<SessionAccessError> {
+        let stored = self.deps.expense_nonces.get(&key)?;
+        if stored != observed_nonce {
+            Some(SessionAccessError::Superseded {
+                actual: observed_nonce,
+                expected: stored,
+            })
+        } else {
+            None
+        }
+    }
+
+    fn require_expense_nonce(
+        &self,
+        key: ExpenseSessionKey,
+    ) -> Result<walicord_application::InteractionNonce, LedgerRouteError> {
+        self.deps
+            .expense_nonces
+            .get(&key)
+            .ok_or_else(|| InternalLedgerRouteError::MissingExpenseNonce { key }.into())
     }
 
     fn expense_session_nonce_owner(
@@ -2764,9 +2873,15 @@ impl LedgerRouter {
         observed_nonce: walicord_application::InteractionNonce,
         now: std::time::SystemTime,
     ) -> Option<MemberId> {
+        let actor_id = self
+            .deps
+            .expense_nonces
+            .owner_by_nonce(key.draft_scope_id(), observed_nonce)?;
+        let candidate_key = ExpenseSessionKey::new(key.draft_scope_id(), actor_id);
         self.deps
             .expense_sessions
-            .active_owner_by_nonce(key.draft_scope_id(), observed_nonce, now)
+            .has_active_session(candidate_key, now)
+            .then_some(actor_id)
     }
 
     async fn respond_expense_session_missing(
@@ -2890,22 +3005,19 @@ impl LedgerRouter {
             scope.expense_draft_scope_id(),
             MemberId(modal.user.id.get()),
         );
-        let claimed =
-            match self
-                .deps
-                .expense_sessions
-                .claim(key, observed_nonce, self.deps.clock.now())
-            {
-                Ok(Some(claimed)) => claimed,
-                Ok(None)
-                | Err(
-                    SessionAccessError::Expired
-                    | SessionAccessError::Superseded { .. }
-                    | SessionAccessError::InFlight,
-                ) => return self.reply_stale_modal(ctx, modal).await,
-            };
+        if self.check_expense_nonce(key, observed_nonce).is_some() {
+            return self.reply_stale_modal(ctx, modal).await;
+        }
+        let claimed = match self.deps.expense_sessions.claim(key, self.deps.clock.now()) {
+            Ok(Some(claimed)) => claimed,
+            Ok(None) | Err(SessionAccessError::Expired | SessionAccessError::InFlight) => {
+                return self.reply_stale_modal(ctx, modal).await;
+            }
+            Err(err) => return Err(err.into()),
+        };
         let mut claim = ExpenseSessionClaim {
             store: self.deps.expense_sessions.as_ref(),
+            nonces: self.deps.expense_nonces.as_ref(),
             original: Some(claimed),
         };
         let roster = self
@@ -2936,7 +3048,7 @@ impl LedgerRouter {
         };
         let updated =
             replace_weight_overrides(claim.session().clone(), weights, self.deps.clock.as_ref())?;
-        let button_ids = build_selection_step_button_ids(updated.nonce());
+        let button_ids = build_selection_step_button_ids(self.require_expense_nonce(key)?);
         let model =
             build_expense_selection_step_surface(&ExpenseSelectionPhase::WeightEditor, &button_ids);
         let rendered = DiscordLedgerPresenter::render_expense_step(&model)?;
@@ -2971,16 +3083,20 @@ impl LedgerRouter {
             scope.expense_draft_scope_id(),
             MemberId(modal.user.id.get()),
         );
+        if self.check_expense_nonce(key, observed_nonce).is_some() {
+            return self.reply_stale_modal(ctx, modal).await;
+        }
         let Some(claimed) = self
             .deps
             .expense_sessions
-            .claim(key, observed_nonce, self.deps.clock.now())
+            .claim(key, self.deps.clock.now())
             .map_err(LedgerRouteError::from)?
         else {
             return self.reply_stale_modal(ctx, modal).await;
         };
         let mut claim = ExpenseSessionClaim {
             store: self.deps.expense_sessions.as_ref(),
+            nonces: self.deps.expense_nonces.as_ref(),
             original: Some(claimed),
         };
         let query = extract_expense_picker_search_query(modal).trim();
@@ -3096,7 +3212,7 @@ impl LedgerRouter {
                 let key = ExpenseSessionKey::new(scope.expense_draft_scope_id(), actor);
                 match intent {
                     ExpenseModalIntent::Create { origin } => {
-                        let (session, _) = bootstrap_expense_session(
+                        let (session, nonce) = bootstrap_expense_session(
                             key,
                             origin,
                             validated,
@@ -3108,12 +3224,14 @@ impl LedgerRouter {
                             .expense_sessions
                             .has_active_session(key, self.deps.clock.now())
                             .then_some(i18n::EXPENSE_SESSION_REPLACED_MESSAGE);
+                        self.deps.expense_nonces.insert(key, nonce);
                         let dispatch = self
                             .acknowledge_modal_success(
                                 ctx,
                                 modal,
                                 scope,
                                 &session,
+                                nonce,
                                 replacement_notice,
                             )
                             .await?;
@@ -3121,22 +3239,23 @@ impl LedgerRouter {
                         Ok(dispatch)
                     }
                     ExpenseModalIntent::ModifyExisting { session_nonce } => {
-                        let Some(claimed) = (match self.deps.expense_sessions.claim(
-                            key,
-                            session_nonce,
-                            self.deps.clock.now(),
-                        ) {
-                            Ok(claimed) => claimed,
-                            Err(
-                                SessionAccessError::Expired
-                                | SessionAccessError::Superseded { .. }
-                                | SessionAccessError::InFlight,
-                            ) => return self.reply_stale_modal(ctx, modal).await,
-                        }) else {
+                        if self.check_expense_nonce(key, session_nonce).is_some() {
+                            return self.reply_stale_modal(ctx, modal).await;
+                        }
+                        let Some(claimed) =
+                            (match self.deps.expense_sessions.claim(key, self.deps.clock.now()) {
+                                Ok(claimed) => claimed,
+                                Err(SessionAccessError::Expired | SessionAccessError::InFlight) => {
+                                    return self.reply_stale_modal(ctx, modal).await;
+                                }
+                                Err(err) => return Err(err.into()),
+                            })
+                        else {
                             return self.reply_stale_modal(ctx, modal).await;
                         };
                         let mut claim = ExpenseSessionClaim {
                             store: self.deps.expense_sessions.as_ref(),
+                            nonces: self.deps.expense_nonces.as_ref(),
                             original: Some(claimed),
                         };
                         let updated = apply_modified_basic_info(
@@ -3144,8 +3263,9 @@ impl LedgerRouter {
                             validated.into(),
                             self.deps.clock.as_ref(),
                         )?;
+                        let nonce = self.require_expense_nonce(key)?;
                         let dispatch = self
-                            .acknowledge_modal_success(ctx, modal, scope, &updated, None)
+                            .acknowledge_modal_success(ctx, modal, scope, &updated, nonce, None)
                             .await?;
                         claim.replace(updated);
                         Ok(dispatch)
@@ -3201,9 +3321,9 @@ impl LedgerRouter {
         modal: &ModalInteraction,
         scope: LedgerInteractionScope,
         session: &ExpenseSession,
+        nonce: walicord_application::InteractionNonce,
         notice: Option<&'static str>,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
-        let nonce = session.nonce();
         let button_ids = build_selection_step_button_ids(nonce);
         let mut model =
             build_expense_selection_step_surface(&ExpenseSelectionPhase::Payer, &button_ids);
@@ -5135,7 +5255,7 @@ mod tests {
         }
     }
 
-    fn expense_claim_session(nonce: u64) -> ExpenseSession {
+    fn expense_claim_session() -> ExpenseSession {
         ExpenseSession::new(
             ExpenseSessionKey::new(
                 ExpenseDraftScopeId::new(10).expect("draft scope should be non-zero"),
@@ -5144,7 +5264,6 @@ mod tests {
             ExpenseLaunchOrigin::SlashCommand,
             ExpenseSessionStage::AwaitingBasicInfo,
             ExpenseDraftSnapshot::empty(),
-            InteractionNonce::new(nonce).expect("nonce should be non-zero"),
             UNIX_EPOCH,
         )
         .expect("expense session should be valid")
@@ -5154,7 +5273,7 @@ mod tests {
         store: &ExpenseSessionStore,
         session: &ExpenseSession,
     ) -> Result<Option<ExpenseSession>, SessionAccessError> {
-        let claimed = store.claim(session.key(), session.nonce(), UNIX_EPOCH)?;
+        let claimed = store.claim(session.key(), UNIX_EPOCH)?;
         Ok(claimed.map(|claimed| {
             let session = claimed.session().clone();
             store.restore_claim(claimed);
@@ -5192,15 +5311,17 @@ mod tests {
     #[test]
     fn expense_session_claim_restores_session_when_transition_does_not_complete() {
         let store = ExpenseSessionStore::new();
-        let session = expense_claim_session(30);
+        let test_nonces = ExpenseNonceRegistry::new();
+        let session = expense_claim_session();
         store.replace(session.clone());
         let claimed = store
-            .claim(session.key(), session.nonce(), UNIX_EPOCH)
+            .claim(session.key(), UNIX_EPOCH)
             .expect("session access should succeed")
             .expect("session should exist");
 
         drop(ExpenseSessionClaim {
             store: &store,
+            nonces: &test_nonces,
             original: Some(claimed),
         });
 
@@ -5213,14 +5334,16 @@ mod tests {
     #[test]
     fn expense_session_claim_discard_keeps_completed_session_absent() {
         let store = ExpenseSessionStore::new();
-        let session = expense_claim_session(30);
+        let test_nonces = ExpenseNonceRegistry::new();
+        let session = expense_claim_session();
         store.replace(session.clone());
         let claimed = store
-            .claim(session.key(), session.nonce(), UNIX_EPOCH)
+            .claim(session.key(), UNIX_EPOCH)
             .expect("session access should succeed")
             .expect("session should exist");
         let mut claim = ExpenseSessionClaim {
             store: &store,
+            nonces: &test_nonces,
             original: Some(claimed),
         };
 
@@ -5232,16 +5355,18 @@ mod tests {
 
     #[test]
     fn expense_session_claim_replace_persists_completed_transition() {
+        let test_nonces = ExpenseNonceRegistry::new();
         let store = ExpenseSessionStore::new();
-        let session = expense_claim_session(30);
-        let replacement = expense_claim_session(31);
+        let session = expense_claim_session();
+        let replacement = expense_claim_session();
         store.replace(session.clone());
         let claimed = store
-            .claim(session.key(), session.nonce(), UNIX_EPOCH)
+            .claim(session.key(), UNIX_EPOCH)
             .expect("session access should succeed")
             .expect("session should exist");
         let mut claim = ExpenseSessionClaim {
             store: &store,
+            nonces: &test_nonces,
             original: Some(claimed),
         };
 

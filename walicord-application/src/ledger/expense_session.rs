@@ -234,7 +234,6 @@ pub struct ExpenseSession {
     origin: ExpenseLaunchOrigin,
     stage: ExpenseSessionStage,
     draft: ExpenseDraftSnapshot,
-    nonce: InteractionNonce,
     last_touched: SystemTime,
 }
 
@@ -244,7 +243,6 @@ impl ExpenseSession {
         origin: ExpenseLaunchOrigin,
         stage: ExpenseSessionStage,
         draft: ExpenseDraftSnapshot,
-        nonce: InteractionNonce,
         last_touched: SystemTime,
     ) -> Result<Self, ExpenseSessionConstructionError> {
         match stage {
@@ -264,7 +262,6 @@ impl ExpenseSession {
                 origin,
                 stage,
                 draft,
-                nonce,
                 last_touched,
             }),
         }
@@ -281,9 +278,6 @@ impl ExpenseSession {
     }
     pub fn draft(&self) -> &ExpenseDraftSnapshot {
         &self.draft
-    }
-    pub fn nonce(&self) -> InteractionNonce {
-        self.nonce
     }
     pub fn last_touched(&self) -> SystemTime {
         self.last_touched
@@ -814,55 +808,23 @@ pub struct ExpenseSessionStore {
     state: Mutex<ExpenseSessionStoreState>,
 }
 
-/// Secondary-index key for `active_owner_by_nonce` lookups. Carries the
-/// `(draft_scope_id, nonce)` pair as named fields so the lookup intent stays
-/// explicit at every callsite instead of leaking a bare tuple.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct ExpenseSessionNonceKey {
-    draft_scope_id: ExpenseDraftScopeId,
-    nonce: InteractionNonce,
-}
-
-impl ExpenseSessionNonceKey {
-    fn for_session(session: &ExpenseSession) -> Self {
-        Self {
-            draft_scope_id: session.key.draft_scope_id(),
-            nonce: session.nonce,
-        }
-    }
-}
-
 struct ExpenseSessionStoreState {
     by_key: HashMap<ExpenseSessionKey, ExpenseSessionSlot>,
-    /// Secondary index `(draft_scope_id, nonce) -> actor_id` so
-    /// `active_owner_by_nonce` is O(1) instead of O(N). Must stay in sync with
-    /// `by_key` on every lifecycle transition (`replace` / `clear` /
-    /// `clear_draft_scope` / `claim` removal / `resolve_claim`).
-    by_nonce: HashMap<ExpenseSessionNonceKey, MemberId>,
     next_claim_token: u64,
 }
 
 impl ExpenseSessionStoreState {
     fn insert_session(&mut self, slot: ExpenseSessionSlot) -> Option<ExpenseSession> {
-        let nonce_key = ExpenseSessionNonceKey::for_session(slot.session());
         let session_key = slot.session().key();
-        let actor_id = session_key.actor_id();
-        let displaced = self.by_key.insert(session_key, slot);
-        if let Some(prior) = displaced.as_ref() {
-            let prior_nonce_key = ExpenseSessionNonceKey::for_session(prior.session());
-            if prior_nonce_key != nonce_key {
-                self.by_nonce.remove(&prior_nonce_key);
-            }
-        }
-        self.by_nonce.insert(nonce_key, actor_id);
-        displaced.map(ExpenseSessionSlot::into_session)
+        self.by_key
+            .insert(session_key, slot)
+            .map(ExpenseSessionSlot::into_session)
     }
 
     fn remove_session(&mut self, key: ExpenseSessionKey) -> Option<ExpenseSession> {
-        let removed = self.by_key.remove(&key)?.into_session();
-        self.by_nonce
-            .remove(&ExpenseSessionNonceKey::for_session(&removed));
-        Some(removed)
+        self.by_key
+            .remove(&key)
+            .map(ExpenseSessionSlot::into_session)
     }
 }
 
@@ -921,7 +883,6 @@ impl ExpenseSessionStore {
         Self {
             state: Mutex::new(ExpenseSessionStoreState {
                 by_key: HashMap::new(),
-                by_nonce: HashMap::new(),
                 next_claim_token: 1,
             }),
         }
@@ -935,22 +896,11 @@ impl ExpenseSessionStore {
     }
 
     pub fn clear_draft_scope(&self, draft_scope_id: ExpenseDraftScopeId) {
-        let mut guard = self
-            .state
+        self.state
             .lock()
-            .expect("ExpenseSessionStore mutex poisoned");
-        let drained_nonce_keys: Vec<ExpenseSessionNonceKey> = guard
-            .by_key
-            .iter()
-            .filter(|(_, slot)| slot.session().key().draft_scope_id() == draft_scope_id)
-            .map(|(_, slot)| ExpenseSessionNonceKey::for_session(slot.session()))
-            .collect();
-        guard
+            .expect("ExpenseSessionStore mutex poisoned")
             .by_key
             .retain(|_, slot| slot.session().key().draft_scope_id() != draft_scope_id);
-        for nonce_key in drained_nonce_keys {
-            guard.by_nonce.remove(&nonce_key);
-        }
     }
 
     pub fn clear(&self, key: ExpenseSessionKey) -> Option<ExpenseSession> {
@@ -963,7 +913,6 @@ impl ExpenseSessionStore {
     pub fn claim(
         &self,
         key: ExpenseSessionKey,
-        observed_nonce: InteractionNonce,
         now: SystemTime,
     ) -> Result<Option<ClaimedExpenseSession>, SessionAccessError> {
         let mut guard = self
@@ -982,12 +931,6 @@ impl ExpenseSessionStore {
             guard.remove_session(key);
             return Err(SessionAccessError::Expired);
         }
-        if session.nonce != observed_nonce {
-            return Err(SessionAccessError::Superseded {
-                actual: observed_nonce,
-                expected: session.nonce,
-            });
-        }
         let token = ExpenseSessionClaimToken {
             key,
             value: guard.next_claim_token,
@@ -1001,31 +944,6 @@ impl ExpenseSessionStore {
             session: session.clone(),
         });
         Ok(Some(ClaimedExpenseSession { token, session }))
-    }
-
-    pub fn active_owner_by_nonce(
-        &self,
-        draft_scope_id: ExpenseDraftScopeId,
-        observed_nonce: InteractionNonce,
-        now: SystemTime,
-    ) -> Option<MemberId> {
-        let guard = self
-            .state
-            .lock()
-            .expect("ExpenseSessionStore mutex poisoned");
-        let actor_id = *guard.by_nonce.get(&ExpenseSessionNonceKey {
-            draft_scope_id,
-            nonce: observed_nonce,
-        })?;
-        // O(1) TTL verification through by_key — by_nonce can host an entry
-        // that is still pending lazy removal until the next lifecycle event.
-        let session_key = ExpenseSessionKey::new(draft_scope_id, actor_id);
-        guard.by_key.get(&session_key).and_then(|slot| {
-            let session = slot.session();
-            (now.duration_since(session.last_touched).unwrap_or_default() < EXPENSE_SESSION_TTL
-                && session.nonce == observed_nonce)
-                .then_some(actor_id)
-        })
     }
 
     pub fn has_active_session(&self, key: ExpenseSessionKey, now: SystemTime) -> bool {
@@ -1335,7 +1253,6 @@ mod tests {
             ExpenseLaunchOrigin::SlashCommand,
             stage,
             draft,
-            nonce(1),
             UNIX_EPOCH,
         )
         .map(|_| ());
@@ -1368,13 +1285,12 @@ mod tests {
         assert_eq!(actual, expected);
     }
 
-    fn fresh_expense_session(now: SystemTime, nonce_value: u64) -> ExpenseSession {
+    fn fresh_expense_session(now: SystemTime) -> ExpenseSession {
         ExpenseSession::new(
             expense_key(),
             ExpenseLaunchOrigin::SlashCommand,
             ExpenseSessionStage::AwaitingBasicInfo,
             ExpenseDraftSnapshot::empty(),
-            nonce(nonce_value),
             now,
         )
         .expect("session should construct")
@@ -1382,10 +1298,9 @@ mod tests {
 
     fn inspect_expense_session(
         store: &ExpenseSessionStore,
-        observed_nonce: InteractionNonce,
         now: SystemTime,
     ) -> Result<Option<ExpenseSession>, SessionAccessError> {
-        let claimed = store.claim(expense_key(), observed_nonce, now)?;
+        let claimed = store.claim(expense_key(), now)?;
         Ok(claimed.map(|claimed| {
             let session = claimed.session().clone();
             store.restore_claim(claimed);
@@ -1396,8 +1311,8 @@ mod tests {
     #[test]
     fn expense_session_store_replace_returns_previous_session() {
         let store = ExpenseSessionStore::new();
-        let first = fresh_expense_session(UNIX_EPOCH, 1);
-        let second = fresh_expense_session(UNIX_EPOCH, 2);
+        let first = fresh_expense_session(UNIX_EPOCH);
+        let second = fresh_expense_session(UNIX_EPOCH);
 
         let prior_after_first = store.replace(first.clone());
         let prior_after_second = store.replace(second);
@@ -1410,13 +1325,12 @@ mod tests {
     fn expense_session_store_clear_draft_scope_keeps_other_channels() {
         let store = ExpenseSessionStore::new();
         let retained_key = ExpenseSessionKey::new(draft_scope(43), MemberId(3));
-        let removed = fresh_expense_session(UNIX_EPOCH, 1);
+        let removed = fresh_expense_session(UNIX_EPOCH);
         let retained = ExpenseSession::new(
             retained_key,
             ExpenseLaunchOrigin::SlashCommand,
             ExpenseSessionStage::AwaitingBasicInfo,
             ExpenseDraftSnapshot::empty(),
-            nonce(2),
             UNIX_EPOCH,
         )
         .expect("session should construct");
@@ -1432,66 +1346,30 @@ mod tests {
     #[test]
     fn expense_session_access_returns_none_when_missing() {
         let store = ExpenseSessionStore::new();
-        let actual = inspect_expense_session(&store, nonce(1), UNIX_EPOCH);
+        let actual = inspect_expense_session(&store, UNIX_EPOCH);
         assert_eq!(actual, Ok(None));
     }
 
     #[rstest]
-    #[case::within_ttl(
-        UNIX_EPOCH,
-        UNIX_EPOCH + Duration::from_secs(599),
-        nonce(1),
-        Ok(()),
-    )]
+    #[case::within_ttl(UNIX_EPOCH, UNIX_EPOCH + Duration::from_secs(599), Ok(()))]
     #[case::at_exact_ttl_boundary_expires(
         UNIX_EPOCH,
         UNIX_EPOCH + EXPENSE_SESSION_TTL,
-        nonce(1),
         Err(SessionAccessError::Expired),
     )]
-    #[case::superseded_when_observed_nonce_differs(
-        UNIX_EPOCH,
-        UNIX_EPOCH + Duration::from_secs(60),
-        nonce(99),
-        Err(SessionAccessError::Superseded { actual: nonce(99), expected: nonce(1) }),
-    )]
-    fn expense_session_access_enforces_ttl_and_nonce(
+    fn expense_session_access_enforces_ttl(
         #[case] last_touched: SystemTime,
         #[case] now: SystemTime,
-        #[case] observed_nonce: InteractionNonce,
         #[case] expected: Result<(), SessionAccessError>,
     ) {
         let store = ExpenseSessionStore::new();
-        store.replace(fresh_expense_session(last_touched, 1));
+        store.replace(fresh_expense_session(last_touched));
 
-        let actual = inspect_expense_session(&store, observed_nonce, now).map(|maybe| {
+        let actual = inspect_expense_session(&store, now).map(|maybe| {
             assert!(maybe.is_some(), "should return session on Ok");
         });
 
         assert_eq!(actual, expected);
-    }
-
-    #[test]
-    fn expense_session_access_reports_superseded_after_replace_keeps_new_session_in_place() {
-        let store = ExpenseSessionStore::new();
-        let first = fresh_expense_session(UNIX_EPOCH, 1);
-        let second = fresh_expense_session(UNIX_EPOCH, 2);
-        store.replace(first.clone());
-        store.replace(second.clone());
-
-        let observed_with_old_nonce =
-            inspect_expense_session(&store, first.nonce(), UNIX_EPOCH + Duration::from_secs(60));
-        let observed_with_new_nonce =
-            inspect_expense_session(&store, second.nonce(), UNIX_EPOCH + Duration::from_secs(60));
-
-        assert_eq!(
-            observed_with_old_nonce,
-            Err(SessionAccessError::Superseded {
-                actual: first.nonce(),
-                expected: second.nonce(),
-            })
-        );
-        assert_eq!(observed_with_new_nonce, Ok(Some(second)));
     }
 
     #[test]
@@ -1564,13 +1442,12 @@ mod tests {
     #[test]
     fn expense_session_access_clears_expired_session_inline() {
         let store = ExpenseSessionStore::new();
-        store.replace(fresh_expense_session(UNIX_EPOCH, 1));
+        store.replace(fresh_expense_session(UNIX_EPOCH));
 
-        let _ = inspect_expense_session(&store, nonce(1), UNIX_EPOCH + EXPENSE_SESSION_TTL);
+        let _ = inspect_expense_session(&store, UNIX_EPOCH + EXPENSE_SESSION_TTL);
 
         let after = inspect_expense_session(
             &store,
-            nonce(1),
             UNIX_EPOCH + EXPENSE_SESSION_TTL + Duration::from_secs(1),
         );
         assert_eq!(after, Ok(None));
@@ -1579,60 +1456,17 @@ mod tests {
     #[test]
     fn expense_session_claim_blocks_concurrent_access() {
         let store = ExpenseSessionStore::new();
-        let session = fresh_expense_session(UNIX_EPOCH, 1);
+        let session = fresh_expense_session(UNIX_EPOCH);
         store.replace(session.clone());
 
-        let claimed = store.claim(
-            expense_key(),
-            nonce(1),
-            UNIX_EPOCH + Duration::from_secs(60),
-        );
-        let after = inspect_expense_session(&store, nonce(1), UNIX_EPOCH + Duration::from_secs(60));
+        let claimed = store.claim(expense_key(), UNIX_EPOCH + Duration::from_secs(60));
+        let after = inspect_expense_session(&store, UNIX_EPOCH + Duration::from_secs(60));
 
         assert_eq!(
             claimed.map(|maybe| maybe.map(|claimed| claimed.session().clone())),
             Ok(Some(session))
         );
         assert_eq!(after, Err(SessionAccessError::InFlight));
-    }
-
-    #[test]
-    fn expense_session_claim_rejects_stale_nonce_without_removing_current_session() {
-        let store = ExpenseSessionStore::new();
-        let session = fresh_expense_session(UNIX_EPOCH, 1);
-        store.replace(session.clone());
-
-        let claimed = store.claim(
-            expense_key(),
-            nonce(99),
-            UNIX_EPOCH + Duration::from_secs(60),
-        );
-        let after = inspect_expense_session(&store, nonce(1), UNIX_EPOCH + Duration::from_secs(60));
-
-        assert_eq!(
-            claimed,
-            Err(SessionAccessError::Superseded {
-                actual: nonce(99),
-                expected: nonce(1),
-            })
-        );
-        assert_eq!(after, Ok(Some(session)));
-    }
-
-    #[test]
-    fn expense_session_store_finds_active_owner_by_nonce_without_claiming() {
-        let store = ExpenseSessionStore::new();
-        let session = fresh_expense_session(UNIX_EPOCH, 1);
-        let key = session.key();
-        store.replace(session.clone());
-
-        let actual = store.active_owner_by_nonce(key.draft_scope_id(), nonce(1), UNIX_EPOCH);
-
-        assert_eq!(actual, Some(key.actor_id()));
-        assert_eq!(
-            inspect_expense_session(&store, nonce(1), UNIX_EPOCH),
-            Ok(Some(session))
-        );
     }
 
     #[test]
@@ -1653,44 +1487,6 @@ mod tests {
 
         assert_eq!(actual, Some(key.actor_id()));
         assert_eq!(store.access(key, nonce(1), UNIX_EPOCH), Ok(Some(session)));
-    }
-
-    #[test]
-    fn expense_session_replace_evicts_prior_nonce_from_secondary_index() {
-        let store = ExpenseSessionStore::new();
-        let first = fresh_expense_session(UNIX_EPOCH, 1);
-        let draft_scope_id = first.key().draft_scope_id();
-        store.replace(first);
-        let replacement = fresh_expense_session(UNIX_EPOCH, 9);
-        store.replace(replacement);
-
-        assert_eq!(
-            store.active_owner_by_nonce(draft_scope_id, nonce(1), UNIX_EPOCH),
-            None,
-            "stale nonce-index entry must not survive a replace at the same session key"
-        );
-        assert!(
-            store
-                .active_owner_by_nonce(draft_scope_id, nonce(9), UNIX_EPOCH)
-                .is_some(),
-            "current nonce-index entry should resolve to the actor"
-        );
-    }
-
-    #[test]
-    fn expense_session_clear_removes_nonce_lookup_for_that_key() {
-        let store = ExpenseSessionStore::new();
-        let session = fresh_expense_session(UNIX_EPOCH, 1);
-        let key = session.key();
-        store.replace(session);
-
-        store.clear(key);
-
-        assert_eq!(
-            store.active_owner_by_nonce(key.draft_scope_id(), nonce(1), UNIX_EPOCH),
-            None,
-            "cleared session must no longer be discoverable via the nonce index"
-        );
     }
 
     #[test]
@@ -1755,11 +1551,11 @@ mod tests {
     #[test]
     fn stale_claim_restore_does_not_overwrite_new_session() {
         let store = ExpenseSessionStore::new();
-        let first = fresh_expense_session(UNIX_EPOCH, 1);
-        let second = fresh_expense_session(UNIX_EPOCH, 2);
+        let first = fresh_expense_session(UNIX_EPOCH);
+        let second = fresh_expense_session(UNIX_EPOCH);
         store.replace(first.clone());
         let claimed = store
-            .claim(expense_key(), first.nonce(), UNIX_EPOCH)
+            .claim(expense_key(), UNIX_EPOCH)
             .expect("claim should succeed")
             .expect("session should exist");
         store.replace(second.clone());
@@ -1767,7 +1563,7 @@ mod tests {
         store.restore_claim(claimed);
 
         assert_eq!(
-            inspect_expense_session(&store, second.nonce(), UNIX_EPOCH),
+            inspect_expense_session(&store, UNIX_EPOCH),
             Ok(Some(second))
         );
     }
@@ -1775,12 +1571,12 @@ mod tests {
     #[test]
     fn stale_claim_resolution_does_not_overwrite_new_session() {
         let store = ExpenseSessionStore::new();
-        let first = fresh_expense_session(UNIX_EPOCH, 1);
-        let second = fresh_expense_session(UNIX_EPOCH, 2);
-        let stale_replacement = fresh_expense_session(UNIX_EPOCH, 3);
+        let first = fresh_expense_session(UNIX_EPOCH);
+        let second = fresh_expense_session(UNIX_EPOCH);
+        let stale_replacement = fresh_expense_session(UNIX_EPOCH);
         store.replace(first.clone());
         let claimed = store
-            .claim(expense_key(), first.nonce(), UNIX_EPOCH)
+            .claim(expense_key(), UNIX_EPOCH)
             .expect("claim should succeed")
             .expect("session should exist");
         store.replace(second.clone());
@@ -1788,7 +1584,7 @@ mod tests {
         store.resolve_claim(claimed.token(), Some(stale_replacement));
 
         assert_eq!(
-            inspect_expense_session(&store, second.nonce(), UNIX_EPOCH),
+            inspect_expense_session(&store, UNIX_EPOCH),
             Ok(Some(second))
         );
     }

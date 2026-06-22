@@ -338,7 +338,6 @@ mod tests {
                 phase: ExpenseSelectionPhase::IndividualSelection,
             },
             draft,
-            session.nonce(),
             FixedClock.now(),
         )
         .unwrap();

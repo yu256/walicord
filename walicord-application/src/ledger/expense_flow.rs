@@ -20,8 +20,9 @@ use walicord_domain::model::{MemberId, RoleId, Weight};
 
 /// Construct a fresh [`ExpenseSession`] in `InSelection { Payer }` from a validated
 /// modal submission. The actor is preselected as both payer and the initial individual
-/// participant (criterion 144). Time is sourced from [`Clock`] and the session nonce
-/// from [`NonceProvider`] so all tests can be made deterministic.
+/// participant (criterion 144). Time is sourced from [`Clock`]; the nonce is generated
+/// by [`NonceProvider`] but returned separately so the adapter layer can register it
+/// in its own nonce map without coupling session state to Discord interaction identity.
 pub fn bootstrap_expense_session(
     key: ExpenseSessionKey,
     origin: ExpenseLaunchOrigin,
@@ -43,7 +44,6 @@ pub fn bootstrap_expense_session(
             phase: ExpenseSelectionPhase::Payer,
         },
         draft,
-        nonce,
         clock.now(),
     )?;
     Ok((session, nonce))
@@ -137,7 +137,6 @@ pub fn build_confirmation_for_session(
         .expect("basic info verified present above");
     let key = session.key();
     let origin = session.origin();
-    let nonce = session.nonce();
     let next_draft = ExpenseDraftSnapshot::empty()
         .with_basic_info(basic_info)
         .with_selection_state(selection)
@@ -147,7 +146,6 @@ pub fn build_confirmation_for_session(
         origin,
         ExpenseSessionStage::InConfirmation,
         next_draft,
-        nonce,
         clock.now(),
     )
     .map_err(ConfirmationBuildError::ConstructionFailed)?;
@@ -228,14 +226,12 @@ pub fn navigate_back(
     let previous = previous_phase(phase).ok_or(NavigationError::AlreadyAtFirstStep)?;
     let key = session.key();
     let origin = session.origin();
-    let nonce = session.nonce();
     let draft = session.draft().clone();
     ExpenseSession::new(
         key,
         origin,
         ExpenseSessionStage::InSelection { phase: previous },
         draft,
-        nonce,
         clock.now(),
     )
     .map_err(NavigationError::ConstructionFailed)
@@ -253,7 +249,6 @@ pub fn navigate_modify_selection(
     }
     let key = session.key();
     let origin = session.origin();
-    let nonce = session.nonce();
     let basic_info = session
         .draft()
         .basic_info()
@@ -270,7 +265,6 @@ pub fn navigate_modify_selection(
             phase: ExpenseSelectionPhase::Payer,
         },
         draft,
-        nonce,
         clock.now(),
     )
     .map_err(NavigationError::ConstructionFailed)
@@ -312,14 +306,12 @@ pub fn navigate_to_phase(
     }
     let key = session.key();
     let origin = session.origin();
-    let nonce = session.nonce();
     let draft = session.draft().clone();
     ExpenseSession::new(
         key,
         origin,
         ExpenseSessionStage::InSelection { phase: target },
         draft,
-        nonce,
         clock.now(),
     )
     .map_err(NavigationError::ConstructionFailed)
@@ -341,7 +333,6 @@ pub fn toggle_members_group(
     };
     let key = session.key();
     let origin = session.origin();
-    let nonce = session.nonce();
     let mut selection = session.draft().selection_state().clone();
     selection.include_members_group = !selection.include_members_group;
     let basic_info = session
@@ -359,7 +350,6 @@ pub fn toggle_members_group(
             phase: ExpenseSelectionPhase::ParticipantSource,
         },
         draft,
-        nonce,
         clock.now(),
     )
     .map_err(NavigationError::ConstructionFailed)
@@ -506,7 +496,6 @@ fn update_selection_in_phase(
     }
     let key = session.key();
     let origin = session.origin();
-    let nonce = session.nonce();
     let mut selection = session.draft().selection_state().clone();
     update(&mut selection);
     let basic_info = session
@@ -523,7 +512,6 @@ fn update_selection_in_phase(
         ExpenseDraftSnapshot::empty()
             .with_basic_info(basic_info)
             .with_selection_state(selection),
-        nonce,
         clock.now(),
     )
     .map_err(NavigationError::ConstructionFailed)
@@ -542,7 +530,6 @@ pub fn apply_modified_basic_info(
 ) -> Result<ExpenseSession, NavigationError> {
     let key = session.key();
     let origin = session.origin();
-    let nonce = session.nonce();
     let selection = session.draft().selection_state().clone();
     let stage = match session.stage() {
         ExpenseSessionStage::AwaitingBasicInfo
@@ -559,7 +546,7 @@ pub fn apply_modified_basic_info(
     let draft = ExpenseDraftSnapshot::empty()
         .with_basic_info(new_basic_info)
         .with_selection_state(selection);
-    ExpenseSession::new(key, origin, stage, draft, nonce, clock.now())
+    ExpenseSession::new(key, origin, stage, draft, clock.now())
         .map_err(NavigationError::ConstructionFailed)
 }
 
@@ -688,7 +675,7 @@ mod tests {
         )
         .expect("bootstrap");
 
-        assert_eq!(session.nonce(), nonce);
+        assert_eq!(nonce, InteractionNonce::new(1).unwrap());
         assert_eq!(session.last_touched(), fixed_clock().now);
     }
 
@@ -760,7 +747,6 @@ mod tests {
         let session = bootstrapped();
         let mut draft = session.draft().clone();
         let key = session.key();
-        let nonce = session.nonce();
         draft = draft.with_selection_state(ExpenseSelectionState {
             payer: None,
             individual_members: vec![MemberId(42)],
@@ -773,7 +759,6 @@ mod tests {
                 phase: ExpenseSelectionPhase::Payer,
             },
             draft,
-            nonce,
             fixed_clock().now,
         )
         .unwrap();
@@ -815,7 +800,6 @@ mod tests {
                 phase: ExpenseSelectionPhase::IndividualSelection,
             },
             draft,
-            first.session.nonce(),
             fixed_clock().now,
         )
         .unwrap();
@@ -858,14 +842,12 @@ mod tests {
     fn session_in_phase(phase: ExpenseSelectionPhase) -> ExpenseSession {
         let session = bootstrapped();
         let key = session.key();
-        let nonce = session.nonce();
         let draft = session.draft().clone();
         ExpenseSession::new(
             key,
             ExpenseLaunchOrigin::SlashCommand,
             ExpenseSessionStage::InSelection { phase },
             draft,
-            nonce,
             fixed_clock().now,
         )
         .expect("session in phase")
@@ -1188,13 +1170,11 @@ mod tests {
     fn apply_modified_basic_info_from_awaiting_stage_advances_to_in_selection() {
         let session = bootstrapped();
         let key = session.key();
-        let nonce = session.nonce();
         let awaiting = ExpenseSession::new(
             key,
             ExpenseLaunchOrigin::SlashCommand,
             ExpenseSessionStage::AwaitingBasicInfo,
             ExpenseDraftSnapshot::empty(),
-            nonce,
             fixed_clock().now,
         )
         .unwrap();

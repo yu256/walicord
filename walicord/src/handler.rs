@@ -1053,6 +1053,7 @@ where
             )),
             thread_creator: Arc::new(crate::discord::ledger::DiscordLedgerCanonicalThreadCreator),
             expense_sessions: Arc::new(crate::discord::ledger::ExpenseSessionStore::new()),
+            expense_nonces: Arc::new(crate::discord::ledger::ExpenseNonceRegistry::new()),
             void_sessions: Arc::new(crate::discord::ledger::VoidSessionStore::new()),
             modal_retries: Arc::new(crate::discord::ledger::ModalRetryBindingStore::new()),
             modal_submissions: Arc::new(
