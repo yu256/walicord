@@ -313,12 +313,10 @@ mod tests {
         },
         settle_up::{PreviewConfirmationBinding, PreviewInstanceId, PreviewedSettlement},
     };
+    use parking_lot::Mutex;
     use std::{
         collections::BTreeMap,
-        sync::{
-            Mutex,
-            atomic::{AtomicU32, Ordering},
-        },
+        sync::atomic::{AtomicU32, Ordering},
         time::{Duration, SystemTime, UNIX_EPOCH},
     };
     use walicord_domain::{
@@ -439,7 +437,7 @@ mod tests {
         async fn load_verified_thread(
             &self,
         ) -> Result<VerifiedLedgerThreadLoad<()>, CanonicalReadError> {
-            Ok(self.load.lock().unwrap().clone().unwrap())
+            Ok(self.load.lock().clone().unwrap())
         }
         async fn scan_recent(
             &self,
@@ -480,7 +478,7 @@ mod tests {
             _: &str,
         ) -> Result<(), CanonicalAppendError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            self.result.lock().unwrap().take().unwrap()
+            self.result.lock().take().unwrap()
         }
     }
 
@@ -511,7 +509,7 @@ mod tests {
     }
     impl crate::ledger::observability::LedgerObservability for StubObservability {
         fn emit(&self, event: LedgerObservabilityEvent) {
-            self.events.lock().unwrap().push(event);
+            self.events.lock().push(event);
         }
     }
 
@@ -606,7 +604,7 @@ mod tests {
         ));
         // Preview is restored to Ready by guard's Drop so retry is possible.
         assert!(preview_store.current(key).is_some());
-        assert_eq!(observability.events.lock().unwrap().len(), 1);
+        assert_eq!(observability.events.lock().len(), 1);
     }
 
     #[tokio::test]

@@ -1,5 +1,6 @@
 use crate::{PreviewConfirmationBinding, PreviewInstanceId, PreviewedSettlement, ledger::LedgerId};
-use std::{collections::HashMap, sync::Mutex, time::SystemTime};
+use parking_lot::Mutex;
+use std::{collections::HashMap, time::SystemTime};
 use walicord_domain::model::MemberId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -140,25 +141,17 @@ impl PreviewStore {
     }
 
     pub fn current(&self, key: PreviewStoreKey) -> Option<PreviewStoreState> {
-        self.by_key
-            .lock()
-            .expect("PreviewStore mutex poisoned")
-            .get(&key)
-            .cloned()
+        self.by_key.lock().get(&key).cloned()
     }
 
     pub fn clear_ledger(&self, ledger_id: LedgerId) {
         self.by_key
             .lock()
-            .expect("PreviewStore mutex poisoned")
             .retain(|key, _| key.ledger_id() != ledger_id);
     }
 
     pub fn clear(&self, key: PreviewStoreKey) -> Option<PreviewStoreState> {
-        self.by_key
-            .lock()
-            .expect("PreviewStore mutex poisoned")
-            .remove(&key)
+        self.by_key.lock().remove(&key)
     }
 
     pub fn transition(
@@ -166,7 +159,7 @@ impl PreviewStore {
         key: PreviewStoreKey,
         transition: PreviewStoreTransition,
     ) -> Result<Option<PreviewStoreState>, PreviewStoreError> {
-        let mut guard = self.by_key.lock().expect("PreviewStore mutex poisoned");
+        let mut guard = self.by_key.lock();
         let current = guard.get(&key).cloned();
         let (next, returned) = compute_next_state(current, transition)?;
         match next {

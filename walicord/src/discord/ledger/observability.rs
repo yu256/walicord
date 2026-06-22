@@ -1,6 +1,6 @@
-use serenity::all::{ChannelId, GuildId, UserId};
 #[cfg(test)]
-use std::sync::Mutex;
+use parking_lot::Mutex;
+use serenity::all::{ChannelId, GuildId, UserId};
 use walicord_application::ledger::{
     LedgerId,
     observability::{LedgerObservability, LedgerObservabilityEvent},
@@ -168,10 +168,7 @@ impl CapturingLedgerObservability {
     }
 
     pub fn snapshot(&self) -> Vec<CapturedLedgerObservabilityEvent> {
-        self.events
-            .lock()
-            .expect("CapturingLedgerObservability mutex poisoned")
-            .clone()
+        self.events.lock().clone()
     }
 }
 
@@ -180,7 +177,6 @@ impl LedgerObservability for CapturingLedgerObservability {
     fn emit(&self, event: LedgerObservabilityEvent) {
         self.events
             .lock()
-            .expect("CapturingLedgerObservability mutex poisoned")
             .push(CapturedLedgerObservabilityEvent::Application(event));
     }
 }
@@ -190,7 +186,6 @@ impl DiscordLedgerObservability for CapturingLedgerObservability {
     fn emit_discord(&self, event: DiscordLedgerObservabilityEvent) {
         self.events
             .lock()
-            .expect("CapturingLedgerObservability mutex poisoned")
             .push(CapturedLedgerObservabilityEvent::Discord(event));
     }
 }

@@ -12,6 +12,7 @@ walicord-infrastructure = { path = "../walicord-infrastructure", default-feature
 walicord-i18n = { path = "../walicord-i18n" }
 walicord-parser = { path = "../walicord-parser" }
 walicord-presentation = { path = "../walicord-presentation" }
+parking_lot = "0.12"
 serenity = { version = "0.12.5", features = ["client", "gateway", "model", "framework", "standard_framework", "rustls_backend"] }
 tokio = { version = "1.48.0", features = ["macros", "rt-multi-thread", "time"] }
 dotenvy = "0.15.7"

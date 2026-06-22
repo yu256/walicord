@@ -258,12 +258,10 @@ mod tests {
         },
         settle_up::PreviewInstanceId,
     };
+    use parking_lot::Mutex;
     use std::{
         collections::BTreeMap,
-        sync::{
-            Mutex,
-            atomic::{AtomicU32, AtomicU64, Ordering},
-        },
+        sync::atomic::{AtomicU32, AtomicU64, Ordering},
         time::{Duration, SystemTime, UNIX_EPOCH},
     };
 
@@ -377,11 +375,7 @@ mod tests {
         async fn load_verified_thread(
             &self,
         ) -> Result<VerifiedLedgerThreadLoad<()>, CanonicalReadError> {
-            self.load
-                .lock()
-                .unwrap()
-                .clone()
-                .ok_or_else(CanonicalReadError::new)
+            self.load.lock().clone().ok_or_else(CanonicalReadError::new)
         }
         async fn scan_recent(
             &self,
@@ -424,7 +418,6 @@ mod tests {
             self.calls.fetch_add(1, Ordering::SeqCst);
             self.result
                 .lock()
-                .unwrap()
                 .take()
                 .expect("appender called more than once")
         }
@@ -457,7 +450,7 @@ mod tests {
     }
     impl crate::ledger::observability::LedgerObservability for StubObservability {
         fn emit(&self, event: LedgerObservabilityEvent) {
-            self.events.lock().unwrap().push(event);
+            self.events.lock().push(event);
         }
     }
 
@@ -514,7 +507,7 @@ mod tests {
         }
         assert_eq!(appender.calls.load(Ordering::SeqCst), 1);
         assert_eq!(publisher.calls.load(Ordering::SeqCst), 1);
-        assert!(observability.events.lock().unwrap().is_empty());
+        assert!(observability.events.lock().is_empty());
     }
 
     #[tokio::test]
@@ -645,7 +638,7 @@ mod tests {
         ));
         assert_eq!(appender.calls.load(Ordering::SeqCst), 1);
         assert_eq!(publisher.calls.load(Ordering::SeqCst), 0);
-        let events = observability.events.lock().unwrap();
+        let events = observability.events.lock();
         assert!(matches!(
             events.as_slice(),
             [LedgerObservabilityEvent::CanonicalAppendFailed {

@@ -2,12 +2,12 @@ use crate::{
     InteractionNonce,
     ledger::{EntryHash, ExpenseNote, LedgerEffectiveDate, LedgerEntryId, LedgerId},
 };
+use parking_lot::Mutex;
 use std::{
     collections::{BTreeMap, HashMap},
     fmt,
     num::{NonZeroU64, ParseIntError},
     str::FromStr,
-    sync::Mutex,
     time::{Duration, SystemTime},
 };
 use walicord_domain::{
@@ -402,26 +402,19 @@ impl ExpenseModalSubmissionBindingStore {
     }
 
     pub fn store(&self, binding: ExpenseModalSubmissionBinding) {
-        self.by_nonce
-            .lock()
-            .expect("ExpenseModalSubmissionBindingStore mutex poisoned")
-            .insert(binding.binding_nonce, binding);
+        self.by_nonce.lock().insert(binding.binding_nonce, binding);
     }
 
     pub fn clear_draft_scope(&self, draft_scope_id: ExpenseDraftScopeId) {
         self.by_nonce
             .lock()
-            .expect("ExpenseModalSubmissionBindingStore mutex poisoned")
             .retain(|_, binding| binding.draft_scope_id != draft_scope_id);
     }
 
     pub fn clear_actor_draft_scope(&self, draft_scope_id: ExpenseDraftScopeId, actor_id: MemberId) {
-        self.by_nonce
-            .lock()
-            .expect("ExpenseModalSubmissionBindingStore mutex poisoned")
-            .retain(|_, binding| {
-                binding.draft_scope_id != draft_scope_id || binding.actor_id != actor_id
-            });
+        self.by_nonce.lock().retain(|_, binding| {
+            binding.draft_scope_id != draft_scope_id || binding.actor_id != actor_id
+        });
     }
 
     pub fn try_consume(
@@ -431,10 +424,7 @@ impl ExpenseModalSubmissionBindingStore {
         draft_scope_id: ExpenseDraftScopeId,
         now: SystemTime,
     ) -> Result<ExpenseModalIntent, ModalSubmissionBindingError> {
-        let mut guard = self
-            .by_nonce
-            .lock()
-            .expect("ExpenseModalSubmissionBindingStore mutex poisoned");
+        let mut guard = self.by_nonce.lock();
         let Some(binding) = guard.get(&binding_nonce) else {
             return Err(ModalSubmissionBindingError::NotFound);
         };
@@ -561,26 +551,19 @@ impl ModalRetryBindingStore {
     }
 
     pub fn store(&self, binding: ModalRetryBinding) {
-        self.by_nonce
-            .lock()
-            .expect("ModalRetryBindingStore mutex poisoned")
-            .insert(binding.binding_nonce, binding);
+        self.by_nonce.lock().insert(binding.binding_nonce, binding);
     }
 
     pub fn clear_draft_scope(&self, draft_scope_id: ExpenseDraftScopeId) {
         self.by_nonce
             .lock()
-            .expect("ModalRetryBindingStore mutex poisoned")
             .retain(|_, binding| binding.draft_scope_id != draft_scope_id);
     }
 
     pub fn clear_actor_draft_scope(&self, draft_scope_id: ExpenseDraftScopeId, actor_id: MemberId) {
-        self.by_nonce
-            .lock()
-            .expect("ModalRetryBindingStore mutex poisoned")
-            .retain(|_, binding| {
-                binding.draft_scope_id != draft_scope_id || binding.actor_id != actor_id
-            });
+        self.by_nonce.lock().retain(|_, binding| {
+            binding.draft_scope_id != draft_scope_id || binding.actor_id != actor_id
+        });
     }
 
     /// Atomically validate and remove the binding. Single-use is structural: the binding
@@ -593,10 +576,7 @@ impl ModalRetryBindingStore {
         draft_scope_id: ExpenseDraftScopeId,
         now: SystemTime,
     ) -> Result<ModalRetryPayload, ModalRetryBindingError> {
-        let mut guard = self
-            .by_nonce
-            .lock()
-            .expect("ModalRetryBindingStore mutex poisoned");
+        let mut guard = self.by_nonce.lock();
         let Some(binding) = guard.get(&binding_nonce) else {
             return Err(ModalRetryBindingError::NotFound);
         };
@@ -891,23 +871,18 @@ impl ExpenseSessionStore {
     pub fn replace(&self, session: ExpenseSession) -> Option<ExpenseSession> {
         self.state
             .lock()
-            .expect("ExpenseSessionStore mutex poisoned")
             .insert_session(ExpenseSessionSlot::Available(session))
     }
 
     pub fn clear_draft_scope(&self, draft_scope_id: ExpenseDraftScopeId) {
         self.state
             .lock()
-            .expect("ExpenseSessionStore mutex poisoned")
             .by_key
             .retain(|_, slot| slot.session().key().draft_scope_id() != draft_scope_id);
     }
 
     pub fn clear(&self, key: ExpenseSessionKey) -> Option<ExpenseSession> {
-        self.state
-            .lock()
-            .expect("ExpenseSessionStore mutex poisoned")
-            .remove_session(key)
+        self.state.lock().remove_session(key)
     }
 
     pub fn claim(
@@ -915,10 +890,7 @@ impl ExpenseSessionStore {
         key: ExpenseSessionKey,
         now: SystemTime,
     ) -> Result<Option<ClaimedExpenseSession>, SessionAccessError> {
-        let mut guard = self
-            .state
-            .lock()
-            .expect("ExpenseSessionStore mutex poisoned");
+        let mut guard = self.state.lock();
         let Some(slot) = guard.by_key.get(&key) else {
             return Ok(None);
         };
@@ -947,16 +919,11 @@ impl ExpenseSessionStore {
     }
 
     pub fn has_active_session(&self, key: ExpenseSessionKey, now: SystemTime) -> bool {
-        self.state
-            .lock()
-            .expect("ExpenseSessionStore mutex poisoned")
-            .by_key
-            .get(&key)
-            .is_some_and(|slot| {
-                now.duration_since(slot.session().last_touched)
-                    .unwrap_or_default()
-                    < EXPENSE_SESSION_TTL
-            })
+        self.state.lock().by_key.get(&key).is_some_and(|slot| {
+            now.duration_since(slot.session().last_touched)
+                .unwrap_or_default()
+                < EXPENSE_SESSION_TTL
+        })
     }
 
     pub fn restore_claim(&self, claimed: ClaimedExpenseSession) -> bool {
@@ -968,10 +935,7 @@ impl ExpenseSessionStore {
         token: ExpenseSessionClaimToken,
         replacement: Option<ExpenseSession>,
     ) -> bool {
-        let mut guard = self
-            .state
-            .lock()
-            .expect("ExpenseSessionStore mutex poisoned");
+        let mut guard = self.state.lock();
         let Some(ExpenseSessionSlot::Claimed {
             token: current_token,
             ..
@@ -1068,21 +1032,15 @@ impl VoidSessionStore {
     }
 
     pub fn replace(&self, session: VoidSession) -> Option<VoidSession> {
-        self.state
-            .lock()
-            .expect("VoidSessionStore mutex poisoned")
-            .insert_session(session)
+        self.state.lock().insert_session(session)
     }
 
     pub fn clear(&self, key: VoidSessionKey) -> Option<VoidSession> {
-        self.state
-            .lock()
-            .expect("VoidSessionStore mutex poisoned")
-            .remove_session(key)
+        self.state.lock().remove_session(key)
     }
 
     pub fn clear_ledger(&self, ledger_id: LedgerId) {
-        let mut guard = self.state.lock().expect("VoidSessionStore mutex poisoned");
+        let mut guard = self.state.lock();
         let drained_nonce_keys: Vec<VoidSessionNonceKey> = guard
             .by_key
             .iter()
@@ -1101,7 +1059,7 @@ impl VoidSessionStore {
         observed_nonce: InteractionNonce,
         now: SystemTime,
     ) -> Result<Option<VoidSession>, SessionAccessError> {
-        let mut guard = self.state.lock().expect("VoidSessionStore mutex poisoned");
+        let mut guard = self.state.lock();
         let Some(session) = guard.by_key.get(&key).cloned() else {
             return Ok(None);
         };
@@ -1125,7 +1083,7 @@ impl VoidSessionStore {
         observed_nonce: InteractionNonce,
         now: SystemTime,
     ) -> Option<MemberId> {
-        let guard = self.state.lock().expect("VoidSessionStore mutex poisoned");
+        let guard = self.state.lock();
         let actor_id = *guard.by_nonce.get(&VoidSessionNonceKey {
             ledger_id,
             nonce: observed_nonce,
@@ -1139,14 +1097,9 @@ impl VoidSessionStore {
     }
 
     pub fn has_active_session(&self, key: VoidSessionKey, now: SystemTime) -> bool {
-        self.state
-            .lock()
-            .expect("VoidSessionStore mutex poisoned")
-            .by_key
-            .get(&key)
-            .is_some_and(|session| {
-                now.duration_since(session.last_touched).unwrap_or_default() < VOID_SESSION_TTL
-            })
+        self.state.lock().by_key.get(&key).is_some_and(|session| {
+            now.duration_since(session.last_touched).unwrap_or_default() < VOID_SESSION_TTL
+        })
     }
 }
 

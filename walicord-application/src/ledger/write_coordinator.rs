@@ -8,9 +8,10 @@ use crate::{
     },
 };
 use dashmap::DashMap;
+use parking_lot::Mutex;
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::Arc,
     time::{Duration, SystemTime},
 };
 use tokio::sync::Mutex as AsyncMutex;
@@ -222,21 +223,14 @@ impl UncertainWriteRegistry {
 
     pub fn current(&self, target: impl Into<WriteTargetKey>) -> Option<UncertainWriteState> {
         let target = target.into();
-        self.by_target
-            .lock()
-            .expect("UncertainWriteRegistry mutex poisoned")
-            .get(&target)
-            .cloned()
+        self.by_target.lock().get(&target).cloned()
     }
 
     /// Capture a new Live retain. Idempotent if the existing Live retain is exactly
     /// equal; rejected if a different retain is already Live. This enforces criterion
     /// 217/279/287's "retained envelope is authoritative" contract.
     pub fn set_live(&self, retained: RetainedCanonicalWrite) -> Result<(), SetLiveError> {
-        let mut guard = self
-            .by_target
-            .lock()
-            .expect("UncertainWriteRegistry mutex poisoned");
+        let mut guard = self.by_target.lock();
         match guard.get(&retained.target) {
             Some(UncertainWriteState::Live(existing)) if existing == &retained => Ok(()),
             Some(UncertainWriteState::Live(existing)) => {
@@ -257,10 +251,7 @@ impl UncertainWriteRegistry {
 
     pub fn abandon(&self, target: impl Into<WriteTargetKey>) -> Option<UncertainWriteState> {
         let target = target.into();
-        let mut guard = self
-            .by_target
-            .lock()
-            .expect("UncertainWriteRegistry mutex poisoned");
+        let mut guard = self.by_target.lock();
         let state = guard.get_mut(&target)?;
         if let UncertainWriteState::Live(retained) = state {
             *state = UncertainWriteState::Abandoned(retained.clone());
@@ -270,10 +261,7 @@ impl UncertainWriteRegistry {
 
     pub fn clear(&self, target: impl Into<WriteTargetKey>) -> Option<UncertainWriteState> {
         let target = target.into();
-        self.by_target
-            .lock()
-            .expect("UncertainWriteRegistry mutex poisoned")
-            .remove(&target)
+        self.by_target.lock().remove(&target)
     }
 
     /// Pure function: given the retained envelope bytes, canonical messages observed
@@ -969,9 +957,9 @@ mod tests {
         let task_a = tokio::spawn(async move {
             let lock = coord_a.lock_for(walicord_ledger::test_fixtures::ledger_id(77));
             let _guard = lock.lock().await;
-            order_a.lock().unwrap().push("a_acquired");
+            order_a.lock().push("a_acquired");
             tokio::time::sleep(Duration::from_millis(20)).await;
-            order_a.lock().unwrap().push("a_released");
+            order_a.lock().push("a_released");
         });
 
         tokio::time::sleep(Duration::from_millis(5)).await;
@@ -981,12 +969,12 @@ mod tests {
         let task_b = tokio::spawn(async move {
             let lock = coord_b.lock_for(walicord_ledger::test_fixtures::ledger_id(77));
             let _guard = lock.lock().await;
-            order_b.lock().unwrap().push("b_acquired");
+            order_b.lock().push("b_acquired");
         });
 
         let _ = tokio::join!(task_a, task_b);
 
-        let final_order: Vec<&str> = order.lock().unwrap().iter().copied().collect();
+        let final_order: Vec<&str> = order.lock().iter().copied().collect();
         assert_eq!(final_order, vec!["a_acquired", "a_released", "b_acquired"]);
     }
 

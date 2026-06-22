@@ -44,8 +44,8 @@ use walicord_domain::model::{MemberId, RoleId};
 use walicord_i18n as i18n;
 use walicord_presentation::discord_ledger::{
     DiscordLedgerPresenter, ExpenseConfirmationButtonIds, ExpenseSelectionStepButtonIds,
-    LedgerPageInputs, ReadViewBuildError, ReadViewPageModel, ReadViewRoute, RecoveryCta,
-    RenderBudgetError, ReviewPageInputs, SurfaceActionRow, SurfaceButton,
+    ExpenseSurfaceModel, LedgerPageInputs, ReadViewBuildError, ReadViewPageModel, ReadViewRoute,
+    RecoveryCta, RenderBudgetError, ReviewPageInputs, SurfaceActionRow, SurfaceButton,
     SurfaceInteractiveButtonStyle, SurfaceMemberLabels, SurfaceSelectMenu, VoidRetargetReason,
     VoidSurfaceModel, build_expense_confirmation_surface, build_expense_selection_step_surface,
     build_ledger_empty_page_model, build_ledger_page_model, build_review_empty_page_model,
@@ -829,7 +829,10 @@ impl ExpenseNonceRegistry {
         }
     }
 
-    pub fn get(&self, key: &ExpenseSessionKey) -> Option<walicord_application::InteractionNonce> {
+    pub fn get_nonce(
+        &self,
+        key: &ExpenseSessionKey,
+    ) -> Option<walicord_application::InteractionNonce> {
         self.by_key.get(key).map(|entry| *entry)
     }
 
@@ -2270,7 +2273,9 @@ impl LedgerRouter {
         scope: LedgerInteractionScope,
         session: &ExpenseSession,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
-        let (body, components) = self.build_expense_step_message(ctx, scope, session).await?;
+        let model = self.build_expense_step_model(ctx, scope, session).await?;
+        let rendered = DiscordLedgerPresenter::render_expense_step(&model)?;
+        let (body, components) = rendered_surface_to_message(rendered);
         let response = CreateInteractionResponse::UpdateMessage(
             safe_ephemeral_interaction_response_message()
                 .content(body)
@@ -2283,12 +2288,12 @@ impl LedgerRouter {
         Ok(InteractionDispatch::Handled)
     }
 
-    async fn build_expense_step_message(
+    async fn build_expense_step_model(
         &self,
         ctx: &Context,
         scope: LedgerInteractionScope,
         session: &ExpenseSession,
-    ) -> Result<(String, Vec<CreateActionRow>), LedgerRouteError> {
+    ) -> Result<ExpenseSurfaceModel, LedgerRouteError> {
         let ExpenseSessionStage::InSelection { phase } = session.stage() else {
             return Err(InternalLedgerRouteError::PostNavigationStageInvariant {
                 observed_stage: session.stage().clone(),
@@ -2308,9 +2313,7 @@ impl LedgerRouter {
         if let Some(menu) = picker.select_menu {
             model.action_rows.insert(0, SurfaceActionRow::Select(menu));
         }
-        let rendered = DiscordLedgerPresenter::render_expense_step(&model)?;
-        let (body, components) = rendered_surface_to_message(rendered);
-        Ok((body, components))
+        Ok(model)
     }
 
     async fn expense_picker_render_parts(
@@ -2739,10 +2742,17 @@ impl LedgerRouter {
         modal
             .create_response(
                 &ctx.http,
-                CreateInteractionResponse::Message(
-                    safe_ephemeral_interaction_response_message()
-                        .content(i18n::STALE_INTERACTION_MESSAGE),
-                ),
+                if Self::modal_originated_from_ephemeral(modal) {
+                    CreateInteractionResponse::UpdateMessage(
+                        safe_interaction_response_message()
+                            .content(i18n::STALE_INTERACTION_MESSAGE),
+                    )
+                } else {
+                    CreateInteractionResponse::Message(
+                        safe_ephemeral_interaction_response_message()
+                            .content(i18n::STALE_INTERACTION_MESSAGE),
+                    )
+                },
             )
             .await
             .map_err(discord_call_error(
@@ -2846,7 +2856,7 @@ impl LedgerRouter {
         key: ExpenseSessionKey,
         observed_nonce: walicord_application::InteractionNonce,
     ) -> Option<SessionAccessError> {
-        let stored = self.deps.expense_nonces.get(&key)?;
+        let stored = self.deps.expense_nonces.get_nonce(&key)?;
         if stored != observed_nonce {
             Some(SessionAccessError::Superseded {
                 actual: observed_nonce,
@@ -2857,13 +2867,14 @@ impl LedgerRouter {
         }
     }
 
+    #[allow(clippy::result_large_err)]
     fn require_expense_nonce(
         &self,
         key: ExpenseSessionKey,
     ) -> Result<walicord_application::InteractionNonce, LedgerRouteError> {
         self.deps
             .expense_nonces
-            .get(&key)
+            .get_nonce(&key)
             .ok_or_else(|| InternalLedgerRouteError::MissingExpenseNonce { key }.into())
     }
 
@@ -2882,6 +2893,53 @@ impl LedgerRouter {
             .expense_sessions
             .has_active_session(candidate_key, now)
             .then_some(actor_id)
+    }
+
+    fn modal_originated_from_ephemeral(modal: &ModalInteraction) -> bool {
+        modal
+            .message
+            .as_ref()
+            .and_then(|msg| msg.flags)
+            .is_some_and(|flags| flags.contains(serenity::all::MessageFlags::EPHEMERAL))
+    }
+
+    async fn respond_modal_with_validation_error(
+        &self,
+        ctx: &Context,
+        modal: &ModalInteraction,
+        scope: LedgerInteractionScope,
+        session: &ExpenseSession,
+        error_message: &str,
+    ) -> Result<(), LedgerRouteError> {
+        let response = match self.build_expense_step_model(ctx, scope, session).await {
+            Ok(mut model) => {
+                model.validation_message = Some(error_message.to_owned());
+                let rendered = DiscordLedgerPresenter::render_expense_step(&model)?;
+                let (body, components) = rendered_surface_to_message(rendered);
+                CreateInteractionResponse::UpdateMessage(
+                    safe_interaction_response_message()
+                        .content(body)
+                        .components(components),
+                )
+            }
+            Err(error) => {
+                tracing::warn!(%error, "modal validation re-render failed, falling back to content-only update");
+                if Self::modal_originated_from_ephemeral(modal) {
+                    CreateInteractionResponse::UpdateMessage(
+                        safe_interaction_response_message().content(error_message),
+                    )
+                } else {
+                    CreateInteractionResponse::Message(
+                        safe_ephemeral_interaction_response_message().content(error_message),
+                    )
+                }
+            }
+        };
+        modal
+            .create_response(&ctx.http, response)
+            .await
+            .map_err(discord_call_error(DiscordCallSite::ExpenseStepRefresh))?;
+        Ok(())
     }
 
     async fn respond_expense_session_missing(
@@ -3033,16 +3091,14 @@ impl LedgerRouter {
         let weights = match parse_expense_weight_modal_submission(modal, &username_to_member) {
             Ok(weights) => weights,
             Err(_) => {
-                modal
-                    .create_response(
-                        &ctx.http,
-                        CreateInteractionResponse::Message(
-                            safe_ephemeral_interaction_response_message()
-                                .content(i18n::WEIGHT_EDITOR_PARSE_ERROR),
-                        ),
-                    )
-                    .await
-                    .map_err(discord_call_error(DiscordCallSite::ExpenseStepRefresh))?;
+                self.respond_modal_with_validation_error(
+                    ctx,
+                    modal,
+                    scope,
+                    claim.session(),
+                    i18n::WEIGHT_EDITOR_PARSE_ERROR,
+                )
+                .await?;
                 return Ok(InteractionDispatch::Handled);
             }
         };
@@ -3053,15 +3109,21 @@ impl LedgerRouter {
             build_expense_selection_step_surface(&ExpenseSelectionPhase::WeightEditor, &button_ids);
         let rendered = DiscordLedgerPresenter::render_expense_step(&model)?;
         let (body, components) = rendered_surface_to_message(rendered);
-        modal
-            .create_response(
-                &ctx.http,
-                CreateInteractionResponse::Message(
-                    safe_ephemeral_interaction_response_message()
-                        .content(body)
-                        .components(components),
-                ),
+        let response = if Self::modal_originated_from_ephemeral(modal) {
+            CreateInteractionResponse::UpdateMessage(
+                safe_interaction_response_message()
+                    .content(body)
+                    .components(components),
             )
+        } else {
+            CreateInteractionResponse::Message(
+                safe_ephemeral_interaction_response_message()
+                    .content(body)
+                    .components(components),
+            )
+        };
+        modal
+            .create_response(&ctx.http, response)
             .await
             .map_err(discord_call_error(DiscordCallSite::ExpenseStepRefresh))?;
         claim.replace(updated);
@@ -3101,16 +3163,14 @@ impl LedgerRouter {
         };
         let query = extract_expense_picker_search_query(modal).trim();
         if query.is_empty() {
-            modal
-                .create_response(
-                    &ctx.http,
-                    CreateInteractionResponse::Message(
-                        safe_ephemeral_interaction_response_message()
-                            .content(i18n::SEARCH_BLANK_ERROR),
-                    ),
-                )
-                .await
-                .map_err(discord_call_error(DiscordCallSite::ExpenseStepRefresh))?;
+            self.respond_modal_with_validation_error(
+                ctx,
+                modal,
+                scope,
+                claim.session(),
+                i18n::SEARCH_BLANK_ERROR,
+            )
+            .await?;
             return Ok(InteractionDispatch::Handled);
         }
         let roster = self
@@ -3128,16 +3188,14 @@ impl LedgerRouter {
             kind,
             query,
         ) {
-            modal
-                .create_response(
-                    &ctx.http,
-                    CreateInteractionResponse::Message(
-                        safe_ephemeral_interaction_response_message()
-                            .content(expense_picker_search_not_found_message(kind)),
-                    ),
-                )
-                .await
-                .map_err(discord_call_error(DiscordCallSite::ExpenseStepRefresh))?;
+            self.respond_modal_with_validation_error(
+                ctx,
+                modal,
+                scope,
+                claim.session(),
+                expense_picker_search_not_found_message(kind),
+            )
+            .await?;
             return Ok(InteractionDispatch::Handled);
         }
         let updated = set_picker_view_state(
@@ -3148,9 +3206,9 @@ impl LedgerRouter {
             Some(query.to_owned()),
             self.deps.clock.as_ref(),
         )?;
-        let (body, components) = self
-            .build_expense_step_message(ctx, scope, &updated)
-            .await?;
+        let model = self.build_expense_step_model(ctx, scope, &updated).await?;
+        let rendered = DiscordLedgerPresenter::render_expense_step(&model)?;
+        let (body, components) = rendered_surface_to_message(rendered);
         modal
             .create_response(
                 &ctx.http,
@@ -3302,11 +3360,19 @@ impl LedgerRouter {
         modal
             .create_response(
                 &ctx.http,
-                CreateInteractionResponse::Message(
-                    safe_ephemeral_interaction_response_message()
-                        .content(expense_modal_validation_message(&validation_error))
-                        .components(vec![expense_modal_retry_row(binding_nonce)]),
-                ),
+                if Self::modal_originated_from_ephemeral(modal) {
+                    CreateInteractionResponse::UpdateMessage(
+                        safe_interaction_response_message()
+                            .content(expense_modal_validation_message(&validation_error))
+                            .components(vec![expense_modal_retry_row(binding_nonce)]),
+                    )
+                } else {
+                    CreateInteractionResponse::Message(
+                        safe_ephemeral_interaction_response_message()
+                            .content(expense_modal_validation_message(&validation_error))
+                            .components(vec![expense_modal_retry_row(binding_nonce)]),
+                    )
+                },
             )
             .await
             .map_err(discord_call_error(
@@ -3342,11 +3408,19 @@ impl LedgerRouter {
         }
         let rendered = DiscordLedgerPresenter::render_expense_step(&model)?;
         let (body, components) = rendered_surface_to_message(rendered);
-        let response = CreateInteractionResponse::Message(
-            safe_ephemeral_interaction_response_message()
-                .content(body)
-                .components(components),
-        );
+        let response = if Self::modal_originated_from_ephemeral(modal) {
+            CreateInteractionResponse::UpdateMessage(
+                safe_interaction_response_message()
+                    .content(body)
+                    .components(components),
+            )
+        } else {
+            CreateInteractionResponse::Message(
+                safe_ephemeral_interaction_response_message()
+                    .content(body)
+                    .components(components),
+            )
+        };
         modal
             .create_response(&ctx.http, response)
             .await

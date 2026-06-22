@@ -190,10 +190,8 @@ mod tests {
         MemberAmount, ledger_chain_genesis_sha256_v1, make_unverified_envelope_sha256_v1,
         write_coordinator::UncertainWriteState,
     };
-    use std::{
-        sync::Mutex,
-        time::{Duration, SystemTime, UNIX_EPOCH},
-    };
+    use parking_lot::Mutex;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
     use walicord_domain::{Money, model::MemberId};
 
     #[test]
@@ -251,10 +249,9 @@ mod tests {
             _envelope: &UnverifiedLedgerStoreEnvelope<()>,
             _body: &str,
         ) -> Result<(), CanonicalAppendError> {
-            *self.calls.lock().unwrap() += 1;
+            *self.calls.lock() += 1;
             self.result
                 .lock()
-                .unwrap()
                 .take()
                 .expect("appender configured to be called exactly once")
         }
@@ -266,7 +263,7 @@ mod tests {
     }
     impl LocatorBindingPublisher for RecordingPublisher {
         fn publish_ready(&self) {
-            *self.calls.lock().unwrap() += 1;
+            *self.calls.lock() += 1;
         }
     }
 
@@ -276,7 +273,7 @@ mod tests {
     }
     impl LedgerObservability for RecordingObservability {
         fn emit(&self, event: LedgerObservabilityEvent) {
-            self.events.lock().unwrap().push(event);
+            self.events.lock().push(event);
         }
     }
 
@@ -341,9 +338,9 @@ mod tests {
         .expect("orchestration should succeed");
 
         assert_eq!(outcome, CommitOutcome::Recorded);
-        assert_eq!(*appender.calls.lock().unwrap(), 1);
-        assert_eq!(*publisher.calls.lock().unwrap(), 1);
-        assert!(observability.events.lock().unwrap().is_empty());
+        assert_eq!(*appender.calls.lock(), 1);
+        assert_eq!(*publisher.calls.lock(), 1);
+        assert!(observability.events.lock().is_empty());
         assert_eq!(registry.current(target), None);
     }
 
@@ -375,13 +372,13 @@ mod tests {
         .expect("orchestration should still return Ok on append failure");
 
         assert_eq!(outcome, CommitOutcome::UncertainAppendFailed);
-        assert_eq!(*appender.calls.lock().unwrap(), 1);
-        assert_eq!(*publisher.calls.lock().unwrap(), 0);
+        assert_eq!(*appender.calls.lock(), 1);
+        assert_eq!(*publisher.calls.lock(), 0);
         assert!(matches!(
             registry.current(target),
             Some(UncertainWriteState::Live(_))
         ));
-        let events = observability.events.lock().unwrap();
+        let events = observability.events.lock();
         assert_eq!(events.len(), 1);
         assert!(matches!(
             &events[0],
@@ -431,8 +428,8 @@ mod tests {
             result,
             Err(CommitOrchestrationError::UncertainWriteAlreadyLive { .. })
         ));
-        assert_eq!(*appender.calls.lock().unwrap(), 0);
-        assert_eq!(*publisher.calls.lock().unwrap(), 0);
-        assert!(observability.events.lock().unwrap().is_empty());
+        assert_eq!(*appender.calls.lock(), 0);
+        assert_eq!(*publisher.calls.lock(), 0);
+        assert!(observability.events.lock().is_empty());
     }
 }

@@ -1,6 +1,6 @@
+use parking_lot::Mutex;
 use std::{
     collections::HashMap,
-    sync::Mutex,
     time::{Duration, SystemTime},
 };
 
@@ -119,17 +119,11 @@ where
     }
 
     pub fn replace(&self, session: ReadViewSession<Page>) -> Option<ReadViewSession<Page>> {
-        self.by_key
-            .lock()
-            .expect("ReadViewSessionStore mutex poisoned")
-            .insert(session.key(), session)
+        self.by_key.lock().insert(session.key(), session)
     }
 
     pub fn peek(&self, key: ReadViewSessionKey, now: SystemTime) -> Option<Page> {
-        let mut guard = self
-            .by_key
-            .lock()
-            .expect("ReadViewSessionStore mutex poisoned");
+        let mut guard = self.by_key.lock();
         let session = guard.get(&key)?;
         let elapsed = now.duration_since(session.last_touched).unwrap_or_default();
         if elapsed >= READ_VIEW_SESSION_TTL {
@@ -140,16 +134,12 @@ where
     }
 
     pub fn clear(&self, key: ReadViewSessionKey) -> Option<ReadViewSession<Page>> {
-        self.by_key
-            .lock()
-            .expect("ReadViewSessionStore mutex poisoned")
-            .remove(&key)
+        self.by_key.lock().remove(&key)
     }
 
     pub fn clear_ledger(&self, ledger_id: LedgerId) {
         self.by_key
             .lock()
-            .expect("ReadViewSessionStore mutex poisoned")
             .retain(|key, _| key.ledger_id != ledger_id);
     }
 
@@ -159,10 +149,7 @@ where
         observed_nonce: InteractionNonce,
         now: SystemTime,
     ) -> Result<Option<ReadViewSession<Page>>, ReadViewSessionAccessError> {
-        let mut guard = self
-            .by_key
-            .lock()
-            .expect("ReadViewSessionStore mutex poisoned");
+        let mut guard = self.by_key.lock();
         let Some(session) = guard.get(&key).cloned() else {
             return Ok(None);
         };

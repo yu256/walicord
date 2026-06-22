@@ -230,12 +230,10 @@ mod tests {
             write_coordinator::{RetainedCanonicalWrite, UncertainWriteState},
         },
     };
+    use parking_lot::Mutex;
     use std::{
         collections::BTreeMap,
-        sync::{
-            Mutex,
-            atomic::{AtomicU32, Ordering},
-        },
+        sync::atomic::{AtomicU32, Ordering},
         time::{Duration, SystemTime, UNIX_EPOCH},
     };
     use walicord_domain::{Money, model::MemberId};
@@ -334,7 +332,7 @@ mod tests {
         async fn load_verified_thread(
             &self,
         ) -> Result<VerifiedLedgerThreadLoad<()>, CanonicalReadError> {
-            Ok(self.load.lock().unwrap().clone().unwrap())
+            Ok(self.load.lock().clone().unwrap())
         }
         async fn scan_recent(
             &self,
@@ -375,7 +373,7 @@ mod tests {
             _: &str,
         ) -> Result<(), CanonicalAppendError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            self.result.lock().unwrap().take().unwrap()
+            self.result.lock().take().unwrap()
         }
     }
 
@@ -407,7 +405,7 @@ mod tests {
     }
     impl crate::ledger::observability::LedgerObservability for StubObservability {
         fn emit(&self, event: LedgerObservabilityEvent) {
-            self.events.lock().unwrap().push(event);
+            self.events.lock().push(event);
         }
     }
 
@@ -560,6 +558,6 @@ mod tests {
         assert_eq!(outcome, VoidExecuteOutcome::UncertainAppendFailed);
         // Session is NOT cleared on append failure — retry path needs it.
         assert!(sessions.has_active_session(session.key(), FixedClock.now()));
-        assert_eq!(observability.events.lock().unwrap().len(), 1);
+        assert_eq!(observability.events.lock().len(), 1);
     }
 }

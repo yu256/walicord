@@ -444,13 +444,14 @@ mod tests {
     use super::*;
     use crate::test_utils::{MockRosterProvider, member_info};
     use insta::assert_snapshot;
+    use parking_lot::Mutex;
     use rstest::rstest;
     use serenity::model::{
         channel::Message,
         id::{ChannelId, GuildId, UserId},
     };
     use std::sync::{
-        Arc, Mutex, OnceLock,
+        Arc, OnceLock,
         atomic::{AtomicUsize, Ordering},
     };
     use walicord_application::{Command, Script, ScriptStatementWithLine};
@@ -741,13 +742,13 @@ mod tests {
                 move |_svg| rendered_png_for_render.clone(),
                 async move |png| {
                     send_count_clone.fetch_add(1, Ordering::SeqCst);
-                    *sent_png_clone.lock().expect("sent png mutex poisoned") = Some(png);
+                    *sent_png_clone.lock() = Some(png);
                     send_result_for_send
                 },
             )
             .await;
 
-        let actual = sent_png.lock().expect("sent png mutex poisoned").clone();
+        let actual = sent_png.lock().clone();
 
         if expected_sent_png.is_some() {
             assert_eq!(send_count.load(Ordering::SeqCst), 1);
@@ -773,13 +774,13 @@ mod tests {
             .reply_with_io("hello".to_string(), async move |content| {
                 send_count_clone.fetch_add(1, Ordering::SeqCst);
                 let sent_clone = Arc::clone(&sent_clone);
-                *sent_clone.lock().expect("sent content mutex poisoned") = Some(content);
+                *sent_clone.lock() = Some(content);
                 send_result_for_send
             })
             .await;
 
         assert_eq!(send_count.load(Ordering::SeqCst), 1);
-        let actual = sent.lock().expect("sent content mutex poisoned").clone();
+        let actual = sent.lock().clone();
         assert_eq!(actual, Some("hello".to_string()));
     }
 
