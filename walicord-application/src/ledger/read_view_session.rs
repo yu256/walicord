@@ -125,6 +125,20 @@ where
             .insert(session.key(), session)
     }
 
+    pub fn peek(&self, key: ReadViewSessionKey, now: SystemTime) -> Option<Page> {
+        let mut guard = self
+            .by_key
+            .lock()
+            .expect("ReadViewSessionStore mutex poisoned");
+        let session = guard.get(&key)?;
+        let elapsed = now.duration_since(session.last_touched).unwrap_or_default();
+        if elapsed >= READ_VIEW_SESSION_TTL {
+            guard.remove(&key);
+            return None;
+        }
+        Some(session.current_page().clone())
+    }
+
     pub fn clear(&self, key: ReadViewSessionKey) -> Option<ReadViewSession<Page>> {
         self.by_key
             .lock()
@@ -244,6 +258,46 @@ mod tests {
         assert!(matches!(actual, Err(ReadViewSessionAccessError::Expired)));
         let after_expiry = store.access(key(), nonce(1), SystemTime::UNIX_EPOCH);
         assert!(matches!(after_expiry, Ok(None)));
+    }
+
+    #[test]
+    fn peek_returns_current_page_without_consuming_session() {
+        let store: ReadViewSessionStore<&'static str> = ReadViewSessionStore::new();
+        store.replace(ReadViewSession::new(
+            key(),
+            nonce(1),
+            vec!["page"],
+            SystemTime::UNIX_EPOCH,
+        ));
+
+        let peeked = store.peek(key(), SystemTime::UNIX_EPOCH);
+        assert_eq!(peeked, Some("page"));
+
+        let still_there = store
+            .access(key(), nonce(1), SystemTime::UNIX_EPOCH)
+            .expect("session should still exist after peek");
+        assert!(still_there.is_some());
+    }
+
+    #[test]
+    fn peek_returns_none_for_expired_session_and_removes_it() {
+        let store: ReadViewSessionStore<&'static str> = ReadViewSessionStore::new();
+        store.replace(ReadViewSession::new(
+            key(),
+            nonce(1),
+            vec!["page"],
+            SystemTime::UNIX_EPOCH,
+        ));
+
+        let later = SystemTime::UNIX_EPOCH + READ_VIEW_SESSION_TTL;
+        assert_eq!(store.peek(key(), later), None);
+        assert_eq!(store.clear(key()), None);
+    }
+
+    #[test]
+    fn peek_returns_none_for_missing_session() {
+        let store: ReadViewSessionStore<&'static str> = ReadViewSessionStore::new();
+        assert_eq!(store.peek(key(), SystemTime::UNIX_EPOCH), None);
     }
 
     #[test]

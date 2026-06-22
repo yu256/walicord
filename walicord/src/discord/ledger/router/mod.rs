@@ -4,8 +4,8 @@ use crate::discord::ledger::panel::{
 use serenity::{
     all::{
         ChannelId, CommandInteraction, ComponentInteraction, ComponentInteractionDataKind,
-        CreateActionRow, CreateButton, CreateInteractionResponse, GuildId, ModalInteraction,
-        Permissions, UserId,
+        CreateActionRow, CreateButton, CreateInteractionResponse, EditInteractionResponse, GuildId,
+        ModalInteraction, Permissions, UserId,
     },
     async_trait,
     prelude::Context,
@@ -1573,8 +1573,20 @@ impl LedgerRouter {
         {
             return self.dispatch_expense_record(ctx, component, nonce).await;
         }
-        if custom_id == REVIEW_SETTLE_CUSTOM_ID {
-            return self.dispatch_review_settle_button(ctx, component).await;
+        if let Some(remainder) = custom_id.strip_prefix(REVIEW_SETTLE_CUSTOM_ID_PREFIX) {
+            let ledger_id = match remainder.parse::<LedgerId>() {
+                Ok(id) => id,
+                Err(_) => {
+                    tracing::warn!(
+                        custom_id,
+                        "settle button custom_id has valid prefix but unparseable ledger_id"
+                    );
+                    return Ok(InteractionDispatch::Ignored);
+                }
+            };
+            return self
+                .dispatch_review_settle_button(ctx, component, ledger_id)
+                .await;
         }
         if let Some(nonce) =
             parse_expense_session_button_nonce(custom_id, READ_VIEW_PREV_CUSTOM_ID_PREFIX)
@@ -3782,7 +3794,9 @@ impl LedgerRouter {
                             model.action_rows.push(SurfaceActionRow::Buttons(vec![
                                 SurfaceButton::Interactive {
                                     label: i18n::review_settle_button_label().to_owned(),
-                                    custom_id: REVIEW_SETTLE_CUSTOM_ID.to_owned(),
+                                    custom_id: format!(
+                                        "{REVIEW_SETTLE_CUSTOM_ID_PREFIX}{ledger_id}"
+                                    ),
                                     style: SurfaceInteractiveButtonStyle::Primary,
                                     disabled: false,
                                 },
@@ -3953,6 +3967,7 @@ impl LedgerRouter {
         &self,
         ctx: &Context,
         component: &ComponentInteraction,
+        ledger_id: LedgerId,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
         let scope = self
             .guard_scope(ctx, component.guild_id, component.channel_id, component)
@@ -3963,10 +3978,49 @@ impl LedgerRouter {
             .await
             .map_err(discord_call_error(DiscordCallSite::ReviewSettleDefer))?;
 
+        let actor_id = MemberId(component.user.id.get());
+        let button_session_key = ReadViewSessionKey {
+            ledger_id,
+            actor_id,
+        };
+        let result = self.execute_settle_from_review(ctx, scope, actor_id).await;
+
+        let response = match result {
+            Ok((resolved_ledger_id, outcome)) => {
+                let session_key = ReadViewSessionKey {
+                    ledger_id: resolved_ledger_id,
+                    actor_id,
+                };
+                self.build_settle_outcome_response(session_key, &outcome)
+            }
+            Err(ref error) if error.is_internal_failure() => {
+                self.build_settle_retryable_response(button_session_key, error.user_message())
+            }
+            Err(error) => {
+                let (body, components) =
+                    self.render_settled_review(button_session_key, error.user_message());
+                safe_edit_interaction_response()
+                    .content(body)
+                    .components(components)
+            }
+        };
+        component
+            .edit_response(&ctx.http, response)
+            .await
+            .map_err(discord_call_error(
+                DiscordCallSite::ReviewSettleEditResponse,
+            ))?;
+        Ok(InteractionDispatch::Handled)
+    }
+
+    async fn execute_settle_from_review(
+        &self,
+        ctx: &Context,
+        scope: LedgerInteractionScope,
+        actor_id: MemberId,
+    ) -> Result<(LedgerId, SettleExecuteOutcome), LedgerRouteError> {
         let binding = self.resolve_existing_ledger(ctx, scope).await?;
         let ledger_id = binding.ledger_id();
-        let actor_id = MemberId(component.user.id.get());
-
         let roster = self
             .deps
             .roster_fetcher
@@ -4010,59 +4064,63 @@ impl LedgerRouter {
         )
         .await
         .map_err(LedgerRouteError::from)?;
+        Ok((ledger_id, outcome))
+    }
 
-        let session_key = ReadViewSessionKey {
-            ledger_id,
-            actor_id,
-        };
-        let response = match &outcome {
+    fn build_settle_outcome_response(
+        &self,
+        session_key: ReadViewSessionKey,
+        outcome: &SettleExecuteOutcome,
+    ) -> EditInteractionResponse {
+        let (body, components) = match outcome {
             SettleExecuteOutcome::Recorded { .. } => {
-                let (body, components) =
-                    self.render_settled_review(session_key, i18n::settlement_recorded_message());
-                safe_edit_interaction_response()
-                    .content(body)
-                    .components(components)
+                self.render_settled_review(session_key, i18n::settlement_recorded_message())
             }
-            SettleExecuteOutcome::NoPreviewRequired => {
-                let (body, components) = self.render_settled_review(
-                    session_key,
-                    i18n::settlement_preview_expired_or_confirmed_message(),
-                );
-                safe_edit_interaction_response()
-                    .content(body)
-                    .components(components)
-            }
+            SettleExecuteOutcome::NoPreviewRequired => self.render_settled_review(
+                session_key,
+                i18n::settlement_preview_expired_or_confirmed_message(),
+            ),
             SettleExecuteOutcome::NoTransferNeeded => {
-                let (body, components) =
-                    self.render_settled_review(session_key, i18n::settlement_no_transfer_message());
-                safe_edit_interaction_response()
-                    .content(body)
-                    .components(components)
+                self.render_settled_review(session_key, i18n::settlement_no_transfer_message())
             }
             SettleExecuteOutcome::UncertainBlocked
             | SettleExecuteOutcome::UncertainAppendFailed => {
                 self.deps.read_view_sessions.clear(session_key);
-                let (body, components) =
-                    self.uncertain_write_block_response(ledger_id, false, true);
-                safe_edit_interaction_response()
-                    .content(body)
-                    .components(components)
+                self.uncertain_write_block_response(session_key.ledger_id, false, true)
             }
             SettleExecuteOutcome::AttemptFailed { error } => {
-                let (body, components) =
-                    self.render_settled_review(session_key, settle_attempt_error_message(error));
-                safe_edit_interaction_response()
-                    .content(body)
-                    .components(components)
+                self.render_settled_review(session_key, settle_attempt_error_message(error))
             }
         };
-        component
-            .edit_response(&ctx.http, response)
-            .await
-            .map_err(discord_call_error(
-                DiscordCallSite::ReviewSettleEditResponse,
-            ))?;
-        Ok(InteractionDispatch::Handled)
+        safe_edit_interaction_response()
+            .content(body)
+            .components(components)
+    }
+
+    fn build_settle_retryable_response(
+        &self,
+        session_key: ReadViewSessionKey,
+        message: &str,
+    ) -> EditInteractionResponse {
+        let page = self
+            .deps
+            .read_view_sessions
+            .peek(session_key, self.deps.clock.now());
+        if let Some(mut model) = page {
+            model.route_guidance_lines = vec![message.to_owned()];
+            match DiscordLedgerPresenter::render_read_view_page(&model) {
+                Ok(rendered) => {
+                    let (body, components) = rendered_surface_to_message(rendered);
+                    return safe_edit_interaction_response()
+                        .content(body)
+                        .components(components);
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "settle retryable re-render failed, falling back to message only");
+                }
+            }
+        }
+        safe_edit_interaction_response().content(message)
     }
 
     fn render_settled_review(
@@ -4751,7 +4809,7 @@ pub(crate) const EXPENSE_TO_CONFIRM_CUSTOM_ID_PREFIX: &str = "ledger:expense:to-
 pub(crate) const EXPENSE_MODIFY_SELECTION_CUSTOM_ID_PREFIX: &str =
     "ledger:expense:modify-selection:";
 pub(crate) const EXPENSE_RECORD_CUSTOM_ID_PREFIX: &str = "ledger:expense:record:";
-pub(crate) const REVIEW_SETTLE_CUSTOM_ID: &str = "ledger:review:settle";
+pub(crate) const REVIEW_SETTLE_CUSTOM_ID_PREFIX: &str = "ledger:review:settle:";
 pub(crate) const READ_VIEW_PREV_CUSTOM_ID_PREFIX: &str = "ledger:read-view:prev:";
 pub(crate) const READ_VIEW_NEXT_CUSTOM_ID_PREFIX: &str = "ledger:read-view:next:";
 pub(crate) const VOID_PICK_CUSTOM_ID_PREFIX: &str = "ledger:void:pick:";
