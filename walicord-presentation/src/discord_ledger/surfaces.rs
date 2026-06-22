@@ -340,7 +340,7 @@ impl LedgerSurfaceSummary {
                 }
                 summary
             }
-            Self::Void { .. } => i18n::sealed_void_summary().to_owned(),
+            Self::Void { .. } => i18n::SEALED_VOID_SUMMARY.to_owned(),
             Self::Sealed {
                 actor_display_name, ..
             } => i18n::sealed_prior_seal_summary(actor_display_name).to_string(),
@@ -727,25 +727,25 @@ impl DiscordLedgerPresenter {
             ]),
             vec![SurfaceActionRow::Buttons(vec![
                 SurfaceButton::Interactive {
-                    label: i18n::panel_record_button_label().to_owned(),
+                    label: i18n::PANEL_RECORD_BUTTON_LABEL.to_owned(),
                     custom_id: "ledger:panel:expense".to_owned(),
                     style: SurfaceInteractiveButtonStyle::Primary,
                     disabled: model.button_states.record_disabled,
                 },
                 SurfaceButton::Interactive {
-                    label: i18n::panel_review_button_label().to_owned(),
+                    label: i18n::PANEL_REVIEW_BUTTON_LABEL.to_owned(),
                     custom_id: "ledger:panel:review".to_owned(),
                     style: SurfaceInteractiveButtonStyle::Secondary,
                     disabled: model.button_states.review_disabled,
                 },
                 SurfaceButton::Interactive {
-                    label: i18n::panel_ledger_button_label().to_owned(),
+                    label: i18n::PANEL_LEDGER_BUTTON_LABEL.to_owned(),
                     custom_id: "ledger:panel:ledger".to_owned(),
                     style: SurfaceInteractiveButtonStyle::Secondary,
                     disabled: model.button_states.ledger_disabled,
                 },
                 SurfaceButton::Interactive {
-                    label: i18n::panel_void_button_label().to_owned(),
+                    label: i18n::PANEL_VOID_BUTTON_LABEL.to_owned(),
                     custom_id: "ledger:panel:void".to_owned(),
                     style: SurfaceInteractiveButtonStyle::Secondary,
                     disabled: model.button_states.void_disabled,
@@ -812,7 +812,7 @@ impl DiscordLedgerPresenter {
     ) -> Result<RenderedSurface, RenderBudgetError> {
         let advisory = model
             .uncertain_write
-            .then(|| i18n::read_uncertain_write_advisory().to_owned());
+            .then(|| i18n::READ_UNCERTAIN_WRITE_ADVISORY.to_owned());
         let mut action_rows = model.action_rows.clone();
         append_recovery_cta_row(
             &mut action_rows,
@@ -826,7 +826,7 @@ impl DiscordLedgerPresenter {
                 Some(read_view_stale_message(model.kind)),
                 model
                     .missing_thread_note
-                    .then_some(i18n::no_ledger_thread_yet_note()),
+                    .then_some(i18n::NO_LEDGER_THREAD_YET_NOTE),
             ])
         } else if let Some(empty_state) = &model.empty_state {
             render_sections([
@@ -835,7 +835,7 @@ impl DiscordLedgerPresenter {
                 Some(empty_state.as_ref()),
                 model
                     .missing_thread_note
-                    .then_some(i18n::no_ledger_thread_yet_note()),
+                    .then_some(i18n::NO_LEDGER_THREAD_YET_NOTE),
             ])
         } else {
             match model.kind {
@@ -848,9 +848,9 @@ impl DiscordLedgerPresenter {
                         .map(String::as_str)
                         .collect();
                     let review_instruction = if model.uncertain_write {
-                        i18n::review_preview_blocked_instruction()
+                        i18n::REVIEW_PREVIEW_BLOCKED_INSTRUCTION
                     } else {
-                        i18n::review_preview_instruction()
+                        i18n::REVIEW_PREVIEW_INSTRUCTION
                     };
                     render_sections([
                         Some(model.title.as_ref()),
@@ -874,7 +874,7 @@ impl DiscordLedgerPresenter {
                             .as_deref(),
                         model
                             .missing_thread_note
-                            .then_some(i18n::no_ledger_thread_yet_note()),
+                            .then_some(i18n::NO_LEDGER_THREAD_YET_NOTE),
                     ])
                 }
                 ReadViewKind::Ledger => {
@@ -911,7 +911,7 @@ impl DiscordLedgerPresenter {
                             .flatten(),
                         model
                             .missing_thread_note
-                            .then_some(i18n::no_ledger_thread_yet_note()),
+                            .then_some(i18n::NO_LEDGER_THREAD_YET_NOTE),
                     ])
                 }
             }
@@ -933,10 +933,10 @@ impl DiscordLedgerPresenter {
         let body = if model.stale_page {
             render_sections([
                 Some(model.title.as_ref()),
-                Some(i18n::stale_void_page_message()),
+                Some(i18n::STALE_VOID_PAGE_MESSAGE),
                 model
                     .missing_thread_note
-                    .then_some(i18n::no_ledger_thread_yet_note()),
+                    .then_some(i18n::NO_LEDGER_THREAD_YET_NOTE),
             ])
         } else {
             let confirmation_lines = model
@@ -960,7 +960,7 @@ impl DiscordLedgerPresenter {
                 non_empty_join(&candidate_lines).as_deref(),
                 model
                     .missing_thread_note
-                    .then_some(i18n::no_ledger_thread_yet_note()),
+                    .then_some(i18n::NO_LEDGER_THREAD_YET_NOTE),
             ])
         };
 
@@ -1017,7 +1017,7 @@ fn render_public_expense_full(model: &PublicExpenseMessageModel) -> Vec<String> 
         i18n::public_date_line(model.effective_date).to_string(),
         i18n::public_payer_line(&model.payer_display_name).to_string(),
         i18n::public_amount_line(&model.amount).to_string(),
-        i18n::public_participants_heading().to_owned(),
+        i18n::PUBLIC_PARTICIPANTS_HEADING.to_owned(),
     ];
     lines.extend(
         model
@@ -1040,7 +1040,7 @@ fn render_public_expense_compact(model: &PublicExpenseMessageModel) -> Vec<Strin
         i18n::public_date_line(model.effective_date).to_string(),
         i18n::public_payer_line(&model.payer_display_name).to_string(),
         i18n::public_amount_line(&model.amount).to_string(),
-        i18n::public_participants_heading().to_owned(),
+        i18n::PUBLIC_PARTICIPANTS_HEADING.to_owned(),
     ];
     lines.extend(
         model
@@ -1059,7 +1059,7 @@ fn render_public_settlement_full(model: &PublicSettlementMessageModel) -> Vec<St
     let mut lines = vec![
         i18n::public_settlement_header(model.entry_id.0).to_string(),
         i18n::public_date_line(model.recorded_date).to_string(),
-        i18n::public_transfer_heading().to_owned(),
+        i18n::PUBLIC_TRANSFER_HEADING.to_owned(),
     ];
     lines.extend(model.transfers.iter().map(render_transfer_row));
     lines.push(i18n::public_confirmed_by_line(&model.actor_display_name).to_string());
@@ -1072,7 +1072,7 @@ fn render_public_settlement_compact(model: &PublicSettlementMessageModel) -> Vec
     let mut lines = vec![
         i18n::public_settlement_header(model.entry_id.0).to_string(),
         i18n::public_date_line(model.recorded_date).to_string(),
-        i18n::public_transfer_heading().to_owned(),
+        i18n::PUBLIC_TRANSFER_HEADING.to_owned(),
     ];
     lines.extend(
         model
@@ -1096,7 +1096,7 @@ fn render_public_void_full(model: &PublicVoidMessageModel) -> Vec<String> {
             model.original_summary.render_void_candidate_summary(),
         )
         .to_string(),
-        i18n::public_void_preserved_line().to_owned(),
+        i18n::PUBLIC_VOID_PRESERVED_LINE.to_owned(),
         i18n::public_recorded_at_line(&model.recorded_at).to_string(),
         model.recovery_reference.render_line(),
     ]
@@ -1111,7 +1111,7 @@ fn render_public_void_compact(model: &PublicVoidMessageModel) -> Vec<String> {
             model.original_summary.render_public_void_compact_summary(),
         )
         .to_string(),
-        i18n::public_void_preserved_line().to_owned(),
+        i18n::PUBLIC_VOID_PRESERVED_LINE.to_owned(),
         i18n::public_recorded_at_line(&model.recorded_at).to_string(),
     ];
     lines.extend(public_truncation_lines(&model.recovery_reference));
@@ -1205,13 +1205,13 @@ fn public_truncation_lines(recovery_reference: &RecoveryReference) -> Vec<String
 }
 
 fn render_review_balances_section(model: &ReadViewPageModel) -> String {
-    let mut lines = vec![i18n::balances_explainer().to_owned()];
+    let mut lines = vec![i18n::BALANCES_EXPLAINER.to_owned()];
     if model.balances.is_empty() {
-        lines.push(i18n::review_zero_balances().to_owned());
+        lines.push(i18n::REVIEW_ZERO_BALANCES.to_owned());
     } else {
         lines.extend(model.balances.iter().map(render_balance_row));
     }
-    render_section(i18n::balances_heading(), lines)
+    render_section(i18n::BALANCES_HEADING, lines)
 }
 
 fn render_review_transfers_section(model: &ReadViewPageModel) -> String {
@@ -1220,21 +1220,21 @@ fn render_review_transfers_section(model: &ReadViewPageModel) -> String {
         .iter()
         .map(render_transfer_row)
         .collect::<Vec<_>>();
-    render_section(i18n::settlement_plan_heading(), lines)
+    render_section(i18n::SETTLEMENT_PLAN_HEADING, lines)
 }
 
 fn render_ledger_balances_section(model: &ReadViewPageModel) -> String {
-    let mut lines = vec![i18n::balances_explainer().to_owned()];
+    let mut lines = vec![i18n::BALANCES_EXPLAINER.to_owned()];
     if model.balances.is_empty() {
-        lines.push(i18n::ledger_zero_balances().to_owned());
+        lines.push(i18n::LEDGER_ZERO_BALANCES.to_owned());
     } else {
         lines.extend(model.balances.iter().map(render_balance_row));
     }
-    render_section(i18n::balances_heading(), lines)
+    render_section(i18n::BALANCES_HEADING, lines)
 }
 
 fn render_ledger_participants_section(model: &ReadViewPageModel) -> String {
-    let mut lines = vec![i18n::participants_explainer().to_owned()];
+    let mut lines = vec![i18n::PARTICIPANTS_EXPLAINER.to_owned()];
     lines.extend(
         model
             .participants
@@ -1242,16 +1242,16 @@ fn render_ledger_participants_section(model: &ReadViewPageModel) -> String {
             .map(ToString::to_string)
             .collect::<Vec<_>>(),
     );
-    render_section(i18n::participants_heading(), lines)
+    render_section(i18n::PARTICIPANTS_HEADING, lines)
 }
 
 fn render_ledger_voided_section(model: &ReadViewPageModel) -> String {
     let lines = if model.voided_entries.is_empty() {
-        vec![i18n::voided_none().to_owned()]
+        vec![i18n::VOIDED_NONE.to_owned()]
     } else {
         model.voided_entries.iter().map(render_voided_row).collect()
     };
-    render_section(i18n::voided_heading(), lines)
+    render_section(i18n::VOIDED_HEADING, lines)
 }
 
 fn render_ledger_confirmed_section(model: &ReadViewPageModel) -> String {
@@ -1262,7 +1262,7 @@ fn render_ledger_confirmed_section(model: &ReadViewPageModel) -> String {
             .iter()
             .map(render_balance_adjustment_summary),
     );
-    render_section(i18n::confirmed_heading(), lines)
+    render_section(i18n::CONFIRMED_HEADING, lines)
 }
 
 fn render_section(heading: &str, lines: Vec<String>) -> String {
@@ -1386,7 +1386,7 @@ fn render_ledger_footer(model: &ReadViewPageModel) -> Option<String> {
 
 fn render_sealed_range(sealed_range: Option<&SealedRangeSummary>) -> String {
     sealed_range.map_or_else(
-        || i18n::sealed_range_none().to_owned(),
+        || i18n::SEALED_RANGE_NONE.to_owned(),
         |sealed_range| {
             i18n::sealed_range_line(
                 sealed_range.through_entry_id.0,
@@ -1444,8 +1444,8 @@ fn render_void_confirmation_lines(recap: &VoidConfirmationRecap) -> Vec<String> 
 
 fn read_view_stale_message(kind: ReadViewKind) -> &'static str {
     match kind {
-        ReadViewKind::Review => i18n::stale_review_page_message(),
-        ReadViewKind::Ledger => i18n::stale_ledger_page_message(),
+        ReadViewKind::Review => i18n::STALE_REVIEW_PAGE_MESSAGE,
+        ReadViewKind::Ledger => i18n::STALE_LEDGER_PAGE_MESSAGE,
     }
 }
 
@@ -1470,8 +1470,8 @@ fn recovery_cta_button(
 ) -> Option<(String, String)> {
     let url = recovery_url?.to_owned();
     let label = match recovery_cta {
-        RecoveryCta::ThreadLink => i18n::open_ledger_thread_label(),
-        RecoveryCta::ParentLink => i18n::open_parent_channel_label(),
+        RecoveryCta::ThreadLink => i18n::OPEN_LEDGER_THREAD_LABEL,
+        RecoveryCta::ParentLink => i18n::OPEN_PARENT_CHANNEL_LABEL,
         RecoveryCta::RecoveryReferenceOnly | RecoveryCta::None => return None,
     };
     Some((label.to_owned(), url))
@@ -2303,7 +2303,7 @@ mod tests {
             balance_adjustments: Vec::new(),
             footer_lines: vec!["表示範囲: これは出てはいけない".to_owned()],
             visible_sections: ReadViewSectionVisibility::default(),
-            empty_state: Some(std::borrow::Cow::Borrowed(i18n::ledger_empty_state())),
+            empty_state: Some(std::borrow::Cow::Borrowed(i18n::LEDGER_EMPTY_STATE)),
             action_rows: Vec::new(),
             ephemeral: true,
         })
@@ -2343,7 +2343,7 @@ mod tests {
         })
         .expect("surface should render");
 
-        assert!(actual.body.contains(i18n::review_preview_instruction()));
+        assert!(actual.body.contains(i18n::REVIEW_PREVIEW_INSTRUCTION));
         let SurfaceActionRow::Buttons(buttons) = &actual.action_rows[0] else {
             panic!("expected thread handoff button");
         };
@@ -2410,7 +2410,7 @@ mod tests {
             uncertain_write: false,
             stale_page: false,
             page_indicator: Some(i18n::page_indicator(1, 2).to_string()),
-            snapshot_notice: Some(i18n::snapshot_notice().to_owned()),
+            snapshot_notice: Some(i18n::SNAPSHOT_NOTICE.to_owned()),
             route_guidance_lines: Vec::new(),
             recovery_cta: RecoveryCta::None,
             recovery_url: None,
@@ -2500,17 +2500,17 @@ mod tests {
     #[test]
     fn panel_and_recovery_locale_fields_fit_discord_component_limits() {
         for label in [
-            i18n::panel_record_button_label(),
-            i18n::panel_review_button_label(),
-            i18n::panel_ledger_button_label(),
-            i18n::panel_void_button_label(),
-            i18n::open_parent_channel_label(),
-            i18n::open_ledger_thread_label(),
+            i18n::PANEL_RECORD_BUTTON_LABEL,
+            i18n::PANEL_REVIEW_BUTTON_LABEL,
+            i18n::PANEL_LEDGER_BUTTON_LABEL,
+            i18n::PANEL_VOID_BUTTON_LABEL,
+            i18n::OPEN_PARENT_CHANNEL_LABEL,
+            i18n::OPEN_LEDGER_THREAD_LABEL,
         ] {
             validate_button_label(label).expect("button label should fit Discord limits");
         }
 
-        validate_component_placeholder(i18n::expense_modal_note_placeholder())
+        validate_component_placeholder(i18n::EXPENSE_MODAL_NOTE_PLACEHOLDER)
             .expect("placeholder should fit Discord limits");
     }
 

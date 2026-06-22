@@ -102,7 +102,7 @@ impl MemberRosterProvider {
             .ok_or(ChannelError::GuildNotCached)?;
 
         let mut member_ids = Vec::new();
-        for (member_id, _member_info) in members.iter() {
+        for member_id in members.keys() {
             let user_id = serenity::model::id::UserId::new(member_id.0);
 
             if let Some(guild_member) = guild.members.get(&user_id) {

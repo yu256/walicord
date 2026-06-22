@@ -102,9 +102,9 @@ pub(super) fn expense_picker_page(
         if total_items == 0 {
             detail_lines.push(
                 match kind {
-                    ExpensePickerKind::Roles => i18n::role_search_not_found_error(),
+                    ExpensePickerKind::Roles => i18n::ROLE_SEARCH_NOT_FOUND_ERROR,
                     ExpensePickerKind::Payer | ExpensePickerKind::Individuals => {
-                        i18n::member_search_not_found_error()
+                        i18n::MEMBER_SEARCH_NOT_FOUND_ERROR
                     }
                 }
                 .to_owned(),
@@ -153,9 +153,9 @@ pub(super) fn expense_picker_query_matches(
 
 pub(super) fn expense_picker_search_not_found_message(kind: ExpensePickerKind) -> &'static str {
     match kind {
-        ExpensePickerKind::Roles => i18n::role_search_not_found_error(),
+        ExpensePickerKind::Roles => i18n::ROLE_SEARCH_NOT_FOUND_ERROR,
         ExpensePickerKind::Payer | ExpensePickerKind::Individuals => {
-            i18n::member_search_not_found_error()
+            i18n::MEMBER_SEARCH_NOT_FOUND_ERROR
         }
     }
 }
@@ -247,7 +247,7 @@ pub(super) fn expense_picker_utility_row(
     let mut buttons = Vec::new();
     if total_pages > 1 {
         buttons.push(SurfaceButton::Interactive {
-            label: i18n::picker_previous_page_label().to_owned(),
+            label: i18n::PICKER_PREVIOUS_PAGE_LABEL.to_owned(),
             custom_id: expense_picker_custom_id(
                 EXPENSE_PICKER_PREV_CUSTOM_ID_PREFIX,
                 kind,
@@ -258,7 +258,7 @@ pub(super) fn expense_picker_utility_row(
             disabled: current_page == 0,
         });
         buttons.push(SurfaceButton::Interactive {
-            label: i18n::picker_next_page_label().to_owned(),
+            label: i18n::PICKER_NEXT_PAGE_LABEL.to_owned(),
             custom_id: expense_picker_custom_id(
                 EXPENSE_PICKER_NEXT_CUSTOM_ID_PREFIX,
                 kind,
@@ -270,7 +270,7 @@ pub(super) fn expense_picker_utility_row(
         });
     }
     buttons.push(SurfaceButton::Interactive {
-        label: i18n::picker_search_label().to_owned(),
+        label: i18n::PICKER_SEARCH_LABEL.to_owned(),
         custom_id: expense_picker_custom_id(
             EXPENSE_PICKER_SEARCH_CUSTOM_ID_PREFIX,
             kind,
@@ -296,9 +296,9 @@ pub(super) fn expense_picker_utility_row(
 
 fn picker_clear_label(kind: ExpensePickerKind) -> &'static str {
     match kind {
-        ExpensePickerKind::Payer => i18n::payer_clear_label(),
-        ExpensePickerKind::Individuals => i18n::individual_clear_label(),
-        ExpensePickerKind::Roles => i18n::role_clear_label(),
+        ExpensePickerKind::Payer => i18n::PAYER_CLEAR_LABEL,
+        ExpensePickerKind::Individuals => i18n::INDIVIDUAL_CLEAR_LABEL,
+        ExpensePickerKind::Roles => i18n::ROLE_CLEAR_LABEL,
     }
 }
 
@@ -388,14 +388,14 @@ pub(super) fn build_expense_picker_search_modal_response(
     validate_custom_id(&custom_id)?;
     let (title, label, placeholder) = match kind {
         ExpensePickerKind::Payer | ExpensePickerKind::Individuals => (
-            i18n::member_search_modal_title(),
-            i18n::member_search_input_label(),
-            i18n::member_search_placeholder(),
+            i18n::MEMBER_SEARCH_MODAL_TITLE,
+            i18n::MEMBER_SEARCH_INPUT_LABEL,
+            i18n::MEMBER_SEARCH_PLACEHOLDER,
         ),
         ExpensePickerKind::Roles => (
-            i18n::role_search_modal_title(),
-            i18n::role_search_input_label(),
-            i18n::role_search_placeholder(),
+            i18n::ROLE_SEARCH_MODAL_TITLE,
+            i18n::ROLE_SEARCH_INPUT_LABEL,
+            i18n::ROLE_SEARCH_PLACEHOLDER,
         ),
     };
     let title = truncate_component_label(title);

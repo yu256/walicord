@@ -316,7 +316,7 @@ pub fn balance_adjustment_summaries(
             Some(BalanceAdjustmentSummary {
                 actor_display_name: labels.safe_actor_label(view.entry()),
                 reason: SafeLiteralText::from_note(event.reason().as_str()).unwrap_or_else(|| {
-                    SafeLiteralText::from_note(i18n::expense_note_none())
+                    SafeLiteralText::from_note(i18n::EXPENSE_NOTE_NONE)
                         .expect("fallback reason should sanitize")
                 }),
                 impacts: balance_adjustment_rows(event, labels),
@@ -341,7 +341,7 @@ pub fn build_ledger_page_model(
     Ok(ReadViewPageModel {
         kind: ReadViewKind::Ledger,
         route: inputs.route,
-        title: std::borrow::Cow::Borrowed(i18n::panel_ledger_button_label()),
+        title: std::borrow::Cow::Borrowed(i18n::PANEL_LEDGER_BUTTON_LABEL),
         uncertain_write: inputs.uncertain_write,
         balances: balance_rows_for_state(inputs.state, inputs.labels),
         participants: participant_names_for_state(inputs.state, inputs.labels),
@@ -365,9 +365,9 @@ pub fn build_ledger_empty_page_model(
     ReadViewPageModel {
         kind: ReadViewKind::Ledger,
         route,
-        title: std::borrow::Cow::Borrowed(i18n::panel_ledger_button_label()),
+        title: std::borrow::Cow::Borrowed(i18n::PANEL_LEDGER_BUTTON_LABEL),
         uncertain_write,
-        empty_state: Some(std::borrow::Cow::Borrowed(i18n::ledger_empty_state())),
+        empty_state: Some(std::borrow::Cow::Borrowed(i18n::LEDGER_EMPTY_STATE)),
         ephemeral: true,
         ..Default::default()
     }
@@ -388,7 +388,7 @@ pub fn build_review_page_model(inputs: ReviewPageInputs<'_>) -> super::surfaces:
     ReadViewPageModel {
         kind: ReadViewKind::Review,
         route: inputs.route,
-        title: std::borrow::Cow::Borrowed(i18n::panel_review_button_label()),
+        title: std::borrow::Cow::Borrowed(i18n::PANEL_REVIEW_BUTTON_LABEL),
         uncertain_write: inputs.uncertain_write,
         recovery_cta: inputs.recovery_cta,
         recovery_url: inputs.recovery_url,
@@ -407,12 +407,12 @@ pub fn build_review_empty_page_model(
     use super::surfaces::{ReadViewKind, ReadViewPageModel, RecoveryCta};
     let (empty_state, recovery_cta, recovery_url) = match route {
         super::surfaces::ReadViewRoute::ReviewParent => (
-            std::borrow::Cow::Borrowed(i18n::review_parent_empty_state()),
+            std::borrow::Cow::Borrowed(i18n::REVIEW_PARENT_EMPTY_STATE),
             RecoveryCta::None,
             None,
         ),
         _ => (
-            std::borrow::Cow::Borrowed(i18n::review_thread_empty_state()),
+            std::borrow::Cow::Borrowed(i18n::REVIEW_THREAD_EMPTY_STATE),
             RecoveryCta::ParentLink,
             recovery_url,
         ),
@@ -420,7 +420,7 @@ pub fn build_review_empty_page_model(
     ReadViewPageModel {
         kind: ReadViewKind::Review,
         route,
-        title: std::borrow::Cow::Borrowed(i18n::panel_review_button_label()),
+        title: std::borrow::Cow::Borrowed(i18n::PANEL_REVIEW_BUTTON_LABEL),
         uncertain_write,
         empty_state: Some(empty_state),
         recovery_cta,
@@ -440,13 +440,13 @@ pub fn build_review_no_transfers_page_model(
     let _ = write!(
         body,
         "{}\n{}",
-        i18n::settlement_already_not_needed_message(),
-        i18n::settlement_preview_not_saved_message(),
+        i18n::SETTLEMENT_ALREADY_NOT_NEEDED_MESSAGE,
+        i18n::SETTLEMENT_PREVIEW_NOT_SAVED_MESSAGE,
     );
     ReadViewPageModel {
         kind: ReadViewKind::Review,
         route,
-        title: std::borrow::Cow::Borrowed(i18n::panel_review_button_label()),
+        title: std::borrow::Cow::Borrowed(i18n::PANEL_REVIEW_BUTTON_LABEL),
         uncertain_write,
         empty_state: Some(std::borrow::Cow::Owned(body)),
         ephemeral: true,

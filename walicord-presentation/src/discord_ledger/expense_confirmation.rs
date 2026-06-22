@@ -104,26 +104,26 @@ pub fn build_expense_confirmation_surface(
     let action_rows = vec![
         SurfaceActionRow::Buttons(vec![
             SurfaceButton::Interactive {
-                label: i18n::expense_record_label().to_owned(),
+                label: i18n::EXPENSE_RECORD_LABEL.to_owned(),
                 custom_id: button_ids.record.clone(),
                 style: SurfaceInteractiveButtonStyle::Primary,
                 disabled: false,
             },
             SurfaceButton::Interactive {
-                label: i18n::expense_revise_label().to_owned(),
+                label: i18n::EXPENSE_REVISE_LABEL.to_owned(),
                 custom_id: button_ids.modify_selection.clone(),
                 style: SurfaceInteractiveButtonStyle::Secondary,
                 disabled: false,
             },
             SurfaceButton::Interactive {
-                label: i18n::expense_basic_info_edit_label().to_owned(),
+                label: i18n::EXPENSE_BASIC_INFO_EDIT_LABEL.to_owned(),
                 custom_id: button_ids.basic_edit.clone(),
                 style: SurfaceInteractiveButtonStyle::Secondary,
                 disabled: false,
             },
         ]),
         SurfaceActionRow::Buttons(vec![SurfaceButton::Interactive {
-            label: i18n::expense_cancel_label().to_owned(),
+            label: i18n::EXPENSE_CANCEL_LABEL.to_owned(),
             custom_id: button_ids.cancel.clone(),
             style: SurfaceInteractiveButtonStyle::Danger,
             disabled: false,
@@ -131,7 +131,7 @@ pub fn build_expense_confirmation_surface(
     ];
 
     Ok(ExpenseSurfaceModel {
-        title: i18n::expense_step_title_confirm().to_owned(),
+        title: i18n::EXPENSE_STEP_TITLE_CONFIRM.to_owned(),
         summary_lines,
         detail_lines,
         validation_message: None,
@@ -165,41 +165,41 @@ pub fn build_expense_selection_step_surface(
     button_ids: &ExpenseSelectionStepButtonIds,
 ) -> ExpenseSurfaceModel {
     let title = match phase {
-        ExpenseSelectionPhase::Payer => i18n::expense_step_title_payer(),
+        ExpenseSelectionPhase::Payer => i18n::EXPENSE_STEP_TITLE_PAYER,
         ExpenseSelectionPhase::ParticipantSource
         | ExpenseSelectionPhase::IndividualSelection
-        | ExpenseSelectionPhase::Roles => i18n::expense_step_title_participants(),
-        ExpenseSelectionPhase::WeightEditor => i18n::expense_step_title_weight(),
+        | ExpenseSelectionPhase::Roles => i18n::EXPENSE_STEP_TITLE_PARTICIPANTS,
+        ExpenseSelectionPhase::WeightEditor => i18n::EXPENSE_STEP_TITLE_WEIGHT,
     };
 
     let phase_specific: Vec<SurfaceButton> = match phase {
         ExpenseSelectionPhase::Payer => vec![SurfaceButton::Interactive {
-            label: i18n::expense_next_label().to_owned(),
+            label: i18n::EXPENSE_NEXT_LABEL.to_owned(),
             custom_id: button_ids.to_participants.clone(),
             style: SurfaceInteractiveButtonStyle::Primary,
             disabled: false,
         }],
         ExpenseSelectionPhase::ParticipantSource => vec![
             SurfaceButton::Interactive {
-                label: i18n::participant_source_individual_label().to_owned(),
+                label: i18n::PARTICIPANT_SOURCE_INDIVIDUAL_LABEL.to_owned(),
                 custom_id: button_ids.source_individual.clone(),
                 style: SurfaceInteractiveButtonStyle::Secondary,
                 disabled: false,
             },
             SurfaceButton::Interactive {
-                label: i18n::participant_source_role_label().to_owned(),
+                label: i18n::PARTICIPANT_SOURCE_ROLE_LABEL.to_owned(),
                 custom_id: button_ids.source_roles.clone(),
                 style: SurfaceInteractiveButtonStyle::Secondary,
                 disabled: false,
             },
             SurfaceButton::Interactive {
-                label: i18n::participant_source_members_label().to_owned(),
+                label: i18n::PARTICIPANT_SOURCE_MEMBERS_LABEL.to_owned(),
                 custom_id: button_ids.source_members.clone(),
                 style: SurfaceInteractiveButtonStyle::Secondary,
                 disabled: false,
             },
             SurfaceButton::Interactive {
-                label: i18n::expense_to_weights_label().to_owned(),
+                label: i18n::EXPENSE_TO_WEIGHTS_LABEL.to_owned(),
                 custom_id: button_ids.to_weights.clone(),
                 style: SurfaceInteractiveButtonStyle::Primary,
                 disabled: false,
@@ -207,13 +207,13 @@ pub fn build_expense_selection_step_surface(
         ],
         ExpenseSelectionPhase::IndividualSelection | ExpenseSelectionPhase::Roles => vec![
             SurfaceButton::Interactive {
-                label: i18n::expense_to_weights_label().to_owned(),
+                label: i18n::EXPENSE_TO_WEIGHTS_LABEL.to_owned(),
                 custom_id: button_ids.to_weights.clone(),
                 style: SurfaceInteractiveButtonStyle::Primary,
                 disabled: false,
             },
             SurfaceButton::Interactive {
-                label: i18n::expense_to_confirm_label().to_owned(),
+                label: i18n::EXPENSE_TO_CONFIRM_LABEL.to_owned(),
                 custom_id: button_ids.to_confirm.clone(),
                 style: SurfaceInteractiveButtonStyle::Primary,
                 disabled: false,
@@ -221,13 +221,13 @@ pub fn build_expense_selection_step_surface(
         ],
         ExpenseSelectionPhase::WeightEditor => vec![
             SurfaceButton::Interactive {
-                label: i18n::expense_weight_edit_label().to_owned(),
+                label: i18n::EXPENSE_WEIGHT_EDIT_LABEL.to_owned(),
                 custom_id: button_ids.weight_edit.clone(),
                 style: SurfaceInteractiveButtonStyle::Secondary,
                 disabled: false,
             },
             SurfaceButton::Interactive {
-                label: i18n::expense_to_confirm_label().to_owned(),
+                label: i18n::EXPENSE_TO_CONFIRM_LABEL.to_owned(),
                 custom_id: button_ids.to_confirm.clone(),
                 style: SurfaceInteractiveButtonStyle::Primary,
                 disabled: false,
@@ -241,13 +241,13 @@ pub fn build_expense_selection_step_surface(
     }
     action_rows.push(SurfaceActionRow::Buttons(vec![
         SurfaceButton::Interactive {
-            label: i18n::expense_back_label().to_owned(),
+            label: i18n::EXPENSE_BACK_LABEL.to_owned(),
             custom_id: button_ids.back.clone(),
             style: SurfaceInteractiveButtonStyle::Secondary,
             disabled: false,
         },
         SurfaceButton::Interactive {
-            label: i18n::expense_cancel_label().to_owned(),
+            label: i18n::EXPENSE_CANCEL_LABEL.to_owned(),
             custom_id: button_ids.cancel.clone(),
             style: SurfaceInteractiveButtonStyle::Danger,
             disabled: false,

@@ -300,33 +300,33 @@ pub enum LedgerRouteError {
 impl LedgerRouteError {
     pub fn user_message(&self) -> &str {
         match self {
-            Self::GuildOnly => i18n::guild_only_command_message(),
+            Self::GuildOnly => i18n::GUILD_ONLY_COMMAND_MESSAGE,
             Self::NotInTrackedChannel => i18n::CHANNEL_NOT_TRACKED,
-            Self::SettleThreadOnly => i18n::settlement_thread_only_message(),
+            Self::SettleThreadOnly => i18n::SETTLEMENT_THREAD_ONLY_MESSAGE,
             Self::Permission(message) => message,
             Self::Internal(InternalLedgerRouteError::ThreadLookup(LocatorError::Fetch {
                 ..
-            })) => i18n::ledger_retryable_load_message(),
+            })) => i18n::LEDGER_RETRYABLE_LOAD_MESSAGE,
             Self::Internal(InternalLedgerRouteError::ThreadLoad(error))
                 if matches!(error.as_ref(), StoreLoadError::Fetch(_)) =>
             {
-                i18n::ledger_retryable_load_message()
+                i18n::LEDGER_RETRYABLE_LOAD_MESSAGE
             }
             Self::Internal(InternalLedgerRouteError::ThreadLookup(LocatorError::Permission {
                 ..
-            })) => i18n::ledger_permission_failed_message(),
+            })) => i18n::LEDGER_PERMISSION_FAILED_MESSAGE,
             Self::Internal(InternalLedgerRouteError::ThreadLoad(error))
                 if matches!(error.as_ref(), StoreLoadError::Permission(_)) =>
             {
-                i18n::ledger_permission_failed_message()
+                i18n::LEDGER_PERMISSION_FAILED_MESSAGE
             }
             Self::Internal(InternalLedgerRouteError::CanonicalLoad { failure, .. }) => failure
                 .user_message()
-                .unwrap_or_else(|| i18n::ledger_thread_prepare_failed_message()),
+                .unwrap_or(i18n::LEDGER_THREAD_PREPARE_FAILED_MESSAGE),
             Self::Internal(InternalLedgerRouteError::ExistingLedgerNotReady) => {
-                i18n::ledger_thread_prepare_failed_message()
+                i18n::LEDGER_THREAD_PREPARE_FAILED_MESSAGE
             }
-            Self::Internal(_) => i18n::ledger_thread_prepare_failed_message(),
+            Self::Internal(_) => i18n::LEDGER_THREAD_PREPARE_FAILED_MESSAGE,
         }
     }
 
@@ -912,7 +912,7 @@ impl LedgerRouter {
         }
         self.clear_actor_state(scope, actor_id);
         Err(LedgerRouteError::Permission(Cow::Borrowed(
-            i18n::ledger_permission_failed_message(),
+            i18n::LEDGER_PERMISSION_FAILED_MESSAGE,
         )))
     }
 
@@ -1004,7 +1004,7 @@ impl LedgerRouter {
             });
         Err(LedgerRouteError::Permission(Cow::Owned(format!(
             "{} {detail}",
-            i18n::ledger_permission_failed_message(),
+            i18n::LEDGER_PERMISSION_FAILED_MESSAGE,
         ))))
     }
 
@@ -1648,9 +1648,9 @@ impl LedgerRouter {
             ctx,
             component,
             if acknowledged {
-                i18n::abandoned_uncertain_write_acknowledged_message()
+                i18n::ABANDONED_UNCERTAIN_WRITE_ACKNOWLEDGED_MESSAGE
             } else {
-                i18n::uncertain_write_block_message()
+                i18n::UNCERTAIN_WRITE_BLOCK_MESSAGE
             },
             DiscordCallSite::ExpenseUncertainWriteReply,
         )
@@ -1947,7 +1947,7 @@ impl LedgerRouter {
         let (mut body, components) = rendered_surface_to_message(rendered);
         if !drift.is_empty() {
             body.push('\n');
-            body.push_str(i18n::expense_participants_drifted_cue());
+            body.push_str(i18n::EXPENSE_PARTICIPANTS_DRIFTED_CUE);
         }
 
         let response = CreateInteractionResponse::UpdateMessage(
@@ -1972,7 +1972,7 @@ impl LedgerRouter {
     ) -> Result<InteractionDispatch, LedgerRouteError> {
         let response = CreateInteractionResponse::UpdateMessage(
             safe_ephemeral_interaction_response_message()
-                .content(i18n::expense_recorded_message())
+                .content(i18n::EXPENSE_RECORDED_MESSAGE)
                 .components(Vec::new()),
         );
         component
@@ -2263,7 +2263,7 @@ impl LedgerRouter {
                     nonce,
                     page.snapshot_id,
                 ),
-                i18n::expense_payer_placeholder(),
+                i18n::EXPENSE_PAYER_PLACEHOLDER,
                 1,
                 1,
             ),
@@ -2273,7 +2273,7 @@ impl LedgerRouter {
                     nonce,
                     page.snapshot_id,
                 ),
-                i18n::participant_source_individual_placeholder(),
+                i18n::PARTICIPANT_SOURCE_INDIVIDUAL_PLACEHOLDER,
                 0,
                 page.page_item_count as u8,
             ),
@@ -2283,7 +2283,7 @@ impl LedgerRouter {
                     nonce,
                     page.snapshot_id,
                 ),
-                i18n::participant_source_role_placeholder(),
+                i18n::PARTICIPANT_SOURCE_ROLE_PLACEHOLDER,
                 0,
                 page.page_item_count as u8,
             ),
@@ -2434,7 +2434,7 @@ impl LedgerRouter {
                 .reply_component_ephemeral(
                     ctx,
                     component,
-                    i18n::weight_editor_too_many_message(),
+                    i18n::WEIGHT_EDITOR_TOO_MANY_MESSAGE,
                     DiscordCallSite::ExpenseStepRefresh,
                 )
                 .await;
@@ -2666,7 +2666,7 @@ impl LedgerRouter {
                 &ctx.http,
                 CreateInteractionResponse::Message(
                     safe_ephemeral_interaction_response_message()
-                        .content(i18n::stale_interaction_message()),
+                        .content(i18n::STALE_INTERACTION_MESSAGE),
                 ),
             )
             .await
@@ -2684,7 +2684,7 @@ impl LedgerRouter {
         self.reply_component_ephemeral(
             ctx,
             component,
-            i18n::stale_interaction_message(),
+            i18n::STALE_INTERACTION_MESSAGE,
             DiscordCallSite::ExpenseStepRefresh,
         )
         .await
@@ -2776,7 +2776,7 @@ impl LedgerRouter {
     ) -> Result<InteractionDispatch, LedgerRouteError> {
         let response = CreateInteractionResponse::Message(
             safe_ephemeral_interaction_response_message()
-                .content(walicord_i18n::expense_session_expired_message()),
+                .content(walicord_i18n::EXPENSE_SESSION_EXPIRED_MESSAGE),
         );
         component
             .create_response(&ctx.http, response)
@@ -2794,7 +2794,7 @@ impl LedgerRouter {
     ) -> Result<InteractionDispatch, LedgerRouteError> {
         let response = CreateInteractionResponse::Message(
             safe_ephemeral_interaction_response_message()
-                .content(walicord_i18n::expense_session_wrong_actor_message()),
+                .content(walicord_i18n::EXPENSE_SESSION_WRONG_ACTOR_MESSAGE),
         );
         component
             .create_response(&ctx.http, response)
@@ -2834,7 +2834,7 @@ impl LedgerRouter {
     ) -> Result<InteractionDispatch, LedgerRouteError> {
         let response = CreateInteractionResponse::UpdateMessage(
             safe_ephemeral_interaction_response_message()
-                .content(walicord_i18n::expense_cancelled_message())
+                .content(walicord_i18n::EXPENSE_CANCELLED_MESSAGE)
                 .components(Vec::new()),
         );
         component
@@ -2926,7 +2926,7 @@ impl LedgerRouter {
                         &ctx.http,
                         CreateInteractionResponse::Message(
                             safe_ephemeral_interaction_response_message()
-                                .content(i18n::weight_editor_parse_error()),
+                                .content(i18n::WEIGHT_EDITOR_PARSE_ERROR),
                         ),
                     )
                     .await
@@ -2990,7 +2990,7 @@ impl LedgerRouter {
                     &ctx.http,
                     CreateInteractionResponse::Message(
                         safe_ephemeral_interaction_response_message()
-                            .content(i18n::search_blank_error()),
+                            .content(i18n::SEARCH_BLANK_ERROR),
                     ),
                 )
                 .await
@@ -3107,7 +3107,7 @@ impl LedgerRouter {
                             .deps
                             .expense_sessions
                             .has_active_session(key, self.deps.clock.now())
-                            .then(i18n::expense_session_replaced_message);
+                            .then_some(i18n::EXPENSE_SESSION_REPLACED_MESSAGE);
                         let dispatch = self
                             .acknowledge_modal_success(
                                 ctx,
@@ -3287,7 +3287,7 @@ impl LedgerRouter {
             message,
             vec![CreateActionRow::Buttons(vec![
                 CreateButton::new(UNCERTAIN_WRITE_ACKNOWLEDGE_CUSTOM_ID)
-                    .label(i18n::abandoned_uncertain_write_acknowledge_label()),
+                    .label(i18n::ABANDONED_UNCERTAIN_WRITE_ACKNOWLEDGE_LABEL),
             ])],
         )
     }
@@ -3748,7 +3748,7 @@ impl LedgerRouter {
                         PreviewAttemptError::Store(PreviewStoreError::CommitInProgress {
                             ..
                         }) => uncertain_write_block_message(false, true),
-                        _ => i18n::review_render_failed_message().to_owned(),
+                        _ => i18n::REVIEW_RENDER_FAILED_MESSAGE.to_owned(),
                     };
                     return interaction
                         .edit(
@@ -3793,7 +3793,7 @@ impl LedgerRouter {
                         if !uncertain_write {
                             model.action_rows.push(SurfaceActionRow::Buttons(vec![
                                 SurfaceButton::Interactive {
-                                    label: i18n::review_settle_button_label().to_owned(),
+                                    label: i18n::REVIEW_SETTLE_BUTTON_LABEL.to_owned(),
                                     custom_id: format!(
                                         "{REVIEW_SETTLE_CUSTOM_ID_PREFIX}{ledger_id}"
                                     ),
@@ -3915,7 +3915,7 @@ impl LedgerRouter {
                 self.edit_command_response(
                     ctx,
                     command,
-                    i18n::settlement_recorded_message(),
+                    i18n::SETTLEMENT_RECORDED_MESSAGE,
                     DiscordCallSite::SettleEditResponse,
                 )
                 .await
@@ -3924,7 +3924,7 @@ impl LedgerRouter {
                 self.edit_command_response(
                     ctx,
                     command,
-                    i18n::review_preview_required_message(),
+                    i18n::REVIEW_PREVIEW_REQUIRED_MESSAGE,
                     DiscordCallSite::SettleEditResponse,
                 )
                 .await
@@ -3933,7 +3933,7 @@ impl LedgerRouter {
                 self.edit_command_response(
                     ctx,
                     command,
-                    i18n::settlement_no_transfer_message(),
+                    i18n::SETTLEMENT_NO_TRANSFER_MESSAGE,
                     DiscordCallSite::SettleEditResponse,
                 )
                 .await
@@ -4074,14 +4074,14 @@ impl LedgerRouter {
     ) -> EditInteractionResponse {
         let (body, components) = match outcome {
             SettleExecuteOutcome::Recorded { .. } => {
-                self.render_settled_review(session_key, i18n::settlement_recorded_message())
+                self.render_settled_review(session_key, i18n::SETTLEMENT_RECORDED_MESSAGE)
             }
             SettleExecuteOutcome::NoPreviewRequired => self.render_settled_review(
                 session_key,
-                i18n::settlement_preview_expired_or_confirmed_message(),
+                i18n::SETTLEMENT_PREVIEW_EXPIRED_OR_CONFIRMED_MESSAGE,
             ),
             SettleExecuteOutcome::NoTransferNeeded => {
-                self.render_settled_review(session_key, i18n::settlement_no_transfer_message())
+                self.render_settled_review(session_key, i18n::SETTLEMENT_NO_TRANSFER_MESSAGE)
             }
             SettleExecuteOutcome::UncertainBlocked
             | SettleExecuteOutcome::UncertainAppendFailed => {
@@ -4175,7 +4175,7 @@ impl LedgerRouter {
                 .edit_initial_void_model(
                     ctx,
                     interaction,
-                    VoidSurfaceModel::empty(i18n::panel_void_button_label(), Vec::new(), true),
+                    VoidSurfaceModel::empty(i18n::PANEL_VOID_BUTTON_LABEL, Vec::new(), true),
                 )
                 .await;
         };
@@ -4196,7 +4196,7 @@ impl LedgerRouter {
                 .edit_initial_void_model(
                     ctx,
                     interaction,
-                    VoidSurfaceModel::empty(i18n::panel_void_button_label(), Vec::new(), true),
+                    VoidSurfaceModel::empty(i18n::PANEL_VOID_BUTTON_LABEL, Vec::new(), true),
                 )
                 .await;
         }
@@ -4216,7 +4216,7 @@ impl LedgerRouter {
                         ctx,
                         interaction,
                         VoidSurfaceModel::no_candidates(
-                            i18n::panel_void_button_label(),
+                            i18n::PANEL_VOID_BUTTON_LABEL,
                             Vec::new(),
                             true,
                         ),
@@ -4245,11 +4245,11 @@ impl LedgerRouter {
             .has_active_session(key, self.deps.clock.now());
         self.deps.void_sessions.replace(session);
         let mut model =
-            VoidSurfaceModel::selection(i18n::panel_void_button_label(), rows, action_rows, true);
+            VoidSurfaceModel::selection(i18n::PANEL_VOID_BUTTON_LABEL, rows, action_rows, true);
         if replaced {
             model
                 .phase_copy
-                .insert(0, i18n::void_session_replaced_message().to_owned());
+                .insert(0, i18n::VOID_SESSION_REPLACED_MESSAGE.to_owned());
         }
         self.edit_initial_void_model(ctx, interaction, model).await
     }
@@ -4389,7 +4389,7 @@ impl LedgerRouter {
         self.update_component_message(
             ctx,
             component,
-            i18n::void_cancelled_message(),
+            i18n::VOID_CANCELLED_MESSAGE,
             Vec::new(),
             DiscordCallSite::VoidUpdateResponse,
         )
@@ -4420,7 +4420,7 @@ impl LedgerRouter {
                 .reply_component_ephemeral(
                     ctx,
                     component,
-                    i18n::void_wrong_stage_copy(),
+                    i18n::VOID_WRONG_STAGE_COPY,
                     DiscordCallSite::VoidUpdateResponse,
                 )
                 .await;
@@ -4488,7 +4488,7 @@ impl LedgerRouter {
                     ctx,
                     component,
                     VoidSurfaceModel::success(
-                        i18n::void_success_title(),
+                        i18n::VOID_SUCCESS_TITLE,
                         format!("<#{}>", binding.canonical_thread_id().get()),
                         Vec::new(),
                         true,
@@ -4500,7 +4500,7 @@ impl LedgerRouter {
                 self.edit_component_response(
                     ctx,
                     component,
-                    i18n::void_target_updated_message(),
+                    i18n::VOID_TARGET_UPDATED_MESSAGE,
                     DiscordCallSite::VoidEditResponse,
                 )
                 .await
@@ -4593,7 +4593,7 @@ impl LedgerRouter {
                     self.reply_component_ephemeral(
                         ctx,
                         component,
-                        i18n::void_session_wrong_actor_message(),
+                        i18n::VOID_SESSION_WRONG_ACTOR_MESSAGE,
                         DiscordCallSite::VoidEditResponse,
                     )
                     .await?;
@@ -4602,7 +4602,7 @@ impl LedgerRouter {
                         ctx,
                         component,
                         VoidSurfaceModel::stale_page(
-                            i18n::panel_void_button_label(),
+                            i18n::PANEL_VOID_BUTTON_LABEL,
                             RecoveryCta::None,
                             None,
                             false,
@@ -4645,7 +4645,7 @@ impl LedgerRouter {
                     ctx,
                     component,
                     VoidSurfaceModel::no_candidates(
-                        i18n::panel_void_button_label(),
+                        i18n::PANEL_VOID_BUTTON_LABEL,
                         Vec::new(),
                         true,
                     ),
@@ -4675,20 +4675,17 @@ impl LedgerRouter {
         let action_rows = void_selection_action_rows(session.nonce(), &candidates, &labels);
         self.deps.void_sessions.replace(refreshed);
         let model = match render_kind {
-            VoidSelectionRenderKind::Normal => VoidSurfaceModel::selection(
-                i18n::panel_void_button_label(),
-                rows,
-                action_rows,
-                true,
-            ),
+            VoidSelectionRenderKind::Normal => {
+                VoidSurfaceModel::selection(i18n::PANEL_VOID_BUTTON_LABEL, rows, action_rows, true)
+            }
             VoidSelectionRenderKind::MissingSelection => VoidSurfaceModel::missing_selection(
-                i18n::panel_void_button_label(),
+                i18n::PANEL_VOID_BUTTON_LABEL,
                 rows,
                 action_rows,
                 true,
             ),
             VoidSelectionRenderKind::StaleTarget(reason) => VoidSurfaceModel::stale_target(
-                i18n::panel_void_button_label(),
+                i18n::PANEL_VOID_BUTTON_LABEL,
                 reason,
                 rows,
                 action_rows,
@@ -4727,7 +4724,7 @@ impl LedgerRouter {
                 .reply_component_ephemeral(
                     ctx,
                     component,
-                    i18n::stale_interaction_message(),
+                    i18n::STALE_INTERACTION_MESSAGE,
                     DiscordCallSite::ReadViewNavUpdateResponse,
                 )
                 .await;
@@ -4819,24 +4816,24 @@ pub(crate) const VOID_CANCEL_CUSTOM_ID_PREFIX: &str = "ledger:void:cancel:";
 
 fn settle_attempt_error_message(error: &SettleAttemptError) -> &'static str {
     match error {
-        SettleAttemptError::NoPreviewStored => i18n::review_preview_required_message(),
+        SettleAttemptError::NoPreviewStored => i18n::REVIEW_PREVIEW_REQUIRED_MESSAGE,
         SettleAttemptError::StaleHead { .. } | SettleAttemptError::Expired { .. } => {
-            i18n::stale_settlement_preview_message()
+            i18n::STALE_SETTLEMENT_PREVIEW_MESSAGE
         }
         SettleAttemptError::Record(
             walicord_application::ledger::SettlementRecordError::PreviewNotDelivered,
-        ) => i18n::settlement_preview_not_delivered_message(),
+        ) => i18n::SETTLEMENT_PREVIEW_NOT_DELIVERED_MESSAGE,
         SettleAttemptError::Store(PreviewStoreError::CommitInProgress { .. }) => {
-            i18n::uncertain_write_block_message()
+            i18n::UNCERTAIN_WRITE_BLOCK_MESSAGE
         }
         SettleAttemptError::Store(_)
         | SettleAttemptError::Record(_)
-        | SettleAttemptError::EnvelopeEncode(_) => i18n::settlement_confirmation_failed_message(),
+        | SettleAttemptError::EnvelopeEncode(_) => i18n::SETTLEMENT_CONFIRMATION_FAILED_MESSAGE,
     }
 }
 
 fn review_route_guidance_lines_with_replacement_notice() -> Vec<String> {
-    vec![i18n::settlement_preview_replaced_message().to_owned()]
+    vec![i18n::SETTLEMENT_PREVIEW_REPLACED_MESSAGE.to_owned()]
 }
 
 pub(super) fn read_view_navigation_row(
@@ -4848,11 +4845,11 @@ pub(super) fn read_view_navigation_row(
     let n = nonce;
     CreateActionRow::Buttons(vec![
         CreateButton::new(format!("{READ_VIEW_PREV_CUSTOM_ID_PREFIX}{n}"))
-            .label(walicord_i18n::picker_previous_page_label())
+            .label(walicord_i18n::PICKER_PREVIOUS_PAGE_LABEL)
             .style(ButtonStyle::Secondary)
             .disabled(current_index == 0),
         CreateButton::new(format!("{READ_VIEW_NEXT_CUSTOM_ID_PREFIX}{n}"))
-            .label(walicord_i18n::picker_next_page_label())
+            .label(walicord_i18n::PICKER_NEXT_PAGE_LABEL)
             .style(ButtonStyle::Secondary)
             .disabled(current_index + 1 >= total_pages),
     ])
@@ -4865,7 +4862,7 @@ fn expense_modal_retry_row(
 
     CreateActionRow::Buttons(vec![
         CreateButton::new(format!("{EXPENSE_MODAL_RETRY_CUSTOM_ID_PREFIX}{nonce}"))
-            .label(i18n::expense_modal_retry_button_label())
+            .label(i18n::EXPENSE_MODAL_RETRY_BUTTON_LABEL)
             .style(ButtonStyle::Primary),
     ])
 }
@@ -4875,9 +4872,9 @@ fn expense_modal_validation_message(error: &ExpenseModalValidationError) -> &'st
         ExpenseModalValidationError::AmountBlank
         | ExpenseModalValidationError::AmountNonInteger
         | ExpenseModalValidationError::AmountNonPositive
-        | ExpenseModalValidationError::AmountMalformed => i18n::expense_invalid_amount_message(),
-        ExpenseModalValidationError::NoteTooLong { .. } => i18n::expense_note_too_long_message(),
-        ExpenseModalValidationError::DateMalformed => i18n::expense_invalid_date_message(),
+        | ExpenseModalValidationError::AmountMalformed => i18n::EXPENSE_INVALID_AMOUNT_MESSAGE,
+        ExpenseModalValidationError::NoteTooLong { .. } => i18n::EXPENSE_NOTE_TOO_LONG_MESSAGE,
+        ExpenseModalValidationError::DateMalformed => i18n::EXPENSE_INVALID_DATE_MESSAGE,
     }
 }
 
@@ -4936,14 +4933,14 @@ pub(super) fn uncertain_write_block_message(
     preserve_input: bool,
     preserve_preview: bool,
 ) -> String {
-    let mut message = String::from(i18n::uncertain_write_block_message());
+    let mut message = String::from(i18n::UNCERTAIN_WRITE_BLOCK_MESSAGE);
     if preserve_input {
         message.push('\n');
-        message.push_str(i18n::uncertain_write_input_preserved_message());
+        message.push_str(i18n::UNCERTAIN_WRITE_INPUT_PRESERVED_MESSAGE);
     }
     if preserve_preview {
         message.push('\n');
-        message.push_str(i18n::uncertain_write_preview_preserved_message());
+        message.push_str(i18n::UNCERTAIN_WRITE_PREVIEW_PRESERVED_MESSAGE);
     }
     message
 }
@@ -5291,17 +5288,14 @@ mod tests {
     }
 
     #[rstest]
-    #[case::guild_only(
-        LedgerRouteError::GuildOnly,
-        walicord_i18n::guild_only_command_message()
-    )]
+    #[case::guild_only(LedgerRouteError::GuildOnly, walicord_i18n::GUILD_ONLY_COMMAND_MESSAGE)]
     #[case::untracked(
         LedgerRouteError::NotInTrackedChannel,
         walicord_i18n::CHANNEL_NOT_TRACKED
     )]
     #[case::settle_parent(
         LedgerRouteError::SettleThreadOnly,
-        walicord_i18n::settlement_thread_only_message()
+        walicord_i18n::SETTLEMENT_THREAD_ONLY_MESSAGE
     )]
     fn route_error_maps_to_user_message(#[case] error: LedgerRouteError, #[case] expected: &str) {
         assert_eq!(error.user_message(), expected);
@@ -5312,14 +5306,14 @@ mod tests {
         CanonicalLoadFailure::FetchTimeout {
             route: CanonicalLoadRoute::Read,
         },
-        walicord_i18n::ledger_load_timeout_message()
+        walicord_i18n::LEDGER_LOAD_TIMEOUT_MESSAGE
     )]
     #[case(
         CanonicalLoadFailure::VersionMismatch {
             route: CanonicalLoadRoute::Read,
             failing_entry_id: Some(LedgerEntryId(7)),
         },
-        walicord_i18n::unknown_ledger_format_message()
+        walicord_i18n::UNKNOWN_LEDGER_FORMAT_MESSAGE
     )]
     fn canonical_load_route_error_preserves_route_aware_user_message(
         #[case] failure: CanonicalLoadFailure,
@@ -5362,33 +5356,33 @@ mod tests {
     #[rstest]
     #[case::no_preview(
         SettleAttemptError::NoPreviewStored,
-        i18n::review_preview_required_message()
+        i18n::REVIEW_PREVIEW_REQUIRED_MESSAGE
     )]
     #[case::stale_head(
         SettleAttemptError::StaleHead {
             stored_head: ledger_chain_genesis_sha256_v1(walicord_ledger::test_fixtures::ledger_id(1)),
             observed_head: None,
         },
-        i18n::stale_settlement_preview_message()
+        i18n::STALE_SETTLEMENT_PREVIEW_MESSAGE
     )]
     #[case::expired(
         SettleAttemptError::Expired {
             now: UNIX_EPOCH,
             expires_at: UNIX_EPOCH,
         },
-        i18n::stale_settlement_preview_message()
+        i18n::STALE_SETTLEMENT_PREVIEW_MESSAGE
     )]
     #[case::preview_not_delivered(
         SettleAttemptError::Record(
             walicord_application::ledger::SettlementRecordError::PreviewNotDelivered
         ),
-        i18n::settlement_preview_not_delivered_message()
+        i18n::SETTLEMENT_PREVIEW_NOT_DELIVERED_MESSAGE
     )]
     #[case::commit_in_progress(
         SettleAttemptError::Store(PreviewStoreError::CommitInProgress {
             preview_instance_id: PreviewInstanceId::new(7).expect("non-zero preview instance"),
         }),
-        i18n::uncertain_write_block_message()
+        i18n::UNCERTAIN_WRITE_BLOCK_MESSAGE
     )]
     fn settle_attempt_error_maps_to_user_message(
         #[case] error: SettleAttemptError,
@@ -5426,9 +5420,9 @@ mod tests {
     fn uncertain_write_block_message_preserves_preview_when_requested() {
         let actual = uncertain_write_block_message(false, true);
 
-        assert!(actual.contains(i18n::uncertain_write_block_message()));
-        assert!(actual.contains(i18n::uncertain_write_preview_preserved_message()));
-        assert!(!actual.contains(i18n::uncertain_write_input_preserved_message()));
+        assert!(actual.contains(i18n::UNCERTAIN_WRITE_BLOCK_MESSAGE));
+        assert!(actual.contains(i18n::UNCERTAIN_WRITE_PREVIEW_PRESERVED_MESSAGE));
+        assert!(!actual.contains(i18n::UNCERTAIN_WRITE_INPUT_PRESERVED_MESSAGE));
     }
 
     #[test]
@@ -5760,7 +5754,7 @@ mod tests {
     fn replacement_review_guidance_contains_only_replaced_notice() {
         assert_eq!(
             review_route_guidance_lines_with_replacement_notice(),
-            vec![i18n::settlement_preview_replaced_message().to_owned()]
+            vec![i18n::SETTLEMENT_PREVIEW_REPLACED_MESSAGE.to_owned()]
         );
     }
 

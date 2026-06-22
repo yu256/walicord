@@ -54,17 +54,17 @@ pub enum CacheLoadResult {
 fn ledger_commands() -> Vec<serenity::builder::CreateCommand> {
     vec![
         serenity::builder::CreateCommand::new("panel")
-            .description(walicord_i18n::slash_panel_description()),
+            .description(walicord_i18n::SLASH_PANEL_DESCRIPTION),
         serenity::builder::CreateCommand::new("expense")
-            .description(walicord_i18n::slash_expense_description()),
+            .description(walicord_i18n::SLASH_EXPENSE_DESCRIPTION),
         serenity::builder::CreateCommand::new("review")
-            .description(walicord_i18n::slash_review_description()),
+            .description(walicord_i18n::SLASH_REVIEW_DESCRIPTION),
         serenity::builder::CreateCommand::new("settle")
-            .description(walicord_i18n::slash_settle_description()),
+            .description(walicord_i18n::SLASH_SETTLE_DESCRIPTION),
         serenity::builder::CreateCommand::new("void")
-            .description(walicord_i18n::slash_void_description()),
+            .description(walicord_i18n::SLASH_VOID_DESCRIPTION),
         serenity::builder::CreateCommand::new("ledger")
-            .description(walicord_i18n::slash_ledger_description()),
+            .description(walicord_i18n::SLASH_LEDGER_DESCRIPTION),
         serenity::builder::CreateCommand::new("variables")
             .description(walicord_i18n::SLASH_VARIABLES_DESCRIPTION),
         crate::discord::ledger::ledger_refresh_command(),
@@ -1594,30 +1594,30 @@ mod tests {
 
         assert_eq!(
             descriptions.get("panel"),
-            Some(&walicord_i18n::slash_panel_description())
+            Some(&walicord_i18n::SLASH_PANEL_DESCRIPTION)
         );
         assert_eq!(
             descriptions.get("expense"),
-            Some(&walicord_i18n::slash_expense_description())
+            Some(&walicord_i18n::SLASH_EXPENSE_DESCRIPTION)
         );
         assert_eq!(
             descriptions.get("review"),
-            Some(&walicord_i18n::slash_review_description())
+            Some(&walicord_i18n::SLASH_REVIEW_DESCRIPTION)
         );
         assert_eq!(
             descriptions.get("settle"),
-            Some(&walicord_i18n::slash_settle_description())
+            Some(&walicord_i18n::SLASH_SETTLE_DESCRIPTION)
         );
         assert_eq!(
             descriptions.get("void"),
-            Some(&walicord_i18n::slash_void_description())
+            Some(&walicord_i18n::SLASH_VOID_DESCRIPTION)
         );
         assert_eq!(
             descriptions.get("ledger"),
-            Some(&walicord_i18n::slash_ledger_description())
+            Some(&walicord_i18n::SLASH_LEDGER_DESCRIPTION)
         );
         assert_eq!(
-            walicord_i18n::slash_ledger_refresh_description(),
+            walicord_i18n::SLASH_LEDGER_REFRESH_DESCRIPTION,
             "この親チャンネルの台帳スレッド状態を管理者が再確認します。"
         );
     }
@@ -1625,13 +1625,13 @@ mod tests {
     #[test]
     fn ledger_command_descriptions_stay_within_the_discord_budget() {
         let descriptions = [
-            walicord_i18n::slash_panel_description(),
-            walicord_i18n::slash_expense_description(),
-            walicord_i18n::slash_review_description(),
-            walicord_i18n::slash_settle_description(),
-            walicord_i18n::slash_void_description(),
-            walicord_i18n::slash_ledger_description(),
-            walicord_i18n::slash_ledger_refresh_description(),
+            walicord_i18n::SLASH_PANEL_DESCRIPTION,
+            walicord_i18n::SLASH_EXPENSE_DESCRIPTION,
+            walicord_i18n::SLASH_REVIEW_DESCRIPTION,
+            walicord_i18n::SLASH_SETTLE_DESCRIPTION,
+            walicord_i18n::SLASH_VOID_DESCRIPTION,
+            walicord_i18n::SLASH_LEDGER_DESCRIPTION,
+            walicord_i18n::SLASH_LEDGER_REFRESH_DESCRIPTION,
         ];
 
         assert!(

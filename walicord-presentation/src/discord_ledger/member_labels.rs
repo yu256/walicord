@@ -15,7 +15,7 @@ use walicord_domain::model::{MemberId, RoleId};
 use walicord_i18n as i18n;
 
 pub fn unknown_member_label() -> SafeLiteralText {
-    SafeLiteralText::from_roster_label(i18n::unknown_display_label())
+    SafeLiteralText::from_roster_label(i18n::UNKNOWN_DISPLAY_LABEL)
         .expect("fallback unknown label should sanitize")
 }
 

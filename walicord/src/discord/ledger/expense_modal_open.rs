@@ -174,22 +174,22 @@ pub fn build_expense_modal_response(
     let custom_id = format!("{EXPENSE_MODAL_CUSTOM_ID_PREFIX}{nonce}");
     validate_custom_id(&custom_id).map_err(ExpenseModalBuildError::Budget)?;
 
-    let title_text = truncate_component_label(i18n::expense_modal_title());
+    let title_text = truncate_component_label(i18n::EXPENSE_MODAL_TITLE);
     validate_modal_title(&title_text).map_err(ExpenseModalBuildError::Budget)?;
 
-    let amount_label = truncate_component_label(i18n::expense_modal_amount_label());
+    let amount_label = truncate_component_label(i18n::EXPENSE_MODAL_AMOUNT_LABEL);
     validate_text_input_label(&amount_label).map_err(ExpenseModalBuildError::Budget)?;
-    let amount_placeholder = truncate_component_label(i18n::expense_modal_amount_placeholder());
+    let amount_placeholder = truncate_component_label(i18n::EXPENSE_MODAL_AMOUNT_PLACEHOLDER);
     validate_text_input_placeholder(&amount_placeholder).map_err(ExpenseModalBuildError::Budget)?;
 
-    let note_label = truncate_component_label(i18n::expense_modal_note_label());
+    let note_label = truncate_component_label(i18n::EXPENSE_MODAL_NOTE_LABEL);
     validate_text_input_label(&note_label).map_err(ExpenseModalBuildError::Budget)?;
-    let note_placeholder = truncate_component_label(i18n::expense_modal_note_placeholder());
+    let note_placeholder = truncate_component_label(i18n::EXPENSE_MODAL_NOTE_PLACEHOLDER);
     validate_text_input_placeholder(&note_placeholder).map_err(ExpenseModalBuildError::Budget)?;
 
-    let date_label = truncate_component_label(i18n::expense_modal_date_label());
+    let date_label = truncate_component_label(i18n::EXPENSE_MODAL_DATE_LABEL);
     validate_text_input_label(&date_label).map_err(ExpenseModalBuildError::Budget)?;
-    let date_placeholder = truncate_component_label(i18n::expense_modal_date_placeholder());
+    let date_placeholder = truncate_component_label(i18n::EXPENSE_MODAL_DATE_PLACEHOLDER);
     validate_text_input_placeholder(&date_placeholder).map_err(ExpenseModalBuildError::Budget)?;
 
     let today_value = clock.today_business_date().to_string();
@@ -228,11 +228,11 @@ pub fn build_expense_weight_modal_response(
 ) -> Result<CreateInteractionResponse, ExpenseModalBuildError> {
     let custom_id = format!("{EXPENSE_WEIGHT_MODAL_CUSTOM_ID_PREFIX}{nonce}");
     validate_custom_id(&custom_id).map_err(ExpenseModalBuildError::Budget)?;
-    let title = truncate_component_label(i18n::weight_editor_modal_title());
+    let title = truncate_component_label(i18n::WEIGHT_EDITOR_MODAL_TITLE);
     validate_modal_title(&title).map_err(ExpenseModalBuildError::Budget)?;
-    let label = truncate_component_label(i18n::weight_editor_input_label());
+    let label = truncate_component_label(i18n::WEIGHT_EDITOR_INPUT_LABEL);
     validate_text_input_label(&label).map_err(ExpenseModalBuildError::Budget)?;
-    let placeholder = truncate_component_label(i18n::weight_editor_placeholder());
+    let placeholder = truncate_component_label(i18n::WEIGHT_EDITOR_PLACEHOLDER);
     validate_text_input_placeholder(&placeholder).map_err(ExpenseModalBuildError::Budget)?;
     let mut value = String::new();
     for participant in participants {

@@ -47,7 +47,7 @@ pub(crate) fn render_panel_post_failure_message(
             RecoveryOutcomeMessage::from_body(outside_tracked_channel_message(*tracked_parent_hint))
         }
         PanelPostFailure::DiscordRejected => {
-            RecoveryOutcomeMessage::from_body(i18n::panel_post_retry_message())
+            RecoveryOutcomeMessage::from_body(i18n::PANEL_POST_RETRY_MESSAGE)
         }
     }
 }
@@ -68,7 +68,7 @@ pub(crate) fn render_panel_post_message(
         ephemeral: false,
     })
     .map(rendered_surface_to_message)
-    .map_err(|_| RecoveryOutcomeMessage::from_body(i18n::panel_render_retry_message()))
+    .map_err(|_| RecoveryOutcomeMessage::from_body(i18n::PANEL_RENDER_RETRY_MESSAGE))
 }
 
 pub(crate) fn render_panel_post_message_for_locator_state(
@@ -95,9 +95,9 @@ fn render_duplicate_blocked_message(
     recovery_references: &[LocatorRecoveryReference],
 ) -> RecoveryOutcomeMessage {
     let mut lines = vec![if authoritative_candidate_known {
-        i18n::duplicate_thread_blocked_message_authoritative().to_owned()
+        i18n::DUPLICATE_THREAD_BLOCKED_MESSAGE_AUTHORITATIVE.to_owned()
     } else {
-        i18n::duplicate_thread_blocked_message_unresolved().to_owned()
+        i18n::DUPLICATE_THREAD_BLOCKED_MESSAGE_UNRESOLVED.to_owned()
     }];
     lines.extend(
         recovery_references
@@ -107,9 +107,9 @@ fn render_duplicate_blocked_message(
     );
     lines.push(
         if authoritative_candidate_known {
-            i18n::duplicate_thread_recovery_guidance_authoritative()
+            i18n::DUPLICATE_THREAD_RECOVERY_GUIDANCE_AUTHORITATIVE
         } else {
-            i18n::duplicate_thread_recovery_guidance_unresolved()
+            i18n::DUPLICATE_THREAD_RECOVERY_GUIDANCE_UNRESOLVED
         }
         .to_owned(),
     );
@@ -126,9 +126,9 @@ fn render_damaged_blocked_message(
 ) -> RecoveryOutcomeMessage {
     RecoveryOutcomeMessage::new(
         [
-            i18n::damaged_candidate_blocked_message().to_owned(),
+            i18n::DAMAGED_CANDIDATE_BLOCKED_MESSAGE.to_owned(),
             recovery_reference.render_line(),
-            i18n::damaged_candidate_recovery_guidance().to_owned(),
+            i18n::DAMAGED_CANDIDATE_RECOVERY_GUIDANCE.to_owned(),
         ]
         .join("\n"),
         recovery_reference_components(recovery_reference),
@@ -205,17 +205,17 @@ mod tests {
         assert_eq!(
             message.body(),
             [
-                i18n::duplicate_thread_blocked_message_authoritative().to_owned(),
+                i18n::DUPLICATE_THREAD_BLOCKED_MESSAGE_AUTHORITATIVE.to_owned(),
                 ledger_recovery_reference("keep").render_line(),
                 ledger_recovery_reference("other").render_line(),
-                i18n::duplicate_thread_recovery_guidance_authoritative().to_owned(),
+                i18n::DUPLICATE_THREAD_RECOVERY_GUIDANCE_AUTHORITATIVE.to_owned(),
             ]
             .join("\n")
         );
         assert_eq!(
             serde_json::to_value(message.components()).expect("components should serialize")[0]["components"]
                 [0]["label"],
-            i18n::open_ledger_thread_label()
+            i18n::OPEN_LEDGER_THREAD_LABEL
         );
     }
 
@@ -235,17 +235,17 @@ mod tests {
         assert_eq!(
             message.body(),
             [
-                i18n::damaged_candidate_blocked_message().to_owned(),
+                i18n::DAMAGED_CANDIDATE_BLOCKED_MESSAGE.to_owned(),
                 channel_recovery_reference(tracked_parent.tracked_parent_channel_id())
                     .render_line(),
-                i18n::damaged_candidate_recovery_guidance().to_owned(),
+                i18n::DAMAGED_CANDIDATE_RECOVERY_GUIDANCE.to_owned(),
             ]
             .join("\n")
         );
         assert_eq!(
             serde_json::to_value(message.components()).expect("components should serialize")[0]["components"]
                 [0]["label"],
-            i18n::open_parent_channel_label()
+            i18n::OPEN_PARENT_CHANNEL_LABEL
         );
     }
 
@@ -271,7 +271,7 @@ mod tests {
         assert_eq!(
             message.body(),
             [
-                i18n::bot_cannot_operate_parent_channel_message().to_owned(),
+                i18n::BOT_CANNOT_OPERATE_PARENT_CHANNEL_MESSAGE.to_owned(),
                 "復旧用の参照: channel:10 | <https://discord.example/channels/1/10>".to_owned(),
             ]
             .join("\n")
@@ -279,7 +279,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(message.components()).expect("components should serialize")[0]["components"]
                 [0]["label"],
-            i18n::open_parent_channel_label()
+            i18n::OPEN_PARENT_CHANNEL_LABEL
         );
     }
 
@@ -287,7 +287,7 @@ mod tests {
     fn panel_post_failure_uses_generic_retry_only_for_other_discord_rejections() {
         let message = render_panel_post_failure_message(&PanelPostFailure::DiscordRejected);
 
-        assert_eq!(message.body(), i18n::panel_post_retry_message());
+        assert_eq!(message.body(), i18n::PANEL_POST_RETRY_MESSAGE);
         assert!(message.components().is_empty());
     }
 }

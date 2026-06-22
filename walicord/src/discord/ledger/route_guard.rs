@@ -58,7 +58,7 @@ pub(crate) fn outside_tracked_channel_message(
                 i18n::outside_tracked_channel_message_with_hint(format_args!("<#{channel_id}>"))
             )
         })
-        .unwrap_or_else(|| i18n::outside_tracked_channel_message_generic().to_owned())
+        .unwrap_or_else(|| i18n::OUTSIDE_TRACKED_CHANNEL_MESSAGE_GENERIC.to_owned())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

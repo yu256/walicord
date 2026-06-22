@@ -153,65 +153,47 @@ pub mod strings {
 
 pub use strings::*;
 
-pub fn slash_panel_description() -> &'static str {
-    if cfg!(feature = "ja") {
-        "このチャンネルに台帳パネルを投稿します。"
-    } else {
-        "Post the ledger panel in this channel."
-    }
-}
+pub const SLASH_PANEL_DESCRIPTION: &str = if cfg!(feature = "ja") {
+    "このチャンネルに台帳パネルを投稿します。"
+} else {
+    "Post the ledger panel in this channel."
+};
 
-pub fn slash_expense_description() -> &'static str {
-    if cfg!(feature = "ja") {
-        "このチャンネルで経費を記録します。"
-    } else {
-        "Record an expense in this channel."
-    }
-}
+pub const SLASH_EXPENSE_DESCRIPTION: &str = if cfg!(feature = "ja") {
+    "このチャンネルで経費を記録します。"
+} else {
+    "Record an expense in this channel."
+};
 
-pub fn slash_review_description() -> &'static str {
-    SLASH_REVIEW_DESCRIPTION
-}
+pub const SLASH_SETTLE_DESCRIPTION: &str = if cfg!(feature = "ja") {
+    "表示中の清算プランを確定します（台帳スレッド）。"
+} else {
+    "Confirm the displayed settlement plan (ledger thread)."
+};
 
-pub fn slash_settle_description() -> &'static str {
-    if cfg!(feature = "ja") {
-        "表示中の清算プランを確定します（台帳スレッド）。"
-    } else {
-        "Confirm the displayed settlement plan (ledger thread)."
-    }
-}
+pub const SETTLEMENT_THREAD_ONLY_MESSAGE: &str = if cfg!(feature = "ja") {
+    "/settle は台帳スレッドで実行してください。"
+} else {
+    "Run /settle in the ledger thread."
+};
 
-pub fn settlement_thread_only_message() -> &'static str {
-    if cfg!(feature = "ja") {
-        "/settle は台帳スレッドで実行してください。"
-    } else {
-        "Run /settle in the ledger thread."
-    }
-}
+pub const SLASH_VOID_DESCRIPTION: &str = if cfg!(feature = "ja") {
+    "このチャンネルで最近の記録を取り消します。"
+} else {
+    "Void recent records in this channel."
+};
 
-pub fn slash_void_description() -> &'static str {
-    if cfg!(feature = "ja") {
-        "このチャンネルで最近の記録を取り消します。"
-    } else {
-        "Void recent records in this channel."
-    }
-}
+pub const SLASH_LEDGER_DESCRIPTION: &str = if cfg!(feature = "ja") {
+    "このチャンネルの台帳を表示します。"
+} else {
+    "Show this channel's ledger."
+};
 
-pub fn slash_ledger_description() -> &'static str {
-    if cfg!(feature = "ja") {
-        "このチャンネルの台帳を表示します。"
-    } else {
-        "Show this channel's ledger."
-    }
-}
-
-pub fn slash_ledger_refresh_description() -> &'static str {
-    if cfg!(feature = "ja") {
-        "この親チャンネルの台帳スレッド状態を管理者が再確認します。"
-    } else {
-        "Admins re-check the ledger-thread state for this parent channel."
-    }
-}
+pub const SLASH_LEDGER_REFRESH_DESCRIPTION: &str = if cfg!(feature = "ja") {
+    "この親チャンネルの台帳スレッド状態を管理者が再確認します。"
+} else {
+    "Admins re-check the ledger-thread state for this parent channel."
+};
 
 #[cfg(feature = "ja")]
 pub fn failed_to_evaluate_group(name: impl std::fmt::Display) -> impl std::fmt::Display {
@@ -279,9 +261,7 @@ pub fn unknown_user_label(id: u64) -> impl std::fmt::Display {
 }
 
 #[cfg(feature = "ja")]
-pub fn unknown_display_label() -> &'static str {
-    "不明"
-}
+pub const UNKNOWN_DISPLAY_LABEL: &str = "不明";
 
 #[cfg(feature = "ja")]
 pub fn unknown_role_label(id: u64) -> impl std::fmt::Display {
@@ -302,9 +282,7 @@ pub fn unknown_user_label(id: u64) -> impl std::fmt::Display {
 }
 
 #[cfg(feature = "en")]
-pub fn unknown_display_label() -> &'static str {
-    "Unknown"
-}
+pub const UNKNOWN_DISPLAY_LABEL: &str = "Unknown";
 
 #[cfg(feature = "en")]
 pub fn unknown_role_label(id: u64) -> impl std::fmt::Display {
@@ -325,9 +303,7 @@ pub fn unknown_user_label(id: u64) -> impl std::fmt::Display {
 }
 
 #[cfg(not(any(feature = "ja", feature = "en")))]
-pub fn unknown_display_label() -> &'static str {
-    "Unknown"
-}
+pub const UNKNOWN_DISPLAY_LABEL: &str = "Unknown";
 
 #[cfg(not(any(feature = "ja", feature = "en")))]
 pub fn unknown_role_label(id: u64) -> impl std::fmt::Display {
@@ -787,13 +763,11 @@ pub fn public_amount_line(value: impl std::fmt::Display) -> impl std::fmt::Displ
     })
 }
 
-pub fn public_participants_heading() -> &'static str {
-    if cfg!(feature = "ja") {
-        "参加者:"
-    } else {
-        "Participants:"
-    }
-}
+pub const PUBLIC_PARTICIPANTS_HEADING: &str = if cfg!(feature = "ja") {
+    "参加者:"
+} else {
+    "Participants:"
+};
 
 pub fn public_note_line(value: impl std::fmt::Display) -> impl std::fmt::Display {
     std::fmt::from_fn(move |f| {
@@ -825,13 +799,11 @@ pub fn public_recorded_at_line(value: impl std::fmt::Display) -> impl std::fmt::
     })
 }
 
-pub fn public_transfer_heading() -> &'static str {
-    if cfg!(feature = "ja") {
-        "送金予定:"
-    } else {
-        "Planned transfers:"
-    }
-}
+pub const PUBLIC_TRANSFER_HEADING: &str = if cfg!(feature = "ja") {
+    "送金予定:"
+} else {
+    "Planned transfers:"
+};
 
 pub fn public_confirmed_by_line(value: impl std::fmt::Display) -> impl std::fmt::Display {
     std::fmt::from_fn(move |f| {
@@ -843,13 +815,11 @@ pub fn public_confirmed_by_line(value: impl std::fmt::Display) -> impl std::fmt:
     })
 }
 
-pub fn public_void_preserved_line() -> &'static str {
-    if cfg!(feature = "ja") {
-        "元の記録は 取り消し済み として残ります。"
-    } else {
-        "The original record remains visible as voided."
-    }
-}
+pub const PUBLIC_VOID_PRESERVED_LINE: &str = if cfg!(feature = "ja") {
+    "元の記録は 取り消し済み として残ります。"
+} else {
+    "The original record remains visible as voided."
+};
 
 pub fn public_seal_line(
     actor: impl std::fmt::Display,
@@ -1026,13 +996,11 @@ pub fn void_candidate_adjustment_summary(
     })
 }
 
-pub fn sealed_range_none() -> &'static str {
-    if cfg!(feature = "ja") {
-        "確認済み: なし"
-    } else {
-        "Confirmed: none"
-    }
-}
+pub const SEALED_RANGE_NONE: &str = if cfg!(feature = "ja") {
+    "確認済み: なし"
+} else {
+    "Confirmed: none"
+};
 
 pub fn sealed_range_line(
     through_entry_id: u64,
@@ -1080,13 +1048,11 @@ pub fn sealed_settlement_summary(
     })
 }
 
-pub fn sealed_void_summary() -> &'static str {
-    if cfg!(feature = "ja") {
-        "取り消し"
-    } else {
-        "void"
-    }
-}
+pub const SEALED_VOID_SUMMARY: &str = if cfg!(feature = "ja") {
+    "取り消し"
+} else {
+    "void"
+};
 
 pub fn sealed_prior_seal_summary(actor: impl std::fmt::Display) -> impl std::fmt::Display {
     std::fmt::from_fn(move |f| {
@@ -1148,181 +1114,137 @@ pub fn impact_summary_pay(
     })
 }
 
-pub fn read_uncertain_write_advisory() -> &'static str {
-    if cfg!(feature = "ja") {
-        "ℹ️ この台帳は現在書き込み確認中です。記録・取り消し・清算は一時的に制限されています。"
-    } else {
-        "ℹ️ This ledger is currently verifying a write. Recording, voiding, and settlement are temporarily restricted."
-    }
-}
+pub const READ_UNCERTAIN_WRITE_ADVISORY: &str = if cfg!(feature = "ja") {
+    "ℹ️ この台帳は現在書き込み確認中です。記録・取り消し・清算は一時的に制限されています。"
+} else {
+    "ℹ️ This ledger is currently verifying a write. Recording, voiding, and settlement are temporarily restricted."
+};
 
-pub fn unknown_ledger_format_message() -> &'static str {
-    if cfg!(feature = "ja") {
-        "この台帳は新しい形式で記録されています。Bot を更新してください。"
-    } else {
-        "This ledger was recorded in a newer format. Please update the bot."
-    }
-}
+pub const UNKNOWN_LEDGER_FORMAT_MESSAGE: &str = if cfg!(feature = "ja") {
+    "この台帳は新しい形式で記録されています。Bot を更新してください。"
+} else {
+    "This ledger was recorded in a newer format. Please update the bot."
+};
 
-pub fn ledger_retryable_load_message() -> &'static str {
-    if cfg!(feature = "ja") {
-        "台帳を読み込めませんでした。通信やDiscord側の一時的な問題の可能性があります。もう一度試してください。続く場合は管理者に連絡してください。"
-    } else {
-        "Failed to load the ledger. This may be a temporary network or Discord-side issue. Please try again. If it continues, contact an administrator."
-    }
-}
+pub const LEDGER_RETRYABLE_LOAD_MESSAGE: &str = if cfg!(feature = "ja") {
+    "台帳を読み込めませんでした。通信やDiscord側の一時的な問題の可能性があります。もう一度試してください。続く場合は管理者に連絡してください。"
+} else {
+    "Failed to load the ledger. This may be a temporary network or Discord-side issue. Please try again. If it continues, contact an administrator."
+};
 
-pub fn ledger_load_timeout_message() -> &'static str {
-    if cfg!(feature = "ja") {
-        "台帳の読み込みがタイムアウトしました。少し待ってからもう一度試してください。続く場合は管理者に連絡してください。"
-    } else {
-        "Loading the ledger timed out. Please wait a moment and try again. If it continues, contact an administrator."
-    }
-}
+pub const LEDGER_LOAD_TIMEOUT_MESSAGE: &str = if cfg!(feature = "ja") {
+    "台帳の読み込みがタイムアウトしました。少し待ってからもう一度試してください。続く場合は管理者に連絡してください。"
+} else {
+    "Loading the ledger timed out. Please wait a moment and try again. If it continues, contact an administrator."
+};
 
-pub fn ledger_permission_failed_message() -> &'static str {
-    if cfg!(feature = "ja") {
-        "台帳を確認する権限または設定を確認できませんでした。管理者に連絡してください。"
-    } else {
-        "The bot could not verify the permissions or configuration needed to open this ledger. Please contact an administrator."
-    }
-}
+pub const LEDGER_PERMISSION_FAILED_MESSAGE: &str = if cfg!(feature = "ja") {
+    "台帳を確認する権限または設定を確認できませんでした。管理者に連絡してください。"
+} else {
+    "The bot could not verify the permissions or configuration needed to open this ledger. Please contact an administrator."
+};
 
-pub fn ledger_attachment_decode_failed_message() -> &'static str {
-    if cfg!(feature = "ja") {
-        "台帳の一部が破損している可能性があります (添付ファイルが見つからないか、このボットで読めない形式です)。運用担当者に連絡してください。"
-    } else {
-        "Part of the ledger may be corrupted (the attachment is missing or in a format this bot cannot read). Please contact an operator."
-    }
-}
+pub const LEDGER_ATTACHMENT_DECODE_FAILED_MESSAGE: &str = if cfg!(feature = "ja") {
+    "台帳の一部が破損している可能性があります (添付ファイルが見つからないか、このボットで読めない形式です)。運用担当者に連絡してください。"
+} else {
+    "Part of the ledger may be corrupted (the attachment is missing or in a format this bot cannot read). Please contact an operator."
+};
 
-pub fn ledger_integrity_failed_message() -> &'static str {
-    if cfg!(feature = "ja") {
-        "台帳の整合性検証に失敗しました (履歴のつながりが壊れているか、このボットで安全に扱えない状態です)。運用担当者に連絡してください。"
-    } else {
-        "Ledger integrity verification failed (the history chain is broken or is in a state this bot cannot safely handle). Please contact an operator."
-    }
-}
+pub const LEDGER_INTEGRITY_FAILED_MESSAGE: &str = if cfg!(feature = "ja") {
+    "台帳の整合性検証に失敗しました (履歴のつながりが壊れているか、このボットで安全に扱えない状態です)。運用担当者に連絡してください。"
+} else {
+    "Ledger integrity verification failed (the history chain is broken or is in a state this bot cannot safely handle). Please contact an operator."
+};
 
-pub fn ledger_thread_prepare_failed_message() -> &'static str {
-    if cfg!(feature = "ja") {
-        "台帳スレッドを準備できませんでした。少し待ってからもう一度試してください。解決しない場合は管理者に連絡してください。"
-    } else {
-        "Failed to prepare the ledger thread. Please wait a moment and try again. If it does not recover, contact an administrator."
-    }
-}
+pub const LEDGER_THREAD_PREPARE_FAILED_MESSAGE: &str = if cfg!(feature = "ja") {
+    "台帳スレッドを準備できませんでした。少し待ってからもう一度試してください。解決しない場合は管理者に連絡してください。"
+} else {
+    "Failed to prepare the ledger thread. Please wait a moment and try again. If it does not recover, contact an administrator."
+};
 
-pub fn balances_heading() -> &'static str {
-    if cfg!(feature = "ja") {
-        "残高"
-    } else {
-        "Balances"
-    }
-}
+pub const BALANCES_HEADING: &str = if cfg!(feature = "ja") {
+    "残高"
+} else {
+    "Balances"
+};
 
-pub fn participants_heading() -> &'static str {
-    if cfg!(feature = "ja") {
-        "参加者"
-    } else {
-        "Participants"
-    }
-}
+pub const PARTICIPANTS_HEADING: &str = if cfg!(feature = "ja") {
+    "参加者"
+} else {
+    "Participants"
+};
 
-pub fn voided_heading() -> &'static str {
-    if cfg!(feature = "ja") {
-        "取り消し済み"
-    } else {
-        "Voided"
-    }
-}
+pub const VOIDED_HEADING: &str = if cfg!(feature = "ja") {
+    "取り消し済み"
+} else {
+    "Voided"
+};
 
-pub fn confirmed_heading() -> &'static str {
-    if cfg!(feature = "ja") {
-        "確認済み"
-    } else {
-        "Confirmed"
-    }
-}
+pub const CONFIRMED_HEADING: &str = if cfg!(feature = "ja") {
+    "確認済み"
+} else {
+    "Confirmed"
+};
 
-pub fn settlement_plan_heading() -> &'static str {
-    if cfg!(feature = "ja") {
-        "送金予定"
-    } else {
-        "Planned transfers"
-    }
-}
+pub const SETTLEMENT_PLAN_HEADING: &str = if cfg!(feature = "ja") {
+    "送金予定"
+} else {
+    "Planned transfers"
+};
 
-pub fn balances_explainer() -> &'static str {
-    if cfg!(feature = "ja") {
-        "確認済み履歴と残高補正を含む現在差額"
-    } else {
-        "Current balance including confirmed history and balance adjustments"
-    }
-}
+pub const BALANCES_EXPLAINER: &str = if cfg!(feature = "ja") {
+    "確認済み履歴と残高補正を含む現在差額"
+} else {
+    "Current balance including confirmed history and balance adjustments"
+};
 
-pub fn participants_explainer() -> &'static str {
-    if cfg!(feature = "ja") {
-        "これまで記録に出た人"
-    } else {
-        "Members who have appeared in recorded history"
-    }
-}
+pub const PARTICIPANTS_EXPLAINER: &str = if cfg!(feature = "ja") {
+    "これまで記録に出た人"
+} else {
+    "Members who have appeared in recorded history"
+};
 
-pub fn review_zero_balances() -> &'static str {
-    if cfg!(feature = "ja") {
-        "残高なし"
-    } else {
-        "No balances"
-    }
-}
+pub const REVIEW_ZERO_BALANCES: &str = if cfg!(feature = "ja") {
+    "残高なし"
+} else {
+    "No balances"
+};
 
-pub fn ledger_zero_balances() -> &'static str {
-    if cfg!(feature = "ja") {
-        "残高なし (新しい経費は 記録する ボタン (/expense コマンド) で記録できます。)"
-    } else {
-        "No balances (You can record a new expense with the Record button or /expense.)"
-    }
-}
+pub const LEDGER_ZERO_BALANCES: &str = if cfg!(feature = "ja") {
+    "残高なし (新しい経費は 記録する ボタン (/expense コマンド) で記録できます。)"
+} else {
+    "No balances (You can record a new expense with the Record button or /expense.)"
+};
 
-pub fn voided_none() -> &'static str {
-    if cfg!(feature = "ja") {
-        "取り消し済みなし"
-    } else {
-        "No voided records"
-    }
-}
+pub const VOIDED_NONE: &str = if cfg!(feature = "ja") {
+    "取り消し済みなし"
+} else {
+    "No voided records"
+};
 
-pub fn ledger_empty_state() -> &'static str {
-    if cfg!(feature = "ja") {
-        "まだ記録がありません。/expense または 記録する ボタンで最初の経費を記録してみましょう。"
-    } else {
-        "No records exist yet. Try recording the first expense with /expense or the Record button."
-    }
-}
+pub const LEDGER_EMPTY_STATE: &str = if cfg!(feature = "ja") {
+    "まだ記録がありません。/expense または 記録する ボタンで最初の経費を記録してみましょう。"
+} else {
+    "No records exist yet. Try recording the first expense with /expense or the Record button."
+};
 
-pub fn review_parent_empty_state() -> &'static str {
-    if cfg!(feature = "ja") {
-        "まだ記録がありません。/expense または 記録する ボタンで最初の経費を記録してみましょう。"
-    } else {
-        "No records exist yet. Try recording the first expense with /expense or the Record button."
-    }
-}
+pub const REVIEW_PARENT_EMPTY_STATE: &str = if cfg!(feature = "ja") {
+    "まだ記録がありません。/expense または 記録する ボタンで最初の経費を記録してみましょう。"
+} else {
+    "No records exist yet. Try recording the first expense with /expense or the Record button."
+};
 
-pub fn review_thread_empty_state() -> &'static str {
-    if cfg!(feature = "ja") {
-        "まだ記録がありません。親チャンネルで /expense または 記録する ボタンから最初の経費を記録してみましょう。"
-    } else {
-        "No records exist yet. Try recording the first expense from the parent channel with /expense or the Record button."
-    }
-}
+pub const REVIEW_THREAD_EMPTY_STATE: &str = if cfg!(feature = "ja") {
+    "まだ記録がありません。親チャンネルで /expense または 記録する ボタンから最初の経費を記録してみましょう。"
+} else {
+    "No records exist yet. Try recording the first expense from the parent channel with /expense or the Record button."
+};
 
-pub fn void_confirm_append_only_line() -> &'static str {
-    if cfg!(feature = "ja") {
-        "-# 元の記録は取り消し済みとして残ります。"
-    } else {
-        "-# The original record remains visible as voided."
-    }
-}
+pub const VOID_CONFIRM_APPEND_ONLY_LINE: &str = if cfg!(feature = "ja") {
+    "-# 元の記録は取り消し済みとして残ります。"
+} else {
+    "-# The original record remains visible as voided."
+};
 
 pub fn void_confirm_date_line(value: impl std::fmt::Display) -> impl std::fmt::Display {
     std::fmt::from_fn(move |f| {
@@ -1388,37 +1310,29 @@ pub fn void_confirm_settlement_target(
     })
 }
 
-pub fn void_missing_selection_error() -> &'static str {
-    if cfg!(feature = "ja") {
-        "対象を選択してください。"
-    } else {
-        "Select a target."
-    }
-}
+pub const VOID_MISSING_SELECTION_ERROR: &str = if cfg!(feature = "ja") {
+    "対象を選択してください。"
+} else {
+    "Select a target."
+};
 
-pub fn void_stale_target_reason_voided() -> &'static str {
-    if cfg!(feature = "ja") {
-        "他のユーザーが取り消しました"
-    } else {
-        "another user already voided it"
-    }
-}
+pub const VOID_STALE_TARGET_REASON_VOIDED: &str = if cfg!(feature = "ja") {
+    "他のユーザーが取り消しました"
+} else {
+    "another user already voided it"
+};
 
-pub fn void_stale_target_reason_sealed() -> &'static str {
-    if cfg!(feature = "ja") {
-        "確認済み範囲に入りました"
-    } else {
-        "it entered the confirmed range"
-    }
-}
+pub const VOID_STALE_TARGET_REASON_SEALED: &str = if cfg!(feature = "ja") {
+    "確認済み範囲に入りました"
+} else {
+    "it entered the confirmed range"
+};
 
-pub fn void_stale_target_reason_excluded() -> &'static str {
-    if cfg!(feature = "ja") {
-        "候補から外れました"
-    } else {
-        "it left the candidate set"
-    }
-}
+pub const VOID_STALE_TARGET_REASON_EXCLUDED: &str = if cfg!(feature = "ja") {
+    "候補から外れました"
+} else {
+    "it left the candidate set"
+};
 
 pub fn void_stale_target_error(reason: impl std::fmt::Display) -> impl std::fmt::Display {
     std::fmt::from_fn(move |f| {
@@ -1436,21 +1350,17 @@ pub fn void_stale_target_error(reason: impl std::fmt::Display) -> impl std::fmt:
     })
 }
 
-pub fn void_success_ack() -> &'static str {
-    if cfg!(feature = "ja") {
-        "取り消しました。"
-    } else {
-        "Voided."
-    }
-}
+pub const VOID_SUCCESS_ACK: &str = if cfg!(feature = "ja") {
+    "取り消しました。"
+} else {
+    "Voided."
+};
 
-pub fn void_success_effect() -> &'static str {
-    if cfg!(feature = "ja") {
-        "この取り消しで元の記録の影響は打ち消されます。正しい内容が必要なら記録し直してください。"
-    } else {
-        "This void cancels the original record's effect. Re-record the correct contents if needed."
-    }
-}
+pub const VOID_SUCCESS_EFFECT: &str = if cfg!(feature = "ja") {
+    "この取り消しで元の記録の影響は打ち消されます。正しい内容が必要なら記録し直してください。"
+} else {
+    "This void cancels the original record's effect. Re-record the correct contents if needed."
+};
 
 pub fn void_success_thread_line(thread_mention: impl std::fmt::Display) -> impl std::fmt::Display {
     std::fmt::from_fn(move |f| {
@@ -1462,37 +1372,29 @@ pub fn void_success_thread_line(thread_mention: impl std::fmt::Display) -> impl 
     })
 }
 
-pub fn void_success_thread_line_without_mention() -> &'static str {
-    if cfg!(feature = "ja") {
-        "台帳スレッドで確認できます。"
-    } else {
-        "Check it in the ledger thread."
-    }
-}
+pub const VOID_SUCCESS_THREAD_LINE_WITHOUT_MENTION: &str = if cfg!(feature = "ja") {
+    "台帳スレッドで確認できます。"
+} else {
+    "Check it in the ledger thread."
+};
 
-pub fn void_empty_state() -> &'static str {
-    if cfg!(feature = "ja") {
-        "まだ記録がありません。/expense または 記録する ボタンで最初の経費を記録してみましょう。"
-    } else {
-        "No records exist yet. Try recording the first expense with /expense or the Record button."
-    }
-}
+pub const VOID_EMPTY_STATE: &str = if cfg!(feature = "ja") {
+    "まだ記録がありません。/expense または 記録する ボタンで最初の経費を記録してみましょう。"
+} else {
+    "No records exist yet. Try recording the first expense with /expense or the Record button."
+};
 
-pub fn void_no_candidate_state() -> &'static str {
-    if cfg!(feature = "ja") {
-        "取り消せる対象がありません。確認済みや既に取り消した記録は対象外です。/ledger または 台帳 で状態を確認してください。"
-    } else {
-        "No voidable targets exist. Confirmed or already voided records are excluded. Check /ledger or the ledger panel."
-    }
-}
+pub const VOID_NO_CANDIDATE_STATE: &str = if cfg!(feature = "ja") {
+    "取り消せる対象がありません。確認済みや既に取り消した記録は対象外です。/ledger または 台帳 で状態を確認してください。"
+} else {
+    "No voidable targets exist. Confirmed or already voided records are excluded. Check /ledger or the ledger panel."
+};
 
-pub fn void_window_empty_state() -> &'static str {
-    if cfg!(feature = "ja") {
-        "対象がありません (このUIで選べるのは新しい25件までです。古い記録はこのUIから取り消せません。運用担当者に連絡してください)。"
-    } else {
-        "No target is available (this UI can only choose from the latest 25 entries; older records require operator help)."
-    }
-}
+pub const VOID_WINDOW_EMPTY_STATE: &str = if cfg!(feature = "ja") {
+    "対象がありません (このUIで選べるのは新しい25件までです。古い記録はこのUIから取り消せません。運用担当者に連絡してください)。"
+} else {
+    "No target is available (this UI can only choose from the latest 25 entries; older records require operator help)."
+};
 
 pub fn void_window_handoff_line(reference_hint: impl std::fmt::Display) -> impl std::fmt::Display {
     std::fmt::from_fn(move |f| {
@@ -1510,93 +1412,71 @@ pub fn void_window_handoff_line(reference_hint: impl std::fmt::Display) -> impl 
     })
 }
 
-pub fn review_preview_instruction() -> &'static str {
-    if cfg!(feature = "ja") {
-        "-# これはプレビューです。10分以内に、作成した本人だけが確定できます。あとから同じ台帳でプレビューを作り直すと、最新のプレビューだけが確定対象になります。"
-    } else {
-        "-# This is a preview. Within 10 minutes, only the creator can confirm. If a newer preview is created for the same ledger, only the newest remains confirmable."
-    }
-}
+pub const REVIEW_PREVIEW_INSTRUCTION: &str = if cfg!(feature = "ja") {
+    "-# これはプレビューです。10分以内に、作成した本人だけが確定できます。あとから同じ台帳でプレビューを作り直すと、最新のプレビューだけが確定対象になります。"
+} else {
+    "-# This is a preview. Within 10 minutes, only the creator can confirm. If a newer preview is created for the same ledger, only the newest remains confirmable."
+};
 
-pub fn review_settle_button_label() -> &'static str {
-    if cfg!(feature = "ja") {
-        "確定する"
-    } else {
-        "Confirm"
-    }
-}
+pub const REVIEW_SETTLE_BUTTON_LABEL: &str = if cfg!(feature = "ja") {
+    "確定する"
+} else {
+    "Confirm"
+};
 
-pub fn review_preview_blocked_instruction() -> &'static str {
-    if cfg!(feature = "ja") {
-        "この台帳は書き込み状態を確認中です。台帳スレッドを確認し、復旧後に /settle を実行してください。"
-    } else {
-        "This ledger is currently verifying a write state. Check the ledger thread, then run /settle after recovery."
-    }
-}
+pub const REVIEW_PREVIEW_BLOCKED_INSTRUCTION: &str = if cfg!(feature = "ja") {
+    "この台帳は書き込み状態を確認中です。台帳スレッドを確認し、復旧後に /settle を実行してください。"
+} else {
+    "This ledger is currently verifying a write state. Check the ledger thread, then run /settle after recovery."
+};
 
-pub fn review_preview_required_message() -> &'static str {
-    if cfg!(feature = "ja") {
-        "先に清算確認でプレビューを作成してください。"
-    } else {
-        "Create a settlement preview first."
-    }
-}
+pub const REVIEW_PREVIEW_REQUIRED_MESSAGE: &str = if cfg!(feature = "ja") {
+    "先に清算確認でプレビューを作成してください。"
+} else {
+    "Create a settlement preview first."
+};
 
-pub fn review_render_failed_message() -> &'static str {
-    if cfg!(feature = "ja") {
-        "清算確認を表示できませんでした。"
-    } else {
-        "Failed to display the settlement preview."
-    }
-}
+pub const REVIEW_RENDER_FAILED_MESSAGE: &str = if cfg!(feature = "ja") {
+    "清算確認を表示できませんでした。"
+} else {
+    "Failed to display the settlement preview."
+};
 
-pub fn stale_settlement_preview_message() -> &'static str {
-    if cfg!(feature = "ja") {
-        "プレビューの有効期限が切れました。清算確認からやり直してください。"
-    } else {
-        "The preview expired. Start from the settlement review again."
-    }
-}
+pub const STALE_SETTLEMENT_PREVIEW_MESSAGE: &str = if cfg!(feature = "ja") {
+    "プレビューの有効期限が切れました。清算確認からやり直してください。"
+} else {
+    "The preview expired. Start from the settlement review again."
+};
 
-pub fn settlement_preview_replaced_message() -> &'static str {
-    if cfg!(feature = "ja") {
-        "前の清算プレビューを新しい内容で置き換えました。"
-    } else {
-        "The previous settlement preview was replaced with the new one."
-    }
-}
+pub const SETTLEMENT_PREVIEW_REPLACED_MESSAGE: &str = if cfg!(feature = "ja") {
+    "前の清算プレビューを新しい内容で置き換えました。"
+} else {
+    "The previous settlement preview was replaced with the new one."
+};
 
-pub fn settlement_already_not_needed_message() -> &'static str {
-    if cfg!(feature = "ja") {
-        "すでに清算は不要です。"
-    } else {
-        "Settlement is already unnecessary."
-    }
-}
+pub const SETTLEMENT_ALREADY_NOT_NEEDED_MESSAGE: &str = if cfg!(feature = "ja") {
+    "すでに清算は不要です。"
+} else {
+    "Settlement is already unnecessary."
+};
 
-pub fn settlement_preview_not_saved_message() -> &'static str {
-    if cfg!(feature = "ja") {
-        "プレビューは保存されていません。/settle は不要です。"
-    } else {
-        "The preview was not saved. /settle is unnecessary."
-    }
-}
+pub const SETTLEMENT_PREVIEW_NOT_SAVED_MESSAGE: &str = if cfg!(feature = "ja") {
+    "プレビューは保存されていません。/settle は不要です。"
+} else {
+    "The preview was not saved. /settle is unnecessary."
+};
 
-pub fn settlement_confirmation_failed_message() -> &'static str {
-    if cfg!(feature = "ja") {
-        "確認に失敗しました。清算確認からやり直してください。"
-    } else {
-        "Confirmation failed. Start from the settlement review again."
-    }
-}
+pub const SETTLEMENT_CONFIRMATION_FAILED_MESSAGE: &str = if cfg!(feature = "ja") {
+    "確認に失敗しました。清算確認からやり直してください。"
+} else {
+    "Confirmation failed. Start from the settlement review again."
+};
 
-pub fn settlement_preview_not_delivered_message() -> &'static str {
-    if cfg!(feature = "ja") {
-        "プレビューが届かなかったようです。清算確認からやり直してください。"
-    } else {
-        "The preview was not delivered. Start from the settlement review again."
-    }
-}
+pub const SETTLEMENT_PREVIEW_NOT_DELIVERED_MESSAGE: &str = if cfg!(feature = "ja") {
+    "プレビューが届かなかったようです。清算確認からやり直してください。"
+} else {
+    "The preview was not delivered. Start from the settlement review again."
+};
 
 pub fn panel_thread_cue_known(thread_mention: impl std::fmt::Display) -> impl std::fmt::Display {
     std::fmt::from_fn(move |f| {
@@ -1608,29 +1488,23 @@ pub fn panel_thread_cue_known(thread_mention: impl std::fmt::Display) -> impl st
     })
 }
 
-pub fn uncertain_write_block_message() -> &'static str {
-    if cfg!(feature = "ja") {
-        "この台帳の書き込み状態が確認できません。しばらく待ってからもう一度お試しください。"
-    } else {
-        "The write state of this ledger could not be confirmed. Please wait a bit and try again."
-    }
-}
+pub const UNCERTAIN_WRITE_BLOCK_MESSAGE: &str = if cfg!(feature = "ja") {
+    "この台帳の書き込み状態が確認できません。しばらく待ってからもう一度お試しください。"
+} else {
+    "The write state of this ledger could not be confirmed. Please wait a bit and try again."
+};
 
-pub fn uncertain_write_input_preserved_message() -> &'static str {
-    if cfg!(feature = "ja") {
-        "入力中の内容は10分間保持されます。"
-    } else {
-        "Your in-progress input will be kept for 10 minutes."
-    }
-}
+pub const UNCERTAIN_WRITE_INPUT_PRESERVED_MESSAGE: &str = if cfg!(feature = "ja") {
+    "入力中の内容は10分間保持されます。"
+} else {
+    "Your in-progress input will be kept for 10 minutes."
+};
 
-pub fn uncertain_write_preview_preserved_message() -> &'static str {
-    if cfg!(feature = "ja") {
-        "保留中のプレビューは作成から10分間有効です。"
-    } else {
-        "The pending preview stays valid for 10 minutes from creation."
-    }
-}
+pub const UNCERTAIN_WRITE_PREVIEW_PRESERVED_MESSAGE: &str = if cfg!(feature = "ja") {
+    "保留中のプレビューは作成から10分間有効です。"
+} else {
+    "The pending preview stays valid for 10 minutes from creation."
+};
 
 pub fn abandoned_uncertain_write_message(
     last_known_summary: impl std::fmt::Display,
@@ -1658,125 +1532,95 @@ pub fn abandoned_uncertain_write_message(
     Message(last_known_summary)
 }
 
-pub fn abandoned_uncertain_write_acknowledge_label() -> &'static str {
-    if cfg!(feature = "ja") {
-        "確認したのでやり直す"
-    } else {
-        "Checked, try again"
-    }
-}
+pub const ABANDONED_UNCERTAIN_WRITE_ACKNOWLEDGE_LABEL: &str = if cfg!(feature = "ja") {
+    "確認したのでやり直す"
+} else {
+    "Checked, try again"
+};
 
-pub fn abandoned_uncertain_write_acknowledged_message() -> &'static str {
-    if cfg!(feature = "ja") {
-        "未確定の送信を確認済みとして解除しました。元の操作からもう一度実行してください。"
-    } else {
-        "The uncertain send block was cleared after acknowledgement. Run the original action again."
-    }
-}
+pub const ABANDONED_UNCERTAIN_WRITE_ACKNOWLEDGED_MESSAGE: &str = if cfg!(feature = "ja") {
+    "未確定の送信を確認済みとして解除しました。元の操作からもう一度実行してください。"
+} else {
+    "The uncertain send block was cleared after acknowledgement. Run the original action again."
+};
 
-pub fn panel_record_button_label() -> &'static str {
-    if cfg!(feature = "ja") {
-        "記録する"
-    } else {
-        "Record"
-    }
-}
+pub const PANEL_RECORD_BUTTON_LABEL: &str = if cfg!(feature = "ja") {
+    "記録する"
+} else {
+    "Record"
+};
 
-pub fn panel_review_button_label() -> &'static str {
-    if cfg!(feature = "ja") {
-        "清算確認"
-    } else {
-        "Settlement Preview"
-    }
-}
+pub const PANEL_REVIEW_BUTTON_LABEL: &str = if cfg!(feature = "ja") {
+    "清算確認"
+} else {
+    "Settlement Preview"
+};
 
-pub fn panel_ledger_button_label() -> &'static str {
-    if cfg!(feature = "ja") {
-        "台帳"
-    } else {
-        "Ledger"
-    }
-}
+pub const PANEL_LEDGER_BUTTON_LABEL: &str = if cfg!(feature = "ja") {
+    "台帳"
+} else {
+    "Ledger"
+};
 
-pub fn panel_void_button_label() -> &'static str {
-    if cfg!(feature = "ja") {
-        "取り消し"
-    } else {
-        "Void"
-    }
-}
+pub const PANEL_VOID_BUTTON_LABEL: &str = if cfg!(feature = "ja") {
+    "取り消し"
+} else {
+    "Void"
+};
 
-pub fn panel_post_retry_message() -> &'static str {
-    if cfg!(feature = "ja") {
-        "パネルを投稿できませんでした。少し待ってからもう一度試してください。続く場合は管理者に連絡してください。"
-    } else {
-        "The panel could not be posted. Please wait a moment and try again. If it keeps happening, contact an administrator."
-    }
-}
+pub const PANEL_POST_RETRY_MESSAGE: &str = if cfg!(feature = "ja") {
+    "パネルを投稿できませんでした。少し待ってからもう一度試してください。続く場合は管理者に連絡してください。"
+} else {
+    "The panel could not be posted. Please wait a moment and try again. If it keeps happening, contact an administrator."
+};
 
-pub fn panel_render_retry_message() -> &'static str {
-    if cfg!(feature = "ja") {
-        "パネルを表示できませんでした。少し待ってからもう一度試してください。続く場合は管理者に連絡してください。"
-    } else {
-        "The panel could not be rendered. Please wait a moment and try again. If it keeps happening, contact an administrator."
-    }
-}
+pub const PANEL_RENDER_RETRY_MESSAGE: &str = if cfg!(feature = "ja") {
+    "パネルを表示できませんでした。少し待ってからもう一度試してください。続く場合は管理者に連絡してください。"
+} else {
+    "The panel could not be rendered. Please wait a moment and try again. If it keeps happening, contact an administrator."
+};
 
-pub fn bot_cannot_operate_parent_channel_message() -> &'static str {
-    if cfg!(feature = "ja") {
-        "ボットが親チャンネルを操作できません。チャンネルまたはロールの権限を管理できる管理者にBotの必要な権限を確認してもらってください。"
-    } else {
-        "The bot cannot operate on the parent channel. Ask an administrator who can manage channel or role permissions to verify the bot's required permissions."
-    }
-}
+pub const BOT_CANNOT_OPERATE_PARENT_CHANNEL_MESSAGE: &str = if cfg!(feature = "ja") {
+    "ボットが親チャンネルを操作できません。チャンネルまたはロールの権限を管理できる管理者にBotの必要な権限を確認してもらってください。"
+} else {
+    "The bot cannot operate on the parent channel. Ask an administrator who can manage channel or role permissions to verify the bot's required permissions."
+};
 
-pub fn duplicate_thread_blocked_message_authoritative() -> &'static str {
-    if cfg!(feature = "ja") {
-        "台帳スレッドが複数見つかりました。スレッド管理権限を持つ管理者に重複する台帳スレッドを削除してもらってください (1つだけ残してください)。"
-    } else {
-        "Multiple ledger threads were found. Ask an administrator with thread management permission to delete the duplicates and leave only one."
-    }
-}
+pub const DUPLICATE_THREAD_BLOCKED_MESSAGE_AUTHORITATIVE: &str = if cfg!(feature = "ja") {
+    "台帳スレッドが複数見つかりました。スレッド管理権限を持つ管理者に重複する台帳スレッドを削除してもらってください (1つだけ残してください)。"
+} else {
+    "Multiple ledger threads were found. Ask an administrator with thread management permission to delete the duplicates and leave only one."
+};
 
-pub fn duplicate_thread_blocked_message_unresolved() -> &'static str {
-    if cfg!(feature = "ja") {
-        "台帳スレッドが複数見つかりました。どれを残すべきか自動では判断できません。スレッド管理権限を持つ運用担当者に重複する台帳スレッドと上記の復旧用の参照を確認してもらってください。"
-    } else {
-        "Multiple ledger threads were found and walicord cannot determine which one to keep automatically. Ask an operator with thread management permission to review the duplicate threads and recovery references above."
-    }
-}
+pub const DUPLICATE_THREAD_BLOCKED_MESSAGE_UNRESOLVED: &str = if cfg!(feature = "ja") {
+    "台帳スレッドが複数見つかりました。どれを残すべきか自動では判断できません。スレッド管理権限を持つ運用担当者に重複する台帳スレッドと上記の復旧用の参照を確認してもらってください。"
+} else {
+    "Multiple ledger threads were found and walicord cannot determine which one to keep automatically. Ask an operator with thread management permission to review the duplicate threads and recovery references above."
+};
 
-pub fn duplicate_thread_recovery_guidance_authoritative() -> &'static str {
-    if cfg!(feature = "ja") {
-        "管理者には残すべき台帳スレッドと上記の復旧用の参照を伝えてください。"
-    } else {
-        "Tell the administrator which ledger thread should be kept and share the recovery references above."
-    }
-}
+pub const DUPLICATE_THREAD_RECOVERY_GUIDANCE_AUTHORITATIVE: &str = if cfg!(feature = "ja") {
+    "管理者には残すべき台帳スレッドと上記の復旧用の参照を伝えてください。"
+} else {
+    "Tell the administrator which ledger thread should be kept and share the recovery references above."
+};
 
-pub fn duplicate_thread_recovery_guidance_unresolved() -> &'static str {
-    if cfg!(feature = "ja") {
-        "運用担当者には対象のチャンネルまたは台帳スレッドと上記の復旧用の参照を伝えてください。"
-    } else {
-        "Tell the operator which channel or ledger thread is affected and share the recovery references above."
-    }
-}
+pub const DUPLICATE_THREAD_RECOVERY_GUIDANCE_UNRESOLVED: &str = if cfg!(feature = "ja") {
+    "運用担当者には対象のチャンネルまたは台帳スレッドと上記の復旧用の参照を伝えてください。"
+} else {
+    "Tell the operator which channel or ledger thread is affected and share the recovery references above."
+};
 
-pub fn damaged_candidate_blocked_message() -> &'static str {
-    if cfg!(feature = "ja") {
-        "台帳スレッドが破損している可能性があります。運用担当者が置き換えてください。"
-    } else {
-        "The ledger thread may be damaged. Ask an operator to replace it."
-    }
-}
+pub const DAMAGED_CANDIDATE_BLOCKED_MESSAGE: &str = if cfg!(feature = "ja") {
+    "台帳スレッドが破損している可能性があります。運用担当者が置き換えてください。"
+} else {
+    "The ledger thread may be damaged. Ask an operator to replace it."
+};
 
-pub fn damaged_candidate_recovery_guidance() -> &'static str {
-    if cfg!(feature = "ja") {
-        "運用担当者には対象のチャンネルまたは台帳スレッド、発生時刻、上記の復旧用の参照を伝えてください。"
-    } else {
-        "Tell the operator which channel or ledger thread is affected, when it happened, and share the recovery reference above."
-    }
-}
+pub const DAMAGED_CANDIDATE_RECOVERY_GUIDANCE: &str = if cfg!(feature = "ja") {
+    "運用担当者には対象のチャンネルまたは台帳スレッド、発生時刻、上記の復旧用の参照を伝えてください。"
+} else {
+    "Tell the operator which channel or ledger thread is affected, when it happened, and share the recovery reference above."
+};
 
 pub fn outside_tracked_channel_message_with_hint(
     tracked_parent_mention: impl std::fmt::Display,
@@ -1796,109 +1640,83 @@ pub fn outside_tracked_channel_message_with_hint(
     })
 }
 
-pub fn outside_tracked_channel_message_generic() -> &'static str {
-    if cfg!(feature = "ja") {
-        "このチャンネルは台帳の対象ではありません。記録用チャンネルで実行してください。わからない場合は管理者に確認してください。"
-    } else {
-        "This channel is not tracked. Run the command in a ledger parent channel. Ask an administrator if you are not sure which channel to use."
-    }
-}
+pub const OUTSIDE_TRACKED_CHANNEL_MESSAGE_GENERIC: &str = if cfg!(feature = "ja") {
+    "このチャンネルは台帳の対象ではありません。記録用チャンネルで実行してください。わからない場合は管理者に確認してください。"
+} else {
+    "This channel is not tracked. Run the command in a ledger parent channel. Ask an administrator if you are not sure which channel to use."
+};
 
-pub fn archived_thread_recovery_message() -> &'static str {
-    if cfg!(feature = "ja") {
-        "台帳スレッドがアーカイブされています。スレッド管理権限を持つ管理者に Discord でスレッドを開いてアーカイブを解除してもらってください。"
-    } else {
-        "The ledger thread is archived. Ask an administrator with thread-management permission to open it in Discord and remove the archive state."
-    }
-}
+pub const ARCHIVED_THREAD_RECOVERY_MESSAGE: &str = if cfg!(feature = "ja") {
+    "台帳スレッドがアーカイブされています。スレッド管理権限を持つ管理者に Discord でスレッドを開いてアーカイブを解除してもらってください。"
+} else {
+    "The ledger thread is archived. Ask an administrator with thread-management permission to open it in Discord and remove the archive state."
+};
 
-pub fn open_parent_channel_label() -> &'static str {
-    if cfg!(feature = "ja") {
-        "親チャンネルを開く"
-    } else {
-        "Open Parent Channel"
-    }
-}
+pub const OPEN_PARENT_CHANNEL_LABEL: &str = if cfg!(feature = "ja") {
+    "親チャンネルを開く"
+} else {
+    "Open Parent Channel"
+};
 
-pub fn open_ledger_thread_label() -> &'static str {
-    if cfg!(feature = "ja") {
-        "台帳スレッドを開く"
-    } else {
-        "Open Ledger Thread"
-    }
-}
+pub const OPEN_LEDGER_THREAD_LABEL: &str = if cfg!(feature = "ja") {
+    "台帳スレッドを開く"
+} else {
+    "Open Ledger Thread"
+};
 
-pub fn ledger_refresh_admin_only_message() -> &'static str {
-    if cfg!(feature = "ja") {
-        "このコマンドは管理者のみ実行できます。必要な場合は管理者に /ledger-refresh の実行を依頼してください。"
-    } else {
-        "Only administrators can run this command. Ask an administrator to run /ledger-refresh if needed."
-    }
-}
+pub const LEDGER_REFRESH_ADMIN_ONLY_MESSAGE: &str = if cfg!(feature = "ja") {
+    "このコマンドは管理者のみ実行できます。必要な場合は管理者に /ledger-refresh の実行を依頼してください。"
+} else {
+    "Only administrators can run this command. Ask an administrator to run /ledger-refresh if needed."
+};
 
-pub fn ledger_refresh_no_thread_message() -> &'static str {
-    if cfg!(feature = "ja") {
-        "台帳スレッドはまだありません。最初の記録時に作成されます。"
-    } else {
-        "There is no ledger thread yet. It will be created when the first record is written."
-    }
-}
+pub const LEDGER_REFRESH_NO_THREAD_MESSAGE: &str = if cfg!(feature = "ja") {
+    "台帳スレッドはまだありません。最初の記録時に作成されます。"
+} else {
+    "There is no ledger thread yet. It will be created when the first record is written."
+};
 
-pub fn ledger_refresh_ready_message() -> &'static str {
-    if cfg!(feature = "ja") {
-        "台帳スレッドの状態を更新しました。利用できます。"
-    } else {
-        "The ledger thread state has been refreshed and is ready to use."
-    }
-}
+pub const LEDGER_REFRESH_READY_MESSAGE: &str = if cfg!(feature = "ja") {
+    "台帳スレッドの状態を更新しました。利用できます。"
+} else {
+    "The ledger thread state has been refreshed and is ready to use."
+};
 
-pub fn ledger_refresh_uncertain_write_message() -> &'static str {
-    if cfg!(feature = "ja") {
-        "前回の書き込み結果を確認中です。新しい書き込みはまだ受け付けられません。しばらく待ってからもう一度確認してください。"
-    } else {
-        "The previous write result is still being checked. New writes cannot be accepted yet. Please wait a moment and check again."
-    }
-}
+pub const LEDGER_REFRESH_UNCERTAIN_WRITE_MESSAGE: &str = if cfg!(feature = "ja") {
+    "前回の書き込み結果を確認中です。新しい書き込みはまだ受け付けられません。しばらく待ってからもう一度確認してください。"
+} else {
+    "The previous write result is still being checked. New writes cannot be accepted yet. Please wait a moment and check again."
+};
 
-pub fn guild_only_command_message() -> &'static str {
-    if cfg!(feature = "ja") {
-        "このコマンドはサーバー内でのみ使えます。"
-    } else {
-        "This command can only be used inside a server."
-    }
-}
+pub const GUILD_ONLY_COMMAND_MESSAGE: &str = if cfg!(feature = "ja") {
+    "このコマンドはサーバー内でのみ使えます。"
+} else {
+    "This command can only be used inside a server."
+};
 
-pub fn expense_session_expired_message() -> &'static str {
-    if cfg!(feature = "ja") {
-        "セッションの有効期限が切れました (10分間操作がない場合に切れます)。/expense からやり直してください。パネルを使う場合は 記録する ボタンから始められます。"
-    } else {
-        "The session has expired (it expires after 10 minutes of inactivity). Start again from /expense. If you use the panel, begin with the Record button."
-    }
-}
+pub const EXPENSE_SESSION_EXPIRED_MESSAGE: &str = if cfg!(feature = "ja") {
+    "セッションの有効期限が切れました (10分間操作がない場合に切れます)。/expense からやり直してください。パネルを使う場合は 記録する ボタンから始められます。"
+} else {
+    "The session has expired (it expires after 10 minutes of inactivity). Start again from /expense. If you use the panel, begin with the Record button."
+};
 
-pub fn expense_session_wrong_actor_message() -> &'static str {
-    if cfg!(feature = "ja") {
-        "この経費入力は他のユーザーのものです。自分で始めるには /expense または 記録する を使ってください。"
-    } else {
-        "This expense draft belongs to another user. Start your own with /expense or Record."
-    }
-}
+pub const EXPENSE_SESSION_WRONG_ACTOR_MESSAGE: &str = if cfg!(feature = "ja") {
+    "この経費入力は他のユーザーのものです。自分で始めるには /expense または 記録する を使ってください。"
+} else {
+    "This expense draft belongs to another user. Start your own with /expense or Record."
+};
 
-pub fn expense_session_replaced_message() -> &'static str {
-    if cfg!(feature = "ja") {
-        "前の経費入力を新しい入力で置き換えました。"
-    } else {
-        "The previous expense draft was replaced with the new input."
-    }
-}
+pub const EXPENSE_SESSION_REPLACED_MESSAGE: &str = if cfg!(feature = "ja") {
+    "前の経費入力を新しい入力で置き換えました。"
+} else {
+    "The previous expense draft was replaced with the new input."
+};
 
-pub fn stale_interaction_message() -> &'static str {
-    if cfg!(feature = "ja") {
-        "この操作は期限切れです。もう一度やり直してください。"
-    } else {
-        "This interaction has expired. Please try again."
-    }
-}
+pub const STALE_INTERACTION_MESSAGE: &str = if cfg!(feature = "ja") {
+    "この操作は期限切れです。もう一度やり直してください。"
+} else {
+    "This interaction has expired. Please try again."
+};
 
 pub fn page_indicator(current: usize, total: usize) -> impl std::fmt::Display {
     std::fmt::from_fn(move |f| {
@@ -1920,469 +1738,353 @@ pub fn page_range_indicator(start: usize, end: usize, total: usize) -> impl std:
     })
 }
 
-pub fn snapshot_notice() -> &'static str {
-    if cfg!(feature = "ja") {
-        "-# この表示は固定スナップショットです。更新するには開き直してください。"
-    } else {
-        "-# This view is a fixed snapshot. Reopen it to refresh."
-    }
-}
+pub const SNAPSHOT_NOTICE: &str = if cfg!(feature = "ja") {
+    "-# この表示は固定スナップショットです。更新するには開き直してください。"
+} else {
+    "-# This view is a fixed snapshot. Reopen it to refresh."
+};
 
-pub fn stale_ledger_page_message() -> &'static str {
-    if cfg!(feature = "ja") {
-        "この表示は期限切れです。/ledger または 台帳 で開き直してください。"
-    } else {
-        "This view has expired. Reopen it with /ledger or the ledger panel."
-    }
-}
+pub const STALE_LEDGER_PAGE_MESSAGE: &str = if cfg!(feature = "ja") {
+    "この表示は期限切れです。/ledger または 台帳 で開き直してください。"
+} else {
+    "This view has expired. Reopen it with /ledger or the ledger panel."
+};
 
-pub fn stale_review_page_message() -> &'static str {
-    if cfg!(feature = "ja") {
-        "この表示は期限切れです。台帳スレッドの /review または親チャンネルの 清算確認 で開き直してください。"
-    } else {
-        "This view has expired. Reopen it from /review in the ledger thread or the parent channel's settlement button."
-    }
-}
+pub const STALE_REVIEW_PAGE_MESSAGE: &str = if cfg!(feature = "ja") {
+    "この表示は期限切れです。台帳スレッドの /review または親チャンネルの 清算確認 で開き直してください。"
+} else {
+    "This view has expired. Reopen it from /review in the ledger thread or the parent channel's settlement button."
+};
 
-pub fn stale_void_page_message() -> &'static str {
-    if cfg!(feature = "ja") {
-        "この表示は期限切れです。/void または 取り消し で開き直してください。"
-    } else {
-        "This view has expired. Reopen it with /void or the Void button."
-    }
-}
+pub const STALE_VOID_PAGE_MESSAGE: &str = if cfg!(feature = "ja") {
+    "この表示は期限切れです。/void または 取り消し で開き直してください。"
+} else {
+    "This view has expired. Reopen it with /void or the Void button."
+};
 
-pub fn void_session_wrong_actor_message() -> &'static str {
-    if cfg!(feature = "ja") {
-        "この取り消し操作は他のユーザーのものです。自分で始めるには /void または 取り消し を使ってください。"
-    } else {
-        "This void operation belongs to another user. Start your own with /void or Void."
-    }
-}
+pub const VOID_SESSION_WRONG_ACTOR_MESSAGE: &str = if cfg!(feature = "ja") {
+    "この取り消し操作は他のユーザーのものです。自分で始めるには /void または 取り消し を使ってください。"
+} else {
+    "This void operation belongs to another user. Start your own with /void or Void."
+};
 
-pub fn void_session_replaced_message() -> &'static str {
-    if cfg!(feature = "ja") {
-        "前の取り消し操作を新しい入力で置き換えました。"
-    } else {
-        "The previous void operation was replaced with the new input."
-    }
-}
+pub const VOID_SESSION_REPLACED_MESSAGE: &str = if cfg!(feature = "ja") {
+    "前の取り消し操作を新しい入力で置き換えました。"
+} else {
+    "The previous void operation was replaced with the new input."
+};
 
-pub fn no_ledger_thread_yet_note() -> &'static str {
-    if cfg!(feature = "ja") {
-        "-# まだ台帳スレッドはありません。最初の記録後に全件確認できます。"
-    } else {
-        "-# There is no ledger thread yet. You can review everything after the first record is written."
-    }
-}
+pub const NO_LEDGER_THREAD_YET_NOTE: &str = if cfg!(feature = "ja") {
+    "-# まだ台帳スレッドはありません。最初の記録後に全件確認できます。"
+} else {
+    "-# There is no ledger thread yet. You can review everything after the first record is written."
+};
 
-pub fn expense_step_title_payer() -> &'static str {
-    if cfg!(feature = "ja") {
-        "1/4 支払者"
-    } else {
-        "1/4 Payer"
-    }
-}
+pub const EXPENSE_STEP_TITLE_PAYER: &str = if cfg!(feature = "ja") {
+    "1/4 支払者"
+} else {
+    "1/4 Payer"
+};
 
-pub fn expense_step_title_participants() -> &'static str {
-    if cfg!(feature = "ja") {
-        "2/4 参加者"
-    } else {
-        "2/4 Participants"
-    }
-}
+pub const EXPENSE_STEP_TITLE_PARTICIPANTS: &str = if cfg!(feature = "ja") {
+    "2/4 参加者"
+} else {
+    "2/4 Participants"
+};
 
-pub fn expense_step_title_weight() -> &'static str {
-    if cfg!(feature = "ja") {
-        "3/4 重み"
-    } else {
-        "3/4 Weights"
-    }
-}
+pub const EXPENSE_STEP_TITLE_WEIGHT: &str = if cfg!(feature = "ja") {
+    "3/4 重み"
+} else {
+    "3/4 Weights"
+};
 
-pub fn expense_step_title_confirm() -> &'static str {
-    if cfg!(feature = "ja") {
-        "4/4 確認"
-    } else {
-        "4/4 Confirm"
-    }
-}
+pub const EXPENSE_STEP_TITLE_CONFIRM: &str = if cfg!(feature = "ja") {
+    "4/4 確認"
+} else {
+    "4/4 Confirm"
+};
 
-pub fn expense_next_label() -> &'static str {
-    if cfg!(feature = "ja") {
-        "次へ"
-    } else {
-        "Next"
-    }
-}
+pub const EXPENSE_NEXT_LABEL: &str = if cfg!(feature = "ja") {
+    "次へ"
+} else {
+    "Next"
+};
 
-pub fn expense_to_weights_label() -> &'static str {
-    if cfg!(feature = "ja") {
-        "重みへ"
-    } else {
-        "To Weights"
-    }
-}
+pub const EXPENSE_TO_WEIGHTS_LABEL: &str = if cfg!(feature = "ja") {
+    "重みへ"
+} else {
+    "To Weights"
+};
 
-pub fn expense_to_confirm_label() -> &'static str {
-    if cfg!(feature = "ja") {
-        "確認へ"
-    } else {
-        "To Confirmation"
-    }
-}
+pub const EXPENSE_TO_CONFIRM_LABEL: &str = if cfg!(feature = "ja") {
+    "確認へ"
+} else {
+    "To Confirmation"
+};
 
-pub fn expense_record_label() -> &'static str {
-    if cfg!(feature = "ja") {
-        "記録する"
-    } else {
-        "Record"
-    }
-}
+pub const EXPENSE_RECORD_LABEL: &str = if cfg!(feature = "ja") {
+    "記録する"
+} else {
+    "Record"
+};
 
-pub fn expense_modal_title() -> &'static str {
-    if cfg!(feature = "ja") {
-        "経費を記録"
-    } else {
-        "Record Expense"
-    }
-}
+pub const EXPENSE_MODAL_TITLE: &str = if cfg!(feature = "ja") {
+    "経費を記録"
+} else {
+    "Record Expense"
+};
 
-pub fn expense_modal_amount_label() -> &'static str {
-    if cfg!(feature = "ja") {
-        "金額"
-    } else {
-        "Amount"
-    }
-}
+pub const EXPENSE_MODAL_AMOUNT_LABEL: &str = if cfg!(feature = "ja") {
+    "金額"
+} else {
+    "Amount"
+};
 
-pub fn expense_modal_note_label() -> &'static str {
-    if cfg!(feature = "ja") {
-        "メモ"
-    } else {
-        "Note"
-    }
-}
+pub const EXPENSE_MODAL_NOTE_LABEL: &str = if cfg!(feature = "ja") {
+    "メモ"
+} else {
+    "Note"
+};
 
-pub fn expense_modal_date_label() -> &'static str {
-    if cfg!(feature = "ja") {
-        "日付"
-    } else {
-        "Date"
-    }
-}
+pub const EXPENSE_MODAL_DATE_LABEL: &str = if cfg!(feature = "ja") {
+    "日付"
+} else {
+    "Date"
+};
 
-pub fn expense_payer_placeholder() -> &'static str {
-    if cfg!(feature = "ja") {
-        "支払者を選択"
-    } else {
-        "Select payer"
-    }
-}
+pub const EXPENSE_PAYER_PLACEHOLDER: &str = if cfg!(feature = "ja") {
+    "支払者を選択"
+} else {
+    "Select payer"
+};
 
-pub fn expense_basic_info_edit_label() -> &'static str {
-    if cfg!(feature = "ja") {
-        "基本情報を修正する"
-    } else {
-        "Edit Basic Info"
-    }
-}
+pub const EXPENSE_BASIC_INFO_EDIT_LABEL: &str = if cfg!(feature = "ja") {
+    "基本情報を修正する"
+} else {
+    "Edit Basic Info"
+};
 
-pub fn expense_weight_edit_label() -> &'static str {
-    if cfg!(feature = "ja") {
-        "重みを編集"
-    } else {
-        "Edit Weights"
-    }
-}
+pub const EXPENSE_WEIGHT_EDIT_LABEL: &str = if cfg!(feature = "ja") {
+    "重みを編集"
+} else {
+    "Edit Weights"
+};
 
-pub fn expense_revise_label() -> &'static str {
-    if cfg!(feature = "ja") {
-        "修正する"
-    } else {
-        "Revise"
-    }
-}
+pub const EXPENSE_REVISE_LABEL: &str = if cfg!(feature = "ja") {
+    "修正する"
+} else {
+    "Revise"
+};
 
-pub fn expense_back_label() -> &'static str {
-    if cfg!(feature = "ja") {
-        "戻る"
-    } else {
-        "Back"
-    }
-}
+pub const EXPENSE_BACK_LABEL: &str = if cfg!(feature = "ja") {
+    "戻る"
+} else {
+    "Back"
+};
 
-pub fn expense_cancel_label() -> &'static str {
-    if cfg!(feature = "ja") {
-        "キャンセル"
-    } else {
-        "Cancel"
-    }
-}
+pub const EXPENSE_CANCEL_LABEL: &str = if cfg!(feature = "ja") {
+    "キャンセル"
+} else {
+    "Cancel"
+};
 
-pub fn expense_cancelled_message() -> &'static str {
-    if cfg!(feature = "ja") {
-        "操作をキャンセルしました。"
-    } else {
-        "The operation was cancelled."
-    }
-}
+pub const EXPENSE_CANCELLED_MESSAGE: &str = if cfg!(feature = "ja") {
+    "操作をキャンセルしました。"
+} else {
+    "The operation was cancelled."
+};
 
-pub fn expense_modal_amount_placeholder() -> &'static str {
-    if cfg!(feature = "ja") {
-        "例: 1500"
-    } else {
-        "Example: 1500"
-    }
-}
+pub const EXPENSE_MODAL_AMOUNT_PLACEHOLDER: &str = if cfg!(feature = "ja") {
+    "例: 1500"
+} else {
+    "Example: 1500"
+};
 
-pub fn expense_modal_note_placeholder() -> &'static str {
-    if cfg!(feature = "ja") {
-        "任意・200文字以内 (メンションや装飾は文字として表示されます)"
-    } else {
-        "Optional, up to 200 characters (mentions and formatting are shown literally)"
-    }
-}
+pub const EXPENSE_MODAL_NOTE_PLACEHOLDER: &str = if cfg!(feature = "ja") {
+    "任意・200文字以内 (メンションや装飾は文字として表示されます)"
+} else {
+    "Optional, up to 200 characters (mentions and formatting are shown literally)"
+};
 
-pub fn expense_modal_date_placeholder() -> &'static str {
-    if cfg!(feature = "ja") {
-        "例: 2026-05-20 / 5/20 / 今日 / 昨日"
-    } else {
-        "Example: 2026-05-20 / 5/20 / today / yesterday"
-    }
-}
+pub const EXPENSE_MODAL_DATE_PLACEHOLDER: &str = if cfg!(feature = "ja") {
+    "例: 2026-05-20 / 5/20 / 今日 / 昨日"
+} else {
+    "Example: 2026-05-20 / 5/20 / today / yesterday"
+};
 
-pub fn participant_source_individual_label() -> &'static str {
-    if cfg!(feature = "ja") {
-        "個別選択"
-    } else {
-        "Choose Individuals"
-    }
-}
+pub const PARTICIPANT_SOURCE_INDIVIDUAL_LABEL: &str = if cfg!(feature = "ja") {
+    "個別選択"
+} else {
+    "Choose Individuals"
+};
 
-pub fn participant_source_role_label() -> &'static str {
-    if cfg!(feature = "ja") {
-        "ロール選択"
-    } else {
-        "Choose Roles"
-    }
-}
+pub const PARTICIPANT_SOURCE_ROLE_LABEL: &str = if cfg!(feature = "ja") {
+    "ロール選択"
+} else {
+    "Choose Roles"
+};
 
-pub fn participant_source_individual_placeholder() -> &'static str {
-    if cfg!(feature = "ja") {
-        "参加者を選択"
-    } else {
-        "Select participants"
-    }
-}
+pub const PARTICIPANT_SOURCE_INDIVIDUAL_PLACEHOLDER: &str = if cfg!(feature = "ja") {
+    "参加者を選択"
+} else {
+    "Select participants"
+};
 
-pub fn participant_source_role_placeholder() -> &'static str {
-    if cfg!(feature = "ja") {
-        "ロールを選択"
-    } else {
-        "Select roles"
-    }
-}
+pub const PARTICIPANT_SOURCE_ROLE_PLACEHOLDER: &str = if cfg!(feature = "ja") {
+    "ロールを選択"
+} else {
+    "Select roles"
+};
 
-pub fn member_search_modal_title() -> &'static str {
-    if cfg!(feature = "ja") {
-        "参加者を検索"
-    } else {
-        "Search Participants"
-    }
-}
+pub const MEMBER_SEARCH_MODAL_TITLE: &str = if cfg!(feature = "ja") {
+    "参加者を検索"
+} else {
+    "Search Participants"
+};
 
-pub fn member_search_input_label() -> &'static str {
-    if cfg!(feature = "ja") {
-        "表示名で検索"
-    } else {
-        "Search by display name"
-    }
-}
+pub const MEMBER_SEARCH_INPUT_LABEL: &str = if cfg!(feature = "ja") {
+    "表示名で検索"
+} else {
+    "Search by display name"
+};
 
-pub fn member_search_placeholder() -> &'static str {
-    if cfg!(feature = "ja") {
-        "例: 田中"
-    } else {
-        "Example: Alice"
-    }
-}
+pub const MEMBER_SEARCH_PLACEHOLDER: &str = if cfg!(feature = "ja") {
+    "例: 田中"
+} else {
+    "Example: Alice"
+};
 
-pub fn role_search_modal_title() -> &'static str {
-    if cfg!(feature = "ja") {
-        "ロールを検索"
-    } else {
-        "Search Roles"
-    }
-}
+pub const ROLE_SEARCH_MODAL_TITLE: &str = if cfg!(feature = "ja") {
+    "ロールを検索"
+} else {
+    "Search Roles"
+};
 
-pub fn role_search_input_label() -> &'static str {
-    if cfg!(feature = "ja") {
-        "ロール名で検索"
-    } else {
-        "Search by role name"
-    }
-}
+pub const ROLE_SEARCH_INPUT_LABEL: &str = if cfg!(feature = "ja") {
+    "ロール名で検索"
+} else {
+    "Search by role name"
+};
 
-pub fn role_search_placeholder() -> &'static str {
-    if cfg!(feature = "ja") {
-        "例: 開発"
-    } else {
-        "Example: Dev"
-    }
-}
+pub const ROLE_SEARCH_PLACEHOLDER: &str = if cfg!(feature = "ja") {
+    "例: 開発"
+} else {
+    "Example: Dev"
+};
 
-pub fn participant_source_members_label() -> &'static str {
-    if cfg!(feature = "ja") {
-        "全メンバー (MEMBERS) を追加"
-    } else {
-        "Add All Members (MEMBERS)"
-    }
-}
+pub const PARTICIPANT_SOURCE_MEMBERS_LABEL: &str = if cfg!(feature = "ja") {
+    "全メンバー (MEMBERS) を追加"
+} else {
+    "Add All Members (MEMBERS)"
+};
 
-pub fn participant_source_clear_roles_label() -> &'static str {
-    if cfg!(feature = "ja") {
-        "ロール選択をクリア"
-    } else {
-        "Clear Role Selection"
-    }
-}
+pub const PARTICIPANT_SOURCE_CLEAR_ROLES_LABEL: &str = if cfg!(feature = "ja") {
+    "ロール選択をクリア"
+} else {
+    "Clear Role Selection"
+};
 
-pub fn participant_source_clear_members_label() -> &'static str {
-    if cfg!(feature = "ja") {
-        "全メンバー (MEMBERS) を外す"
-    } else {
-        "Remove All Members (MEMBERS)"
-    }
-}
+pub const PARTICIPANT_SOURCE_CLEAR_MEMBERS_LABEL: &str = if cfg!(feature = "ja") {
+    "全メンバー (MEMBERS) を外す"
+} else {
+    "Remove All Members (MEMBERS)"
+};
 
-pub fn picker_previous_page_label() -> &'static str {
-    if cfg!(feature = "ja") {
-        "前のページ"
-    } else {
-        "Previous Page"
-    }
-}
+pub const PICKER_PREVIOUS_PAGE_LABEL: &str = if cfg!(feature = "ja") {
+    "前のページ"
+} else {
+    "Previous Page"
+};
 
-pub fn picker_next_page_label() -> &'static str {
-    if cfg!(feature = "ja") {
-        "次のページ"
-    } else {
-        "Next Page"
-    }
-}
+pub const PICKER_NEXT_PAGE_LABEL: &str = if cfg!(feature = "ja") {
+    "次のページ"
+} else {
+    "Next Page"
+};
 
-pub fn picker_search_label() -> &'static str {
-    if cfg!(feature = "ja") {
-        "検索"
-    } else {
-        "Search"
-    }
-}
+pub const PICKER_SEARCH_LABEL: &str = if cfg!(feature = "ja") {
+    "検索"
+} else {
+    "Search"
+};
 
-pub fn payer_clear_label() -> &'static str {
-    if cfg!(feature = "ja") {
-        "支払者をクリア"
-    } else {
-        "Clear Payer"
-    }
-}
+pub const PAYER_CLEAR_LABEL: &str = if cfg!(feature = "ja") {
+    "支払者をクリア"
+} else {
+    "Clear Payer"
+};
 
-pub fn individual_clear_label() -> &'static str {
-    if cfg!(feature = "ja") {
-        "個別選択をクリア"
-    } else {
-        "Clear Individuals"
-    }
-}
+pub const INDIVIDUAL_CLEAR_LABEL: &str = if cfg!(feature = "ja") {
+    "個別選択をクリア"
+} else {
+    "Clear Individuals"
+};
 
-pub fn role_clear_label() -> &'static str {
-    if cfg!(feature = "ja") {
-        "ロール選択をクリア"
-    } else {
-        "Clear Roles"
-    }
-}
+pub const ROLE_CLEAR_LABEL: &str = if cfg!(feature = "ja") {
+    "ロール選択をクリア"
+} else {
+    "Clear Roles"
+};
 
-pub fn search_blank_error() -> &'static str {
-    if cfg!(feature = "ja") {
-        "検索語を入力してください。"
-    } else {
-        "Enter a search term."
-    }
-}
+pub const SEARCH_BLANK_ERROR: &str = if cfg!(feature = "ja") {
+    "検索語を入力してください。"
+} else {
+    "Enter a search term."
+};
 
-pub fn member_search_not_found_error() -> &'static str {
-    if cfg!(feature = "ja") {
-        "見つかりませんでした。"
-    } else {
-        "No match found."
-    }
-}
+pub const MEMBER_SEARCH_NOT_FOUND_ERROR: &str = if cfg!(feature = "ja") {
+    "見つかりませんでした。"
+} else {
+    "No match found."
+};
 
-pub fn role_search_not_found_error() -> &'static str {
-    if cfg!(feature = "ja") {
-        "見つかりませんでした。"
-    } else {
-        "No match found."
-    }
-}
+pub const ROLE_SEARCH_NOT_FOUND_ERROR: &str = if cfg!(feature = "ja") {
+    "見つかりませんでした。"
+} else {
+    "No match found."
+};
 
-pub fn weight_editor_modal_title() -> &'static str {
-    if cfg!(feature = "ja") {
-        "重みを編集"
-    } else {
-        "Edit Weights"
-    }
-}
+pub const WEIGHT_EDITOR_MODAL_TITLE: &str = if cfg!(feature = "ja") {
+    "重みを編集"
+} else {
+    "Edit Weights"
+};
 
-pub fn weight_editor_input_label() -> &'static str {
-    if cfg!(feature = "ja") {
-        "ユーザー名 = 重み"
-    } else {
-        "Username = Weight"
-    }
-}
+pub const WEIGHT_EDITOR_INPUT_LABEL: &str = if cfg!(feature = "ja") {
+    "ユーザー名 = 重み"
+} else {
+    "Username = Weight"
+};
 
-pub fn weight_editor_placeholder() -> &'static str {
-    if cfg!(feature = "ja") {
-        "例: alice = 2"
-    } else {
-        "Example: alice = 2"
-    }
-}
+pub const WEIGHT_EDITOR_PLACEHOLDER: &str = if cfg!(feature = "ja") {
+    "例: alice = 2"
+} else {
+    "Example: alice = 2"
+};
 
-pub fn weight_editor_too_many_message() -> &'static str {
-    if cfg!(feature = "ja") {
-        "重み編集は40人までです。参加者を減らすか均等割りで記録してください。"
-    } else {
-        "Weight editing supports up to 40 participants. Reduce the participants or record with equal weights."
-    }
-}
+pub const WEIGHT_EDITOR_TOO_MANY_MESSAGE: &str = if cfg!(feature = "ja") {
+    "重み編集は40人までです。参加者を減らすか均等割りで記録してください。"
+} else {
+    "Weight editing supports up to 40 participants. Reduce the participants or record with equal weights."
+};
 
-pub fn weight_editor_parse_error() -> &'static str {
-    if cfg!(feature = "ja") {
-        "ユーザー名 = 重み の形式で入力してください。例: alice = 2"
-    } else {
-        "Enter as username = weight. Example: alice = 2"
-    }
-}
+pub const WEIGHT_EDITOR_PARSE_ERROR: &str = if cfg!(feature = "ja") {
+    "ユーザー名 = 重み の形式で入力してください。例: alice = 2"
+} else {
+    "Enter as username = weight. Example: alice = 2"
+};
 
-pub fn weight_editor_reset_label() -> &'static str {
-    if cfg!(feature = "ja") {
-        "均等割りに戻す"
-    } else {
-        "Reset to Equal Weights"
-    }
-}
+pub const WEIGHT_EDITOR_RESET_LABEL: &str = if cfg!(feature = "ja") {
+    "均等割りに戻す"
+} else {
+    "Reset to Equal Weights"
+};
 
-pub fn expense_note_none() -> &'static str {
-    if cfg!(feature = "ja") {
-        "なし"
-    } else {
-        "none"
-    }
-}
+pub const EXPENSE_NOTE_NONE: &str = if cfg!(feature = "ja") {
+    "なし"
+} else {
+    "none"
+};
 
 pub fn expense_search_line(value: impl std::fmt::Display) -> impl std::fmt::Display {
     std::fmt::from_fn(move |f| {
@@ -2394,77 +2096,59 @@ pub fn expense_search_line(value: impl std::fmt::Display) -> impl std::fmt::Disp
     })
 }
 
-pub fn expense_invalid_amount_message() -> &'static str {
-    if cfg!(feature = "ja") {
-        "金額は 1 円以上の整数で入力してください。"
-    } else {
-        "Enter an integer amount of at least 1 JPY."
-    }
-}
+pub const EXPENSE_INVALID_AMOUNT_MESSAGE: &str = if cfg!(feature = "ja") {
+    "金額は 1 円以上の整数で入力してください。"
+} else {
+    "Enter an integer amount of at least 1 JPY."
+};
 
-pub fn expense_invalid_date_message() -> &'static str {
-    if cfg!(feature = "ja") {
-        "日付の形式が正しくありません。例: 今日、昨日、5/1、2026-05-01"
-    } else {
-        "The date format is invalid. Example: today, yesterday, 5/1, 2026-05-01"
-    }
-}
+pub const EXPENSE_INVALID_DATE_MESSAGE: &str = if cfg!(feature = "ja") {
+    "日付の形式が正しくありません。例: 今日、昨日、5/1、2026-05-01"
+} else {
+    "The date format is invalid. Example: today, yesterday, 5/1, 2026-05-01"
+};
 
-pub fn expense_note_too_long_message() -> &'static str {
-    if cfg!(feature = "ja") {
-        "メモは 200 文字以内で入力してください。"
-    } else {
-        "Enter a note of at most 200 characters."
-    }
-}
+pub const EXPENSE_NOTE_TOO_LONG_MESSAGE: &str = if cfg!(feature = "ja") {
+    "メモは 200 文字以内で入力してください。"
+} else {
+    "Enter a note of at most 200 characters."
+};
 
-pub fn expense_modal_retry_button_label() -> &'static str {
-    if cfg!(feature = "ja") {
-        "入力を修正する"
-    } else {
-        "Edit input"
-    }
-}
+pub const EXPENSE_MODAL_RETRY_BUTTON_LABEL: &str = if cfg!(feature = "ja") {
+    "入力を修正する"
+} else {
+    "Edit input"
+};
 
-pub fn expense_recorded_message() -> &'static str {
-    if cfg!(feature = "ja") {
-        "経費を記録しました。"
-    } else {
-        "Recorded the expense."
-    }
-}
+pub const EXPENSE_RECORDED_MESSAGE: &str = if cfg!(feature = "ja") {
+    "経費を記録しました。"
+} else {
+    "Recorded the expense."
+};
 
-pub fn expense_participants_drifted_cue() -> &'static str {
-    if cfg!(feature = "ja") {
-        "対象者が更新されたため確認内容を更新しました。もう一度「記録する」を押してください。"
-    } else {
-        "Participants changed since you confirmed; the page has been refreshed. Press 記録する again to record."
-    }
-}
+pub const EXPENSE_PARTICIPANTS_DRIFTED_CUE: &str = if cfg!(feature = "ja") {
+    "対象者が更新されたため確認内容を更新しました。もう一度「記録する」を押してください。"
+} else {
+    "Participants changed since you confirmed; the page has been refreshed. Press 記録する again to record."
+};
 
-pub fn settlement_recorded_message() -> &'static str {
-    if cfg!(feature = "ja") {
-        "清算を記録しました。"
-    } else {
-        "Recorded the settlement."
-    }
-}
+pub const SETTLEMENT_RECORDED_MESSAGE: &str = if cfg!(feature = "ja") {
+    "清算を記録しました。"
+} else {
+    "Recorded the settlement."
+};
 
-pub fn settlement_preview_expired_or_confirmed_message() -> &'static str {
-    if cfg!(feature = "ja") {
-        "プレビューの期限切れ・確定済み・作り直しにより無効です。必要であれば清算確認からやり直してください。"
-    } else {
-        "The preview is no longer valid (expired, already confirmed, or replaced). Start from the settlement review if needed."
-    }
-}
+pub const SETTLEMENT_PREVIEW_EXPIRED_OR_CONFIRMED_MESSAGE: &str = if cfg!(feature = "ja") {
+    "プレビューの期限切れ・確定済み・作り直しにより無効です。必要であれば清算確認からやり直してください。"
+} else {
+    "The preview is no longer valid (expired, already confirmed, or replaced). Start from the settlement review if needed."
+};
 
-pub fn settlement_no_transfer_message() -> &'static str {
-    if cfg!(feature = "ja") {
-        "この清算プランでは、送金を記録する必要がありません。"
-    } else {
-        "This settlement plan does not require any transfer record."
-    }
-}
+pub const SETTLEMENT_NO_TRANSFER_MESSAGE: &str = if cfg!(feature = "ja") {
+    "この清算プランでは、送金を記録する必要がありません。"
+} else {
+    "This settlement plan does not require any transfer record."
+};
 
 pub fn expense_draft_amount_line(value: impl std::fmt::Display) -> impl std::fmt::Display {
     std::fmt::from_fn(move |f| {
@@ -2558,82 +2242,60 @@ pub fn expense_confirmation_rounded_zero_row(
     })
 }
 
-pub fn void_reselect_label() -> &'static str {
-    if cfg!(feature = "ja") {
-        "選び直す"
-    } else {
-        "Choose Again"
-    }
-}
+pub const VOID_RESELECT_LABEL: &str = if cfg!(feature = "ja") {
+    "選び直す"
+} else {
+    "Choose Again"
+};
 
-pub fn void_next_label() -> &'static str {
-    if cfg!(feature = "ja") {
-        "確認へ"
-    } else {
-        "To Confirmation"
-    }
-}
+pub const VOID_NEXT_LABEL: &str = if cfg!(feature = "ja") {
+    "確認へ"
+} else {
+    "To Confirmation"
+};
 
-pub fn void_cancel_label() -> &'static str {
-    expense_cancel_label()
-}
+pub const VOID_CANCEL_LABEL: &str = EXPENSE_CANCEL_LABEL;
 
-pub fn void_confirm_label() -> &'static str {
-    if cfg!(feature = "ja") {
-        "取り消す"
-    } else {
-        "Void"
-    }
-}
+pub const VOID_CONFIRM_LABEL: &str = if cfg!(feature = "ja") {
+    "取り消す"
+} else {
+    "Void"
+};
 
-pub fn void_cancelled_message() -> &'static str {
-    expense_cancelled_message()
-}
+pub const VOID_CANCELLED_MESSAGE: &str = EXPENSE_CANCELLED_MESSAGE;
 
-pub fn void_in_flight_copy() -> &'static str {
-    if cfg!(feature = "ja") {
-        "取り消し中..."
-    } else {
-        "Voiding..."
-    }
-}
+pub const VOID_IN_FLIGHT_COPY: &str = if cfg!(feature = "ja") {
+    "取り消し中..."
+} else {
+    "Voiding..."
+};
 
-pub fn void_wrong_stage_copy() -> &'static str {
-    if cfg!(feature = "ja") {
-        "取り消しボタンは確認画面から押してください。"
-    } else {
-        "Press the void button from the confirmation screen."
-    }
-}
+pub const VOID_WRONG_STAGE_COPY: &str = if cfg!(feature = "ja") {
+    "取り消しボタンは確認画面から押してください。"
+} else {
+    "Press the void button from the confirmation screen."
+};
 
-pub fn void_confirmation_title() -> &'static str {
-    if cfg!(feature = "ja") {
-        "取り消し確認"
-    } else {
-        "Void Confirmation"
-    }
-}
+pub const VOID_CONFIRMATION_TITLE: &str = if cfg!(feature = "ja") {
+    "取り消し確認"
+} else {
+    "Void Confirmation"
+};
 
-pub fn void_select_placeholder() -> &'static str {
-    if cfg!(feature = "ja") {
-        "取り消し対象を選ぶ"
-    } else {
-        "Select a record to void"
-    }
-}
+pub const VOID_SELECT_PLACEHOLDER: &str = if cfg!(feature = "ja") {
+    "取り消し対象を選ぶ"
+} else {
+    "Select a record to void"
+};
 
-pub fn void_success_title() -> &'static str {
-    if cfg!(feature = "ja") {
-        "取り消し完了"
-    } else {
-        "Void Complete"
-    }
-}
+pub const VOID_SUCCESS_TITLE: &str = if cfg!(feature = "ja") {
+    "取り消し完了"
+} else {
+    "Void Complete"
+};
 
-pub fn void_target_updated_message() -> &'static str {
-    if cfg!(feature = "ja") {
-        "取り消し対象が更新されました。最新の表示でもう一度「取り消す」を押してください。"
-    } else {
-        "The void target changed. Press Void again from the latest view."
-    }
-}
+pub const VOID_TARGET_UPDATED_MESSAGE: &str = if cfg!(feature = "ja") {
+    "取り消し対象が更新されました。最新の表示でもう一度「取り消す」を押してください。"
+} else {
+    "The void target changed. Press Void again from the latest view."
+};

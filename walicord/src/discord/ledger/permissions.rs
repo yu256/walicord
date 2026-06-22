@@ -199,13 +199,13 @@ pub(crate) fn recovery_reference_components(
             thread_link: Some(thread_link),
             ..
         } => vec![CreateActionRow::Buttons(vec![
-            CreateButton::new_link(thread_link.clone()).label(i18n::open_ledger_thread_label()),
+            CreateButton::new_link(thread_link.clone()).label(i18n::OPEN_LEDGER_THREAD_LABEL),
         ])],
         LocatorRecoveryReference::Channel {
             channel_link: Some(channel_link),
             ..
         } => vec![CreateActionRow::Buttons(vec![
-            CreateButton::new_link(channel_link.clone()).label(i18n::open_parent_channel_label()),
+            CreateButton::new_link(channel_link.clone()).label(i18n::OPEN_PARENT_CHANNEL_LABEL),
         ])],
         LocatorRecoveryReference::Ledger {
             thread_link: None, ..
@@ -222,7 +222,7 @@ pub(crate) fn render_parent_channel_access_failure_message(
 ) -> RecoveryOutcomeMessage {
     RecoveryOutcomeMessage::new(
         [
-            i18n::bot_cannot_operate_parent_channel_message().to_owned(),
+            i18n::BOT_CANNOT_OPERATE_PARENT_CHANNEL_MESSAGE.to_owned(),
             recovery_reference.render_line(),
         ]
         .join("\n"),
@@ -236,7 +236,7 @@ pub(crate) fn render_archived_thread_recovery_message(
 ) -> RecoveryOutcomeMessage {
     RecoveryOutcomeMessage::new(
         [
-            i18n::archived_thread_recovery_message().to_owned(),
+            i18n::ARCHIVED_THREAD_RECOVERY_MESSAGE.to_owned(),
             recovery_reference.render_line(),
         ]
         .join("\n"),
@@ -249,12 +249,12 @@ pub(crate) fn render_ledger_refresh_acknowledgement(
 ) -> String {
     match acknowledgement {
         LedgerRefreshAcknowledgement::Unauthorized => {
-            i18n::ledger_refresh_admin_only_message().to_owned()
+            i18n::LEDGER_REFRESH_ADMIN_ONLY_MESSAGE.to_owned()
         }
         LedgerRefreshAcknowledgement::ReadyNoThread => {
-            i18n::ledger_refresh_no_thread_message().to_owned()
+            i18n::LEDGER_REFRESH_NO_THREAD_MESSAGE.to_owned()
         }
-        LedgerRefreshAcknowledgement::Ready => i18n::ledger_refresh_ready_message().to_owned(),
+        LedgerRefreshAcknowledgement::Ready => i18n::LEDGER_REFRESH_READY_MESSAGE.to_owned(),
     }
 }
 
@@ -263,7 +263,7 @@ pub(crate) fn render_ledger_refresh_uncertain_write_message(
 ) -> RecoveryOutcomeMessage {
     RecoveryOutcomeMessage::new(
         [
-            i18n::ledger_refresh_uncertain_write_message().to_owned(),
+            i18n::LEDGER_REFRESH_UNCERTAIN_WRITE_MESSAGE.to_owned(),
             recovery_reference.render_line(),
         ]
         .join("\n"),
@@ -272,7 +272,7 @@ pub(crate) fn render_ledger_refresh_uncertain_write_message(
 }
 
 pub(crate) fn ledger_refresh_command() -> CreateCommand {
-    CreateCommand::new("ledger-refresh").description(i18n::slash_ledger_refresh_description())
+    CreateCommand::new("ledger-refresh").description(i18n::SLASH_LEDGER_REFRESH_DESCRIPTION)
 }
 
 pub(crate) fn missing_runtime_permissions_for(
@@ -403,7 +403,7 @@ mod tests {
         assert_eq!(
             message.body(),
             [
-                i18n::bot_cannot_operate_parent_channel_message().to_owned(),
+                i18n::BOT_CANNOT_OPERATE_PARENT_CHANNEL_MESSAGE.to_owned(),
                 "復旧用の参照: channel:10 | <https://discord.example/channels/1/10>".to_owned(),
             ]
             .join("\n")
@@ -411,7 +411,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(message.components()).expect("components should serialize")[0]["components"]
                 [0]["label"],
-            i18n::open_parent_channel_label()
+            i18n::OPEN_PARENT_CHANNEL_LABEL
         );
     }
 
@@ -422,7 +422,7 @@ mod tests {
         assert_eq!(
             message.body(),
             [
-                i18n::archived_thread_recovery_message().to_owned(),
+                i18n::ARCHIVED_THREAD_RECOVERY_MESSAGE.to_owned(),
                 "復旧用の参照: ledger:abcd1234 | <https://discord.example/channels/1/20>"
                     .to_owned(),
             ]
@@ -431,22 +431,22 @@ mod tests {
         assert_eq!(
             serde_json::to_value(message.components()).expect("components should serialize")[0]["components"]
                 [0]["label"],
-            i18n::open_ledger_thread_label()
+            i18n::OPEN_LEDGER_THREAD_LABEL
         );
     }
 
     #[rstest]
     #[case::unauthorized(
         LedgerRefreshAcknowledgement::Unauthorized,
-        i18n::ledger_refresh_admin_only_message()
+        i18n::LEDGER_REFRESH_ADMIN_ONLY_MESSAGE
     )]
     #[case::no_thread(
         LedgerRefreshAcknowledgement::ReadyNoThread,
-        i18n::ledger_refresh_no_thread_message()
+        i18n::LEDGER_REFRESH_NO_THREAD_MESSAGE
     )]
     #[case::ready(
         LedgerRefreshAcknowledgement::Ready,
-        i18n::ledger_refresh_ready_message()
+        i18n::LEDGER_REFRESH_READY_MESSAGE
     )]
     fn ledger_refresh_acknowledgements_use_fixed_copy(
         #[case] acknowledgement: LedgerRefreshAcknowledgement,
@@ -476,7 +476,7 @@ mod tests {
         assert_eq!(
             message.body(),
             [
-                i18n::ledger_refresh_uncertain_write_message().to_owned(),
+                i18n::LEDGER_REFRESH_UNCERTAIN_WRITE_MESSAGE.to_owned(),
                 expected_reference_line.to_owned(),
             ]
             .join("\n")
@@ -491,7 +491,7 @@ mod tests {
         assert_eq!(command["name"], "ledger-refresh");
         assert_eq!(
             command["description"],
-            i18n::slash_ledger_refresh_description()
+            i18n::SLASH_LEDGER_REFRESH_DESCRIPTION
         );
     }
 }

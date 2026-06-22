@@ -69,7 +69,7 @@ pub(super) fn void_selection_action_rows(
     let n = nonce;
     vec![SurfaceActionRow::Select(SurfaceSelectMenu {
         custom_id: format!("{VOID_PICK_CUSTOM_ID_PREFIX}{n}"),
-        placeholder: Some(i18n::void_select_placeholder().to_owned()),
+        placeholder: Some(i18n::VOID_SELECT_PLACEHOLDER.to_owned()),
         options: candidates
             .iter()
             .map(|view| SurfaceSelectOption {
@@ -91,19 +91,19 @@ pub(super) fn void_confirmation_action_rows(
     let n = nonce;
     vec![SurfaceActionRow::Buttons(vec![
         SurfaceButton::Interactive {
-            label: i18n::void_confirm_label().to_owned(),
+            label: i18n::VOID_CONFIRM_LABEL.to_owned(),
             custom_id: format!("{VOID_CONFIRM_CUSTOM_ID_PREFIX}{n}"),
             style: SurfaceInteractiveButtonStyle::Danger,
             disabled: false,
         },
         SurfaceButton::Interactive {
-            label: i18n::void_reselect_label().to_owned(),
+            label: i18n::VOID_RESELECT_LABEL.to_owned(),
             custom_id: format!("{VOID_RESELECT_CUSTOM_ID_PREFIX}{n}"),
             style: SurfaceInteractiveButtonStyle::Secondary,
             disabled: false,
         },
         SurfaceButton::Interactive {
-            label: i18n::void_cancel_label().to_owned(),
+            label: i18n::VOID_CANCEL_LABEL.to_owned(),
             custom_id: format!("{VOID_CANCEL_CUSTOM_ID_PREFIX}{n}"),
             style: SurfaceInteractiveButtonStyle::Secondary,
             disabled: false,
@@ -163,7 +163,7 @@ pub(super) fn void_confirmation_model(
     nonce: walicord_application::InteractionNonce,
 ) -> Result<VoidSurfaceModel, LedgerRouteError> {
     Ok(VoidSurfaceModel::confirmation(
-        i18n::void_confirmation_title(),
+        i18n::VOID_CONFIRMATION_TITLE,
         VoidConfirmationRecap {
             summary: summary_for_view(target, labels)?,
             total_amount: void_confirmation_total_amount(target.entry())?,

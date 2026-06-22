@@ -31,10 +31,10 @@ pub enum ExpenseStepTitle {
 impl ExpenseStepTitle {
     pub fn render(self) -> &'static str {
         match self {
-            Self::Payer => i18n::expense_step_title_payer(),
-            Self::Participants => i18n::expense_step_title_participants(),
-            Self::Weight => i18n::expense_step_title_weight(),
-            Self::Confirm => i18n::expense_step_title_confirm(),
+            Self::Payer => i18n::EXPENSE_STEP_TITLE_PAYER,
+            Self::Participants => i18n::EXPENSE_STEP_TITLE_PARTICIPANTS,
+            Self::Weight => i18n::EXPENSE_STEP_TITLE_WEIGHT,
+            Self::Confirm => i18n::EXPENSE_STEP_TITLE_CONFIRM,
         }
     }
 }
@@ -55,7 +55,7 @@ impl ExpenseDraftSummary {
                 self.note
                     .as_ref()
                     .map(SafeLiteralText::as_str)
-                    .unwrap_or(i18n::expense_note_none()),
+                    .unwrap_or(i18n::EXPENSE_NOTE_NONE),
             )
             .to_string(),
         ]
@@ -83,7 +83,7 @@ impl PickerPageChrome {
     }
 
     pub fn snapshot_notice(&self) -> String {
-        i18n::snapshot_notice().to_owned()
+        i18n::SNAPSHOT_NOTICE.to_owned()
     }
 }
 
@@ -140,10 +140,10 @@ pub enum ExpenseForwardAction {
 impl ExpenseForwardAction {
     pub fn render(self) -> &'static str {
         match self {
-            Self::Payer => i18n::expense_next_label(),
-            Self::Participants => i18n::expense_to_weights_label(),
-            Self::Weight => i18n::expense_to_confirm_label(),
-            Self::Confirm => i18n::expense_record_label(),
+            Self::Payer => i18n::EXPENSE_NEXT_LABEL,
+            Self::Participants => i18n::EXPENSE_TO_WEIGHTS_LABEL,
+            Self::Weight => i18n::EXPENSE_TO_CONFIRM_LABEL,
+            Self::Confirm => i18n::EXPENSE_RECORD_LABEL,
         }
     }
 }
@@ -184,47 +184,47 @@ pub fn individual_selection_title(count: usize, names: &[SafeLiteralText]) -> St
 #[cfg(test)]
 pub fn payer_picker_utility_labels() -> [&'static str; 4] {
     [
-        i18n::picker_previous_page_label(),
-        i18n::picker_next_page_label(),
-        i18n::picker_search_label(),
-        i18n::payer_clear_label(),
+        i18n::PICKER_PREVIOUS_PAGE_LABEL,
+        i18n::PICKER_NEXT_PAGE_LABEL,
+        i18n::PICKER_SEARCH_LABEL,
+        i18n::PAYER_CLEAR_LABEL,
     ]
 }
 
 #[cfg(test)]
 pub fn individual_picker_utility_labels() -> [&'static str; 4] {
     [
-        i18n::picker_previous_page_label(),
-        i18n::picker_next_page_label(),
-        i18n::picker_search_label(),
-        i18n::individual_clear_label(),
+        i18n::PICKER_PREVIOUS_PAGE_LABEL,
+        i18n::PICKER_NEXT_PAGE_LABEL,
+        i18n::PICKER_SEARCH_LABEL,
+        i18n::INDIVIDUAL_CLEAR_LABEL,
     ]
 }
 
 #[cfg(test)]
 pub fn role_picker_utility_labels() -> [&'static str; 4] {
     [
-        i18n::picker_previous_page_label(),
-        i18n::picker_next_page_label(),
-        i18n::picker_search_label(),
-        i18n::role_clear_label(),
+        i18n::PICKER_PREVIOUS_PAGE_LABEL,
+        i18n::PICKER_NEXT_PAGE_LABEL,
+        i18n::PICKER_SEARCH_LABEL,
+        i18n::ROLE_CLEAR_LABEL,
     ]
 }
 
 #[cfg(test)]
 pub fn participant_source_entry_labels() -> [&'static str; 3] {
     [
-        i18n::participant_source_individual_label(),
-        i18n::participant_source_role_label(),
-        i18n::participant_source_members_label(),
+        i18n::PARTICIPANT_SOURCE_INDIVIDUAL_LABEL,
+        i18n::PARTICIPANT_SOURCE_ROLE_LABEL,
+        i18n::PARTICIPANT_SOURCE_MEMBERS_LABEL,
     ]
 }
 
 #[cfg(test)]
 pub fn participant_source_clear_labels() -> [&'static str; 2] {
     [
-        i18n::participant_source_clear_roles_label(),
-        i18n::participant_source_clear_members_label(),
+        i18n::PARTICIPANT_SOURCE_CLEAR_ROLES_LABEL,
+        i18n::PARTICIPANT_SOURCE_CLEAR_MEMBERS_LABEL,
     ]
 }
 
@@ -462,38 +462,41 @@ mod tests {
 
     #[test]
     fn fixed_picker_copy_routes_through_i18n() {
-        assert_eq!(i18n::weight_editor_reset_label(), "均等割りに戻す");
-        assert_eq!(i18n::search_blank_error(), "検索語を入力してください。");
-        assert_eq!(i18n::member_search_not_found_error(), "見つかりませんでした。");
-        assert_eq!(i18n::role_search_not_found_error(), "見つかりませんでした。");
+        assert_eq!(i18n::WEIGHT_EDITOR_RESET_LABEL, "均等割りに戻す");
+        assert_eq!(i18n::SEARCH_BLANK_ERROR, "検索語を入力してください。");
+        assert_eq!(
+            i18n::MEMBER_SEARCH_NOT_FOUND_ERROR,
+            "見つかりませんでした。"
+        );
+        assert_eq!(i18n::ROLE_SEARCH_NOT_FOUND_ERROR, "見つかりませんでした。");
     }
 
     #[test]
     fn bounded_picker_locale_fields_fit_within_discord_limits() {
         for label in [
-            i18n::picker_previous_page_label(),
-            i18n::picker_next_page_label(),
-            i18n::picker_search_label(),
-            i18n::payer_clear_label(),
-            i18n::individual_clear_label(),
-            i18n::role_clear_label(),
-            i18n::participant_source_individual_label(),
-            i18n::participant_source_role_label(),
-            i18n::participant_source_members_label(),
-            i18n::participant_source_clear_roles_label(),
-            i18n::participant_source_clear_members_label(),
-            i18n::expense_next_label(),
-            i18n::expense_to_weights_label(),
-            i18n::expense_to_confirm_label(),
-            i18n::expense_record_label(),
+            i18n::PICKER_PREVIOUS_PAGE_LABEL,
+            i18n::PICKER_NEXT_PAGE_LABEL,
+            i18n::PICKER_SEARCH_LABEL,
+            i18n::PAYER_CLEAR_LABEL,
+            i18n::INDIVIDUAL_CLEAR_LABEL,
+            i18n::ROLE_CLEAR_LABEL,
+            i18n::PARTICIPANT_SOURCE_INDIVIDUAL_LABEL,
+            i18n::PARTICIPANT_SOURCE_ROLE_LABEL,
+            i18n::PARTICIPANT_SOURCE_MEMBERS_LABEL,
+            i18n::PARTICIPANT_SOURCE_CLEAR_ROLES_LABEL,
+            i18n::PARTICIPANT_SOURCE_CLEAR_MEMBERS_LABEL,
+            i18n::EXPENSE_NEXT_LABEL,
+            i18n::EXPENSE_TO_WEIGHTS_LABEL,
+            i18n::EXPENSE_TO_CONFIRM_LABEL,
+            i18n::EXPENSE_RECORD_LABEL,
         ] {
             validate_button_label(label).expect("button label should fit Discord limits");
         }
 
         for placeholder in [
-            i18n::expense_modal_amount_placeholder(),
-            i18n::expense_modal_note_placeholder(),
-            i18n::expense_modal_date_placeholder(),
+            i18n::EXPENSE_MODAL_AMOUNT_PLACEHOLDER,
+            i18n::EXPENSE_MODAL_NOTE_PLACEHOLDER,
+            i18n::EXPENSE_MODAL_DATE_PLACEHOLDER,
         ] {
             validate_component_placeholder(placeholder)
                 .expect("placeholder should fit Discord limits");

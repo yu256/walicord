@@ -89,34 +89,34 @@ impl CanonicalLoadFailure {
 
     pub fn user_message(self) -> Option<&'static str> {
         match self {
-            Self::VersionMismatch { .. } => Some(i18n::unknown_ledger_format_message()),
+            Self::VersionMismatch { .. } => Some(i18n::UNKNOWN_LEDGER_FORMAT_MESSAGE),
             Self::Fetch { route } => Some(match route {
-                CanonicalLoadRoute::WritePrelude => i18n::ledger_thread_prepare_failed_message(),
+                CanonicalLoadRoute::WritePrelude => i18n::LEDGER_THREAD_PREPARE_FAILED_MESSAGE,
                 CanonicalLoadRoute::Read
                 | CanonicalLoadRoute::Preview
-                | CanonicalLoadRoute::Refresh => i18n::ledger_retryable_load_message(),
+                | CanonicalLoadRoute::Refresh => i18n::LEDGER_RETRYABLE_LOAD_MESSAGE,
             }),
             Self::FetchTimeout { route } => Some(match route {
-                CanonicalLoadRoute::WritePrelude => i18n::ledger_thread_prepare_failed_message(),
+                CanonicalLoadRoute::WritePrelude => i18n::LEDGER_THREAD_PREPARE_FAILED_MESSAGE,
                 CanonicalLoadRoute::Read
                 | CanonicalLoadRoute::Preview
-                | CanonicalLoadRoute::Refresh => i18n::ledger_load_timeout_message(),
+                | CanonicalLoadRoute::Refresh => i18n::LEDGER_LOAD_TIMEOUT_MESSAGE,
             }),
             Self::Permission { route } => Some(match route {
-                CanonicalLoadRoute::WritePrelude => i18n::ledger_thread_prepare_failed_message(),
+                CanonicalLoadRoute::WritePrelude => i18n::LEDGER_THREAD_PREPARE_FAILED_MESSAGE,
                 CanonicalLoadRoute::Read
                 | CanonicalLoadRoute::Preview
-                | CanonicalLoadRoute::Refresh => i18n::ledger_permission_failed_message(),
+                | CanonicalLoadRoute::Refresh => i18n::LEDGER_PERMISSION_FAILED_MESSAGE,
             }),
             Self::AttachmentCardinality { .. }
             | Self::OversizeAttachment { .. }
-            | Self::Decode { .. } => Some(i18n::ledger_attachment_decode_failed_message()),
+            | Self::Decode { .. } => Some(i18n::LEDGER_ATTACHMENT_DECODE_FAILED_MESSAGE),
             Self::WriterLineage { .. }
             | Self::Chain { .. }
             | Self::Structure { .. }
             | Self::Projection { .. }
             | Self::MetadataCoherence { .. }
-            | Self::DisplayDrift { .. } => Some(i18n::ledger_integrity_failed_message()),
+            | Self::DisplayDrift { .. } => Some(i18n::LEDGER_INTEGRITY_FAILED_MESSAGE),
         }
     }
 
@@ -213,7 +213,7 @@ mod tests {
         );
         assert_eq!(
             actual.user_message(),
-            Some(i18n::unknown_ledger_format_message())
+            Some(i18n::UNKNOWN_LEDGER_FORMAT_MESSAGE)
         );
         assert_eq!(
             actual.observability_event(),
@@ -244,7 +244,7 @@ mod tests {
         );
         assert_eq!(
             actual.user_message(),
-            Some(i18n::unknown_ledger_format_message())
+            Some(i18n::UNKNOWN_LEDGER_FORMAT_MESSAGE)
         );
         assert_eq!(
             actual.observability_event(),
@@ -289,15 +289,15 @@ mod tests {
 
         assert_eq!(
             fetch.user_message(),
-            Some(i18n::ledger_retryable_load_message())
+            Some(i18n::LEDGER_RETRYABLE_LOAD_MESSAGE)
         );
         assert_eq!(
             timeout.user_message(),
-            Some(i18n::ledger_load_timeout_message())
+            Some(i18n::LEDGER_LOAD_TIMEOUT_MESSAGE)
         );
         assert_eq!(
             permission.user_message(),
-            Some(i18n::ledger_permission_failed_message())
+            Some(i18n::LEDGER_PERMISSION_FAILED_MESSAGE)
         );
     }
 
@@ -319,7 +319,7 @@ mod tests {
         );
         assert_eq!(
             actual.user_message(),
-            Some(i18n::ledger_attachment_decode_failed_message())
+            Some(i18n::LEDGER_ATTACHMENT_DECODE_FAILED_MESSAGE)
         );
         assert_eq!(actual.observability_event(), None);
     }

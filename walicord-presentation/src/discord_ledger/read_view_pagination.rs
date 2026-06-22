@@ -41,7 +41,7 @@ fn paginate_review_model(model: ReadViewPageModel) -> Vec<ReadViewPageModel> {
             let mut page = model.clone();
             page.page_indicator =
                 Some(i18n::page_indicator(page_index + 1, total_pages).to_string());
-            page.snapshot_notice = Some(i18n::snapshot_notice().to_owned());
+            page.snapshot_notice = Some(i18n::SNAPSHOT_NOTICE.to_owned());
             page.balances = slice_section(&model.balances, page_start, page_end, 0);
             page.transfers =
                 slice_section(&model.transfers, page_start, page_end, model.balances.len());
@@ -74,7 +74,7 @@ fn paginate_ledger_model(model: ReadViewPageModel) -> Vec<ReadViewPageModel> {
             let mut page = model.clone();
             page.page_indicator =
                 Some(i18n::page_indicator(page_index + 1, total_pages).to_string());
-            page.snapshot_notice = Some(i18n::snapshot_notice().to_owned());
+            page.snapshot_notice = Some(i18n::SNAPSHOT_NOTICE.to_owned());
             page.balances = slice_section(&model.balances, page_start, page_end, 0);
             page.participants = slice_section(
                 &model.participants,
@@ -246,7 +246,7 @@ mod tests {
         assert_eq!(pages[0].page_indicator.as_deref(), Some("ページ 1/2"));
         assert_eq!(
             pages[0].snapshot_notice.as_deref(),
-            Some(i18n::snapshot_notice())
+            Some(i18n::SNAPSHOT_NOTICE)
         );
         assert_eq!(pages[0].balances.len(), 18);
         assert_eq!(pages[0].transfers.len(), 2);
@@ -298,7 +298,7 @@ mod tests {
         assert!(pages[1].visible_sections.confirmed);
         assert_eq!(
             pages[1].snapshot_notice.as_deref(),
-            Some(i18n::snapshot_notice())
+            Some(i18n::SNAPSHOT_NOTICE)
         );
     }
 
