@@ -464,14 +464,8 @@ mod tests {
     fn fixed_picker_copy_routes_through_i18n() {
         assert_eq!(i18n::weight_editor_reset_label(), "均等割りに戻す");
         assert_eq!(i18n::search_blank_error(), "検索語を入力してください。");
-        assert_eq!(
-            i18n::member_search_not_found_error(),
-            "見つかりませんでした。表示名の一部でも検索できます。前後のページも確認してください。"
-        );
-        assert_eq!(
-            i18n::role_search_not_found_error(),
-            "見つかりませんでした。ロール名の一部でも検索できます。前後のページも確認してください。"
-        );
+        assert_eq!(i18n::member_search_not_found_error(), "見つかりませんでした。");
+        assert_eq!(i18n::role_search_not_found_error(), "見つかりませんでした。");
     }
 
     #[test]

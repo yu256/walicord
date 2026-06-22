@@ -2386,17 +2386,17 @@ pub fn search_blank_error() -> &'static str {
 
 pub fn member_search_not_found_error() -> &'static str {
     if cfg!(feature = "ja") {
-        "見つかりませんでした。表示名の一部でも検索できます。前後のページも確認してください。"
+        "見つかりませんでした。"
     } else {
-        "No match found. You can search by part of a display name. Also check the pages before and after."
+        "No match found."
     }
 }
 
 pub fn role_search_not_found_error() -> &'static str {
     if cfg!(feature = "ja") {
-        "見つかりませんでした。ロール名の一部でも検索できます。前後のページも確認してください。"
+        "見つかりませんでした。"
     } else {
-        "No match found. You can search by part of a role name. Also check the pages before and after."
+        "No match found."
     }
 }
 
