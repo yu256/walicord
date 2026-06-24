@@ -448,11 +448,11 @@ mod tests {
     fn participant_source_controls_and_forward_labels_use_the_fixed_order() {
         assert_eq!(
             participant_source_entry_labels(),
-            ["個別選択", "ロール選択", "全メンバー (MEMBERS) を追加"]
+            ["個別選択", "ロール選択", "全員を追加"]
         );
         assert_eq!(
             participant_source_clear_labels(),
-            ["ロール選択をクリア", "全メンバー (MEMBERS) を外す"]
+            ["ロール選択をクリア", "全員を外す"]
         );
         assert_eq!(ExpenseForwardAction::Payer.render(), "次へ");
         assert_eq!(ExpenseForwardAction::Participants.render(), "重みへ");

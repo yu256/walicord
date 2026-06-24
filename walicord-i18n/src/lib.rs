@@ -1973,9 +1973,9 @@ pub const ROLE_SEARCH_PLACEHOLDER: &str = if cfg!(feature = "ja") {
 };
 
 pub const PARTICIPANT_SOURCE_MEMBERS_LABEL: &str = if cfg!(feature = "ja") {
-    "全メンバー (MEMBERS) を追加"
+    "全員を追加"
 } else {
-    "Add All Members (MEMBERS)"
+    "Add All Members"
 };
 
 pub const PARTICIPANT_SOURCE_CLEAR_ROLES_LABEL: &str = if cfg!(feature = "ja") {
@@ -1985,9 +1985,9 @@ pub const PARTICIPANT_SOURCE_CLEAR_ROLES_LABEL: &str = if cfg!(feature = "ja") {
 };
 
 pub const PARTICIPANT_SOURCE_CLEAR_MEMBERS_LABEL: &str = if cfg!(feature = "ja") {
-    "全メンバー (MEMBERS) を外す"
+    "全員を外す"
 } else {
-    "Remove All Members (MEMBERS)"
+    "Remove All Members"
 };
 
 pub const PICKER_PREVIOUS_PAGE_LABEL: &str = if cfg!(feature = "ja") {
