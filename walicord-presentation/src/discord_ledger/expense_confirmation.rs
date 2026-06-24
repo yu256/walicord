@@ -6,7 +6,7 @@ use crate::discord_ledger::{
 use smol_str::SmolStr;
 use std::collections::HashMap;
 use walicord_application::{
-    InteractionNonce,
+    SessionNonce,
     ledger::{
         ExpenseAuthoringError, MemberWeight, compute_expense_owed_amounts,
         expense_session::{
@@ -22,7 +22,7 @@ pub fn build_expense_confirmation_surface(
     basic_info: &ExpenseBasicInfo,
     participants: &[ExpenseParticipantSelection],
     display_names: &HashMap<MemberId, SmolStr>,
-    nonce: InteractionNonce,
+    nonce: SessionNonce,
 ) -> Result<ExpenseSurfaceModel, ExpenseAuthoringError> {
     let labels = SurfaceMemberLabels::from_member_names(participants.iter().map(|row| {
         (
@@ -130,7 +130,7 @@ pub fn build_expense_confirmation_surface(
 
 pub fn build_expense_selection_step_surface(
     phase: &ExpenseSelectionPhase,
-    nonce: InteractionNonce,
+    nonce: SessionNonce,
     include_members_group: bool,
 ) -> ExpenseSurfaceModel {
     let ExpenseSelectionPhase::Participants { mode } = phase;

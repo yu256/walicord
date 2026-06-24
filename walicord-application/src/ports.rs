@@ -65,25 +65,25 @@ pub trait SettlementPlanner: Send + Sync {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct InteractionNonce(NonZeroU64);
+pub struct SessionNonce(NonZeroU64);
 
-impl InteractionNonce {
-    pub fn new(value: u64) -> Result<Self, InteractionNonceError> {
+impl SessionNonce {
+    pub fn new(value: u64) -> Result<Self, SessionNonceError> {
         NonZeroU64::new(value)
             .map(Self)
-            .ok_or(InteractionNonceError::Zero)
+            .ok_or(SessionNonceError::Zero)
     }
 }
 
-impl std::fmt::Display for InteractionNonce {
+impl std::fmt::Display for SessionNonce {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         std::fmt::Display::fmt(&self.0.get(), formatter)
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-pub enum InteractionNonceError {
-    #[error("interaction nonce must be non-zero")]
+pub enum SessionNonceError {
+    #[error("session nonce must be non-zero")]
     Zero,
 }
 
@@ -93,8 +93,8 @@ pub trait Clock: Send + Sync {
     fn today_business_date(&self) -> LedgerEffectiveDate;
 }
 
-pub trait NonceProvider: Send + Sync {
-    fn next_interaction_nonce(&self) -> InteractionNonce;
+pub trait SessionNonceProvider: Send + Sync {
+    fn next_session_nonce(&self) -> SessionNonce;
 
     fn next_preview_instance_id(&self) -> PreviewInstanceId;
 }
@@ -115,8 +115,8 @@ mod tests {
     use crate::settle_up::PreviewInstanceIdError;
 
     #[test]
-    fn interaction_nonce_rejects_zero() {
-        assert_eq!(InteractionNonce::new(0), Err(InteractionNonceError::Zero));
+    fn session_nonce_rejects_zero() {
+        assert_eq!(SessionNonce::new(0), Err(SessionNonceError::Zero));
     }
 
     #[test]

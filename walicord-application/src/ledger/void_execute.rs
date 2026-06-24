@@ -214,7 +214,7 @@ where
 mod tests {
     use super::*;
     use crate::{
-        InteractionNonce,
+        SessionNonce,
         ledger::{
             AllocationSnapshot, ExpenseNote, ExpenseRecorded, LedgerEntryId, MemberAmount,
             UnverifiedLedgerStoreEnvelope,
@@ -257,7 +257,7 @@ mod tests {
             crate::ledger::expense_session::VoidSessionKey::new(ledger_id(), MemberId(1)),
             VoidSessionStage::Confirming,
             Some(VoidCandidateSelection::new(target)),
-            InteractionNonce::new(1).unwrap(),
+            SessionNonce::new(1).unwrap(),
             UNIX_EPOCH,
         )
         .unwrap()

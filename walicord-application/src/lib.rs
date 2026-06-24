@@ -24,7 +24,7 @@ pub use model::{
     Command, PersonBalance, Script, ScriptStatement, ScriptStatementWithLine, SettleUpContext,
 };
 pub use ports::{
-    Clock, InteractionNonce, MemberDirectory, NonceProvider, ProgramParser, SettlementPlanner,
+    Clock, MemberDirectory, ProgramParser, SessionNonce, SessionNonceProvider, SettlementPlanner,
 };
 pub use role_visibility::{
     FilteredEmptyRoleParseError, RoleVisibilityDiagnostic, RoleVisibilityDiagnostics,

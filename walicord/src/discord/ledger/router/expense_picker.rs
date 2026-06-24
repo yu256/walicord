@@ -220,7 +220,7 @@ fn expense_picker_items(
 
 pub(super) fn expense_picker_utility_row(
     kind: ExpensePickerKind,
-    nonce: walicord_application::InteractionNonce,
+    nonce: walicord_application::SessionNonce,
     snapshot_id: PickerSnapshotId,
     current_page: usize,
     total_pages: usize,
@@ -287,7 +287,7 @@ fn picker_clear_label(kind: ExpensePickerKind) -> &'static str {
 #[allow(clippy::result_large_err)] // LedgerRouteError is the router-wide error envelope.
 pub(super) fn build_expense_picker_search_modal_response(
     kind: ExpensePickerKind,
-    nonce: walicord_application::InteractionNonce,
+    nonce: walicord_application::SessionNonce,
     snapshot_id: PickerSnapshotId,
 ) -> Result<CreateInteractionResponse, LedgerRouteError> {
     let custom_id =

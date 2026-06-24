@@ -1,5 +1,5 @@
 use crate::{
-    InteractionNonce,
+    SessionNonce,
     ledger::{EntryHash, ExpenseNote, LedgerEffectiveDate, LedgerEntryId, LedgerId},
 };
 use parking_lot::Mutex;
@@ -300,7 +300,7 @@ pub struct VoidSession {
     key: VoidSessionKey,
     stage: VoidSessionStage,
     selection: Option<VoidCandidateSelection>,
-    nonce: InteractionNonce,
+    nonce: SessionNonce,
     last_touched: SystemTime,
 }
 
@@ -309,7 +309,7 @@ impl VoidSession {
         key: VoidSessionKey,
         stage: VoidSessionStage,
         selection: Option<VoidCandidateSelection>,
-        nonce: InteractionNonce,
+        nonce: SessionNonce,
         last_touched: SystemTime,
     ) -> Result<Self, VoidSessionConstructionError> {
         match (&stage, &selection) {
@@ -335,7 +335,7 @@ impl VoidSession {
     pub fn selection(&self) -> Option<&VoidCandidateSelection> {
         self.selection.as_ref()
     }
-    pub fn nonce(&self) -> InteractionNonce {
+    pub fn nonce(&self) -> SessionNonce {
         self.nonce
     }
     pub fn last_touched(&self) -> SystemTime {
@@ -353,12 +353,12 @@ pub struct ModalRetryPreserved {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExpenseModalIntent {
     Create { origin: ExpenseLaunchOrigin },
-    ModifyExisting { session_nonce: InteractionNonce },
+    ModifyExisting { session_nonce: SessionNonce },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExpenseModalSubmissionBinding {
-    binding_nonce: InteractionNonce,
+    binding_nonce: SessionNonce,
     actor_id: MemberId,
     draft_scope_id: ExpenseDraftScopeId,
     intent: ExpenseModalIntent,
@@ -367,7 +367,7 @@ pub struct ExpenseModalSubmissionBinding {
 
 impl ExpenseModalSubmissionBinding {
     pub fn capture(
-        binding_nonce: InteractionNonce,
+        binding_nonce: SessionNonce,
         actor_id: MemberId,
         draft_scope_id: ExpenseDraftScopeId,
         intent: ExpenseModalIntent,
@@ -396,7 +396,7 @@ pub enum ModalSubmissionBindingError {
 }
 
 pub struct ExpenseModalSubmissionBindingStore {
-    by_nonce: Mutex<HashMap<InteractionNonce, ExpenseModalSubmissionBinding>>,
+    by_nonce: Mutex<HashMap<SessionNonce, ExpenseModalSubmissionBinding>>,
 }
 
 impl Default for ExpenseModalSubmissionBindingStore {
@@ -430,7 +430,7 @@ impl ExpenseModalSubmissionBindingStore {
 
     pub fn try_consume(
         &self,
-        binding_nonce: InteractionNonce,
+        binding_nonce: SessionNonce,
         actor_id: MemberId,
         draft_scope_id: ExpenseDraftScopeId,
         now: SystemTime,
@@ -465,7 +465,7 @@ impl ExpenseModalSubmissionBindingStore {
 /// Scope is bound to the expense draft independently of canonical ledger creation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModalRetryBinding {
-    binding_nonce: InteractionNonce,
+    binding_nonce: SessionNonce,
     actor_id: MemberId,
     draft_scope_id: ExpenseDraftScopeId,
     preserved: ModalRetryPreserved,
@@ -497,7 +497,7 @@ pub enum ModalRetryBindingError {
 
 impl ModalRetryBinding {
     pub fn capture(
-        binding_nonce: InteractionNonce,
+        binding_nonce: SessionNonce,
         actor_id: MemberId,
         draft_scope_id: ExpenseDraftScopeId,
         preserved: ModalRetryPreserved,
@@ -515,7 +515,7 @@ impl ModalRetryBinding {
         }
     }
 
-    pub fn binding_nonce(&self) -> InteractionNonce {
+    pub fn binding_nonce(&self) -> SessionNonce {
         self.binding_nonce
     }
     pub fn actor_id(&self) -> MemberId {
@@ -539,7 +539,7 @@ impl ModalRetryBinding {
 }
 
 pub struct ModalRetryBindingStore {
-    by_nonce: Mutex<HashMap<InteractionNonce, ModalRetryBinding>>,
+    by_nonce: Mutex<HashMap<SessionNonce, ModalRetryBinding>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -582,7 +582,7 @@ impl ModalRetryBindingStore {
     /// return [`ModalRetryBindingError::NotFound`].
     pub fn try_consume(
         &self,
-        binding_nonce: InteractionNonce,
+        binding_nonce: SessionNonce,
         actor_id: MemberId,
         draft_scope_id: ExpenseDraftScopeId,
         now: SystemTime,
@@ -705,8 +705,8 @@ pub enum SessionAccessError {
     Expired,
     #[error("session has been superseded: observed {actual:?}, expected {expected:?}")]
     Superseded {
-        actual: InteractionNonce,
-        expected: InteractionNonce,
+        actual: SessionNonce,
+        expected: SessionNonce,
     },
     #[error("session interaction is already in flight")]
     InFlight,
@@ -901,7 +901,7 @@ pub struct VoidSessionStore {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct VoidSessionNonceKey {
     ledger_id: LedgerId,
-    nonce: InteractionNonce,
+    nonce: SessionNonce,
 }
 
 impl VoidSessionNonceKey {
@@ -985,7 +985,7 @@ impl VoidSessionStore {
     pub fn access(
         &self,
         key: VoidSessionKey,
-        observed_nonce: InteractionNonce,
+        observed_nonce: SessionNonce,
         now: SystemTime,
     ) -> Result<Option<VoidSession>, SessionAccessError> {
         let mut guard = self.state.lock();
@@ -1009,7 +1009,7 @@ impl VoidSessionStore {
     pub fn active_owner_by_nonce(
         &self,
         ledger_id: LedgerId,
-        observed_nonce: InteractionNonce,
+        observed_nonce: SessionNonce,
         now: SystemTime,
     ) -> Option<MemberId> {
         let guard = self.state.lock();
@@ -1039,8 +1039,8 @@ mod tests {
     use rstest::rstest;
     use std::time::UNIX_EPOCH;
 
-    fn nonce(value: u64) -> InteractionNonce {
-        InteractionNonce::new(value).expect("nonce non-zero")
+    fn nonce(value: u64) -> SessionNonce {
+        SessionNonce::new(value).expect("nonce non-zero")
     }
 
     #[test]

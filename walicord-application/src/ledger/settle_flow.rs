@@ -3,8 +3,8 @@ use super::preview_store::{
     PreviewStoreTransition,
 };
 use crate::{
-    Clock, NonceProvider, PreviewBindingError, PreviewConfirmationBinding, PreviewInstanceId,
-    SettlementPlanner,
+    Clock, PreviewBindingError, PreviewConfirmationBinding, PreviewInstanceId,
+    SessionNonceProvider, SettlementPlanner,
     ledger::{
         DiscordLedgerSourceDescriptor, EntryHash, LedgerCanonicalEncodeError, LedgerEntry,
         LedgerEntryId, LedgerId, PreviewedSettlementOutcome, SettlementPreviewError,
@@ -62,7 +62,7 @@ pub fn compose_and_store_preview(
     actor_id: MemberId,
     planner: &dyn SettlementPlanner,
     clock: &dyn Clock,
-    nonce_provider: &dyn NonceProvider,
+    nonce_provider: &dyn SessionNonceProvider,
     preview_store: &PreviewStore,
 ) -> Result<PreviewAttemptOutcome, PreviewAttemptError> {
     let outcome = preview_settlement_from_snapshot(snapshot, actor_id, planner, clock)

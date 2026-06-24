@@ -43,7 +43,7 @@ pub(crate) use walicord_application::ledger::{
     preview_store::PreviewStore,
     write_coordinator::{UncertainWriteRegistry, WriteCoordinator},
 };
-pub(crate) use walicord_infrastructure::{ProcessNonceProvider, SystemClock};
+pub(crate) use walicord_infrastructure::{ProcessSessionNonceProvider, SystemClock};
 
 pub(crate) const LEDGER_ATTACHMENT_FILENAME: &str = "walicord-ledger-entry.json";
 

@@ -62,7 +62,7 @@ pub(super) fn void_recovery_reference(
 }
 
 pub(super) fn void_selection_action_rows(
-    nonce: walicord_application::InteractionNonce,
+    nonce: walicord_application::SessionNonce,
     candidates: &[VerifiedLedgerEntryView],
     labels: &SurfaceMemberLabels,
 ) -> Vec<SurfaceActionRow> {
@@ -86,7 +86,7 @@ pub(super) fn void_selection_action_rows(
 }
 
 pub(super) fn void_confirmation_action_rows(
-    nonce: walicord_application::InteractionNonce,
+    nonce: walicord_application::SessionNonce,
 ) -> Vec<SurfaceActionRow> {
     let n = nonce;
     vec![SurfaceActionRow::Buttons(vec![
@@ -160,7 +160,7 @@ pub(super) fn void_confirmation_model(
     target: &VerifiedLedgerEntryView,
     labels: &SurfaceMemberLabels,
     ledger_id: LedgerId,
-    nonce: walicord_application::InteractionNonce,
+    nonce: walicord_application::SessionNonce,
 ) -> Result<VoidSurfaceModel, LedgerRouteError> {
     Ok(VoidSurfaceModel::confirmation(
         i18n::VOID_CONFIRMATION_TITLE,

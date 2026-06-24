@@ -21,7 +21,7 @@ use std::{
 #[cfg(test)]
 use walicord_application::ledger::LedgerEntry;
 use walicord_application::{
-    Clock, NonceProvider, SettlementPlanner,
+    Clock, SessionNonceProvider, SettlementPlanner,
     ledger::{
         DiscordLedgerSourceDescriptor, ExpenseAuthoringError, LedgerId,
         expense_session::{
@@ -200,7 +200,7 @@ impl PickerStateStore {
 
 pub struct LedgerRouterDependencies {
     pub clock: Arc<dyn Clock>,
-    pub nonce_provider: Arc<dyn NonceProvider>,
+    pub nonce_provider: Arc<dyn SessionNonceProvider>,
     pub channels: Arc<ChannelManager>,
     pub roster_fetcher: Arc<dyn RouterRosterFetcher>,
     pub thread_loader: Arc<dyn LedgerThreadLoader>,
@@ -825,11 +825,11 @@ pub struct LedgerRouter {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct ExpenseNonceLookupKey {
     draft_scope_id: ExpenseDraftScopeId,
-    nonce: walicord_application::InteractionNonce,
+    nonce: walicord_application::SessionNonce,
 }
 
 pub struct ExpenseNonceRegistry {
-    by_key: DashMap<ExpenseSessionKey, walicord_application::InteractionNonce>,
+    by_key: DashMap<ExpenseSessionKey, walicord_application::SessionNonce>,
     by_nonce: DashMap<ExpenseNonceLookupKey, MemberId>,
 }
 
@@ -841,7 +841,7 @@ impl ExpenseNonceRegistry {
         }
     }
 
-    pub fn insert(&self, key: ExpenseSessionKey, nonce: walicord_application::InteractionNonce) {
+    pub fn insert(&self, key: ExpenseSessionKey, nonce: walicord_application::SessionNonce) {
         if let Some(old_nonce) = self.by_key.insert(key, nonce) {
             self.by_nonce.remove(&ExpenseNonceLookupKey {
                 draft_scope_id: key.draft_scope_id(),
@@ -866,17 +866,14 @@ impl ExpenseNonceRegistry {
         }
     }
 
-    pub fn get_nonce(
-        &self,
-        key: &ExpenseSessionKey,
-    ) -> Option<walicord_application::InteractionNonce> {
+    pub fn get_nonce(&self, key: &ExpenseSessionKey) -> Option<walicord_application::SessionNonce> {
         self.by_key.get(key).map(|entry| *entry)
     }
 
     pub fn owner_by_nonce(
         &self,
         draft_scope_id: ExpenseDraftScopeId,
-        nonce: walicord_application::InteractionNonce,
+        nonce: walicord_application::SessionNonce,
     ) -> Option<MemberId> {
         self.by_nonce
             .get(&ExpenseNonceLookupKey {
@@ -894,14 +891,36 @@ impl ExpenseNonceRegistry {
     }
 }
 
-struct ExpenseSessionClaim<'a> {
+struct ExpenseSessionReadClaim<'a> {
+    store: &'a ExpenseSessionStore,
+    original: Option<ClaimedExpenseSession>,
+}
+
+impl ExpenseSessionReadClaim<'_> {
+    fn session(&self) -> &ExpenseSession {
+        self.original
+            .as_ref()
+            .expect("claimed expense session remains available until terminal transition")
+            .session()
+    }
+}
+
+impl Drop for ExpenseSessionReadClaim<'_> {
+    fn drop(&mut self) {
+        if let Some(claimed) = self.original.take() {
+            self.store.restore_claim(claimed);
+        }
+    }
+}
+
+struct ExpenseSessionWriteClaim<'a> {
     store: &'a ExpenseSessionStore,
     nonces: &'a ExpenseNonceRegistry,
     picker_states: &'a PickerStateStore,
     original: Option<ClaimedExpenseSession>,
 }
 
-impl ExpenseSessionClaim<'_> {
+impl ExpenseSessionWriteClaim<'_> {
     fn session(&self) -> &ExpenseSession {
         self.original
             .as_ref()
@@ -925,7 +944,7 @@ impl ExpenseSessionClaim<'_> {
     }
 }
 
-impl Drop for ExpenseSessionClaim<'_> {
+impl Drop for ExpenseSessionWriteClaim<'_> {
     fn drop(&mut self) {
         if let Some(claimed) = self.original.take() {
             self.store.restore_claim(claimed);
@@ -1477,7 +1496,7 @@ impl LedgerRouter {
             return Ok(InteractionDispatch::Handled);
         }
 
-        let nonce = self.deps.nonce_provider.next_interaction_nonce();
+        let nonce = self.deps.nonce_provider.next_session_nonce();
         self.store_expense_modal_submission(
             nonce,
             MemberId(command.user.id.get()),
@@ -1739,7 +1758,7 @@ impl LedgerRouter {
         &self,
         ctx: &Context,
         component: &ComponentInteraction,
-        observed_nonce: walicord_application::InteractionNonce,
+        observed_nonce: walicord_application::SessionNonce,
         target: walicord_application::ledger::expense_session::ParticipantSelectionMode,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
         let scope = self
@@ -1750,7 +1769,7 @@ impl LedgerRouter {
             MemberId(component.user.id.get()),
         );
         let Some(mut claim) = self
-            .take_expense_session_or_reply(ctx, component, key, observed_nonce)
+            .write_expense_session_or_reply(ctx, component, key, observed_nonce)
             .await?
         else {
             return Ok(InteractionDispatch::Handled);
@@ -1774,7 +1793,7 @@ impl LedgerRouter {
         &self,
         ctx: &Context,
         component: &ComponentInteraction,
-        observed_nonce: walicord_application::InteractionNonce,
+        observed_nonce: walicord_application::SessionNonce,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
         let scope = self
             .guard_scope(ctx, component.guild_id, component.channel_id, component)
@@ -1784,7 +1803,7 @@ impl LedgerRouter {
             MemberId(component.user.id.get()),
         );
         let Some(mut claim) = self
-            .take_expense_session_or_reply(ctx, component, key, observed_nonce)
+            .write_expense_session_or_reply(ctx, component, key, observed_nonce)
             .await?
         else {
             return Ok(InteractionDispatch::Handled);
@@ -1846,7 +1865,7 @@ impl LedgerRouter {
         &self,
         ctx: &Context,
         component: &ComponentInteraction,
-        observed_nonce: walicord_application::InteractionNonce,
+        observed_nonce: walicord_application::SessionNonce,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
         let scope = self
             .guard_scope(ctx, component.guild_id, component.channel_id, component)
@@ -1856,7 +1875,7 @@ impl LedgerRouter {
         let actor_id = MemberId(component.user.id.get());
         let key = ExpenseSessionKey::new(scope.expense_draft_scope_id(), actor_id);
         let Some(mut claim) = self
-            .take_expense_session_or_reply(ctx, component, key, observed_nonce)
+            .write_expense_session_or_reply(ctx, component, key, observed_nonce)
             .await?
         else {
             return Ok(InteractionDispatch::Handled);
@@ -1968,7 +1987,7 @@ impl LedgerRouter {
         &self,
         ctx: &Context,
         component: &ComponentInteraction,
-        claim: &mut ExpenseSessionClaim<'_>,
+        claim: &mut ExpenseSessionWriteClaim<'_>,
         session: ExpenseSession,
         drift: Vec<ParticipantDrift>,
         refreshed: Vec<ExpenseParticipantSelection>,
@@ -2043,7 +2062,7 @@ impl LedgerRouter {
         &self,
         ctx: &Context,
         component: &ComponentInteraction,
-        observed_nonce: walicord_application::InteractionNonce,
+        observed_nonce: walicord_application::SessionNonce,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
         let scope = self
             .guard_scope(ctx, component.guild_id, component.channel_id, component)
@@ -2053,7 +2072,7 @@ impl LedgerRouter {
             MemberId(component.user.id.get()),
         );
         let Some(mut claim) = self
-            .take_expense_session_or_reply(ctx, component, key, observed_nonce)
+            .write_expense_session_or_reply(ctx, component, key, observed_nonce)
             .await?
         else {
             return Ok(InteractionDispatch::Handled);
@@ -2072,7 +2091,7 @@ impl LedgerRouter {
         &self,
         ctx: &Context,
         component: &ComponentInteraction,
-        observed_nonce: walicord_application::InteractionNonce,
+        observed_nonce: walicord_application::SessionNonce,
         expected_snapshot: PickerSnapshotId,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
         let scope = self
@@ -2083,7 +2102,7 @@ impl LedgerRouter {
             MemberId(component.user.id.get()),
         );
         let Some(mut claim) = self
-            .take_expense_session_or_reply(ctx, component, key, observed_nonce)
+            .write_expense_session_or_reply(ctx, component, key, observed_nonce)
             .await?
         else {
             return Ok(InteractionDispatch::Handled);
@@ -2110,7 +2129,7 @@ impl LedgerRouter {
         &self,
         ctx: &Context,
         component: &ComponentInteraction,
-        observed_nonce: walicord_application::InteractionNonce,
+        observed_nonce: walicord_application::SessionNonce,
         expected_snapshot: PickerSnapshotId,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
         let scope = self
@@ -2121,7 +2140,7 @@ impl LedgerRouter {
             MemberId(component.user.id.get()),
         );
         let Some(mut claim) = self
-            .take_expense_session_or_reply(ctx, component, key, observed_nonce)
+            .write_expense_session_or_reply(ctx, component, key, observed_nonce)
             .await?
         else {
             return Ok(InteractionDispatch::Handled);
@@ -2166,7 +2185,7 @@ impl LedgerRouter {
         &self,
         ctx: &Context,
         component: &ComponentInteraction,
-        observed_nonce: walicord_application::InteractionNonce,
+        observed_nonce: walicord_application::SessionNonce,
         expected_snapshot: PickerSnapshotId,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
         let scope = self
@@ -2177,7 +2196,7 @@ impl LedgerRouter {
             MemberId(component.user.id.get()),
         );
         let Some(mut claim) = self
-            .take_expense_session_or_reply(ctx, component, key, observed_nonce)
+            .write_expense_session_or_reply(ctx, component, key, observed_nonce)
             .await?
         else {
             return Ok(InteractionDispatch::Handled);
@@ -2217,7 +2236,7 @@ impl LedgerRouter {
         &self,
         ctx: &Context,
         component: &ComponentInteraction,
-        observed_nonce: walicord_application::InteractionNonce,
+        observed_nonce: walicord_application::SessionNonce,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
         let scope = self
             .guard_scope(ctx, component.guild_id, component.channel_id, component)
@@ -2227,7 +2246,7 @@ impl LedgerRouter {
             MemberId(component.user.id.get()),
         );
         let Some(mut claim) = self
-            .take_expense_session_or_reply(ctx, component, key, observed_nonce)
+            .write_expense_session_or_reply(ctx, component, key, observed_nonce)
             .await?
         else {
             return Ok(InteractionDispatch::Handled);
@@ -2297,7 +2316,7 @@ impl LedgerRouter {
         scope: LedgerInteractionScope,
         session: &ExpenseSession,
         phase: &ExpenseSelectionPhase,
-        nonce: walicord_application::InteractionNonce,
+        nonce: walicord_application::SessionNonce,
     ) -> Result<ExpensePickerRenderParts, LedgerRouteError> {
         let kind = picker_kind_for_phase(phase);
         let page = self
@@ -2391,7 +2410,7 @@ impl LedgerRouter {
         &self,
         ctx: &Context,
         component: &ComponentInteraction,
-        observed_nonce: walicord_application::InteractionNonce,
+        observed_nonce: walicord_application::SessionNonce,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
         let scope = self
             .guard_scope(ctx, component.guild_id, component.channel_id, component)
@@ -2401,7 +2420,7 @@ impl LedgerRouter {
             MemberId(component.user.id.get()),
         );
         let Some(claim) = self
-            .take_expense_session_or_reply(ctx, component, key, observed_nonce)
+            .read_expense_session_or_reply(ctx, component, key, observed_nonce)
             .await?
         else {
             return Ok(InteractionDispatch::Handled);
@@ -2416,7 +2435,7 @@ impl LedgerRouter {
                 raw_date: Some(info.effective_date.to_string()),
             })
             .unwrap_or_default();
-        let nonce = self.deps.nonce_provider.next_interaction_nonce();
+        let nonce = self.deps.nonce_provider.next_session_nonce();
         self.store_expense_modal_submission(
             nonce,
             MemberId(component.user.id.get()),
@@ -2440,7 +2459,7 @@ impl LedgerRouter {
         &self,
         ctx: &Context,
         component: &ComponentInteraction,
-        observed_nonce: walicord_application::InteractionNonce,
+        observed_nonce: walicord_application::SessionNonce,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
         let scope = self
             .guard_scope(ctx, component.guild_id, component.channel_id, component)
@@ -2450,7 +2469,7 @@ impl LedgerRouter {
             MemberId(component.user.id.get()),
         );
         let Some(claim) = self
-            .take_expense_session_or_reply(ctx, component, key, observed_nonce)
+            .read_expense_session_or_reply(ctx, component, key, observed_nonce)
             .await?
         else {
             return Ok(InteractionDispatch::Handled);
@@ -2503,7 +2522,7 @@ impl LedgerRouter {
         component: &ComponentInteraction,
         kind: ExpensePickerKind,
         direction: PickerPageDirection,
-        observed_nonce: walicord_application::InteractionNonce,
+        observed_nonce: walicord_application::SessionNonce,
         expected_snapshot: PickerSnapshotId,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
         let scope = self
@@ -2514,7 +2533,7 @@ impl LedgerRouter {
             MemberId(component.user.id.get()),
         );
         let Some(claim) = self
-            .take_expense_session_or_reply(ctx, component, key, observed_nonce)
+            .read_expense_session_or_reply(ctx, component, key, observed_nonce)
             .await?
         else {
             return Ok(InteractionDispatch::Handled);
@@ -2551,7 +2570,7 @@ impl LedgerRouter {
         ctx: &Context,
         component: &ComponentInteraction,
         kind: ExpensePickerKind,
-        observed_nonce: walicord_application::InteractionNonce,
+        observed_nonce: walicord_application::SessionNonce,
         expected_snapshot: PickerSnapshotId,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
         let scope = self
@@ -2562,7 +2581,7 @@ impl LedgerRouter {
             MemberId(component.user.id.get()),
         );
         let Some(mut claim) = self
-            .take_expense_session_or_reply(ctx, component, key, observed_nonce)
+            .write_expense_session_or_reply(ctx, component, key, observed_nonce)
             .await?
         else {
             return Ok(InteractionDispatch::Handled);
@@ -2607,7 +2626,7 @@ impl LedgerRouter {
         ctx: &Context,
         component: &ComponentInteraction,
         kind: ExpensePickerKind,
-        observed_nonce: walicord_application::InteractionNonce,
+        observed_nonce: walicord_application::SessionNonce,
         expected_snapshot: PickerSnapshotId,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
         let scope = self
@@ -2618,7 +2637,7 @@ impl LedgerRouter {
             MemberId(component.user.id.get()),
         );
         let Some(claim) = self
-            .take_expense_session_or_reply(ctx, component, key, observed_nonce)
+            .read_expense_session_or_reply(ctx, component, key, observed_nonce)
             .await?
         else {
             return Ok(InteractionDispatch::Handled);
@@ -2640,7 +2659,7 @@ impl LedgerRouter {
 
     fn store_expense_modal_submission(
         &self,
-        binding_nonce: walicord_application::InteractionNonce,
+        binding_nonce: walicord_application::SessionNonce,
         actor_id: MemberId,
         draft_scope_id: ExpenseDraftScopeId,
         intent: ExpenseModalIntent,
@@ -2660,7 +2679,7 @@ impl LedgerRouter {
         &self,
         ctx: &Context,
         component: &ComponentInteraction,
-        binding_nonce: walicord_application::InteractionNonce,
+        binding_nonce: walicord_application::SessionNonce,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
         let scope = self
             .guard_scope(ctx, component.guild_id, component.channel_id, component)
@@ -2675,7 +2694,7 @@ impl LedgerRouter {
             Ok(retry) => retry,
             Err(_) => return self.respond_expense_session_missing(ctx, component).await,
         };
-        let modal_nonce = self.deps.nonce_provider.next_interaction_nonce();
+        let modal_nonce = self.deps.nonce_provider.next_session_nonce();
         self.store_expense_modal_submission(
             modal_nonce,
             actor,
@@ -2740,13 +2759,47 @@ impl LedgerRouter {
         .await
     }
 
-    async fn take_expense_session_or_reply(
+    async fn read_expense_session_or_reply(
         &self,
         ctx: &Context,
         component: &ComponentInteraction,
         key: ExpenseSessionKey,
-        observed_nonce: walicord_application::InteractionNonce,
-    ) -> Result<Option<ExpenseSessionClaim<'_>>, LedgerRouteError> {
+        observed_nonce: walicord_application::SessionNonce,
+    ) -> Result<Option<ExpenseSessionReadClaim<'_>>, LedgerRouteError> {
+        let session = self
+            .claim_expense_session_or_reply(ctx, component, key, observed_nonce)
+            .await?;
+        Ok(session.map(|s| ExpenseSessionReadClaim {
+            store: self.deps.expense_sessions.as_ref(),
+            original: Some(s),
+        }))
+    }
+
+    async fn write_expense_session_or_reply(
+        &self,
+        ctx: &Context,
+        component: &ComponentInteraction,
+        key: ExpenseSessionKey,
+        observed_nonce: walicord_application::SessionNonce,
+    ) -> Result<Option<ExpenseSessionWriteClaim<'_>>, LedgerRouteError> {
+        let session = self
+            .claim_expense_session_or_reply(ctx, component, key, observed_nonce)
+            .await?;
+        Ok(session.map(|s| ExpenseSessionWriteClaim {
+            store: self.deps.expense_sessions.as_ref(),
+            nonces: self.deps.expense_nonces.as_ref(),
+            picker_states: self.deps.picker_states.as_ref(),
+            original: Some(s),
+        }))
+    }
+
+    async fn claim_expense_session_or_reply(
+        &self,
+        ctx: &Context,
+        component: &ComponentInteraction,
+        key: ExpenseSessionKey,
+        observed_nonce: walicord_application::SessionNonce,
+    ) -> Result<Option<ClaimedExpenseSession>, LedgerRouteError> {
         let now = self.deps.clock.now();
         if let Some(err) = self.check_expense_nonce(key, observed_nonce) {
             let owner = self.expense_session_nonce_owner(key, observed_nonce, now);
@@ -2760,12 +2813,7 @@ impl LedgerRouter {
             return Ok(None);
         }
         match self.deps.expense_sessions.claim(key, now) {
-            Ok(Some(session)) => Ok(Some(ExpenseSessionClaim {
-                store: self.deps.expense_sessions.as_ref(),
-                nonces: self.deps.expense_nonces.as_ref(),
-                picker_states: self.deps.picker_states.as_ref(),
-                original: Some(session),
-            })),
+            Ok(Some(session)) => Ok(Some(session)),
             Ok(None) | Err(SessionAccessError::Expired | SessionAccessError::InFlight) => {
                 self.deps.picker_states.remove_all_for_session(key);
                 let owner = self.expense_session_nonce_owner(key, observed_nonce, now);
@@ -2784,7 +2832,7 @@ impl LedgerRouter {
     fn check_expense_nonce(
         &self,
         key: ExpenseSessionKey,
-        observed_nonce: walicord_application::InteractionNonce,
+        observed_nonce: walicord_application::SessionNonce,
     ) -> Option<SessionAccessError> {
         let stored = self.deps.expense_nonces.get_nonce(&key)?;
         if stored != observed_nonce {
@@ -2801,7 +2849,7 @@ impl LedgerRouter {
     fn require_expense_nonce(
         &self,
         key: ExpenseSessionKey,
-    ) -> Result<walicord_application::InteractionNonce, LedgerRouteError> {
+    ) -> Result<walicord_application::SessionNonce, LedgerRouteError> {
         self.deps
             .expense_nonces
             .get_nonce(&key)
@@ -2811,7 +2859,7 @@ impl LedgerRouter {
     fn expense_session_nonce_owner(
         &self,
         key: ExpenseSessionKey,
-        observed_nonce: walicord_application::InteractionNonce,
+        observed_nonce: walicord_application::SessionNonce,
         now: std::time::SystemTime,
     ) -> Option<MemberId> {
         let actor_id = self
@@ -2921,7 +2969,7 @@ impl LedgerRouter {
         &self,
         ctx: &Context,
         component: &ComponentInteraction,
-        observed_nonce: walicord_application::InteractionNonce,
+        observed_nonce: walicord_application::SessionNonce,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
         let scope = self
             .guard_scope(ctx, component.guild_id, component.channel_id, component)
@@ -2931,7 +2979,7 @@ impl LedgerRouter {
             MemberId(component.user.id.get()),
         );
         let Some(mut claim) = self
-            .take_expense_session_or_reply(ctx, component, key, observed_nonce)
+            .write_expense_session_or_reply(ctx, component, key, observed_nonce)
             .await?
         else {
             return Ok(InteractionDispatch::Handled);
@@ -2997,7 +3045,7 @@ impl LedgerRouter {
         &self,
         ctx: &Context,
         modal: &ModalInteraction,
-        observed_nonce: walicord_application::InteractionNonce,
+        observed_nonce: walicord_application::SessionNonce,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
         let scope = self
             .guard_scope(ctx, modal.guild_id, modal.channel_id, modal)
@@ -3016,7 +3064,7 @@ impl LedgerRouter {
             }
             Err(err) => return Err(err.into()),
         };
-        let mut claim = ExpenseSessionClaim {
+        let mut claim = ExpenseSessionWriteClaim {
             store: self.deps.expense_sessions.as_ref(),
             nonces: self.deps.expense_nonces.as_ref(),
             picker_states: self.deps.picker_states.as_ref(),
@@ -3094,7 +3142,7 @@ impl LedgerRouter {
         ctx: &Context,
         modal: &ModalInteraction,
         kind: ExpensePickerKind,
-        observed_nonce: walicord_application::InteractionNonce,
+        observed_nonce: walicord_application::SessionNonce,
         expected_snapshot: PickerSnapshotId,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
         let scope = self
@@ -3115,7 +3163,7 @@ impl LedgerRouter {
         else {
             return self.reply_stale_modal(ctx, modal).await;
         };
-        let claim = ExpenseSessionClaim {
+        let claim = ExpenseSessionWriteClaim {
             store: self.deps.expense_sessions.as_ref(),
             nonces: self.deps.expense_nonces.as_ref(),
             picker_states: self.deps.picker_states.as_ref(),
@@ -3204,7 +3252,7 @@ impl LedgerRouter {
         &self,
         ctx: &Context,
         modal: &ModalInteraction,
-        binding_nonce: walicord_application::InteractionNonce,
+        binding_nonce: walicord_application::SessionNonce,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
         let scope = self
             .guard_scope(ctx, modal.guild_id, modal.channel_id, modal)
@@ -3287,7 +3335,7 @@ impl LedgerRouter {
                         else {
                             return self.reply_stale_modal(ctx, modal).await;
                         };
-                        let mut claim = ExpenseSessionClaim {
+                        let mut claim = ExpenseSessionWriteClaim {
                             store: self.deps.expense_sessions.as_ref(),
                             nonces: self.deps.expense_nonces.as_ref(),
                             picker_states: self.deps.picker_states.as_ref(),
@@ -3322,7 +3370,7 @@ impl LedgerRouter {
         // Reserve a fresh retry-binding nonce, persist it, then re-open the modal with
         // the actor's last raw values so they can correct the offending field
         // (criteria 124-125, 145, 205).
-        let binding_nonce = self.deps.nonce_provider.next_interaction_nonce();
+        let binding_nonce = self.deps.nonce_provider.next_session_nonce();
         let actor = MemberId(modal.user.id.get());
         let binding = ModalRetryBinding::capture(
             binding_nonce,
@@ -3364,7 +3412,7 @@ impl LedgerRouter {
         modal: &ModalInteraction,
         scope: LedgerInteractionScope,
         session: &ExpenseSession,
-        nonce: walicord_application::InteractionNonce,
+        nonce: walicord_application::SessionNonce,
         notice: Option<&'static str>,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
         let initial_phase = ExpenseSelectionPhase::participants(
@@ -3632,7 +3680,7 @@ impl LedgerRouter {
                 )
                 .await;
         }
-        let nonce = self.deps.nonce_provider.next_interaction_nonce();
+        let nonce = self.deps.nonce_provider.next_session_nonce();
         self.store_expense_modal_submission(
             nonce,
             MemberId(component.user.id.get()),
@@ -3786,7 +3834,7 @@ impl LedgerRouter {
             paginate_read_view_model(model)
         };
 
-        let nonce = self.deps.nonce_provider.next_interaction_nonce();
+        let nonce = self.deps.nonce_provider.next_session_nonce();
         let actor_id = MemberId(interaction.user_id().get());
         let session = ReadViewSession::new(
             ReadViewSessionKey {
@@ -3982,7 +4030,7 @@ impl LedgerRouter {
             }
         };
 
-        let nonce = self.deps.nonce_provider.next_interaction_nonce();
+        let nonce = self.deps.nonce_provider.next_session_nonce();
         let actor_id = MemberId(interaction.user_id().get());
         self.deps.read_view_sessions.replace(ReadViewSession::new(
             ReadViewSessionKey {
@@ -4432,7 +4480,7 @@ impl LedgerRouter {
         &self,
         ctx: &Context,
         component: &ComponentInteraction,
-        nonce: walicord_application::InteractionNonce,
+        nonce: walicord_application::SessionNonce,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
         let scope = self
             .guard_scope(ctx, component.guild_id, component.channel_id, component)
@@ -4516,7 +4564,7 @@ impl LedgerRouter {
         &self,
         ctx: &Context,
         component: &ComponentInteraction,
-        nonce: walicord_application::InteractionNonce,
+        nonce: walicord_application::SessionNonce,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
         let scope = self
             .guard_scope(ctx, component.guild_id, component.channel_id, component)
@@ -4546,7 +4594,7 @@ impl LedgerRouter {
         &self,
         ctx: &Context,
         component: &ComponentInteraction,
-        nonce: walicord_application::InteractionNonce,
+        nonce: walicord_application::SessionNonce,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
         let scope = self
             .guard_scope(ctx, component.guild_id, component.channel_id, component)
@@ -4574,7 +4622,7 @@ impl LedgerRouter {
         &self,
         ctx: &Context,
         component: &ComponentInteraction,
-        nonce: walicord_application::InteractionNonce,
+        nonce: walicord_application::SessionNonce,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
         let scope = self
             .guard_scope(ctx, component.guild_id, component.channel_id, component)
@@ -4753,7 +4801,7 @@ impl LedgerRouter {
         ctx: &Context,
         component: &ComponentInteraction,
         key: VoidSessionKey,
-        nonce: walicord_application::InteractionNonce,
+        nonce: walicord_application::SessionNonce,
     ) -> Result<Option<VoidSession>, LedgerRouteError> {
         let now = self.deps.clock.now();
         match self.deps.void_sessions.access(key, nonce, now) {
@@ -4874,7 +4922,7 @@ impl LedgerRouter {
         &self,
         ctx: &Context,
         component: &ComponentInteraction,
-        nonce: walicord_application::InteractionNonce,
+        nonce: walicord_application::SessionNonce,
         direction: ReadViewNavigation,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
         let scope = self
@@ -4996,7 +5044,7 @@ fn review_route_guidance_lines_with_replacement_notice() -> Vec<String> {
 }
 
 pub(super) fn read_view_navigation_row(
-    nonce: walicord_application::InteractionNonce,
+    nonce: walicord_application::SessionNonce,
     current_index: usize,
     total_pages: usize,
 ) -> serenity::all::CreateActionRow {
@@ -5015,7 +5063,7 @@ pub(super) fn read_view_navigation_row(
 }
 
 fn expense_modal_retry_row(
-    nonce: walicord_application::InteractionNonce,
+    nonce: walicord_application::SessionNonce,
 ) -> serenity::all::CreateActionRow {
     use serenity::all::{ButtonStyle, CreateActionRow, CreateButton};
 
@@ -5185,16 +5233,16 @@ fn parse_component_selection_values(
         .collect()
 }
 /// Parse a session-scoped button custom_id of the form `{prefix}{nonce}` and return
-/// the carried [`InteractionNonce`] when the prefix matches. Returns `None` on prefix
+/// the carried [`SessionNonce`] when the prefix matches. Returns `None` on prefix
 /// mismatch or on a non-numeric / zero nonce — both treated as "not for this route"
 /// by the caller.
 pub(crate) fn parse_expense_session_button_nonce(
     custom_id: &str,
     prefix: &str,
-) -> Option<walicord_application::InteractionNonce> {
+) -> Option<walicord_application::SessionNonce> {
     let remainder = custom_id.strip_prefix(prefix)?;
     let value = remainder.parse::<u64>().ok()?;
-    walicord_application::InteractionNonce::new(value).ok()
+    walicord_application::SessionNonce::new(value).ok()
 }
 
 #[cfg(test)]
@@ -5206,7 +5254,7 @@ mod tests {
         time::UNIX_EPOCH,
     };
     use walicord_application::{
-        InteractionNonce, PreviewInstanceId,
+        PreviewInstanceId, SessionNonce,
         ledger::{
             AllocationSnapshot, ExpenseRecorded, LedgerEntryId, MemberAmount,
             NormalizedSettlementPlanRecorded, expense_session::ExpenseSelectionState,
@@ -5227,8 +5275,8 @@ mod tests {
         }
     }
 
-    fn nonce(value: u64) -> InteractionNonce {
-        InteractionNonce::new(value).expect("nonce should be non-zero")
+    fn nonce(value: u64) -> SessionNonce {
+        SessionNonce::new(value).expect("nonce should be non-zero")
     }
 
     #[rstest]
@@ -5326,7 +5374,7 @@ mod tests {
             .expect("session access should succeed")
             .expect("session should exist");
 
-        drop(ExpenseSessionClaim {
+        drop(ExpenseSessionWriteClaim {
             store: &store,
             nonces: &test_nonces,
             picker_states: &test_picker_states,
@@ -5350,7 +5398,7 @@ mod tests {
             .claim(session.key(), UNIX_EPOCH)
             .expect("session access should succeed")
             .expect("session should exist");
-        let mut claim = ExpenseSessionClaim {
+        let mut claim = ExpenseSessionWriteClaim {
             store: &store,
             nonces: &test_nonces,
             picker_states: &test_picker_states,
@@ -5375,7 +5423,7 @@ mod tests {
             .claim(session.key(), UNIX_EPOCH)
             .expect("session access should succeed")
             .expect("session should exist");
-        let mut claim = ExpenseSessionClaim {
+        let mut claim = ExpenseSessionWriteClaim {
             store: &store,
             nonces: &test_nonces,
             picker_states: &test_picker_states,

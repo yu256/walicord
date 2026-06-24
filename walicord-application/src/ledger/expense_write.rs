@@ -208,7 +208,7 @@ pub fn build_canonical_envelope(
 mod tests {
     use super::*;
     use crate::{
-        Clock, InteractionNonce, NonceProvider,
+        Clock, SessionNonce, SessionNonceProvider,
         ledger::{
             LedgerEffectiveDate,
             expense_flow::{bootstrap_expense_session, build_confirmation_for_session},
@@ -241,9 +241,9 @@ mod tests {
         nonce: AtomicU64,
         preview: AtomicU64,
     }
-    impl NonceProvider for SeqNonces {
-        fn next_interaction_nonce(&self) -> InteractionNonce {
-            InteractionNonce::new(self.nonce.fetch_add(1, Ordering::SeqCst)).unwrap()
+    impl SessionNonceProvider for SeqNonces {
+        fn next_session_nonce(&self) -> SessionNonce {
+            SessionNonce::new(self.nonce.fetch_add(1, Ordering::SeqCst)).unwrap()
         }
         fn next_preview_instance_id(&self) -> PreviewInstanceId {
             PreviewInstanceId::new(self.preview.fetch_add(1, Ordering::SeqCst)).unwrap()

@@ -7,7 +7,7 @@ use std::{
 use walicord_domain::model::MemberId;
 use walicord_ledger::LedgerId;
 
-use crate::ports::InteractionNonce;
+use crate::ports::SessionNonce;
 
 /// Read-view sessions expire after this long so stale paginated views do not block
 /// the actor from reopening `/ledger` / `/review` with fresh data.
@@ -22,7 +22,7 @@ pub struct ReadViewSessionKey {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReadViewSession<Page> {
     key: ReadViewSessionKey,
-    nonce: InteractionNonce,
+    nonce: SessionNonce,
     pages: Vec<Page>,
     current_page: usize,
     last_touched: SystemTime,
@@ -31,7 +31,7 @@ pub struct ReadViewSession<Page> {
 impl<Page> ReadViewSession<Page> {
     pub fn new(
         key: ReadViewSessionKey,
-        nonce: InteractionNonce,
+        nonce: SessionNonce,
         pages: Vec<Page>,
         now: SystemTime,
     ) -> Self {
@@ -52,7 +52,7 @@ impl<Page> ReadViewSession<Page> {
         self.key
     }
 
-    pub fn nonce(&self) -> InteractionNonce {
+    pub fn nonce(&self) -> SessionNonce {
         self.nonce
     }
 
@@ -93,8 +93,8 @@ pub enum ReadViewSessionAccessError {
     Expired,
     #[error("read view session has been superseded")]
     Superseded {
-        actual: InteractionNonce,
-        expected: InteractionNonce,
+        actual: SessionNonce,
+        expected: SessionNonce,
     },
 }
 
@@ -146,7 +146,7 @@ where
     pub fn access(
         &self,
         key: ReadViewSessionKey,
-        observed_nonce: InteractionNonce,
+        observed_nonce: SessionNonce,
         now: SystemTime,
     ) -> Result<Option<ReadViewSession<Page>>, ReadViewSessionAccessError> {
         let mut guard = self.by_key.lock();
@@ -179,8 +179,8 @@ mod tests {
         }
     }
 
-    fn nonce(value: u64) -> InteractionNonce {
-        InteractionNonce::new(value).expect("non-zero nonce")
+    fn nonce(value: u64) -> SessionNonce {
+        SessionNonce::new(value).expect("non-zero nonce")
     }
 
     #[test]

@@ -1,59 +1,59 @@
 use std::fmt;
 
 use super::picker_types::{ExpensePickerKind, PickerSnapshotId};
-use walicord_application::InteractionNonce;
+use walicord_application::SessionNonce;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExpenseComponentId {
-    SwitchIndividual(InteractionNonce),
-    SwitchRoles(InteractionNonce),
-    SwitchPayer(InteractionNonce),
-    MembersToggle(InteractionNonce),
-    ToConfirm(InteractionNonce),
-    Cancel(InteractionNonce),
+    SwitchIndividual(SessionNonce),
+    SwitchRoles(SessionNonce),
+    SwitchPayer(SessionNonce),
+    MembersToggle(SessionNonce),
+    ToConfirm(SessionNonce),
+    Cancel(SessionNonce),
 
-    Record(InteractionNonce),
-    WeightEdit(InteractionNonce),
-    ModifySelection(InteractionNonce),
-    BasicEdit(InteractionNonce),
+    Record(SessionNonce),
+    WeightEdit(SessionNonce),
+    ModifySelection(SessionNonce),
+    BasicEdit(SessionNonce),
 
-    ModalRetry(InteractionNonce),
+    ModalRetry(SessionNonce),
 
     PickerSelectPayer {
-        nonce: InteractionNonce,
+        nonce: SessionNonce,
         snapshot_id: PickerSnapshotId,
     },
     PickerSelectIndividual {
-        nonce: InteractionNonce,
+        nonce: SessionNonce,
         snapshot_id: PickerSnapshotId,
     },
     PickerSelectRole {
-        nonce: InteractionNonce,
+        nonce: SessionNonce,
         snapshot_id: PickerSnapshotId,
     },
     PickerPrev {
         kind: ExpensePickerKind,
-        nonce: InteractionNonce,
+        nonce: SessionNonce,
         snapshot_id: PickerSnapshotId,
     },
     PickerNext {
         kind: ExpensePickerKind,
-        nonce: InteractionNonce,
+        nonce: SessionNonce,
         snapshot_id: PickerSnapshotId,
     },
     PickerSearch {
         kind: ExpensePickerKind,
-        nonce: InteractionNonce,
+        nonce: SessionNonce,
         snapshot_id: PickerSnapshotId,
     },
     PickerClear {
         kind: ExpensePickerKind,
-        nonce: InteractionNonce,
+        nonce: SessionNonce,
         snapshot_id: PickerSnapshotId,
     },
     PickerSearchModal {
         kind: ExpensePickerKind,
-        nonce: InteractionNonce,
+        nonce: SessionNonce,
         snapshot_id: PickerSnapshotId,
     },
 }
@@ -174,14 +174,14 @@ impl fmt::Display for ExpenseComponentId {
     }
 }
 
-fn parse_nonce(payload: &str) -> Option<InteractionNonce> {
+fn parse_nonce(payload: &str) -> Option<SessionNonce> {
     let value = payload.parse::<u64>().ok()?;
-    InteractionNonce::new(value).ok()
+    SessionNonce::new(value).ok()
 }
 
 fn parse_nonce_snapshot(
     payload: &str,
-    constructor: impl FnOnce(InteractionNonce, PickerSnapshotId) -> ExpenseComponentId,
+    constructor: impl FnOnce(SessionNonce, PickerSnapshotId) -> ExpenseComponentId,
 ) -> Option<ExpenseComponentId> {
     let (nonce_str, snapshot_str) = payload.split_once(':')?;
     let nonce = parse_nonce(nonce_str)?;
@@ -191,11 +191,7 @@ fn parse_nonce_snapshot(
 
 fn parse_picker(
     payload: &str,
-    constructor: impl FnOnce(
-        ExpensePickerKind,
-        InteractionNonce,
-        PickerSnapshotId,
-    ) -> ExpenseComponentId,
+    constructor: impl FnOnce(ExpensePickerKind, SessionNonce, PickerSnapshotId) -> ExpenseComponentId,
 ) -> Option<ExpenseComponentId> {
     let (kind_str, rest) = payload.split_once(':')?;
     let (nonce_str, snapshot_str) = rest.split_once(':')?;
@@ -210,8 +206,8 @@ mod tests {
     use super::*;
     use rstest::rstest;
 
-    fn nonce(v: u64) -> InteractionNonce {
-        InteractionNonce::new(v).unwrap()
+    fn nonce(v: u64) -> SessionNonce {
+        SessionNonce::new(v).unwrap()
     }
 
     #[rstest]

@@ -1038,7 +1038,7 @@ where
         ));
         let deps = crate::discord::ledger::LedgerRouterDependencies {
             clock: Arc::new(crate::discord::ledger::SystemClock),
-            nonce_provider: Arc::new(crate::discord::ledger::ProcessNonceProvider::new()),
+            nonce_provider: Arc::new(crate::discord::ledger::ProcessSessionNonceProvider::new()),
             channels: Arc::new(self.channel_manager.clone()),
             roster_fetcher: Arc::new(crate::discord::ledger::DiscordRouterRosterFetcher::new(
                 self.roster_provider.clone(),

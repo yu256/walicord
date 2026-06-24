@@ -1,6 +1,6 @@
 use super::expense_modal::ValidatedExpenseModalSubmission;
 use crate::{
-    Clock, InteractionNonce, NonceProvider,
+    Clock, SessionNonce, SessionNonceProvider,
     ledger::{
         expense_session::{
             ExpenseBasicInfo, ExpenseConfirmationSnapshot, ExpenseDraftSnapshot,
@@ -22,9 +22,9 @@ pub fn bootstrap_expense_session(
     origin: ExpenseLaunchOrigin,
     validated_modal: ValidatedExpenseModalSubmission,
     clock: &dyn Clock,
-    nonce_provider: &dyn NonceProvider,
-) -> Result<(ExpenseSession, InteractionNonce), ExpenseSessionConstructionError> {
-    let nonce = nonce_provider.next_interaction_nonce();
+    nonce_provider: &dyn SessionNonceProvider,
+) -> Result<(ExpenseSession, SessionNonce), ExpenseSessionConstructionError> {
+    let nonce = nonce_provider.next_session_nonce();
     let basic_info = ExpenseBasicInfo::from(validated_modal);
     let actor = key.actor_id();
     let selection_state = preselect_actor_as_payer_and_participant(actor);
@@ -406,22 +406,22 @@ mod tests {
         }
     }
 
-    struct SequentialNonceProvider {
+    struct SequentialSessionNonceProvider {
         nonce: AtomicU64,
         preview: AtomicU64,
     }
 
-    impl NonceProvider for SequentialNonceProvider {
-        fn next_interaction_nonce(&self) -> InteractionNonce {
-            InteractionNonce::new(self.nonce.fetch_add(1, Ordering::SeqCst)).expect("non-zero")
+    impl SessionNonceProvider for SequentialSessionNonceProvider {
+        fn next_session_nonce(&self) -> SessionNonce {
+            SessionNonce::new(self.nonce.fetch_add(1, Ordering::SeqCst)).expect("non-zero")
         }
         fn next_preview_instance_id(&self) -> PreviewInstanceId {
             PreviewInstanceId::new(self.preview.fetch_add(1, Ordering::SeqCst)).expect("non-zero")
         }
     }
 
-    fn nonce_provider() -> SequentialNonceProvider {
-        SequentialNonceProvider {
+    fn nonce_provider() -> SequentialSessionNonceProvider {
+        SequentialSessionNonceProvider {
             nonce: AtomicU64::new(1),
             preview: AtomicU64::new(1),
         }
@@ -479,7 +479,7 @@ mod tests {
         assert!(selection.selected_roles.is_empty());
         assert!(!selection.include_members_group);
         assert!(selection.weight_overrides.is_empty());
-        assert_eq!(nonce, InteractionNonce::new(1).unwrap());
+        assert_eq!(nonce, SessionNonce::new(1).unwrap());
     }
 
     #[test]
@@ -500,7 +500,7 @@ mod tests {
         )
         .expect("bootstrap");
 
-        assert_eq!(nonce, InteractionNonce::new(1).unwrap());
+        assert_eq!(nonce, SessionNonce::new(1).unwrap());
         assert_eq!(session.last_touched(), fixed_clock().now);
     }
 

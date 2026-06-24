@@ -5,7 +5,7 @@ use serenity::{
     },
     builder::CreateInteractionResponse,
 };
-use walicord_application::{Clock, InteractionNonce};
+use walicord_application::{Clock, SessionNonce};
 use walicord_i18n as i18n;
 use walicord_presentation::discord_ledger::{
     RenderBudgetError, truncate_component_label, validate_custom_id, validate_modal_title,
@@ -45,7 +45,7 @@ pub enum ExpenseModalBuildError {
 /// detect stale-nonce re-submits per criterion 167.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExpenseModalCustomIdMatch {
-    Match { nonce: InteractionNonce },
+    Match { nonce: SessionNonce },
     Stale,
     NoMatch,
 }
@@ -65,7 +65,7 @@ fn parse_modal_custom_id(custom_id: &str, prefix: &str) -> ExpenseModalCustomIdM
     let Ok(parsed) = remainder.parse::<u64>() else {
         return ExpenseModalCustomIdMatch::Stale;
     };
-    match InteractionNonce::new(parsed) {
+    match SessionNonce::new(parsed) {
         Ok(nonce) => ExpenseModalCustomIdMatch::Match { nonce },
         Err(_) => ExpenseModalCustomIdMatch::Stale,
     }
@@ -162,13 +162,13 @@ pub fn extract_raw_expense_modal_submission(
 
 /// Build the expense modal `CreateInteractionResponse` for `/expense` and the panel
 /// `記録する` launcher. Today's date (criterion 147) is sourced from the `Clock` port
-/// so tests are deterministic, the custom_id carries the `InteractionNonce` per
+/// so tests are deterministic, the custom_id carries the `SessionNonce` per
 /// criterion 193, and all chrome (title / labels / placeholders) is routed through
 /// `walicord-i18n` per criterion 191. The function is pure — the caller invokes
 /// `create_response` separately.
 pub fn build_expense_modal_response(
     clock: &dyn Clock,
-    nonce: InteractionNonce,
+    nonce: SessionNonce,
     prefill: &ExpenseModalPrefill,
 ) -> Result<CreateInteractionResponse, ExpenseModalBuildError> {
     let custom_id = format!("{EXPENSE_MODAL_CUSTOM_ID_PREFIX}{nonce}");
@@ -223,7 +223,7 @@ pub fn build_expense_modal_response(
 }
 
 pub fn build_expense_weight_modal_response(
-    nonce: InteractionNonce,
+    nonce: SessionNonce,
     participants: &[WeightEditorParticipant<'_>],
 ) -> Result<CreateInteractionResponse, ExpenseModalBuildError> {
     let custom_id = format!("{EXPENSE_WEIGHT_MODAL_CUSTOM_ID_PREFIX}{nonce}");
@@ -266,8 +266,8 @@ mod tests {
         }
     }
 
-    fn nonce(value: u64) -> InteractionNonce {
-        InteractionNonce::new(value).expect("nonce")
+    fn nonce(value: u64) -> SessionNonce {
+        SessionNonce::new(value).expect("nonce")
     }
 
     fn username_map() -> BTreeMap<&'static str, MemberId> {

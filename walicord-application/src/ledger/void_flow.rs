@@ -1,5 +1,5 @@
 use crate::{
-    Clock, InteractionNonce, NonceProvider,
+    Clock, SessionNonce, SessionNonceProvider,
     ledger::{
         DiscordLedgerEntryError, DiscordLedgerSourceDescriptor, LedgerCanonicalEncodeError,
         LedgerEntry, LedgerEntryId, LedgerId, UnverifiedLedgerStoreEnvelope,
@@ -57,9 +57,8 @@ pub fn bootstrap_void_session<ExternalId>(
     key: VoidSessionKey,
     load: &VerifiedLedgerThreadLoad<ExternalId>,
     clock: &dyn Clock,
-    nonce_provider: &dyn NonceProvider,
-) -> Result<(VoidSession, InteractionNonce, Vec<VerifiedLedgerEntryView>), VoidSessionBootstrapError>
-{
+    nonce_provider: &dyn SessionNonceProvider,
+) -> Result<(VoidSession, SessionNonce, Vec<VerifiedLedgerEntryView>), VoidSessionBootstrapError> {
     let candidates = enumerate_void_candidates(load).map_err(|error| match error {
         VoidCandidateEnumerationError::Projection(err) => {
             VoidSessionBootstrapError::Projection(err)
@@ -69,7 +68,7 @@ pub fn bootstrap_void_session<ExternalId>(
         return Err(VoidSessionBootstrapError::NoVoidableCandidates);
     }
 
-    let nonce = nonce_provider.next_interaction_nonce();
+    let nonce = nonce_provider.next_session_nonce();
     let session = VoidSession::new(
         key,
         VoidSessionStage::SelectingCandidate,
