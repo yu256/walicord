@@ -28,11 +28,10 @@ use walicord_application::{
             ClaimedExpenseSession, ExpenseConfirmationSnapshot, ExpenseDraftScopeId,
             ExpenseDraftSnapshot, ExpenseLaunchOrigin, ExpenseModalIntent,
             ExpenseModalSubmissionBinding, ExpenseModalSubmissionBindingStore,
-            ExpenseParticipantSelection, ExpensePickerKind, ExpenseSelectionPhase, ExpenseSession,
+            ExpenseParticipantSelection, ExpenseSelectionPhase, ExpenseSession,
             ExpenseSessionConstructionError, ExpenseSessionKey, ExpenseSessionStage,
             ExpenseSessionStore, ModalRetryBinding, ModalRetryBindingStore, ModalRetryPreserved,
-            PickerSnapshotId, SessionAccessError, VoidSession, VoidSessionKey, VoidSessionStage,
-            VoidSessionStore,
+            SessionAccessError, VoidSession, VoidSessionKey, VoidSessionStage, VoidSessionStore,
         },
         observability::LedgerObservabilityEvent,
         participant_resolution::{
@@ -43,13 +42,15 @@ use walicord_application::{
 use walicord_domain::model::{MemberId, RoleId};
 use walicord_i18n as i18n;
 use walicord_presentation::discord_ledger::{
-    DiscordLedgerPresenter, ExpenseConfirmationButtonIds, ExpenseSelectionStepButtonIds,
-    ExpenseSurfaceModel, LedgerPageInputs, ReadViewBuildError, ReadViewPageModel, ReadViewRoute,
-    RecoveryCta, RenderBudgetError, ReviewPageInputs, SurfaceActionRow, SurfaceButton,
-    SurfaceInteractiveButtonStyle, SurfaceMemberLabels, SurfaceSelectMenu, VoidRetargetReason,
-    VoidSurfaceModel, build_expense_confirmation_surface, build_expense_selection_step_surface,
-    build_ledger_empty_page_model, build_ledger_page_model, build_review_empty_page_model,
-    build_review_no_transfers_page_model, build_review_page_model, paginate_read_view_model,
+    DiscordLedgerPresenter, ExpenseSurfaceModel, LedgerPageInputs, ReadViewBuildError,
+    ReadViewPageModel, ReadViewRoute, RecoveryCta, RenderBudgetError, ReviewPageInputs,
+    SurfaceActionRow, SurfaceButton, SurfaceInteractiveButtonStyle, SurfaceMemberLabels,
+    SurfaceSelectMenu, VoidRetargetReason, VoidSurfaceModel, build_expense_confirmation_surface,
+    build_expense_selection_step_surface, build_ledger_empty_page_model, build_ledger_page_model,
+    build_review_empty_page_model, build_review_no_transfers_page_model, build_review_page_model,
+    expense_component_id::ExpenseComponentId,
+    paginate_read_view_model,
+    picker_types::{ExpensePickerKind, PagedPickerState, PickerSnapshotId},
 };
 
 use crate::channel::ChannelManager;
@@ -62,18 +63,11 @@ use self::void::void_confirmation_total_amount;
 use canonical_message::{
     DiscordExpenseEntryRenderer, DiscordSettlementEntryRenderer, DiscordVoidEntryRenderer,
 };
-#[cfg(test)]
-use expense_picker::expense_picker_custom_id;
 use expense_picker::{
-    EXPENSE_INDIVIDUAL_PICK_CUSTOM_ID_PREFIX, EXPENSE_PAYER_PICK_CUSTOM_ID_PREFIX,
-    EXPENSE_PICKER_CLEAR_CUSTOM_ID_PREFIX, EXPENSE_PICKER_NEXT_CUSTOM_ID_PREFIX,
-    EXPENSE_PICKER_PREV_CUSTOM_ID_PREFIX, EXPENSE_PICKER_SEARCH_CUSTOM_ID_PREFIX,
-    EXPENSE_PICKER_SEARCH_MODAL_CUSTOM_ID_PREFIX, EXPENSE_ROLE_PICK_CUSTOM_ID_PREFIX,
     ExpensePickerPage, build_expense_picker_search_modal_response, expense_picker_page,
     expense_picker_query_matches, expense_picker_search_not_found_message,
-    expense_picker_selection_custom_id, expense_picker_utility_row,
-    extract_expense_picker_search_query, merge_paged_selection, parse_expense_picker_custom_id,
-    parse_expense_picker_selection_custom_id, picker_kind_for_phase,
+    expense_picker_utility_row, extract_expense_picker_search_query, merge_paged_selection,
+    picker_kind_for_phase,
 };
 use void::{
     selected_void_target, void_candidate_rows, void_confirmation_model, void_selection_action_rows,
@@ -122,10 +116,9 @@ use walicord_application::ledger::{
     canonical_write::CommitOrchestrationError,
     expense_flow::{
         ConfirmationBuildError, NavigationError, apply_modified_basic_info,
-        bootstrap_expense_session, build_confirmation_for_session, clear_picker_selection,
-        navigate_back, navigate_modify_selection, navigate_to_phase, replace_individual_members,
-        replace_payer, replace_selected_roles, replace_weight_overrides, set_picker_view_state,
-        toggle_members_group,
+        bootstrap_expense_session, build_confirmation_for_session, navigate_modify_selection,
+        replace_individual_members, replace_payer, replace_selected_roles,
+        replace_weight_overrides_and_rebuild, switch_participant_mode, toggle_members_group,
     },
     expense_modal::{ExpenseModalValidationError, validate_expense_modal_submission},
     expense_write::ExpenseWriteOrchestrationError,
@@ -162,6 +155,49 @@ use walicord_application::ledger::{
 /// router itself holds no behavior; each route handler reads the dependencies it needs
 /// and calls into the appropriate flow module (expense_flow, settle_flow, void_flow,
 /// maintenance, etc.).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PickerStateKey {
+    session: ExpenseSessionKey,
+    kind: ExpensePickerKind,
+}
+
+impl PickerStateKey {
+    pub fn new(session: ExpenseSessionKey, kind: ExpensePickerKind) -> Self {
+        Self { session, kind }
+    }
+}
+
+pub struct PickerStateStore {
+    states: DashMap<PickerStateKey, PagedPickerState>,
+}
+
+impl PickerStateStore {
+    pub fn new() -> Self {
+        Self {
+            states: DashMap::new(),
+        }
+    }
+
+    pub fn get(&self, key: PickerStateKey) -> Option<PagedPickerState> {
+        self.states.get(&key).map(|r| r.value().clone())
+    }
+
+    pub fn set(&self, key: PickerStateKey, state: PagedPickerState) {
+        self.states.insert(key, state);
+    }
+
+    pub fn remove_all_for_session(&self, session: ExpenseSessionKey) {
+        for kind in ExpensePickerKind::all() {
+            self.states.remove(&PickerStateKey::new(session, kind));
+        }
+    }
+
+    pub fn remove_draft_scope(&self, draft_scope_id: ExpenseDraftScopeId) {
+        self.states
+            .retain(|k, _| k.session.draft_scope_id() != draft_scope_id);
+    }
+}
+
 pub struct LedgerRouterDependencies {
     pub clock: Arc<dyn Clock>,
     pub nonce_provider: Arc<dyn NonceProvider>,
@@ -172,6 +208,7 @@ pub struct LedgerRouterDependencies {
     pub thread_creator: Arc<dyn LedgerCanonicalThreadCreator>,
     pub expense_sessions: Arc<ExpenseSessionStore>,
     pub expense_nonces: Arc<ExpenseNonceRegistry>,
+    pub picker_states: Arc<PickerStateStore>,
     pub void_sessions: Arc<VoidSessionStore>,
     pub modal_retries: Arc<ModalRetryBindingStore>,
     pub modal_submissions: Arc<ExpenseModalSubmissionBindingStore>,
@@ -860,6 +897,7 @@ impl ExpenseNonceRegistry {
 struct ExpenseSessionClaim<'a> {
     store: &'a ExpenseSessionStore,
     nonces: &'a ExpenseNonceRegistry,
+    picker_states: &'a PickerStateStore,
     original: Option<ClaimedExpenseSession>,
 }
 
@@ -879,7 +917,9 @@ impl ExpenseSessionClaim<'_> {
 
     fn discard(&mut self) {
         if let Some(claimed) = self.original.take() {
-            self.nonces.remove(&claimed.session().key());
+            let key = claimed.session().key();
+            self.nonces.remove(&key);
+            self.picker_states.remove_all_for_session(key);
             self.store.resolve_claim(claimed.token(), None);
         }
     }
@@ -962,6 +1002,7 @@ impl LedgerRouter {
             .expect("serenity channel IDs are always non-zero");
         self.deps.expense_sessions.clear_draft_scope(draft_scope_id);
         self.deps.expense_nonces.clear_draft_scope(draft_scope_id);
+        self.deps.picker_states.remove_draft_scope(draft_scope_id);
         self.deps.modal_retries.clear_draft_scope(draft_scope_id);
         self.deps
             .modal_submissions
@@ -997,9 +1038,9 @@ impl LedgerRouter {
 
     fn clear_actor_state(&self, scope: LedgerInteractionScope, actor_id: MemberId) {
         let draft_scope_id = scope.expense_draft_scope_id();
-        self.deps
-            .expense_sessions
-            .clear(ExpenseSessionKey::new(draft_scope_id, actor_id));
+        let key = ExpenseSessionKey::new(draft_scope_id, actor_id);
+        self.deps.expense_sessions.clear(key);
+        self.deps.picker_states.remove_all_for_session(key);
         self.deps
             .modal_retries
             .clear_actor_draft_scope(draft_scope_id, actor_id);
@@ -1487,170 +1528,128 @@ impl LedgerRouter {
             None => {}
         }
         let custom_id = component.data.custom_id.as_str();
-        if let Some(nonce) =
-            parse_expense_session_button_nonce(custom_id, EXPENSE_MODAL_RETRY_CUSTOM_ID_PREFIX)
-        {
-            return self
-                .dispatch_expense_modal_retry(ctx, component, nonce)
-                .await;
-        }
-        if let Some(nonce) =
-            parse_expense_session_button_nonce(custom_id, EXPENSE_CANCEL_CUSTOM_ID_PREFIX)
-        {
-            return self.dispatch_expense_cancel(ctx, component, nonce).await;
-        }
-        if let Some(nonce) =
-            parse_expense_session_button_nonce(custom_id, EXPENSE_BACK_CUSTOM_ID_PREFIX)
-        {
-            return self.dispatch_expense_back(ctx, component, nonce).await;
-        }
-        if let Some(nonce) =
-            parse_expense_session_button_nonce(custom_id, EXPENSE_BASIC_EDIT_CUSTOM_ID_PREFIX)
-        {
-            return self
-                .dispatch_expense_basic_edit(ctx, component, nonce)
-                .await;
-        }
-        if let Some((nonce, snapshot_id)) =
-            parse_expense_picker_selection_custom_id(custom_id, EXPENSE_PAYER_PICK_CUSTOM_ID_PREFIX)
-        {
-            return self
-                .dispatch_expense_payer_pick(ctx, component, nonce, snapshot_id)
-                .await;
-        }
-        if let Some((kind, nonce, snapshot_id)) =
-            parse_expense_picker_custom_id(custom_id, EXPENSE_PICKER_PREV_CUSTOM_ID_PREFIX)
-        {
-            return self
-                .dispatch_expense_picker_page(
-                    ctx,
-                    component,
+        if let Some(id) = ExpenseComponentId::parse(custom_id) {
+            use walicord_application::ledger::expense_session::ParticipantSelectionMode;
+            return match id {
+                ExpenseComponentId::ModalRetry(n) => {
+                    self.dispatch_expense_modal_retry(ctx, component, n).await
+                }
+                ExpenseComponentId::Cancel(n) => {
+                    self.dispatch_expense_cancel(ctx, component, n).await
+                }
+                ExpenseComponentId::BasicEdit(n) => {
+                    self.dispatch_expense_basic_edit(ctx, component, n).await
+                }
+                ExpenseComponentId::SwitchIndividual(n) => {
+                    self.dispatch_expense_switch_mode(
+                        ctx,
+                        component,
+                        n,
+                        ParticipantSelectionMode::Individual,
+                    )
+                    .await
+                }
+                ExpenseComponentId::SwitchRoles(n) => {
+                    self.dispatch_expense_switch_mode(
+                        ctx,
+                        component,
+                        n,
+                        ParticipantSelectionMode::Roles,
+                    )
+                    .await
+                }
+                ExpenseComponentId::SwitchPayer(n) => {
+                    self.dispatch_expense_switch_mode(
+                        ctx,
+                        component,
+                        n,
+                        ParticipantSelectionMode::Payer,
+                    )
+                    .await
+                }
+                ExpenseComponentId::MembersToggle(n) => {
+                    self.dispatch_expense_members_toggle(ctx, component, n)
+                        .await
+                }
+                ExpenseComponentId::WeightEdit(n) => {
+                    self.dispatch_expense_weight_edit(ctx, component, n).await
+                }
+                ExpenseComponentId::ToConfirm(n) => {
+                    self.dispatch_expense_to_confirm(ctx, component, n).await
+                }
+                ExpenseComponentId::ModifySelection(n) => {
+                    self.dispatch_expense_modify_selection(ctx, component, n)
+                        .await
+                }
+                ExpenseComponentId::Record(n) => {
+                    self.dispatch_expense_record(ctx, component, n).await
+                }
+                ExpenseComponentId::PickerSelectPayer { nonce, snapshot_id } => {
+                    self.dispatch_expense_payer_pick(ctx, component, nonce, snapshot_id)
+                        .await
+                }
+                ExpenseComponentId::PickerSelectIndividual { nonce, snapshot_id } => {
+                    self.dispatch_expense_individual_pick(ctx, component, nonce, snapshot_id)
+                        .await
+                }
+                ExpenseComponentId::PickerSelectRole { nonce, snapshot_id } => {
+                    self.dispatch_expense_role_pick(ctx, component, nonce, snapshot_id)
+                        .await
+                }
+                ExpenseComponentId::PickerPrev {
                     kind,
-                    PickerPageDirection::Previous,
                     nonce,
                     snapshot_id,
-                )
-                .await;
-        }
-        if let Some((kind, nonce, snapshot_id)) =
-            parse_expense_picker_custom_id(custom_id, EXPENSE_PICKER_NEXT_CUSTOM_ID_PREFIX)
-        {
-            return self
-                .dispatch_expense_picker_page(
-                    ctx,
-                    component,
+                } => {
+                    self.dispatch_expense_picker_page(
+                        ctx,
+                        component,
+                        kind,
+                        PickerPageDirection::Previous,
+                        nonce,
+                        snapshot_id,
+                    )
+                    .await
+                }
+                ExpenseComponentId::PickerNext {
                     kind,
-                    PickerPageDirection::Next,
                     nonce,
                     snapshot_id,
-                )
-                .await;
-        }
-        if let Some((kind, nonce, snapshot_id)) =
-            parse_expense_picker_custom_id(custom_id, EXPENSE_PICKER_SEARCH_CUSTOM_ID_PREFIX)
-        {
-            return self
-                .dispatch_expense_picker_search_open(ctx, component, kind, nonce, snapshot_id)
-                .await;
-        }
-        if let Some((kind, nonce, snapshot_id)) =
-            parse_expense_picker_custom_id(custom_id, EXPENSE_PICKER_CLEAR_CUSTOM_ID_PREFIX)
-        {
-            return self
-                .dispatch_expense_picker_clear(ctx, component, kind, nonce, snapshot_id)
-                .await;
-        }
-        if let Some((nonce, snapshot_id)) = parse_expense_picker_selection_custom_id(
-            custom_id,
-            EXPENSE_INDIVIDUAL_PICK_CUSTOM_ID_PREFIX,
-        ) {
-            return self
-                .dispatch_expense_individual_pick(ctx, component, nonce, snapshot_id)
-                .await;
-        }
-        if let Some((nonce, snapshot_id)) =
-            parse_expense_picker_selection_custom_id(custom_id, EXPENSE_ROLE_PICK_CUSTOM_ID_PREFIX)
-        {
-            return self
-                .dispatch_expense_role_pick(ctx, component, nonce, snapshot_id)
-                .await;
-        }
-        if let Some(nonce) =
-            parse_expense_session_button_nonce(custom_id, EXPENSE_TO_PARTICIPANTS_CUSTOM_ID_PREFIX)
-        {
-            return self
-                .dispatch_expense_forward(
-                    ctx,
-                    component,
+                } => {
+                    self.dispatch_expense_picker_page(
+                        ctx,
+                        component,
+                        kind,
+                        PickerPageDirection::Next,
+                        nonce,
+                        snapshot_id,
+                    )
+                    .await
+                }
+                ExpenseComponentId::PickerSearch {
+                    kind,
                     nonce,
-                    ExpenseSelectionPhase::ParticipantSource,
-                )
-                .await;
-        }
-        if let Some(nonce) = parse_expense_session_button_nonce(
-            custom_id,
-            EXPENSE_SOURCE_INDIVIDUAL_CUSTOM_ID_PREFIX,
-        ) {
-            return self
-                .dispatch_expense_forward(
-                    ctx,
-                    component,
+                    snapshot_id,
+                } => {
+                    self.dispatch_expense_picker_search_open(
+                        ctx,
+                        component,
+                        kind,
+                        nonce,
+                        snapshot_id,
+                    )
+                    .await
+                }
+                ExpenseComponentId::PickerClear {
+                    kind,
                     nonce,
-                    ExpenseSelectionPhase::IndividualSelection,
-                )
-                .await;
-        }
-        if let Some(nonce) =
-            parse_expense_session_button_nonce(custom_id, EXPENSE_SOURCE_ROLES_CUSTOM_ID_PREFIX)
-        {
-            return self
-                .dispatch_expense_forward(ctx, component, nonce, ExpenseSelectionPhase::Roles)
-                .await;
-        }
-        if let Some(nonce) =
-            parse_expense_session_button_nonce(custom_id, EXPENSE_SOURCE_MEMBERS_CUSTOM_ID_PREFIX)
-        {
-            return self
-                .dispatch_expense_members_toggle(ctx, component, nonce)
-                .await;
-        }
-        if let Some(nonce) =
-            parse_expense_session_button_nonce(custom_id, EXPENSE_TO_WEIGHTS_CUSTOM_ID_PREFIX)
-        {
-            return self
-                .dispatch_expense_forward(
-                    ctx,
-                    component,
-                    nonce,
-                    ExpenseSelectionPhase::WeightEditor,
-                )
-                .await;
-        }
-        if let Some(nonce) =
-            parse_expense_session_button_nonce(custom_id, EXPENSE_WEIGHT_EDIT_CUSTOM_ID_PREFIX)
-        {
-            return self
-                .dispatch_expense_weight_edit(ctx, component, nonce)
-                .await;
-        }
-        if let Some(nonce) =
-            parse_expense_session_button_nonce(custom_id, EXPENSE_TO_CONFIRM_CUSTOM_ID_PREFIX)
-        {
-            return self
-                .dispatch_expense_to_confirm(ctx, component, nonce)
-                .await;
-        }
-        if let Some(nonce) =
-            parse_expense_session_button_nonce(custom_id, EXPENSE_MODIFY_SELECTION_CUSTOM_ID_PREFIX)
-        {
-            return self
-                .dispatch_expense_modify_selection(ctx, component, nonce)
-                .await;
-        }
-        if let Some(nonce) =
-            parse_expense_session_button_nonce(custom_id, EXPENSE_RECORD_CUSTOM_ID_PREFIX)
-        {
-            return self.dispatch_expense_record(ctx, component, nonce).await;
+                    snapshot_id,
+                } => {
+                    self.dispatch_expense_picker_clear(ctx, component, kind, nonce, snapshot_id)
+                        .await
+                }
+                ExpenseComponentId::PickerSearchModal { .. } => Ok(InteractionDispatch::Ignored),
+            };
         }
         if let Some(remainder) = custom_id.strip_prefix(REVIEW_SETTLE_CUSTOM_ID_PREFIX) {
             let ledger_id = match remainder.parse::<LedgerId>() {
@@ -1736,15 +1735,12 @@ impl LedgerRouter {
         .await
     }
 
-    /// Apply a legal forward selection-wizard transition, persist the new session,
-    /// and refresh the actor's ephemeral with the next step's chrome. Illegal
-    /// transitions silently refresh the current step instead of corrupting state.
-    async fn dispatch_expense_forward(
+    async fn dispatch_expense_switch_mode(
         &self,
         ctx: &Context,
         component: &ComponentInteraction,
         observed_nonce: walicord_application::InteractionNonce,
-        target: ExpenseSelectionPhase,
+        target: walicord_application::ledger::expense_session::ParticipantSelectionMode,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
         let scope = self
             .guard_scope(ctx, component.guild_id, component.channel_id, component)
@@ -1759,24 +1755,13 @@ impl LedgerRouter {
         else {
             return Ok(InteractionDispatch::Handled);
         };
-        match navigate_to_phase(
-            claim.session().clone(),
-            target.clone(),
-            self.deps.clock.as_ref(),
-        ) {
-            Ok(updated) => {
-                let dispatch = self
-                    .respond_with_step_body(ctx, component, scope, &updated)
-                    .await?;
-                claim.replace(updated);
-                Ok(dispatch)
-            }
-            Err(NavigationError::IllegalForwardTransition { from, .. }) => {
-                let _ = (key, from);
-                self.respond_expense_session_missing(ctx, component).await
-            }
-            Err(other) => Err(other.into()),
-        }
+        let updated =
+            switch_participant_mode(claim.session().clone(), target, self.deps.clock.as_ref())?;
+        let dispatch = self
+            .respond_with_step_body(ctx, component, scope, &updated)
+            .await?;
+        claim.replace(updated);
+        Ok(dispatch)
     }
 
     /// Transition the session to `InConfirmation` after a fresh roster fetch:
@@ -1822,13 +1807,11 @@ impl LedgerRouter {
         let basic_info = outcome.session.draft().basic_info().cloned().ok_or(
             InternalLedgerRouteError::ConfirmationBuild(ConfirmationBuildError::BasicInfoMissing),
         )?;
-        let button_ids = build_confirmation_button_ids(nonce);
         let model = build_expense_confirmation_surface(
             &basic_info,
             &outcome.snapshot.participants,
-            &outcome.defaulted_members,
             &roster_snapshot.display_names,
-            &button_ids,
+            nonce,
         )?;
         let rendered = DiscordLedgerPresenter::render_expense_step(&model)?;
         let (body, components) = rendered_surface_to_message(rendered);
@@ -1947,7 +1930,7 @@ impl LedgerRouter {
             RecordExpenseOutcome::DriftDetected {
                 drift,
                 refreshed,
-                defaulted_members,
+                defaulted_members: _,
             } => {
                 let session = claim.session().clone();
                 self.refresh_confirmation_for_drift(
@@ -1957,7 +1940,6 @@ impl LedgerRouter {
                     session,
                     drift,
                     refreshed,
-                    defaulted_members,
                     &roster_snapshot.display_names,
                 )
                 .await
@@ -1990,7 +1972,6 @@ impl LedgerRouter {
         session: ExpenseSession,
         drift: Vec<ParticipantDrift>,
         refreshed: Vec<ExpenseParticipantSelection>,
-        defaulted_members: Vec<MemberId>,
         display_names: &HashMap<MemberId, smol_str::SmolStr>,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
         // Rebuild the confirmation snapshot from the refreshed participants so the
@@ -2013,14 +1994,8 @@ impl LedgerRouter {
             self.deps.clock.now(),
         )?;
         let nonce = self.require_expense_nonce(session.key())?;
-        let button_ids = build_confirmation_button_ids(nonce);
-        let model = build_expense_confirmation_surface(
-            &basic_info,
-            &refreshed,
-            &defaulted_members,
-            display_names,
-            &button_ids,
-        )?;
+        let model =
+            build_expense_confirmation_surface(&basic_info, &refreshed, display_names, nonce)?;
         let rendered = DiscordLedgerPresenter::render_expense_step(&model)?;
         let (mut body, components) = rendered_surface_to_message(rendered);
         if !drift.is_empty() {
@@ -2301,8 +2276,8 @@ impl LedgerRouter {
             .into());
         };
         let nonce = self.require_expense_nonce(session.key())?;
-        let button_ids = build_selection_step_button_ids(nonce);
-        let mut model = build_expense_selection_step_surface(phase, &button_ids);
+        let include_members = session.draft().selection_state().include_members_group;
+        let mut model = build_expense_selection_step_surface(phase, nonce, include_members);
         let picker = self
             .expense_picker_render_parts(ctx, scope, session, phase, nonce)
             .await?;
@@ -2324,43 +2299,27 @@ impl LedgerRouter {
         phase: &ExpenseSelectionPhase,
         nonce: walicord_application::InteractionNonce,
     ) -> Result<ExpensePickerRenderParts, LedgerRouteError> {
-        let Some(kind) = picker_kind_for_phase(phase) else {
-            return Ok(ExpensePickerRenderParts::default());
-        };
+        let kind = picker_kind_for_phase(phase);
         let page = self
             .expense_picker_page_for_session(ctx, scope, session, kind)
             .await?;
         let detail_lines = page.detail_lines;
-        // `picker_kind_for_phase` already narrowed the phase set: every phase that
-        // reaches this point has a menu kind, so matching on `kind` makes the match
-        // exhaustive without an `unreachable!` arm.
+        let snapshot_id = page.snapshot_id;
         let (custom_id, placeholder, min_values, max_values) = match kind {
             ExpensePickerKind::Payer => (
-                expense_picker_selection_custom_id(
-                    EXPENSE_PAYER_PICK_CUSTOM_ID_PREFIX,
-                    nonce,
-                    page.snapshot_id,
-                ),
+                ExpenseComponentId::PickerSelectPayer { nonce, snapshot_id }.to_string(),
                 i18n::EXPENSE_PAYER_PLACEHOLDER,
                 1,
                 1,
             ),
             ExpensePickerKind::Individuals => (
-                expense_picker_selection_custom_id(
-                    EXPENSE_INDIVIDUAL_PICK_CUSTOM_ID_PREFIX,
-                    nonce,
-                    page.snapshot_id,
-                ),
+                ExpenseComponentId::PickerSelectIndividual { nonce, snapshot_id }.to_string(),
                 i18n::PARTICIPANT_SOURCE_INDIVIDUAL_PLACEHOLDER,
                 0,
                 page.page_item_count as u8,
             ),
             ExpensePickerKind::Roles => (
-                expense_picker_selection_custom_id(
-                    EXPENSE_ROLE_PICK_CUSTOM_ID_PREFIX,
-                    nonce,
-                    page.snapshot_id,
-                ),
+                ExpenseComponentId::PickerSelectRole { nonce, snapshot_id }.to_string(),
                 i18n::PARTICIPANT_SOURCE_ROLE_PLACEHOLDER,
                 0,
                 page.page_item_count as u8,
@@ -2411,10 +2370,17 @@ impl LedgerRouter {
             .roster_fetcher
             .fetch(ctx, scope.guild_id(), scope.channel_id())
             .await?;
+        let picker_key = PickerStateKey::new(session.key(), kind);
+        let picker_state = self.deps.picker_states.get(picker_key);
+        let (page, query) = picker_state
+            .map(|s| (s.current_page, s.query))
+            .unwrap_or((0, None));
         Ok(expense_picker_page(
             &roster,
             session.draft().selection_state(),
             kind,
+            page,
+            query,
         ))
     }
 
@@ -2489,12 +2455,7 @@ impl LedgerRouter {
         else {
             return Ok(InteractionDispatch::Handled);
         };
-        if !matches!(
-            claim.session().stage(),
-            ExpenseSessionStage::InSelection {
-                phase: ExpenseSelectionPhase::WeightEditor
-            }
-        ) {
+        if !matches!(claim.session().stage(), ExpenseSessionStage::InConfirmation) {
             return self.respond_expense_session_missing(ctx, component).await;
         }
         let roster = self
@@ -2552,7 +2513,7 @@ impl LedgerRouter {
             scope.expense_draft_scope_id(),
             MemberId(component.user.id.get()),
         );
-        let Some(mut claim) = self
+        let Some(claim) = self
             .take_expense_session_or_reply(ctx, component, key, observed_nonce)
             .await?
         else {
@@ -2564,29 +2525,24 @@ impl LedgerRouter {
         if page.snapshot_id != expected_snapshot {
             return self.reject_stale_picker_component(ctx, component).await;
         }
-        let state = claim
-            .session()
-            .draft()
-            .selection_state()
-            .picker_states
-            .get(&kind);
+        let picker_key = PickerStateKey::new(key, kind);
+        let prev_state = self.deps.picker_states.get(picker_key);
         let next_page = match direction {
             PickerPageDirection::Previous => page.current_page.saturating_sub(1),
             PickerPageDirection::Next => page.current_page.saturating_add(1),
         }
         .min(page.total_pages.saturating_sub(1));
-        let updated = set_picker_view_state(
-            claim.session().clone(),
-            kind,
-            page.snapshot_id,
-            next_page,
-            state.and_then(|state| state.query().map(str::to_owned)),
-            self.deps.clock.as_ref(),
-        )?;
+        self.deps.picker_states.set(
+            picker_key,
+            PagedPickerState {
+                snapshot_id: page.snapshot_id,
+                current_page: next_page,
+                query: prev_state.and_then(|s| s.query),
+            },
+        );
         let dispatch = self
-            .respond_with_step_body(ctx, component, scope, &updated)
+            .respond_with_step_body(ctx, component, scope, claim.session())
             .await?;
-        claim.replace(updated);
         Ok(dispatch)
     }
 
@@ -2617,20 +2573,28 @@ impl LedgerRouter {
         if page.snapshot_id != expected_snapshot {
             return self.reject_stale_picker_component(ctx, component).await;
         }
-        let session_with_snapshot = set_picker_view_state(
-            claim.session().clone(),
-            kind,
-            page.snapshot_id,
-            page.current_page,
-            page.query.clone(),
-            self.deps.clock.as_ref(),
-        )?;
-        let updated = clear_picker_selection(
-            session_with_snapshot,
-            kind,
-            page.snapshot_id,
-            self.deps.clock.as_ref(),
-        )?;
+        let updated = match kind {
+            ExpensePickerKind::Payer => {
+                replace_payer(claim.session().clone(), None, self.deps.clock.as_ref())?
+            }
+            ExpensePickerKind::Individuals => replace_individual_members(
+                claim.session().clone(),
+                vec![],
+                self.deps.clock.as_ref(),
+            )?,
+            ExpensePickerKind::Roles => {
+                replace_selected_roles(claim.session().clone(), vec![], self.deps.clock.as_ref())?
+            }
+        };
+        let picker_key = PickerStateKey::new(key, kind);
+        self.deps.picker_states.set(
+            picker_key,
+            PagedPickerState {
+                snapshot_id: page.snapshot_id,
+                current_page: 0,
+                query: None,
+            },
+        );
         let dispatch = self
             .respond_with_step_body(ctx, component, scope, &updated)
             .await?;
@@ -2776,43 +2740,6 @@ impl LedgerRouter {
         .await
     }
 
-    async fn dispatch_expense_back(
-        &self,
-        ctx: &Context,
-        component: &ComponentInteraction,
-        observed_nonce: walicord_application::InteractionNonce,
-    ) -> Result<InteractionDispatch, LedgerRouteError> {
-        let scope = self
-            .guard_scope(ctx, component.guild_id, component.channel_id, component)
-            .await?;
-        let key = ExpenseSessionKey::new(
-            scope.expense_draft_scope_id(),
-            MemberId(component.user.id.get()),
-        );
-        let Some(mut claim) = self
-            .take_expense_session_or_reply(ctx, component, key, observed_nonce)
-            .await?
-        else {
-            return Ok(InteractionDispatch::Handled);
-        };
-        match navigate_back(claim.session().clone(), self.deps.clock.as_ref()) {
-            Ok(updated) => {
-                let dispatch = self
-                    .respond_with_step_body(ctx, component, scope, &updated)
-                    .await?;
-                claim.replace(updated);
-                Ok(dispatch)
-            }
-            Err(NavigationError::AlreadyAtFirstStep) => {
-                // From the first phase Back == Cancel (criterion 201).
-                let dispatch = self.respond_expense_cancelled(ctx, component).await?;
-                claim.discard();
-                Ok(dispatch)
-            }
-            Err(other) => Err(other.into()),
-        }
-    }
-
     async fn take_expense_session_or_reply(
         &self,
         ctx: &Context,
@@ -2836,9 +2763,11 @@ impl LedgerRouter {
             Ok(Some(session)) => Ok(Some(ExpenseSessionClaim {
                 store: self.deps.expense_sessions.as_ref(),
                 nonces: self.deps.expense_nonces.as_ref(),
+                picker_states: self.deps.picker_states.as_ref(),
                 original: Some(session),
             })),
             Ok(None) | Err(SessionAccessError::Expired | SessionAccessError::InFlight) => {
+                self.deps.picker_states.remove_all_for_session(key);
                 let owner = self.expense_session_nonce_owner(key, observed_nonce, now);
                 if owner.is_some() && owner != Some(key.actor_id()) {
                     self.respond_expense_session_wrong_actor(ctx, component)
@@ -3036,10 +2965,12 @@ impl LedgerRouter {
         ctx: &Context,
         modal: &ModalInteraction,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
-        if let Some((kind, nonce, snapshot_id)) = parse_expense_picker_custom_id(
-            &modal.data.custom_id,
-            EXPENSE_PICKER_SEARCH_MODAL_CUSTOM_ID_PREFIX,
-        ) {
+        if let Some(ExpenseComponentId::PickerSearchModal {
+            kind,
+            nonce,
+            snapshot_id,
+        }) = ExpenseComponentId::parse(&modal.data.custom_id)
+        {
             return self
                 .dispatch_expense_picker_search_submit(ctx, modal, kind, nonce, snapshot_id)
                 .await;
@@ -3088,6 +3019,7 @@ impl LedgerRouter {
         let mut claim = ExpenseSessionClaim {
             store: self.deps.expense_sessions.as_ref(),
             nonces: self.deps.expense_nonces.as_ref(),
+            picker_states: self.deps.picker_states.as_ref(),
             original: Some(claimed),
         };
         let roster = self
@@ -3114,13 +3046,28 @@ impl LedgerRouter {
                 return Ok(InteractionDispatch::Handled);
             }
         };
-        let updated =
-            replace_weight_overrides(claim.session().clone(), weights, self.deps.clock.as_ref())?;
-        let button_ids = build_selection_step_button_ids(self.require_expense_nonce(key)?);
-        let model =
-            build_expense_selection_step_surface(&ExpenseSelectionPhase::WeightEditor, &button_ids);
+        let outcome = replace_weight_overrides_and_rebuild(
+            claim.session().clone(),
+            weights,
+            &roster.roster,
+            self.deps.clock.as_ref(),
+        )?;
+        let nonce = self.require_expense_nonce(key)?;
+        let basic_info = outcome.session.draft().basic_info().cloned().ok_or(
+            InternalLedgerRouteError::ConfirmationBuild(ConfirmationBuildError::BasicInfoMissing),
+        )?;
+        let model = build_expense_confirmation_surface(
+            &basic_info,
+            &outcome.snapshot.participants,
+            &roster.display_names,
+            nonce,
+        )?;
         let rendered = DiscordLedgerPresenter::render_expense_step(&model)?;
-        let (body, components) = rendered_surface_to_message(rendered);
+        let (mut body, components) = rendered_surface_to_message(rendered);
+        if !outcome.drift.is_empty() {
+            body.push('\n');
+            body.push_str(i18n::EXPENSE_PARTICIPANTS_DRIFTED_CUE);
+        }
         let response = if Self::modal_originated_from_ephemeral(modal) {
             CreateInteractionResponse::UpdateMessage(
                 safe_interaction_response_message()
@@ -3138,7 +3085,7 @@ impl LedgerRouter {
             .create_response(&ctx.http, response)
             .await
             .map_err(discord_call_error(DiscordCallSite::ExpenseStepRefresh))?;
-        claim.replace(updated);
+        claim.replace(outcome.session);
         Ok(InteractionDispatch::Handled)
     }
 
@@ -3168,9 +3115,10 @@ impl LedgerRouter {
         else {
             return self.reply_stale_modal(ctx, modal).await;
         };
-        let mut claim = ExpenseSessionClaim {
+        let claim = ExpenseSessionClaim {
             store: self.deps.expense_sessions.as_ref(),
             nonces: self.deps.expense_nonces.as_ref(),
+            picker_states: self.deps.picker_states.as_ref(),
             original: Some(claimed),
         };
         let query = extract_expense_picker_search_query(modal).trim();
@@ -3190,7 +3138,16 @@ impl LedgerRouter {
             .roster_fetcher
             .fetch(ctx, scope.guild_id(), scope.channel_id())
             .await?;
-        let page = expense_picker_page(&roster, claim.session().draft().selection_state(), kind);
+        let picker_key = PickerStateKey::new(key, kind);
+        let prev = self.deps.picker_states.get(picker_key);
+        let (prev_page, prev_query) = prev.map(|s| (s.current_page, s.query)).unwrap_or((0, None));
+        let page = expense_picker_page(
+            &roster,
+            claim.session().draft().selection_state(),
+            kind,
+            prev_page,
+            prev_query,
+        );
         if page.snapshot_id != expected_snapshot {
             return self.reply_stale_modal(ctx, modal).await;
         }
@@ -3210,15 +3167,17 @@ impl LedgerRouter {
             .await?;
             return Ok(InteractionDispatch::Handled);
         }
-        let updated = set_picker_view_state(
-            claim.session().clone(),
-            kind,
-            page.snapshot_id,
-            0,
-            Some(query.to_owned()),
-            self.deps.clock.as_ref(),
-        )?;
-        let model = self.build_expense_step_model(ctx, scope, &updated).await?;
+        self.deps.picker_states.set(
+            picker_key,
+            PagedPickerState {
+                snapshot_id: page.snapshot_id,
+                current_page: 0,
+                query: Some(query.to_owned()),
+            },
+        );
+        let model = self
+            .build_expense_step_model(ctx, scope, claim.session())
+            .await?;
         let rendered = DiscordLedgerPresenter::render_expense_step(&model)?;
         let (body, components) = rendered_surface_to_message(rendered);
         let response = if Self::modal_originated_from_ephemeral(modal) {
@@ -3238,7 +3197,6 @@ impl LedgerRouter {
             .create_response(&ctx.http, response)
             .await
             .map_err(discord_call_error(DiscordCallSite::ExpenseStepRefresh))?;
-        claim.replace(updated);
         Ok(InteractionDispatch::Handled)
     }
 
@@ -3332,6 +3290,7 @@ impl LedgerRouter {
                         let mut claim = ExpenseSessionClaim {
                             store: self.deps.expense_sessions.as_ref(),
                             nonces: self.deps.expense_nonces.as_ref(),
+                            picker_states: self.deps.picker_states.as_ref(),
                             original: Some(claimed),
                         };
                         let updated = apply_modified_basic_info(
@@ -3408,11 +3367,14 @@ impl LedgerRouter {
         nonce: walicord_application::InteractionNonce,
         notice: Option<&'static str>,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
-        let button_ids = build_selection_step_button_ids(nonce);
+        let initial_phase = ExpenseSelectionPhase::participants(
+            walicord_application::ledger::expense_session::ParticipantSelectionMode::Individual,
+        );
+        let include_members = session.draft().selection_state().include_members_group;
         let mut model =
-            build_expense_selection_step_surface(&ExpenseSelectionPhase::Payer, &button_ids);
+            build_expense_selection_step_surface(&initial_phase, nonce, include_members);
         let picker = self
-            .expense_picker_render_parts(ctx, scope, session, &ExpenseSelectionPhase::Payer, nonce)
+            .expense_picker_render_parts(ctx, scope, session, &initial_phase, nonce)
             .await?;
         model.detail_lines.extend(picker.detail_lines);
         if let Some(row) = picker.utility_row {
@@ -5002,22 +4964,7 @@ pub(super) fn discord_call_error(
     move |error| LedgerRouteError::Internal(InternalLedgerRouteError::DiscordCall { site, error })
 }
 
-pub(crate) const EXPENSE_CANCEL_CUSTOM_ID_PREFIX: &str = "ledger:expense:cancel:";
-pub(crate) const EXPENSE_MODAL_RETRY_CUSTOM_ID_PREFIX: &str = "ledger:expense:retry:";
-pub(crate) const EXPENSE_BACK_CUSTOM_ID_PREFIX: &str = "ledger:expense:back:";
-pub(crate) const EXPENSE_BASIC_EDIT_CUSTOM_ID_PREFIX: &str = "ledger:expense:basic-edit:";
 pub(crate) const UNCERTAIN_WRITE_ACKNOWLEDGE_CUSTOM_ID: &str = "ledger:uncertain:acknowledge";
-pub(crate) const EXPENSE_TO_PARTICIPANTS_CUSTOM_ID_PREFIX: &str = "ledger:expense:to-participants:";
-pub(crate) const EXPENSE_SOURCE_INDIVIDUAL_CUSTOM_ID_PREFIX: &str =
-    "ledger:expense:source-individual:";
-pub(crate) const EXPENSE_SOURCE_ROLES_CUSTOM_ID_PREFIX: &str = "ledger:expense:source-roles:";
-pub(crate) const EXPENSE_SOURCE_MEMBERS_CUSTOM_ID_PREFIX: &str = "ledger:expense:source-members:";
-pub(crate) const EXPENSE_TO_WEIGHTS_CUSTOM_ID_PREFIX: &str = "ledger:expense:to-weights:";
-pub(crate) const EXPENSE_WEIGHT_EDIT_CUSTOM_ID_PREFIX: &str = "ledger:expense:weight-edit:";
-pub(crate) const EXPENSE_TO_CONFIRM_CUSTOM_ID_PREFIX: &str = "ledger:expense:to-confirm:";
-pub(crate) const EXPENSE_MODIFY_SELECTION_CUSTOM_ID_PREFIX: &str =
-    "ledger:expense:modify-selection:";
-pub(crate) const EXPENSE_RECORD_CUSTOM_ID_PREFIX: &str = "ledger:expense:record:";
 pub(crate) const REVIEW_SETTLE_CUSTOM_ID_PREFIX: &str = "ledger:review:settle:";
 pub(crate) const READ_VIEW_PREV_CUSTOM_ID_PREFIX: &str = "ledger:read-view:prev:";
 pub(crate) const READ_VIEW_NEXT_CUSTOM_ID_PREFIX: &str = "ledger:read-view:next:";
@@ -5073,7 +5020,7 @@ fn expense_modal_retry_row(
     use serenity::all::{ButtonStyle, CreateActionRow, CreateButton};
 
     CreateActionRow::Buttons(vec![
-        CreateButton::new(format!("{EXPENSE_MODAL_RETRY_CUSTOM_ID_PREFIX}{nonce}"))
+        CreateButton::new(ExpenseComponentId::ModalRetry(nonce).to_string())
             .label(i18n::EXPENSE_MODAL_RETRY_BUTTON_LABEL)
             .style(ButtonStyle::Primary),
     ])
@@ -5098,39 +5045,6 @@ pub(super) fn expense_source_descriptor(
             DiscordLedgerSourceDescriptor::expense_slash_modal_v1()
         }
         ExpenseLaunchOrigin::PanelButton => DiscordLedgerSourceDescriptor::expense_panel_modal_v1(),
-    }
-}
-
-/// Build the custom_id strings for every button the selection wizard can show. The
-/// adapter owns the custom_id format (Discord component identity); the presentation
-/// builder takes them as opaque strings.
-fn build_selection_step_button_ids(
-    nonce: walicord_application::InteractionNonce,
-) -> ExpenseSelectionStepButtonIds {
-    let n = nonce;
-    ExpenseSelectionStepButtonIds {
-        to_participants: format!("{EXPENSE_TO_PARTICIPANTS_CUSTOM_ID_PREFIX}{n}"),
-        source_individual: format!("{EXPENSE_SOURCE_INDIVIDUAL_CUSTOM_ID_PREFIX}{n}"),
-        source_roles: format!("{EXPENSE_SOURCE_ROLES_CUSTOM_ID_PREFIX}{n}"),
-        source_members: format!("{EXPENSE_SOURCE_MEMBERS_CUSTOM_ID_PREFIX}{n}"),
-        to_weights: format!("{EXPENSE_TO_WEIGHTS_CUSTOM_ID_PREFIX}{n}"),
-        weight_edit: format!("{EXPENSE_WEIGHT_EDIT_CUSTOM_ID_PREFIX}{n}"),
-        to_confirm: format!("{EXPENSE_TO_CONFIRM_CUSTOM_ID_PREFIX}{n}"),
-        back: format!("{EXPENSE_BACK_CUSTOM_ID_PREFIX}{n}"),
-        cancel: format!("{EXPENSE_CANCEL_CUSTOM_ID_PREFIX}{n}"),
-    }
-}
-
-/// Build the custom_id strings for the confirmation-page buttons.
-fn build_confirmation_button_ids(
-    nonce: walicord_application::InteractionNonce,
-) -> ExpenseConfirmationButtonIds {
-    let n = nonce;
-    ExpenseConfirmationButtonIds {
-        record: format!("{EXPENSE_RECORD_CUSTOM_ID_PREFIX}{n}"),
-        modify_selection: format!("{EXPENSE_MODIFY_SELECTION_CUSTOM_ID_PREFIX}{n}"),
-        basic_edit: format!("{EXPENSE_BASIC_EDIT_CUSTOM_ID_PREFIX}{n}"),
-        cancel: format!("{EXPENSE_CANCEL_CUSTOM_ID_PREFIX}{n}"),
     }
 }
 
@@ -5404,6 +5318,7 @@ mod tests {
     fn expense_session_claim_restores_session_when_transition_does_not_complete() {
         let store = ExpenseSessionStore::new();
         let test_nonces = ExpenseNonceRegistry::new();
+        let test_picker_states = PickerStateStore::new();
         let session = expense_claim_session();
         store.replace(session.clone());
         let claimed = store
@@ -5414,6 +5329,7 @@ mod tests {
         drop(ExpenseSessionClaim {
             store: &store,
             nonces: &test_nonces,
+            picker_states: &test_picker_states,
             original: Some(claimed),
         });
 
@@ -5427,6 +5343,7 @@ mod tests {
     fn expense_session_claim_discard_keeps_completed_session_absent() {
         let store = ExpenseSessionStore::new();
         let test_nonces = ExpenseNonceRegistry::new();
+        let test_picker_states = PickerStateStore::new();
         let session = expense_claim_session();
         store.replace(session.clone());
         let claimed = store
@@ -5436,6 +5353,7 @@ mod tests {
         let mut claim = ExpenseSessionClaim {
             store: &store,
             nonces: &test_nonces,
+            picker_states: &test_picker_states,
             original: Some(claimed),
         };
 
@@ -5448,6 +5366,7 @@ mod tests {
     #[test]
     fn expense_session_claim_replace_persists_completed_transition() {
         let test_nonces = ExpenseNonceRegistry::new();
+        let test_picker_states = PickerStateStore::new();
         let store = ExpenseSessionStore::new();
         let session = expense_claim_session();
         let replacement = expense_claim_session();
@@ -5459,6 +5378,7 @@ mod tests {
         let mut claim = ExpenseSessionClaim {
             store: &store,
             nonces: &test_nonces,
+            picker_states: &test_picker_states,
             original: Some(claimed),
         };
 
@@ -5768,21 +5688,12 @@ mod tests {
 
     #[test]
     fn expense_picker_page_reaches_members_after_the_first_discord_page() {
-        let mut selection = ExpenseSelectionState::default();
-        selection.picker_states.insert(
-            ExpensePickerKind::Individuals,
-            walicord_application::ledger::expense_session::PagedPickerState::new(
-                walicord_application::ledger::expense_session::PickerSnapshotId::new(21),
-                1,
-                None,
-                Vec::new(),
-            ),
-        );
-
         let actual = expense_picker_page(
             &picker_roster(30),
-            &selection,
+            &ExpenseSelectionState::default(),
             ExpensePickerKind::Individuals,
+            1,
+            None,
         );
 
         assert_eq!(actual.current_page, 1);
@@ -5792,21 +5703,12 @@ mod tests {
 
     #[test]
     fn expense_picker_page_filters_by_search_query() {
-        let mut selection = ExpenseSelectionState::default();
-        selection.picker_states.insert(
-            ExpensePickerKind::Individuals,
-            walicord_application::ledger::expense_session::PagedPickerState::new(
-                walicord_application::ledger::expense_session::PickerSnapshotId::new(22),
-                0,
-                Some("03".to_owned()),
-                Vec::new(),
-            ),
-        );
-
         let actual = expense_picker_page(
             &picker_roster(30),
-            &selection,
+            &ExpenseSelectionState::default(),
             ExpensePickerKind::Individuals,
+            0,
+            Some("03".to_owned()),
         );
 
         assert_eq!(actual.visible_values, vec![3]);
@@ -5829,6 +5731,8 @@ mod tests {
             &roster,
             &ExpenseSelectionState::default(),
             ExpensePickerKind::Roles,
+            0,
+            None,
         );
 
         assert_eq!(
@@ -5853,6 +5757,8 @@ mod tests {
             &roster,
             &ExpenseSelectionState::default(),
             ExpensePickerKind::Roles,
+            0,
+            None,
         );
 
         assert_eq!(actual.options[0].label.as_str(), "開発");
@@ -5877,6 +5783,8 @@ mod tests {
             &roster,
             &ExpenseSelectionState::default(),
             ExpensePickerKind::Individuals,
+            0,
+            None,
         );
 
         assert_eq!(
@@ -5904,6 +5812,8 @@ mod tests {
             &roster,
             &ExpenseSelectionState::default(),
             ExpensePickerKind::Roles,
+            0,
+            None,
         );
 
         assert_eq!(
@@ -5913,41 +5823,26 @@ mod tests {
     }
 
     #[test]
-    fn picker_navigation_custom_id_round_trips_snapshot_id() {
-        let custom_id = expense_picker_custom_id(
-            EXPENSE_PICKER_NEXT_CUSTOM_ID_PREFIX,
-            ExpensePickerKind::Individuals,
-            nonce(7),
-            PickerSnapshotId::new(42),
-        );
-
-        let actual =
-            parse_expense_picker_custom_id(&custom_id, EXPENSE_PICKER_NEXT_CUSTOM_ID_PREFIX);
-
-        assert_eq!(
-            actual,
-            Some((
-                ExpensePickerKind::Individuals,
-                nonce(7),
-                PickerSnapshotId::new(42),
-            ))
-        );
+    fn picker_navigation_custom_id_round_trips_through_expense_component_id() {
+        let id = ExpenseComponentId::PickerNext {
+            kind: ExpensePickerKind::Individuals,
+            nonce: nonce(7),
+            snapshot_id: PickerSnapshotId::new(42),
+        };
+        let serialized = id.to_string();
+        let parsed = ExpenseComponentId::parse(&serialized);
+        assert_eq!(parsed, Some(id));
     }
 
     #[test]
-    fn picker_selection_custom_id_round_trips_snapshot_id() {
-        let custom_id = expense_picker_selection_custom_id(
-            EXPENSE_INDIVIDUAL_PICK_CUSTOM_ID_PREFIX,
-            nonce(7),
-            PickerSnapshotId::new(42),
-        );
-
-        let actual = parse_expense_picker_selection_custom_id(
-            &custom_id,
-            EXPENSE_INDIVIDUAL_PICK_CUSTOM_ID_PREFIX,
-        );
-
-        assert_eq!(actual, Some((nonce(7), PickerSnapshotId::new(42))));
+    fn picker_selection_custom_id_round_trips_through_expense_component_id() {
+        let id = ExpenseComponentId::PickerSelectIndividual {
+            nonce: nonce(7),
+            snapshot_id: PickerSnapshotId::new(42),
+        };
+        let serialized = id.to_string();
+        let parsed = ExpenseComponentId::parse(&serialized);
+        assert_eq!(parsed, Some(id));
     }
 
     #[rstest]

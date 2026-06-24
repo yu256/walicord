@@ -1780,40 +1780,16 @@ pub const NO_LEDGER_THREAD_YET_NOTE: &str = if cfg!(feature = "ja") {
     "-# There is no ledger thread yet. You can review everything after the first record is written."
 };
 
-pub const EXPENSE_STEP_TITLE_PAYER: &str = if cfg!(feature = "ja") {
-    "1/4 支払者"
-} else {
-    "1/4 Payer"
-};
-
 pub const EXPENSE_STEP_TITLE_PARTICIPANTS: &str = if cfg!(feature = "ja") {
-    "2/4 参加者"
+    "1/2 参加者"
 } else {
-    "2/4 Participants"
-};
-
-pub const EXPENSE_STEP_TITLE_WEIGHT: &str = if cfg!(feature = "ja") {
-    "3/4 重み"
-} else {
-    "3/4 Weights"
+    "1/2 Participants"
 };
 
 pub const EXPENSE_STEP_TITLE_CONFIRM: &str = if cfg!(feature = "ja") {
-    "4/4 確認"
+    "2/2 確認"
 } else {
-    "4/4 Confirm"
-};
-
-pub const EXPENSE_NEXT_LABEL: &str = if cfg!(feature = "ja") {
-    "次へ"
-} else {
-    "Next"
-};
-
-pub const EXPENSE_TO_WEIGHTS_LABEL: &str = if cfg!(feature = "ja") {
-    "重みへ"
-} else {
-    "To Weights"
+    "2/2 Confirm"
 };
 
 pub const EXPENSE_TO_CONFIRM_LABEL: &str = if cfg!(feature = "ja") {
@@ -1876,12 +1852,6 @@ pub const EXPENSE_REVISE_LABEL: &str = if cfg!(feature = "ja") {
     "Revise"
 };
 
-pub const EXPENSE_BACK_LABEL: &str = if cfg!(feature = "ja") {
-    "戻る"
-} else {
-    "Back"
-};
-
 pub const EXPENSE_CANCEL_LABEL: &str = if cfg!(feature = "ja") {
     "キャンセル"
 } else {
@@ -1922,6 +1892,18 @@ pub const PARTICIPANT_SOURCE_ROLE_LABEL: &str = if cfg!(feature = "ja") {
     "ロール選択"
 } else {
     "Choose Roles"
+};
+
+pub const EXPENSE_SWITCH_TO_PAYER_LABEL: &str = if cfg!(feature = "ja") {
+    "支払者を変更"
+} else {
+    "Change Payer"
+};
+
+pub const EXPENSE_SUB_VIEW_PAYER_TITLE: &str = if cfg!(feature = "ja") {
+    "支払者"
+} else {
+    "Payer"
 };
 
 pub const PARTICIPANT_SOURCE_INDIVIDUAL_PLACEHOLDER: &str = if cfg!(feature = "ja") {

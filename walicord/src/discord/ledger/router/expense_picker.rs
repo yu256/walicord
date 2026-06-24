@@ -8,27 +8,18 @@ use serenity::{
     builder::{CreateActionRow, CreateInputText, CreateInteractionResponse, CreateModal},
     model::application::InputTextStyle,
 };
-use walicord_application::ledger::expense_session::{
-    ExpensePickerKind, ExpenseSelectionPhase, ExpenseSelectionState, PickerSnapshotId,
-};
+use walicord_application::ledger::expense_session::{ExpenseSelectionPhase, ExpenseSelectionState};
 use walicord_i18n as i18n;
 use walicord_presentation::discord_ledger::{
     SafeLiteralText, SurfaceActionRow, SurfaceButton, SurfaceInteractiveButtonStyle,
-    SurfaceMemberLabels, SurfaceSelectOption, truncate_component_label, validate_custom_id,
-    validate_modal_title, validate_text_input_label, validate_text_input_placeholder,
+    SurfaceMemberLabels, SurfaceSelectOption,
+    picker_types::{ExpensePickerKind, PickerSnapshotId},
+    truncate_component_label, validate_custom_id, validate_modal_title, validate_text_input_label,
+    validate_text_input_placeholder,
 };
 
 use super::{LedgerRouteError, RouterRosterSnapshot};
 
-pub(super) const EXPENSE_PAYER_PICK_CUSTOM_ID_PREFIX: &str = "ledger:expense:payer-pick:";
-pub(super) const EXPENSE_INDIVIDUAL_PICK_CUSTOM_ID_PREFIX: &str = "ledger:expense:individual-pick:";
-pub(super) const EXPENSE_ROLE_PICK_CUSTOM_ID_PREFIX: &str = "ledger:expense:role-pick:";
-pub(super) const EXPENSE_PICKER_PREV_CUSTOM_ID_PREFIX: &str = "ledger:expense:picker-prev:";
-pub(super) const EXPENSE_PICKER_NEXT_CUSTOM_ID_PREFIX: &str = "ledger:expense:picker-next:";
-pub(super) const EXPENSE_PICKER_SEARCH_CUSTOM_ID_PREFIX: &str = "ledger:expense:picker-search:";
-pub(super) const EXPENSE_PICKER_CLEAR_CUSTOM_ID_PREFIX: &str = "ledger:expense:picker-clear:";
-pub(super) const EXPENSE_PICKER_SEARCH_MODAL_CUSTOM_ID_PREFIX: &str =
-    "ledger:expense:picker-search-modal:";
 pub(super) const EXPENSE_PICKER_SEARCH_FIELD: &str = "query";
 pub(super) const EXPENSE_PICKER_PAGE_SIZE: usize = 25;
 
@@ -52,29 +43,19 @@ struct ExpensePickerItem {
     selected: bool,
 }
 
-pub(super) fn picker_kind_for_phase(phase: &ExpenseSelectionPhase) -> Option<ExpensePickerKind> {
-    match phase {
-        ExpenseSelectionPhase::Payer => Some(ExpensePickerKind::Payer),
-        ExpenseSelectionPhase::IndividualSelection => Some(ExpensePickerKind::Individuals),
-        ExpenseSelectionPhase::Roles => Some(ExpensePickerKind::Roles),
-        ExpenseSelectionPhase::ParticipantSource | ExpenseSelectionPhase::WeightEditor => None,
-    }
+pub(super) fn picker_kind_for_phase(phase: &ExpenseSelectionPhase) -> ExpensePickerKind {
+    let ExpenseSelectionPhase::Participants { mode } = phase;
+    ExpensePickerKind::from(*mode)
 }
 
 pub(super) fn expense_picker_page(
     roster: &RouterRosterSnapshot,
     selection: &ExpenseSelectionState,
     kind: ExpensePickerKind,
+    requested_page: usize,
+    query: Option<String>,
 ) -> ExpensePickerPage {
-    let query = selection
-        .picker_states
-        .get(&kind)
-        .and_then(|state| state.query().map(str::to_owned));
     let snapshot_id = expense_picker_snapshot_id(roster, kind);
-    let requested_page = selection
-        .picker_states
-        .get(&kind)
-        .map_or(0, |state| state.current_page());
     let mut items = expense_picker_items(roster, selection, kind);
     items.sort_by(|left, right| {
         left.label
@@ -244,50 +225,51 @@ pub(super) fn expense_picker_utility_row(
     current_page: usize,
     total_pages: usize,
 ) -> SurfaceActionRow {
+    use walicord_presentation::discord_ledger::expense_component_id::ExpenseComponentId;
     let mut buttons = Vec::new();
     if total_pages > 1 {
         buttons.push(SurfaceButton::Interactive {
             label: i18n::PICKER_PREVIOUS_PAGE_LABEL.to_owned(),
-            custom_id: expense_picker_custom_id(
-                EXPENSE_PICKER_PREV_CUSTOM_ID_PREFIX,
+            custom_id: ExpenseComponentId::PickerPrev {
                 kind,
                 nonce,
                 snapshot_id,
-            ),
+            }
+            .to_string(),
             style: SurfaceInteractiveButtonStyle::Secondary,
             disabled: current_page == 0,
         });
         buttons.push(SurfaceButton::Interactive {
             label: i18n::PICKER_NEXT_PAGE_LABEL.to_owned(),
-            custom_id: expense_picker_custom_id(
-                EXPENSE_PICKER_NEXT_CUSTOM_ID_PREFIX,
+            custom_id: ExpenseComponentId::PickerNext {
                 kind,
                 nonce,
                 snapshot_id,
-            ),
+            }
+            .to_string(),
             style: SurfaceInteractiveButtonStyle::Secondary,
             disabled: current_page + 1 >= total_pages,
         });
     }
     buttons.push(SurfaceButton::Interactive {
         label: i18n::PICKER_SEARCH_LABEL.to_owned(),
-        custom_id: expense_picker_custom_id(
-            EXPENSE_PICKER_SEARCH_CUSTOM_ID_PREFIX,
+        custom_id: ExpenseComponentId::PickerSearch {
             kind,
             nonce,
             snapshot_id,
-        ),
+        }
+        .to_string(),
         style: SurfaceInteractiveButtonStyle::Secondary,
         disabled: false,
     });
     buttons.push(SurfaceButton::Interactive {
         label: picker_clear_label(kind).to_owned(),
-        custom_id: expense_picker_custom_id(
-            EXPENSE_PICKER_CLEAR_CUSTOM_ID_PREFIX,
+        custom_id: ExpenseComponentId::PickerClear {
             kind,
             nonce,
             snapshot_id,
-        ),
+        }
+        .to_string(),
         style: SurfaceInteractiveButtonStyle::Secondary,
         disabled: false,
     });
@@ -302,89 +284,19 @@ fn picker_clear_label(kind: ExpensePickerKind) -> &'static str {
     }
 }
 
-pub(super) fn expense_picker_custom_id(
-    prefix: &str,
-    kind: ExpensePickerKind,
-    nonce: walicord_application::InteractionNonce,
-    snapshot_id: PickerSnapshotId,
-) -> String {
-    format!(
-        "{prefix}{}:{nonce}:{snapshot_id}",
-        expense_picker_kind_slug(kind)
-    )
-}
-
-pub(super) fn parse_expense_picker_custom_id(
-    custom_id: &str,
-    prefix: &str,
-) -> Option<(
-    ExpensePickerKind,
-    walicord_application::InteractionNonce,
-    PickerSnapshotId,
-)> {
-    let remainder = custom_id.strip_prefix(prefix)?;
-    let (kind, remainder) = remainder.split_once(':')?;
-    let (nonce, snapshot_id) = remainder.split_once(':')?;
-    let kind = parse_expense_picker_kind(kind)?;
-    let nonce = nonce
-        .parse::<u64>()
-        .ok()
-        .and_then(|value| walicord_application::InteractionNonce::new(value).ok())?;
-    let snapshot_id = snapshot_id.parse::<PickerSnapshotId>().ok()?;
-    Some((kind, nonce, snapshot_id))
-}
-
-pub(super) fn expense_picker_selection_custom_id(
-    prefix: &str,
-    nonce: walicord_application::InteractionNonce,
-    snapshot_id: PickerSnapshotId,
-) -> String {
-    format!("{prefix}{nonce}:{snapshot_id}")
-}
-
-pub(super) fn parse_expense_picker_selection_custom_id(
-    custom_id: &str,
-    prefix: &str,
-) -> Option<(walicord_application::InteractionNonce, PickerSnapshotId)> {
-    let remainder = custom_id.strip_prefix(prefix)?;
-    let (nonce, snapshot_id) = remainder.split_once(':')?;
-    let nonce = nonce
-        .parse::<u64>()
-        .ok()
-        .and_then(|value| walicord_application::InteractionNonce::new(value).ok())?;
-    let snapshot_id = snapshot_id.parse::<PickerSnapshotId>().ok()?;
-    Some((nonce, snapshot_id))
-}
-
-fn expense_picker_kind_slug(kind: ExpensePickerKind) -> &'static str {
-    match kind {
-        ExpensePickerKind::Payer => "payer",
-        ExpensePickerKind::Individuals => "individuals",
-        ExpensePickerKind::Roles => "roles",
-    }
-}
-
-fn parse_expense_picker_kind(value: &str) -> Option<ExpensePickerKind> {
-    match value {
-        "payer" => Some(ExpensePickerKind::Payer),
-        "individuals" => Some(ExpensePickerKind::Individuals),
-        "roles" => Some(ExpensePickerKind::Roles),
-        _ => None,
-    }
-}
-
 #[allow(clippy::result_large_err)] // LedgerRouteError is the router-wide error envelope.
 pub(super) fn build_expense_picker_search_modal_response(
     kind: ExpensePickerKind,
     nonce: walicord_application::InteractionNonce,
     snapshot_id: PickerSnapshotId,
 ) -> Result<CreateInteractionResponse, LedgerRouteError> {
-    let custom_id = expense_picker_custom_id(
-        EXPENSE_PICKER_SEARCH_MODAL_CUSTOM_ID_PREFIX,
-        kind,
-        nonce,
-        snapshot_id,
-    );
+    let custom_id =
+        walicord_presentation::discord_ledger::expense_component_id::ExpenseComponentId::PickerSearchModal {
+            kind,
+            nonce,
+            snapshot_id,
+        }
+        .to_string();
     validate_custom_id(&custom_id)?;
     let (title, label, placeholder) = match kind {
         ExpensePickerKind::Payer | ExpensePickerKind::Individuals => (

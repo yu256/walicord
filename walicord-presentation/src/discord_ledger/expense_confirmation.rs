@@ -1,47 +1,29 @@
-//! Confirmation-step and selection-step surface model builders.
-//!
-//! The adapter (router) used to compose the confirmation body and step bodies inline,
-//! by interleaving i18n calls, format!() and direct serenity component construction.
-//! That was a Tactical DDD violation: presentation rendering lived in the Discord
-//! adapter. This module pulls the rendering into walicord-presentation so the adapter
-//! only owns the conversion from `RenderedSurface` to serenity types.
-
+use super::expense_component_id::ExpenseComponentId;
 use crate::discord_ledger::{
     ExpenseConfirmationParticipantRow, ExpenseDraftSummary, ExpenseSurfaceModel, SafeLiteralText,
     SurfaceActionRow, SurfaceButton, SurfaceInteractiveButtonStyle, SurfaceMemberLabels,
 };
 use smol_str::SmolStr;
-use std::collections::{BTreeSet, HashMap};
-use walicord_application::ledger::{
-    ExpenseAuthoringError, MemberWeight, compute_expense_owed_amounts,
-    expense_session::{ExpenseBasicInfo, ExpenseParticipantSelection, ExpenseSelectionPhase},
+use std::collections::HashMap;
+use walicord_application::{
+    InteractionNonce,
+    ledger::{
+        ExpenseAuthoringError, MemberWeight, compute_expense_owed_amounts,
+        expense_session::{
+            ExpenseBasicInfo, ExpenseParticipantSelection, ExpenseSelectionPhase,
+            ParticipantSelectionMode,
+        },
+    },
 };
 use walicord_domain::{Money, model::MemberId};
 use walicord_i18n as i18n;
 
-/// Custom-id strings the adapter renders into the confirmation-page buttons. Owned by
-/// the adapter (Discord component identity) and passed in so the presentation layer
-/// stays unaware of the custom_id format.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExpenseConfirmationButtonIds {
-    pub record: String,
-    pub modify_selection: String,
-    pub basic_edit: String,
-    pub cancel: String,
-}
-
-/// Build the confirmation-page surface (4/4 step). The per-member share is computed
-/// via `compute_expense_owed_amounts` — the same function the record path uses to
-/// produce on-ledger amounts, so the preview the actor confirms equals the canonical
-/// amounts by construction.
 pub fn build_expense_confirmation_surface(
     basic_info: &ExpenseBasicInfo,
     participants: &[ExpenseParticipantSelection],
-    defaulted_members: &[MemberId],
     display_names: &HashMap<MemberId, SmolStr>,
-    button_ids: &ExpenseConfirmationButtonIds,
+    nonce: InteractionNonce,
 ) -> Result<ExpenseSurfaceModel, ExpenseAuthoringError> {
-    let _defaulted: BTreeSet<MemberId> = defaulted_members.iter().copied().collect();
     let labels = SurfaceMemberLabels::from_member_names(participants.iter().map(|row| {
         (
             row.member_id,
@@ -50,8 +32,6 @@ pub fn build_expense_confirmation_surface(
     }));
 
     let summary_note = basic_info.note.as_ref().map(|note| {
-        // ExpenseNote::new validates non-empty canonical form; from_note returning None
-        // would be an invariant violation between the two types.
         SafeLiteralText::from_note(note.as_str())
             .expect("validated ExpenseNote should always produce a SafeLiteralText")
     });
@@ -105,29 +85,37 @@ pub fn build_expense_confirmation_surface(
         SurfaceActionRow::Buttons(vec![
             SurfaceButton::Interactive {
                 label: i18n::EXPENSE_RECORD_LABEL.to_owned(),
-                custom_id: button_ids.record.clone(),
+                custom_id: ExpenseComponentId::Record(nonce).to_string(),
                 style: SurfaceInteractiveButtonStyle::Primary,
                 disabled: false,
             },
             SurfaceButton::Interactive {
-                label: i18n::EXPENSE_REVISE_LABEL.to_owned(),
-                custom_id: button_ids.modify_selection.clone(),
+                label: i18n::EXPENSE_WEIGHT_EDIT_LABEL.to_owned(),
+                custom_id: ExpenseComponentId::WeightEdit(nonce).to_string(),
                 style: SurfaceInteractiveButtonStyle::Secondary,
                 disabled: false,
             },
             SurfaceButton::Interactive {
-                label: i18n::EXPENSE_BASIC_INFO_EDIT_LABEL.to_owned(),
-                custom_id: button_ids.basic_edit.clone(),
+                label: i18n::EXPENSE_REVISE_LABEL.to_owned(),
+                custom_id: ExpenseComponentId::ModifySelection(nonce).to_string(),
                 style: SurfaceInteractiveButtonStyle::Secondary,
                 disabled: false,
             },
         ]),
-        SurfaceActionRow::Buttons(vec![SurfaceButton::Interactive {
-            label: i18n::EXPENSE_CANCEL_LABEL.to_owned(),
-            custom_id: button_ids.cancel.clone(),
-            style: SurfaceInteractiveButtonStyle::Danger,
-            disabled: false,
-        }]),
+        SurfaceActionRow::Buttons(vec![
+            SurfaceButton::Interactive {
+                label: i18n::EXPENSE_BASIC_INFO_EDIT_LABEL.to_owned(),
+                custom_id: ExpenseComponentId::BasicEdit(nonce).to_string(),
+                style: SurfaceInteractiveButtonStyle::Secondary,
+                disabled: false,
+            },
+            SurfaceButton::Interactive {
+                label: i18n::EXPENSE_CANCEL_LABEL.to_owned(),
+                custom_id: ExpenseComponentId::Cancel(nonce).to_string(),
+                style: SurfaceInteractiveButtonStyle::Danger,
+                disabled: false,
+            },
+        ]),
     ];
 
     Ok(ExpenseSurfaceModel {
@@ -140,96 +128,68 @@ pub fn build_expense_confirmation_surface(
     })
 }
 
-/// Custom-id strings the adapter renders into each selection-step phase's buttons.
-/// Like `ExpenseConfirmationButtonIds`, these stay adapter-owned so presentation never
-/// has to know how Discord encodes button identities.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExpenseSelectionStepButtonIds {
-    pub to_participants: String,
-    pub source_individual: String,
-    pub source_roles: String,
-    pub source_members: String,
-    pub to_weights: String,
-    pub weight_edit: String,
-    pub to_confirm: String,
-    pub back: String,
-    pub cancel: String,
-}
-
-/// Build the selection-step surface model for the supplied phase. Each phase shows the
-/// step title and a phase-specific forward action row, ending with a Back/Cancel row.
-/// Picker select menus are not part of this model yet (they're built separately as the
-/// roster data flows in).
 pub fn build_expense_selection_step_surface(
     phase: &ExpenseSelectionPhase,
-    button_ids: &ExpenseSelectionStepButtonIds,
+    nonce: InteractionNonce,
+    include_members_group: bool,
 ) -> ExpenseSurfaceModel {
-    let title = match phase {
-        ExpenseSelectionPhase::Payer => i18n::EXPENSE_STEP_TITLE_PAYER,
-        ExpenseSelectionPhase::ParticipantSource
-        | ExpenseSelectionPhase::IndividualSelection
-        | ExpenseSelectionPhase::Roles => i18n::EXPENSE_STEP_TITLE_PARTICIPANTS,
-        ExpenseSelectionPhase::WeightEditor => i18n::EXPENSE_STEP_TITLE_WEIGHT,
+    let ExpenseSelectionPhase::Participants { mode } = phase;
+
+    let members_toggle_label = if include_members_group {
+        i18n::PARTICIPANT_SOURCE_CLEAR_MEMBERS_LABEL
+    } else {
+        i18n::PARTICIPANT_SOURCE_MEMBERS_LABEL
     };
 
-    let phase_specific: Vec<SurfaceButton> = match phase {
-        ExpenseSelectionPhase::Payer => vec![SurfaceButton::Interactive {
-            label: i18n::EXPENSE_NEXT_LABEL.to_owned(),
-            custom_id: button_ids.to_participants.clone(),
-            style: SurfaceInteractiveButtonStyle::Primary,
-            disabled: false,
-        }],
-        ExpenseSelectionPhase::ParticipantSource => vec![
+    let members_toggle_button = SurfaceButton::Interactive {
+        label: members_toggle_label.to_owned(),
+        custom_id: ExpenseComponentId::MembersToggle(nonce).to_string(),
+        style: SurfaceInteractiveButtonStyle::Secondary,
+        disabled: false,
+    };
+
+    let phase_specific: Vec<SurfaceButton> = match mode {
+        ParticipantSelectionMode::Individual => vec![
+            SurfaceButton::Interactive {
+                label: i18n::PARTICIPANT_SOURCE_ROLE_LABEL.to_owned(),
+                custom_id: ExpenseComponentId::SwitchRoles(nonce).to_string(),
+                style: SurfaceInteractiveButtonStyle::Secondary,
+                disabled: false,
+            },
+            members_toggle_button,
+            SurfaceButton::Interactive {
+                label: i18n::EXPENSE_SWITCH_TO_PAYER_LABEL.to_owned(),
+                custom_id: ExpenseComponentId::SwitchPayer(nonce).to_string(),
+                style: SurfaceInteractiveButtonStyle::Secondary,
+                disabled: false,
+            },
+        ],
+        ParticipantSelectionMode::Roles => vec![
             SurfaceButton::Interactive {
                 label: i18n::PARTICIPANT_SOURCE_INDIVIDUAL_LABEL.to_owned(),
-                custom_id: button_ids.source_individual.clone(),
+                custom_id: ExpenseComponentId::SwitchIndividual(nonce).to_string(),
+                style: SurfaceInteractiveButtonStyle::Secondary,
+                disabled: false,
+            },
+            members_toggle_button,
+            SurfaceButton::Interactive {
+                label: i18n::EXPENSE_SWITCH_TO_PAYER_LABEL.to_owned(),
+                custom_id: ExpenseComponentId::SwitchPayer(nonce).to_string(),
+                style: SurfaceInteractiveButtonStyle::Secondary,
+                disabled: false,
+            },
+        ],
+        ParticipantSelectionMode::Payer => vec![
+            SurfaceButton::Interactive {
+                label: i18n::PARTICIPANT_SOURCE_INDIVIDUAL_LABEL.to_owned(),
+                custom_id: ExpenseComponentId::SwitchIndividual(nonce).to_string(),
                 style: SurfaceInteractiveButtonStyle::Secondary,
                 disabled: false,
             },
             SurfaceButton::Interactive {
                 label: i18n::PARTICIPANT_SOURCE_ROLE_LABEL.to_owned(),
-                custom_id: button_ids.source_roles.clone(),
+                custom_id: ExpenseComponentId::SwitchRoles(nonce).to_string(),
                 style: SurfaceInteractiveButtonStyle::Secondary,
-                disabled: false,
-            },
-            SurfaceButton::Interactive {
-                label: i18n::PARTICIPANT_SOURCE_MEMBERS_LABEL.to_owned(),
-                custom_id: button_ids.source_members.clone(),
-                style: SurfaceInteractiveButtonStyle::Secondary,
-                disabled: false,
-            },
-            SurfaceButton::Interactive {
-                label: i18n::EXPENSE_TO_WEIGHTS_LABEL.to_owned(),
-                custom_id: button_ids.to_weights.clone(),
-                style: SurfaceInteractiveButtonStyle::Primary,
-                disabled: false,
-            },
-        ],
-        ExpenseSelectionPhase::IndividualSelection | ExpenseSelectionPhase::Roles => vec![
-            SurfaceButton::Interactive {
-                label: i18n::EXPENSE_TO_WEIGHTS_LABEL.to_owned(),
-                custom_id: button_ids.to_weights.clone(),
-                style: SurfaceInteractiveButtonStyle::Primary,
-                disabled: false,
-            },
-            SurfaceButton::Interactive {
-                label: i18n::EXPENSE_TO_CONFIRM_LABEL.to_owned(),
-                custom_id: button_ids.to_confirm.clone(),
-                style: SurfaceInteractiveButtonStyle::Primary,
-                disabled: false,
-            },
-        ],
-        ExpenseSelectionPhase::WeightEditor => vec![
-            SurfaceButton::Interactive {
-                label: i18n::EXPENSE_WEIGHT_EDIT_LABEL.to_owned(),
-                custom_id: button_ids.weight_edit.clone(),
-                style: SurfaceInteractiveButtonStyle::Secondary,
-                disabled: false,
-            },
-            SurfaceButton::Interactive {
-                label: i18n::EXPENSE_TO_CONFIRM_LABEL.to_owned(),
-                custom_id: button_ids.to_confirm.clone(),
-                style: SurfaceInteractiveButtonStyle::Primary,
                 disabled: false,
             },
         ],
@@ -241,21 +201,27 @@ pub fn build_expense_selection_step_surface(
     }
     action_rows.push(SurfaceActionRow::Buttons(vec![
         SurfaceButton::Interactive {
-            label: i18n::EXPENSE_BACK_LABEL.to_owned(),
-            custom_id: button_ids.back.clone(),
-            style: SurfaceInteractiveButtonStyle::Secondary,
+            label: i18n::EXPENSE_TO_CONFIRM_LABEL.to_owned(),
+            custom_id: ExpenseComponentId::ToConfirm(nonce).to_string(),
+            style: SurfaceInteractiveButtonStyle::Primary,
             disabled: false,
         },
         SurfaceButton::Interactive {
             label: i18n::EXPENSE_CANCEL_LABEL.to_owned(),
-            custom_id: button_ids.cancel.clone(),
+            custom_id: ExpenseComponentId::Cancel(nonce).to_string(),
             style: SurfaceInteractiveButtonStyle::Danger,
             disabled: false,
         },
     ]));
 
+    let mode_label = match mode {
+        ParticipantSelectionMode::Individual => i18n::PARTICIPANT_SOURCE_INDIVIDUAL_LABEL,
+        ParticipantSelectionMode::Roles => i18n::PARTICIPANT_SOURCE_ROLE_LABEL,
+        ParticipantSelectionMode::Payer => i18n::EXPENSE_SUB_VIEW_PAYER_TITLE,
+    };
+
     ExpenseSurfaceModel {
-        title: title.to_owned(),
+        title: format!("{} — {mode_label}", i18n::EXPENSE_STEP_TITLE_PARTICIPANTS),
         summary_lines: Vec::new(),
         detail_lines: Vec::new(),
         validation_message: None,

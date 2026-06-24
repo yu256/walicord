@@ -298,7 +298,9 @@ mod tests {
             session.key(),
             session.origin(),
             ExpenseSessionStage::InSelection {
-                phase: ExpenseSelectionPhase::IndividualSelection,
+                phase: ExpenseSelectionPhase::participants(
+                    crate::ledger::expense_session::ParticipantSelectionMode::Individual,
+                ),
             },
             draft,
             FixedClock.now(),

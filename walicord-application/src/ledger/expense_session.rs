@@ -5,9 +5,7 @@ use crate::{
 use parking_lot::Mutex;
 use std::{
     collections::{BTreeMap, HashMap},
-    fmt,
-    num::{NonZeroU64, ParseIntError},
-    str::FromStr,
+    num::NonZeroU64,
     time::{Duration, SystemTime},
 };
 use walicord_domain::{
@@ -83,20 +81,22 @@ impl VoidSessionKey {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ExpenseSelectionPhase {
-    Payer,
-    ParticipantSource,
-    IndividualSelection,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParticipantSelectionMode {
+    Individual,
     Roles,
-    WeightEditor,
+    Payer,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum ExpensePickerKind {
-    Payer,
-    Individuals,
-    Roles,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExpenseSelectionPhase {
+    Participants { mode: ParticipantSelectionMode },
+}
+
+impl ExpenseSelectionPhase {
+    pub fn participants(mode: ParticipantSelectionMode) -> Self {
+        Self::Participants { mode }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -139,7 +139,6 @@ pub struct ExpenseSelectionState {
     pub selected_roles: Vec<RoleId>,
     pub include_members_group: bool,
     pub weight_overrides: BTreeMap<MemberId, Weight>,
-    pub picker_states: BTreeMap<ExpensePickerKind, PagedPickerState>,
 }
 
 /// One resolved participant row as captured at confirmation rebuild time.
@@ -181,6 +180,11 @@ impl ExpenseDraftSnapshot {
 
     pub fn with_confirmation_snapshot(mut self, snapshot: ExpenseConfirmationSnapshot) -> Self {
         self.confirmation_snapshot = Some(snapshot);
+        self
+    }
+
+    pub fn without_confirmation_snapshot(mut self) -> Self {
+        self.confirmation_snapshot = None;
         self
     }
 
@@ -279,8 +283,15 @@ impl ExpenseSession {
     pub fn draft(&self) -> &ExpenseDraftSnapshot {
         &self.draft
     }
+    pub fn into_draft(self) -> ExpenseDraftSnapshot {
+        self.draft
+    }
     pub fn last_touched(&self) -> SystemTime {
         self.last_touched
+    }
+
+    pub(crate) fn refresh_touched(&mut self, now: SystemTime) {
+        self.last_touched = now;
     }
 }
 
@@ -607,89 +618,6 @@ impl ModalRetryBindingStore {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct PickerSnapshotId(u64);
-
-impl PickerSnapshotId {
-    pub fn new(value: u64) -> Self {
-        Self(value)
-    }
-}
-
-impl fmt::Display for PickerSnapshotId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl FromStr for PickerSnapshotId {
-    type Err = ParseIntError;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        value.parse::<u64>().map(Self)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PagedPickerState {
-    snapshot_id: PickerSnapshotId,
-    current_page: usize,
-    query: Option<String>,
-    selection: Vec<u64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum PagedPickerStateError {
-    #[error("paged picker snapshot is stale: observed {actual:?}, expected {expected:?}")]
-    StaleSnapshot {
-        actual: PickerSnapshotId,
-        expected: PickerSnapshotId,
-    },
-}
-
-impl PagedPickerState {
-    pub fn new(
-        snapshot_id: PickerSnapshotId,
-        current_page: usize,
-        query: Option<String>,
-        selection: Vec<u64>,
-    ) -> Self {
-        Self {
-            snapshot_id,
-            current_page,
-            query,
-            selection,
-        }
-    }
-
-    pub fn snapshot_id(&self) -> PickerSnapshotId {
-        self.snapshot_id
-    }
-    pub fn current_page(&self) -> usize {
-        self.current_page
-    }
-    pub fn query(&self) -> Option<&str> {
-        self.query.as_deref()
-    }
-    pub fn selection(&self) -> &[u64] {
-        &self.selection
-    }
-
-    pub fn require_snapshot(
-        &self,
-        expected: PickerSnapshotId,
-    ) -> Result<(), PagedPickerStateError> {
-        if self.snapshot_id == expected {
-            Ok(())
-        } else {
-            Err(PagedPickerStateError::StaleSnapshot {
-                actual: self.snapshot_id,
-                expected,
-            })
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PagedReadViewRoute {
     ReviewParent,
@@ -894,7 +822,7 @@ impl ExpenseSessionStore {
         let Some(slot) = guard.by_key.get(&key) else {
             return Ok(None);
         };
-        let session = match slot {
+        let mut session = match slot {
             ExpenseSessionSlot::Available(session) => session.clone(),
             ExpenseSessionSlot::Claimed { .. } => return Err(SessionAccessError::InFlight),
         };
@@ -903,6 +831,7 @@ impl ExpenseSessionStore {
             guard.remove_session(key);
             return Err(SessionAccessError::Expired);
         }
+        session.refresh_touched(now);
         let token = ExpenseSessionClaimToken {
             key,
             value: guard.next_claim_token,
@@ -1172,7 +1101,7 @@ mod tests {
         Err(ExpenseSessionConstructionError::AwaitingBasicInfoCannotHaveBasicInfo)
     )]
     #[case::in_selection_without_basic_info_rejected(
-        ExpenseSessionStage::InSelection { phase: ExpenseSelectionPhase::Payer },
+        ExpenseSessionStage::InSelection { phase: ExpenseSelectionPhase::participants(ParticipantSelectionMode::Individual) },
         ExpenseDraftSnapshot::empty(),
         Err(ExpenseSessionConstructionError::InSelectionRequiresBasicInfo),
     )]
@@ -1187,7 +1116,7 @@ mod tests {
         Ok(()),
     )]
     #[case::in_selection_with_basic_info_ok(
-        ExpenseSessionStage::InSelection { phase: ExpenseSelectionPhase::WeightEditor },
+        ExpenseSessionStage::InSelection { phase: ExpenseSelectionPhase::participants(ParticipantSelectionMode::Roles) },
         draft_with_basic_info(),
         Ok(()),
     )]
@@ -1410,14 +1339,16 @@ mod tests {
     fn expense_session_claim_blocks_concurrent_access() {
         let store = ExpenseSessionStore::new();
         let session = fresh_expense_session(UNIX_EPOCH);
-        store.replace(session.clone());
+        store.replace(session);
 
-        let claimed = store.claim(expense_key(), UNIX_EPOCH + Duration::from_secs(60));
-        let after = inspect_expense_session(&store, UNIX_EPOCH + Duration::from_secs(60));
+        let claim_time = UNIX_EPOCH + Duration::from_secs(60);
+        let expected = fresh_expense_session(claim_time);
+        let claimed = store.claim(expense_key(), claim_time);
+        let after = inspect_expense_session(&store, claim_time);
 
         assert_eq!(
-            claimed.map(|maybe| maybe.map(|claimed| claimed.session().clone())),
-            Ok(Some(session))
+            claimed.map(|maybe| maybe.map(|c| c.session().clone())),
+            Ok(Some(expected))
         );
         assert_eq!(after, Err(SessionAccessError::InFlight));
     }
@@ -1694,24 +1625,6 @@ mod tests {
 
         assert_eq!(first, Ok(create_from_panel()));
         assert_eq!(second, Err(ModalSubmissionBindingError::NotFound));
-    }
-
-    #[rstest]
-    #[case::matching_snapshot(PickerSnapshotId::new(42), Ok(()))]
-    #[case::stale_snapshot(
-        PickerSnapshotId::new(99),
-        Err(PagedPickerStateError::StaleSnapshot {
-            actual: PickerSnapshotId::new(42),
-            expected: PickerSnapshotId::new(99),
-        }),
-    )]
-    fn paged_picker_state_require_snapshot_rejects_stale_clicks(
-        #[case] expected_snapshot: PickerSnapshotId,
-        #[case] expected: Result<(), PagedPickerStateError>,
-    ) {
-        let state = PagedPickerState::new(PickerSnapshotId::new(42), 0, None, vec![]);
-        let actual = state.require_snapshot(expected_snapshot);
-        assert_eq!(actual, expected);
     }
 
     #[rstest]

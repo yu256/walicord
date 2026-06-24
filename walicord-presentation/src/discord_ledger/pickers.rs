@@ -21,9 +21,7 @@ pub struct PickerSurfaceModel {
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExpenseStepTitle {
-    Payer,
     Participants,
-    Weight,
     Confirm,
 }
 
@@ -31,9 +29,7 @@ pub enum ExpenseStepTitle {
 impl ExpenseStepTitle {
     pub fn render(self) -> &'static str {
         match self {
-            Self::Payer => i18n::EXPENSE_STEP_TITLE_PAYER,
             Self::Participants => i18n::EXPENSE_STEP_TITLE_PARTICIPANTS,
-            Self::Weight => i18n::EXPENSE_STEP_TITLE_WEIGHT,
             Self::Confirm => i18n::EXPENSE_STEP_TITLE_CONFIRM,
         }
     }
@@ -130,20 +126,16 @@ impl ExpenseConfirmationParticipantRow {
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExpenseForwardAction {
-    Payer,
-    Participants,
-    Weight,
-    Confirm,
+    ToConfirm,
+    Record,
 }
 
 #[cfg(test)]
 impl ExpenseForwardAction {
     pub fn render(self) -> &'static str {
         match self {
-            Self::Payer => i18n::EXPENSE_NEXT_LABEL,
-            Self::Participants => i18n::EXPENSE_TO_WEIGHTS_LABEL,
-            Self::Weight => i18n::EXPENSE_TO_CONFIRM_LABEL,
-            Self::Confirm => i18n::EXPENSE_RECORD_LABEL,
+            Self::ToConfirm => i18n::EXPENSE_TO_CONFIRM_LABEL,
+            Self::Record => i18n::EXPENSE_RECORD_LABEL,
         }
     }
 }
@@ -350,10 +342,8 @@ mod tests {
 
     #[test]
     fn expense_step_titles_use_the_fixed_stage_framing() {
-        assert_eq!(ExpenseStepTitle::Payer.render(), "1/4 支払者");
-        assert_eq!(ExpenseStepTitle::Participants.render(), "2/4 参加者");
-        assert_eq!(ExpenseStepTitle::Weight.render(), "3/4 重み");
-        assert_eq!(ExpenseStepTitle::Confirm.render(), "4/4 確認");
+        assert_eq!(ExpenseStepTitle::Participants.render(), "1/2 参加者");
+        assert_eq!(ExpenseStepTitle::Confirm.render(), "2/2 確認");
     }
 
     #[test]
@@ -454,10 +444,8 @@ mod tests {
             participant_source_clear_labels(),
             ["ロール選択をクリア", "全員を外す"]
         );
-        assert_eq!(ExpenseForwardAction::Payer.render(), "次へ");
-        assert_eq!(ExpenseForwardAction::Participants.render(), "重みへ");
-        assert_eq!(ExpenseForwardAction::Weight.render(), "確認へ");
-        assert_eq!(ExpenseForwardAction::Confirm.render(), "記録する");
+        assert_eq!(ExpenseForwardAction::ToConfirm.render(), "確認へ");
+        assert_eq!(ExpenseForwardAction::Record.render(), "記録する");
     }
 
     #[test]
@@ -485,8 +473,6 @@ mod tests {
             i18n::PARTICIPANT_SOURCE_MEMBERS_LABEL,
             i18n::PARTICIPANT_SOURCE_CLEAR_ROLES_LABEL,
             i18n::PARTICIPANT_SOURCE_CLEAR_MEMBERS_LABEL,
-            i18n::EXPENSE_NEXT_LABEL,
-            i18n::EXPENSE_TO_WEIGHTS_LABEL,
             i18n::EXPENSE_TO_CONFIRM_LABEL,
             i18n::EXPENSE_RECORD_LABEL,
         ] {

@@ -4,10 +4,9 @@ use crate::{
     ledger::{
         expense_session::{
             ExpenseBasicInfo, ExpenseConfirmationSnapshot, ExpenseDraftSnapshot,
-            ExpenseLaunchOrigin, ExpenseParticipantSelection, ExpensePickerKind,
-            ExpenseSelectionPhase, ExpenseSelectionState, ExpenseSession,
-            ExpenseSessionConstructionError, ExpenseSessionKey, ExpenseSessionStage,
-            PagedPickerState, PickerSnapshotId,
+            ExpenseLaunchOrigin, ExpenseParticipantSelection, ExpenseSelectionPhase,
+            ExpenseSelectionState, ExpenseSession, ExpenseSessionConstructionError,
+            ExpenseSessionKey, ExpenseSessionStage, ParticipantSelectionMode,
         },
         participant_resolution::{
             ParticipantDrift, RosterSnapshot, drift_between_snapshot_and_resolution,
@@ -18,11 +17,6 @@ use crate::{
 use std::collections::BTreeMap;
 use walicord_domain::model::{MemberId, RoleId, Weight};
 
-/// Construct a fresh [`ExpenseSession`] in `InSelection { Payer }` from a validated
-/// modal submission. The actor is preselected as both payer and the initial individual
-/// participant (criterion 144). Time is sourced from [`Clock`]; the nonce is generated
-/// by [`NonceProvider`] but returned separately so the adapter layer can register it
-/// in its own nonce map without coupling session state to Discord interaction identity.
 pub fn bootstrap_expense_session(
     key: ExpenseSessionKey,
     origin: ExpenseLaunchOrigin,
@@ -41,7 +35,7 @@ pub fn bootstrap_expense_session(
         key,
         origin,
         ExpenseSessionStage::InSelection {
-            phase: ExpenseSelectionPhase::Payer,
+            phase: ExpenseSelectionPhase::participants(ParticipantSelectionMode::Individual),
         },
         draft,
         clock.now(),
@@ -67,13 +61,6 @@ fn preselect_actor_as_payer_and_participant(actor: MemberId) -> ExpenseSelection
     }
 }
 
-/// Outcome of resolving a session's selection state into a confirmation view. `drift`
-/// is non-empty when the resolved participant set differs from the previous
-/// confirmation snapshot (criterion 111); the caller surfaces those rows explicitly
-/// and re-renders the confirmation page. `dropped_overrides` and `defaulted_members`
-/// flow through from the resolution so the caller can update the session's stored
-/// selection state, emit the criterion-158 observability event, and render the
-/// criterion-216 `既定値 1` cue on affected rows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfirmationBuildOutcome {
     pub session: ExpenseSession,
@@ -85,6 +72,8 @@ pub struct ConfirmationBuildOutcome {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ConfirmationBuildError {
+    #[error("session is not in the InConfirmation stage")]
+    NotInConfirmation,
     #[error("basic info is missing from the session draft")]
     BasicInfoMissing,
     #[error("no payer is selected in the session")]
@@ -95,11 +84,6 @@ pub enum ConfirmationBuildError {
     ConstructionFailed(#[from] ExpenseSessionConstructionError),
 }
 
-/// Resolve the current selection against a fresh roster snapshot and transition the
-/// session into `InConfirmation` with the captured snapshot. Stale or removed
-/// participants are dropped automatically (criterion 158); newly-added participants
-/// default to `Weight(1)` (criterion 157); drift between an existing snapshot and the
-/// new resolution is reported to the caller for re-render disclosure (criterion 111).
 pub fn build_confirmation_for_session(
     session: ExpenseSession,
     roster: &RosterSnapshot,
@@ -130,15 +114,10 @@ pub fn build_confirmation_for_session(
     let snapshot = ExpenseConfirmationSnapshot {
         participants: outcome.resolved.clone(),
     };
-    let basic_info = session
-        .draft()
-        .basic_info()
-        .cloned()
-        .expect("basic info verified present above");
     let key = session.key();
     let origin = session.origin();
-    let next_draft = ExpenseDraftSnapshot::empty()
-        .with_basic_info(basic_info)
+    let draft = session.into_draft();
+    let next_draft = draft
         .with_selection_state(selection)
         .with_confirmation_snapshot(snapshot.clone());
     let next_session = ExpenseSession::new(
@@ -159,8 +138,6 @@ pub fn build_confirmation_for_session(
     })
 }
 
-/// Convenience: extract `(payer, participants)` from a session that is already in
-/// `InConfirmation`. Used by the record path to feed the application authoring layer.
 pub fn confirmation_payer_and_participants(
     session: &ExpenseSession,
 ) -> Option<(MemberId, &[ExpenseParticipantSelection])> {
@@ -178,68 +155,42 @@ pub fn confirmation_payer_and_participants(
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum NavigationError {
-    #[error("already at the first selection step (caller should fall back to cancel)")]
-    AlreadyAtFirstStep,
     #[error("session is not in the InSelection stage")]
     NotInSelection,
     #[error("session is not in the InConfirmation stage")]
     NotInConfirmation,
     #[error("basic info is missing from the session draft")]
     BasicInfoMissing,
-    /// The actor pressed a forward-navigation button whose target phase is not a legal
-    /// next step from the current phase (e.g. pressing `重みへ` from `Payer`). The
-    /// session has not been mutated; the caller surfaces the criterion-201 cancel cue
-    /// or refreshes the current step.
-    #[error("illegal forward selection transition: {from:?} → {to:?}")]
-    IllegalForwardTransition {
-        from: ExpenseSelectionPhase,
-        to: ExpenseSelectionPhase,
-    },
     #[error("session construction failed during navigation: {0}")]
     ConstructionFailed(#[from] ExpenseSessionConstructionError),
 }
 
-/// Walk one selection phase backwards (criterion 200). At the first selection phase,
-/// the caller falls back to the cancel path (criterion 201).
-pub fn previous_phase(phase: &ExpenseSelectionPhase) -> Option<ExpenseSelectionPhase> {
-    match phase {
-        ExpenseSelectionPhase::Payer => None,
-        ExpenseSelectionPhase::ParticipantSource => Some(ExpenseSelectionPhase::Payer),
-        ExpenseSelectionPhase::IndividualSelection => {
-            Some(ExpenseSelectionPhase::ParticipantSource)
-        }
-        ExpenseSelectionPhase::Roles => Some(ExpenseSelectionPhase::ParticipantSource),
-        ExpenseSelectionPhase::WeightEditor => Some(ExpenseSelectionPhase::ParticipantSource),
-    }
-}
-
-/// Move the session one phase back without touching draft state (criterion 200/202).
-/// Returns `AlreadyAtFirstStep` when the caller should instead invoke the cancel path
-/// (criterion 201).
-pub fn navigate_back(
+pub fn switch_participant_mode(
     session: ExpenseSession,
+    target: ParticipantSelectionMode,
     clock: &dyn Clock,
 ) -> Result<ExpenseSession, NavigationError> {
-    let ExpenseSessionStage::InSelection { phase } = session.stage() else {
+    let ExpenseSessionStage::InSelection {
+        phase: ExpenseSelectionPhase::Participants { .. },
+    } = session.stage()
+    else {
         return Err(NavigationError::NotInSelection);
     };
-    let previous = previous_phase(phase).ok_or(NavigationError::AlreadyAtFirstStep)?;
     let key = session.key();
     let origin = session.origin();
-    let draft = session.draft().clone();
+    let draft = session.into_draft();
     ExpenseSession::new(
         key,
         origin,
-        ExpenseSessionStage::InSelection { phase: previous },
+        ExpenseSessionStage::InSelection {
+            phase: ExpenseSelectionPhase::participants(target),
+        },
         draft,
         clock.now(),
     )
     .map_err(NavigationError::ConstructionFailed)
 }
 
-/// Transition a confirmation-stage session back to the first selection phase with
-/// state preserved (criterion 145 / G17). The confirmation snapshot is dropped so the
-/// next confirmation rebuild observes drift and refreshes participant rows.
 pub fn navigate_modify_selection(
     session: ExpenseSession,
     clock: &dyn Clock,
@@ -249,20 +200,13 @@ pub fn navigate_modify_selection(
     }
     let key = session.key();
     let origin = session.origin();
-    let basic_info = session
-        .draft()
-        .basic_info()
-        .cloned()
-        .ok_or(NavigationError::BasicInfoMissing)?;
-    let selection = session.draft().selection_state().clone();
-    let draft = ExpenseDraftSnapshot::empty()
-        .with_basic_info(basic_info)
-        .with_selection_state(selection);
+    let draft = session.into_draft();
+    let draft = draft.without_confirmation_snapshot();
     ExpenseSession::new(
         key,
         origin,
         ExpenseSessionStage::InSelection {
-            phase: ExpenseSelectionPhase::Payer,
+            phase: ExpenseSelectionPhase::participants(ParticipantSelectionMode::Individual),
         },
         draft,
         clock.now(),
@@ -270,84 +214,28 @@ pub fn navigate_modify_selection(
     .map_err(NavigationError::ConstructionFailed)
 }
 
-/// Allowed forward transitions inside the selection wizard. Adding a `Members` toggle
-/// is *not* a transition — it mutates the draft and stays on `ParticipantSource`.
-pub fn legal_forward_target(phase: &ExpenseSelectionPhase) -> &'static [ExpenseSelectionPhase] {
-    match phase {
-        ExpenseSelectionPhase::Payer => &[ExpenseSelectionPhase::ParticipantSource],
-        ExpenseSelectionPhase::ParticipantSource => &[
-            ExpenseSelectionPhase::IndividualSelection,
-            ExpenseSelectionPhase::Roles,
-            ExpenseSelectionPhase::WeightEditor,
-        ],
-        ExpenseSelectionPhase::IndividualSelection => &[ExpenseSelectionPhase::WeightEditor],
-        ExpenseSelectionPhase::Roles => &[ExpenseSelectionPhase::WeightEditor],
-        ExpenseSelectionPhase::WeightEditor => &[],
-    }
-}
-
-/// Forward-navigate one selection phase. Draft state (basic_info, selection_state) is
-/// preserved verbatim; only the stage transitions. Illegal transitions return
-/// `IllegalForwardTransition` so the caller can refresh the current step without
-/// corrupting the session.
-pub fn navigate_to_phase(
-    session: ExpenseSession,
-    target: ExpenseSelectionPhase,
-    clock: &dyn Clock,
-) -> Result<ExpenseSession, NavigationError> {
-    let ExpenseSessionStage::InSelection { phase } = session.stage() else {
-        return Err(NavigationError::NotInSelection);
-    };
-    if !legal_forward_target(phase).contains(&target) {
-        return Err(NavigationError::IllegalForwardTransition {
-            from: phase.clone(),
-            to: target,
-        });
-    }
-    let key = session.key();
-    let origin = session.origin();
-    let draft = session.draft().clone();
-    ExpenseSession::new(
-        key,
-        origin,
-        ExpenseSessionStage::InSelection { phase: target },
-        draft,
-        clock.now(),
-    )
-    .map_err(NavigationError::ConstructionFailed)
-}
-
-/// Toggle the `MEMBERS` (全メンバー) virtual group in the current selection. Allowed
-/// from the `ParticipantSource` phase only; the stage does not change. Per criterion
-/// 214 the MEMBERS group is resolved at record time, so the toggle simply flips a flag
-/// in the draft.
 pub fn toggle_members_group(
     session: ExpenseSession,
     clock: &dyn Clock,
 ) -> Result<ExpenseSession, NavigationError> {
     let ExpenseSessionStage::InSelection {
-        phase: ExpenseSelectionPhase::ParticipantSource,
+        phase: ExpenseSelectionPhase::Participants { mode },
     } = session.stage()
     else {
         return Err(NavigationError::NotInSelection);
     };
-    let key = session.key();
-    let origin = session.origin();
+    let mode = *mode;
     let mut selection = session.draft().selection_state().clone();
     selection.include_members_group = !selection.include_members_group;
-    let basic_info = session
-        .draft()
-        .basic_info()
-        .cloned()
-        .ok_or(NavigationError::BasicInfoMissing)?;
-    let draft = ExpenseDraftSnapshot::empty()
-        .with_basic_info(basic_info)
-        .with_selection_state(selection);
+    let key = session.key();
+    let origin = session.origin();
+    let draft = session.into_draft();
+    let draft = draft.with_selection_state(selection);
     ExpenseSession::new(
         key,
         origin,
         ExpenseSessionStage::InSelection {
-            phase: ExpenseSelectionPhase::ParticipantSource,
+            phase: ExpenseSelectionPhase::participants(mode),
         },
         draft,
         clock.now(),
@@ -360,9 +248,14 @@ pub fn replace_payer(
     payer: Option<MemberId>,
     clock: &dyn Clock,
 ) -> Result<ExpenseSession, NavigationError> {
-    update_selection_in_phase(session, ExpenseSelectionPhase::Payer, clock, |selection| {
-        selection.payer = payer;
-    })
+    update_selection_in_phase(
+        session,
+        ExpenseSelectionPhase::participants(ParticipantSelectionMode::Payer),
+        clock,
+        |selection| {
+            selection.payer = payer;
+        },
+    )
 }
 
 pub fn replace_individual_members(
@@ -374,7 +267,7 @@ pub fn replace_individual_members(
     members.dedup();
     update_selection_in_phase(
         session,
-        ExpenseSelectionPhase::IndividualSelection,
+        ExpenseSelectionPhase::participants(ParticipantSelectionMode::Individual),
         clock,
         |selection| {
             selection.individual_members = members;
@@ -389,97 +282,43 @@ pub fn replace_selected_roles(
 ) -> Result<ExpenseSession, NavigationError> {
     roles.sort_unstable();
     roles.dedup();
-    update_selection_in_phase(session, ExpenseSelectionPhase::Roles, clock, |selection| {
-        selection.selected_roles = roles;
-    })
-}
-
-pub fn replace_weight_overrides(
-    session: ExpenseSession,
-    weights: BTreeMap<MemberId, Weight>,
-    clock: &dyn Clock,
-) -> Result<ExpenseSession, NavigationError> {
     update_selection_in_phase(
         session,
-        ExpenseSelectionPhase::WeightEditor,
+        ExpenseSelectionPhase::participants(ParticipantSelectionMode::Roles),
         clock,
         |selection| {
-            selection.weight_overrides = weights;
+            selection.selected_roles = roles;
         },
     )
 }
 
-pub fn set_picker_view_state(
+pub fn replace_weight_overrides_and_rebuild(
     session: ExpenseSession,
-    kind: ExpensePickerKind,
-    snapshot_id: PickerSnapshotId,
-    current_page: usize,
-    query: Option<String>,
+    weights: BTreeMap<MemberId, Weight>,
+    roster: &RosterSnapshot,
     clock: &dyn Clock,
-) -> Result<ExpenseSession, NavigationError> {
-    update_selection_in_picker_kind(session, kind, clock, |selection| {
-        let selected_values = picker_selection_values(kind, selection);
-        selection.picker_states.insert(
-            kind,
-            PagedPickerState::new(snapshot_id, current_page, query, selected_values),
-        );
-    })
-}
-
-pub fn clear_picker_selection(
-    session: ExpenseSession,
-    kind: ExpensePickerKind,
-    snapshot_id: PickerSnapshotId,
-    clock: &dyn Clock,
-) -> Result<ExpenseSession, NavigationError> {
-    update_selection_in_picker_kind(session, kind, clock, |selection| {
-        match kind {
-            ExpensePickerKind::Payer => selection.payer = None,
-            ExpensePickerKind::Individuals => selection.individual_members.clear(),
-            ExpensePickerKind::Roles => selection.selected_roles.clear(),
-        }
-        selection.picker_states.insert(
-            kind,
-            PagedPickerState::new(snapshot_id, 0, None, Vec::new()),
-        );
-    })
-}
-
-fn update_selection_in_picker_kind(
-    session: ExpenseSession,
-    kind: ExpensePickerKind,
-    clock: &dyn Clock,
-    update: impl FnOnce(&mut ExpenseSelectionState),
-) -> Result<ExpenseSession, NavigationError> {
-    update_selection_in_phase(session, picker_phase(kind), clock, update)
-}
-
-fn picker_phase(kind: ExpensePickerKind) -> ExpenseSelectionPhase {
-    match kind {
-        ExpensePickerKind::Payer => ExpenseSelectionPhase::Payer,
-        ExpensePickerKind::Individuals => ExpenseSelectionPhase::IndividualSelection,
-        ExpensePickerKind::Roles => ExpenseSelectionPhase::Roles,
+) -> Result<ConfirmationBuildOutcome, ConfirmationBuildError> {
+    if !matches!(session.stage(), ExpenseSessionStage::InConfirmation) {
+        return Err(ConfirmationBuildError::NotInConfirmation);
     }
-}
-
-fn picker_selection_values(kind: ExpensePickerKind, selection: &ExpenseSelectionState) -> Vec<u64> {
-    match kind {
-        ExpensePickerKind::Payer => selection
-            .payer
-            .map(|member_id| member_id.0)
-            .into_iter()
-            .collect(),
-        ExpensePickerKind::Individuals => selection
-            .individual_members
-            .iter()
-            .map(|member_id| member_id.0)
-            .collect(),
-        ExpensePickerKind::Roles => selection
-            .selected_roles
-            .iter()
-            .map(|role_id| role_id.0)
-            .collect(),
-    }
+    let mut selection = session.draft().selection_state().clone();
+    selection.weight_overrides = weights;
+    let key = session.key();
+    let origin = session.origin();
+    let draft = session.into_draft();
+    let intermediate = ExpenseSession::new(
+        key,
+        origin,
+        ExpenseSessionStage::InSelection {
+            phase: ExpenseSelectionPhase::participants(ParticipantSelectionMode::Individual),
+        },
+        draft
+            .with_selection_state(selection)
+            .without_confirmation_snapshot(),
+        clock.now(),
+    )
+    .map_err(ConfirmationBuildError::ConstructionFailed)?;
+    build_confirmation_for_session(intermediate, roster, clock)
 }
 
 fn update_selection_in_phase(
@@ -494,58 +333,44 @@ fn update_selection_in_phase(
     if phase != &expected_phase {
         return Err(NavigationError::NotInSelection);
     }
-    let key = session.key();
-    let origin = session.origin();
     let mut selection = session.draft().selection_state().clone();
     update(&mut selection);
-    let basic_info = session
-        .draft()
-        .basic_info()
-        .cloned()
-        .ok_or(NavigationError::BasicInfoMissing)?;
+    let key = session.key();
+    let origin = session.origin();
+    let draft = session.into_draft();
     ExpenseSession::new(
         key,
         origin,
         ExpenseSessionStage::InSelection {
             phase: expected_phase,
         },
-        ExpenseDraftSnapshot::empty()
-            .with_basic_info(basic_info)
-            .with_selection_state(selection),
+        draft.with_selection_state(selection),
         clock.now(),
     )
     .map_err(NavigationError::ConstructionFailed)
 }
 
-/// Apply a re-edited basic-info submission to an existing session. Per criterion 229
-/// the actor presses `基本情報を修正する`, the modal re-opens prefilled from the
-/// current draft, and on submit the new values replace the old basic_info while
-/// **selection state persists** (criterion 229: "draft / choices persist"). The
-/// confirmation snapshot is dropped — basic_info edits invalidate the captured
-/// amounts so the next confirmation rebuild observes drift and refreshes.
 pub fn apply_modified_basic_info(
     session: ExpenseSession,
     new_basic_info: ExpenseBasicInfo,
     clock: &dyn Clock,
 ) -> Result<ExpenseSession, NavigationError> {
-    let key = session.key();
-    let origin = session.origin();
-    let selection = session.draft().selection_state().clone();
     let stage = match session.stage() {
-        ExpenseSessionStage::AwaitingBasicInfo
-        | ExpenseSessionStage::InSelection {
-            phase: ExpenseSelectionPhase::Payer,
+        ExpenseSessionStage::AwaitingBasicInfo | ExpenseSessionStage::InConfirmation => {
+            ExpenseSessionStage::InSelection {
+                phase: ExpenseSelectionPhase::participants(ParticipantSelectionMode::Individual),
+            }
         }
-        | ExpenseSessionStage::InConfirmation => ExpenseSessionStage::InSelection {
-            phase: ExpenseSelectionPhase::Payer,
-        },
         ExpenseSessionStage::InSelection { phase } => ExpenseSessionStage::InSelection {
             phase: phase.clone(),
         },
     };
-    let draft = ExpenseDraftSnapshot::empty()
+    let key = session.key();
+    let origin = session.origin();
+    let draft = session.into_draft();
+    let draft = draft
         .with_basic_info(new_basic_info)
-        .with_selection_state(selection);
+        .without_confirmation_snapshot();
     ExpenseSession::new(key, origin, stage, draft, clock.now())
         .map_err(NavigationError::ConstructionFailed)
 }
@@ -638,7 +463,7 @@ mod tests {
         assert_eq!(
             session.stage(),
             &ExpenseSessionStage::InSelection {
-                phase: ExpenseSelectionPhase::Payer
+                phase: ExpenseSelectionPhase::participants(ParticipantSelectionMode::Individual)
             }
         );
         let basic = session.draft().basic_info().expect("basic info present");
@@ -756,7 +581,7 @@ mod tests {
             key,
             ExpenseLaunchOrigin::SlashCommand,
             ExpenseSessionStage::InSelection {
-                phase: ExpenseSelectionPhase::Payer,
+                phase: ExpenseSelectionPhase::participants(ParticipantSelectionMode::Individual),
             },
             draft,
             fixed_clock().now,
@@ -797,7 +622,7 @@ mod tests {
             first.session.key(),
             ExpenseLaunchOrigin::SlashCommand,
             ExpenseSessionStage::InSelection {
-                phase: ExpenseSelectionPhase::IndividualSelection,
+                phase: ExpenseSelectionPhase::participants(ParticipantSelectionMode::Individual),
             },
             draft,
             fixed_clock().now,
@@ -839,71 +664,78 @@ mod tests {
         assert_eq!(actual, None);
     }
 
-    fn session_in_phase(phase: ExpenseSelectionPhase) -> ExpenseSession {
+    fn session_in_mode(mode: ParticipantSelectionMode) -> ExpenseSession {
         let session = bootstrapped();
         let key = session.key();
         let draft = session.draft().clone();
         ExpenseSession::new(
             key,
             ExpenseLaunchOrigin::SlashCommand,
-            ExpenseSessionStage::InSelection { phase },
+            ExpenseSessionStage::InSelection {
+                phase: ExpenseSelectionPhase::participants(mode),
+            },
             draft,
             fixed_clock().now,
         )
-        .expect("session in phase")
+        .expect("session in mode")
     }
 
     #[rstest::rstest]
-    #[case::from_participant_source(
-        ExpenseSelectionPhase::ParticipantSource,
-        Some(ExpenseSelectionPhase::Payer)
+    #[case::individual_to_roles(
+        ParticipantSelectionMode::Individual,
+        ParticipantSelectionMode::Roles
     )]
-    #[case::from_individual_selection(
-        ExpenseSelectionPhase::IndividualSelection,
-        Some(ExpenseSelectionPhase::ParticipantSource)
+    #[case::individual_to_payer(
+        ParticipantSelectionMode::Individual,
+        ParticipantSelectionMode::Payer
     )]
-    #[case::from_roles(
-        ExpenseSelectionPhase::Roles,
-        Some(ExpenseSelectionPhase::ParticipantSource)
+    #[case::roles_to_individual(
+        ParticipantSelectionMode::Roles,
+        ParticipantSelectionMode::Individual
     )]
-    #[case::from_weight_editor(
-        ExpenseSelectionPhase::WeightEditor,
-        Some(ExpenseSelectionPhase::ParticipantSource)
+    #[case::roles_to_payer(ParticipantSelectionMode::Roles, ParticipantSelectionMode::Payer)]
+    #[case::payer_to_individual(
+        ParticipantSelectionMode::Payer,
+        ParticipantSelectionMode::Individual
     )]
-    #[case::from_payer_is_first_step(ExpenseSelectionPhase::Payer, None)]
-    fn previous_phase_returns_documented_previous_step(
-        #[case] from: ExpenseSelectionPhase,
-        #[case] expected: Option<ExpenseSelectionPhase>,
+    #[case::payer_to_roles(ParticipantSelectionMode::Payer, ParticipantSelectionMode::Roles)]
+    fn switch_participant_mode_changes_mode_preserving_draft(
+        #[case] from: ParticipantSelectionMode,
+        #[case] to: ParticipantSelectionMode,
     ) {
-        let actual = previous_phase(&from);
-        assert_eq!(actual, expected);
-    }
-
-    #[test]
-    fn navigate_back_returns_already_at_first_step_when_in_payer_phase() {
-        let session = session_in_phase(ExpenseSelectionPhase::Payer);
-        let actual = navigate_back(session, &fixed_clock());
-        assert_eq!(actual.unwrap_err(), NavigationError::AlreadyAtFirstStep);
-    }
-
-    #[test]
-    fn navigate_back_preserves_draft_state_when_moving_one_phase_back() {
-        let session = session_in_phase(ExpenseSelectionPhase::IndividualSelection);
+        let session = session_in_mode(from);
         let original_draft = session.draft().clone();
 
-        let next = navigate_back(session, &fixed_clock()).expect("back navigation");
+        let switched =
+            switch_participant_mode(session, to, &fixed_clock()).expect("switch should succeed");
 
         assert_eq!(
-            next.stage(),
+            switched.stage(),
             &ExpenseSessionStage::InSelection {
-                phase: ExpenseSelectionPhase::ParticipantSource
+                phase: ExpenseSelectionPhase::participants(to)
             }
         );
-        assert_eq!(next.draft(), &original_draft);
+        assert_eq!(switched.draft(), &original_draft);
     }
 
     #[test]
-    fn navigate_modify_selection_returns_to_payer_phase_dropping_confirmation_snapshot() {
+    fn switch_participant_mode_rejects_non_selection_stage() {
+        let session = bootstrapped();
+        let roster = roster_with(&[42]);
+        let outcome =
+            build_confirmation_for_session(session, &roster, &fixed_clock()).expect("confirmation");
+
+        let actual = switch_participant_mode(
+            outcome.session,
+            ParticipantSelectionMode::Roles,
+            &fixed_clock(),
+        );
+
+        assert_eq!(actual.unwrap_err(), NavigationError::NotInSelection);
+    }
+
+    #[test]
+    fn navigate_modify_selection_returns_to_individual_mode_dropping_confirmation_snapshot() {
         let session = bootstrapped();
         let roster = roster_with(&[42]);
         let outcome =
@@ -915,7 +747,7 @@ mod tests {
         assert_eq!(
             next.stage(),
             &ExpenseSessionStage::InSelection {
-                phase: ExpenseSelectionPhase::Payer
+                phase: ExpenseSelectionPhase::participants(ParticipantSelectionMode::Individual)
             }
         );
         assert_eq!(next.draft().confirmation_snapshot(), None);
@@ -949,134 +781,68 @@ mod tests {
         assert_eq!(
             next.stage(),
             &ExpenseSessionStage::InSelection {
-                phase: ExpenseSelectionPhase::Payer
+                phase: ExpenseSelectionPhase::participants(ParticipantSelectionMode::Individual)
             }
         );
     }
 
-    #[rstest::rstest]
-    #[case::payer_to_participant_source(
-        ExpenseSelectionPhase::Payer,
-        ExpenseSelectionPhase::ParticipantSource
-    )]
-    #[case::participant_source_to_individual(
-        ExpenseSelectionPhase::ParticipantSource,
-        ExpenseSelectionPhase::IndividualSelection
-    )]
-    #[case::participant_source_to_roles(
-        ExpenseSelectionPhase::ParticipantSource,
-        ExpenseSelectionPhase::Roles
-    )]
-    #[case::participant_source_to_weight_editor(
-        ExpenseSelectionPhase::ParticipantSource,
-        ExpenseSelectionPhase::WeightEditor
-    )]
-    #[case::individual_to_weight_editor(
-        ExpenseSelectionPhase::IndividualSelection,
-        ExpenseSelectionPhase::WeightEditor
-    )]
-    #[case::roles_to_weight_editor(
-        ExpenseSelectionPhase::Roles,
-        ExpenseSelectionPhase::WeightEditor
-    )]
-    fn navigate_to_phase_accepts_legal_forward_transitions(
-        #[case] from: ExpenseSelectionPhase,
-        #[case] to: ExpenseSelectionPhase,
-    ) {
-        let actual = navigate_to_phase(session_in_phase(from), to.clone(), &fixed_clock())
-            .expect("transition should succeed");
-
-        assert_eq!(
-            actual.stage(),
-            &ExpenseSessionStage::InSelection { phase: to }
-        );
-    }
-
-    #[rstest::rstest]
-    #[case::payer_to_weight_editor_rejected(
-        ExpenseSelectionPhase::Payer,
-        ExpenseSelectionPhase::WeightEditor
-    )]
-    #[case::individual_to_roles_rejected(
-        ExpenseSelectionPhase::IndividualSelection,
-        ExpenseSelectionPhase::Roles
-    )]
-    #[case::weight_editor_has_no_forward_target(
-        ExpenseSelectionPhase::WeightEditor,
-        ExpenseSelectionPhase::WeightEditor
-    )]
-    fn navigate_to_phase_rejects_illegal_forward_transitions(
-        #[case] from: ExpenseSelectionPhase,
-        #[case] to: ExpenseSelectionPhase,
-    ) {
-        let actual = navigate_to_phase(session_in_phase(from.clone()), to.clone(), &fixed_clock());
-
-        assert_eq!(
-            actual,
-            Err(NavigationError::IllegalForwardTransition { from, to })
-        );
-    }
-
-    #[test]
-    fn navigate_to_phase_preserves_draft_state_across_the_transition() {
-        let from = session_in_phase(ExpenseSelectionPhase::Payer);
-        let original_draft = from.draft().clone();
-
-        let next = navigate_to_phase(
-            from,
-            ExpenseSelectionPhase::ParticipantSource,
-            &fixed_clock(),
-        )
-        .expect("legal transition");
-
-        assert_eq!(next.draft(), &original_draft);
-    }
-
     #[test]
     fn toggle_members_group_flips_the_include_members_group_flag() {
-        let session = session_in_phase(ExpenseSelectionPhase::ParticipantSource);
+        let session = session_in_mode(ParticipantSelectionMode::Individual);
         assert!(!session.draft().selection_state().include_members_group);
 
         let toggled = toggle_members_group(session, &fixed_clock()).expect("toggle should succeed");
-
         assert!(toggled.draft().selection_state().include_members_group);
 
         let toggled_back =
             toggle_members_group(toggled, &fixed_clock()).expect("toggle should succeed");
-
         assert!(!toggled_back.draft().selection_state().include_members_group);
     }
 
-    #[test]
-    fn toggle_members_group_rejects_when_not_in_participant_source_phase() {
-        let session = session_in_phase(ExpenseSelectionPhase::Payer);
-        let actual = toggle_members_group(session, &fixed_clock());
-        assert_eq!(actual.unwrap_err(), NavigationError::NotInSelection);
+    #[rstest::rstest]
+    #[case::from_individual(ParticipantSelectionMode::Individual)]
+    #[case::from_roles(ParticipantSelectionMode::Roles)]
+    #[case::from_payer(ParticipantSelectionMode::Payer)]
+    fn toggle_members_group_preserves_current_mode(#[case] mode: ParticipantSelectionMode) {
+        let session = session_in_mode(mode);
+        let toggled = toggle_members_group(session, &fixed_clock()).expect("toggle");
+        assert_eq!(
+            toggled.stage(),
+            &ExpenseSessionStage::InSelection {
+                phase: ExpenseSelectionPhase::participants(mode)
+            }
+        );
     }
 
     #[test]
-    fn picker_replacements_update_only_the_active_phase_selection() {
-        let payer = replace_payer(
-            session_in_phase(ExpenseSelectionPhase::Payer),
+    fn replace_payer_updates_payer_in_payer_mode() {
+        let updated = replace_payer(
+            session_in_mode(ParticipantSelectionMode::Payer),
             Some(MemberId(7)),
             &fixed_clock(),
         )
         .expect("payer replacement");
-        assert_eq!(payer.draft().selection_state().payer, Some(MemberId(7)));
+        assert_eq!(updated.draft().selection_state().payer, Some(MemberId(7)));
+    }
 
-        let individuals = replace_individual_members(
-            session_in_phase(ExpenseSelectionPhase::IndividualSelection),
+    #[test]
+    fn replace_individual_members_deduplicates_and_sorts() {
+        let updated = replace_individual_members(
+            session_in_mode(ParticipantSelectionMode::Individual),
             vec![MemberId(7), MemberId(42), MemberId(7)],
             &fixed_clock(),
         )
         .expect("individual replacement");
         assert_eq!(
-            individuals.draft().selection_state().individual_members,
+            updated.draft().selection_state().individual_members,
             vec![MemberId(7), MemberId(42)]
         );
+    }
 
-        let roles = replace_selected_roles(
-            session_in_phase(ExpenseSelectionPhase::Roles),
+    #[test]
+    fn replace_selected_roles_deduplicates_and_sorts() {
+        let updated = replace_selected_roles(
+            session_in_mode(ParticipantSelectionMode::Roles),
             vec![
                 walicord_domain::model::RoleId(9),
                 walicord_domain::model::RoleId(3),
@@ -1085,85 +851,52 @@ mod tests {
         )
         .expect("role replacement");
         assert_eq!(
-            roles.draft().selection_state().selected_roles,
+            updated.draft().selection_state().selected_roles,
             vec![
                 walicord_domain::model::RoleId(3),
                 walicord_domain::model::RoleId(9)
             ]
         );
-
-        let weights = replace_weight_overrides(
-            session_in_phase(ExpenseSelectionPhase::WeightEditor),
-            BTreeMap::from([(MemberId(7), walicord_domain::model::Weight(2))]),
-            &fixed_clock(),
-        )
-        .expect("weight replacement");
-        assert_eq!(
-            weights.draft().selection_state().weight_overrides,
-            BTreeMap::from([(MemberId(7), walicord_domain::model::Weight(2))])
-        );
     }
 
     #[test]
-    fn picker_view_state_is_saved_in_the_active_session_phase() {
-        let session = session_in_phase(ExpenseSelectionPhase::IndividualSelection);
+    fn weight_overrides_are_applied_and_confirmation_is_rebuilt() {
+        let session = bootstrapped();
+        let roster = roster_with(&[42]);
+        let outcome =
+            build_confirmation_for_session(session, &roster, &fixed_clock()).expect("confirmation");
 
-        let actual = set_picker_view_state(
-            session,
-            ExpensePickerKind::Individuals,
-            PickerSnapshotId::new(11),
-            2,
-            Some("tanaka".to_owned()),
+        let rebuilt = replace_weight_overrides_and_rebuild(
+            outcome.session,
+            BTreeMap::from([(MemberId(42), walicord_domain::model::Weight(2))]),
+            &roster,
             &fixed_clock(),
         )
-        .expect("picker state update");
+        .expect("weight replacement and rebuild");
 
         assert_eq!(
-            actual
-                .draft()
-                .selection_state()
-                .picker_states
-                .get(&ExpensePickerKind::Individuals),
-            Some(&PagedPickerState::new(
-                PickerSnapshotId::new(11),
-                2,
-                Some("tanaka".to_owned()),
-                vec![42],
-            ))
+            rebuilt.session.stage(),
+            &ExpenseSessionStage::InConfirmation
         );
+        assert_eq!(
+            rebuilt.session.draft().selection_state().weight_overrides,
+            BTreeMap::from([(MemberId(42), walicord_domain::model::Weight(2))])
+        );
+        assert_eq!(rebuilt.snapshot.participants.len(), 1);
     }
 
     #[test]
-    fn picker_clear_updates_the_matching_selection_and_resets_picker_state() {
+    fn replace_selected_roles_with_empty_vec_clears_roles() {
         let session = replace_selected_roles(
-            session_in_phase(ExpenseSelectionPhase::Roles),
+            session_in_mode(ParticipantSelectionMode::Roles),
             vec![walicord_domain::model::RoleId(7)],
             &fixed_clock(),
         )
         .expect("role selection");
 
-        let actual = clear_picker_selection(
-            session,
-            ExpensePickerKind::Roles,
-            PickerSnapshotId::new(17),
-            &fixed_clock(),
-        )
-        .expect("clear role picker");
+        let actual = replace_selected_roles(session, vec![], &fixed_clock()).expect("clear roles");
 
         assert!(actual.draft().selection_state().selected_roles.is_empty());
-        assert_eq!(
-            actual
-                .draft()
-                .selection_state()
-                .picker_states
-                .get(&ExpensePickerKind::Roles),
-            Some(&PagedPickerState::new(
-                PickerSnapshotId::new(17),
-                0,
-                None,
-                Vec::new(),
-            ))
-        );
     }
 
     #[test]
@@ -1185,7 +918,7 @@ mod tests {
         assert_eq!(
             next.stage(),
             &ExpenseSessionStage::InSelection {
-                phase: ExpenseSelectionPhase::Payer
+                phase: ExpenseSelectionPhase::participants(ParticipantSelectionMode::Individual)
             }
         );
         assert!(next.draft().basic_info().is_some());

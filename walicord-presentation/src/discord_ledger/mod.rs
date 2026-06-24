@@ -1,6 +1,8 @@
 mod budgets;
+pub mod expense_component_id;
 mod expense_confirmation;
 mod member_labels;
+pub mod picker_types;
 mod pickers;
 mod read_view_builder;
 mod read_view_pagination;
@@ -19,7 +21,6 @@ pub use read_view_builder::{
 pub use read_view_pagination::{READ_VIEW_ITEMS_PER_PAGE, paginate_read_view_model};
 
 pub use expense_confirmation::{
-    ExpenseConfirmationButtonIds, ExpenseSelectionStepButtonIds,
     build_expense_confirmation_surface, build_expense_selection_step_surface,
 };
 

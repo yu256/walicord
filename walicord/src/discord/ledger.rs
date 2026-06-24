@@ -29,7 +29,10 @@ pub(crate) use self::{
         ChannelFlagAction, SlashScopeError, channel_flag_action, slash_scope_channel_id,
         startup_track_targets,
     },
-    router::{ExpenseNonceRegistry, InteractionDispatch, LedgerRouter, LedgerRouterDependencies},
+    router::{
+        ExpenseNonceRegistry, InteractionDispatch, LedgerRouter, LedgerRouterDependencies,
+        PickerStateStore,
+    },
     store::{DiscordCanonicalLedgerStore, WriterLineagePolicy},
 };
 pub(crate) use walicord_application::ledger::{
