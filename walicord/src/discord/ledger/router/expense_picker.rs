@@ -263,25 +263,17 @@ pub(super) fn expense_picker_utility_row(
         disabled: false,
     });
     buttons.push(SurfaceButton::Interactive {
-        label: picker_clear_label(kind).to_owned(),
+        label: i18n::PICKER_CLEAR_LABEL.to_owned(),
         custom_id: ExpenseComponentId::PickerClear {
             kind,
             nonce,
             snapshot_id,
         }
         .to_string(),
-        style: SurfaceInteractiveButtonStyle::Secondary,
+        style: SurfaceInteractiveButtonStyle::Danger,
         disabled: false,
     });
     SurfaceActionRow::Buttons(buttons)
-}
-
-fn picker_clear_label(kind: ExpensePickerKind) -> &'static str {
-    match kind {
-        ExpensePickerKind::Payer => i18n::PAYER_CLEAR_LABEL,
-        ExpensePickerKind::Individuals => i18n::INDIVIDUAL_CLEAR_LABEL,
-        ExpensePickerKind::Roles => i18n::ROLE_CLEAR_LABEL,
-    }
 }
 
 #[allow(clippy::result_large_err)] // LedgerRouteError is the router-wide error envelope.

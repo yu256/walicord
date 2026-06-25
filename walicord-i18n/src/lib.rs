@@ -10,11 +10,7 @@ pub mod strings {
     pub const FROM: &str = "支払者";
     pub const TO: &str = "受取人";
     pub const AMOUNT: &str = "金額";
-    pub const CATEGORY: &str = "カテゴリ";
     pub const STATUS: &str = "状態";
-    pub const SETTLEMENT_PAYMENT: &str = "支払う金額";
-    pub const PAYMENT_TO_SETTLOR: &str = "受け取る金額";
-    pub const PENDING: &str = "保留";
     pub const SETTLED_MEMBER: &str = "確定対象";
     pub const UNSETTLED_MEMBER: &str = "未確定";
     pub const SETTLED_TRANSFER: &str = "確定済み";
@@ -60,11 +56,7 @@ pub mod strings {
     pub const FROM: &str = "From";
     pub const TO: &str = "To";
     pub const AMOUNT: &str = "Amount";
-    pub const CATEGORY: &str = "Category";
     pub const STATUS: &str = "Status";
-    pub const SETTLEMENT_PAYMENT: &str = "Settlement Payment";
-    pub const PAYMENT_TO_SETTLOR: &str = "Payment to Settlor";
-    pub const PENDING: &str = "Pending";
     pub const SETTLED_MEMBER: &str = "Settled";
     pub const UNSETTLED_MEMBER: &str = "Not settled";
     pub const SETTLED_TRANSFER: &str = "Confirmed";
@@ -109,11 +101,7 @@ pub mod strings {
     pub const FROM: &str = "From";
     pub const TO: &str = "To";
     pub const AMOUNT: &str = "Amount";
-    pub const CATEGORY: &str = "Category";
     pub const STATUS: &str = "Status";
-    pub const SETTLEMENT_PAYMENT: &str = "Settlement Payment";
-    pub const PAYMENT_TO_SETTLOR: &str = "Payment to Settlor";
-    pub const PENDING: &str = "Pending";
     pub const SETTLED_MEMBER: &str = "Settled";
     pub const UNSETTLED_MEMBER: &str = "Not settled";
     pub const SETTLED_TRANSFER: &str = "Confirmed";
@@ -1781,15 +1769,15 @@ pub const NO_LEDGER_THREAD_YET_NOTE: &str = if cfg!(feature = "ja") {
 };
 
 pub const EXPENSE_STEP_TITLE_PARTICIPANTS: &str = if cfg!(feature = "ja") {
-    "1/2 参加者"
+    "参加者"
 } else {
-    "1/2 Participants"
+    "Participants"
 };
 
 pub const EXPENSE_STEP_TITLE_CONFIRM: &str = if cfg!(feature = "ja") {
-    "2/2 確認"
+    "最終確認"
 } else {
-    "2/2 Confirm"
+    "Final Confirmation"
 };
 
 pub const EXPENSE_TO_CONFIRM_LABEL: &str = if cfg!(feature = "ja") {
@@ -1835,9 +1823,9 @@ pub const EXPENSE_PAYER_PLACEHOLDER: &str = if cfg!(feature = "ja") {
 };
 
 pub const EXPENSE_BASIC_INFO_EDIT_LABEL: &str = if cfg!(feature = "ja") {
-    "基本情報を修正する"
+    "基本情報修正"
 } else {
-    "Edit Basic Info"
+    "Edit Info"
 };
 
 pub const EXPENSE_WEIGHT_EDIT_LABEL: &str = if cfg!(feature = "ja") {
@@ -1847,9 +1835,9 @@ pub const EXPENSE_WEIGHT_EDIT_LABEL: &str = if cfg!(feature = "ja") {
 };
 
 pub const EXPENSE_REVISE_LABEL: &str = if cfg!(feature = "ja") {
-    "修正する"
+    "選び直す"
 } else {
-    "Revise"
+    "Reselect"
 };
 
 pub const EXPENSE_CANCEL_LABEL: &str = if cfg!(feature = "ja") {
@@ -1895,9 +1883,9 @@ pub const PARTICIPANT_SOURCE_ROLE_LABEL: &str = if cfg!(feature = "ja") {
 };
 
 pub const EXPENSE_SWITCH_TO_PAYER_LABEL: &str = if cfg!(feature = "ja") {
-    "支払者を変更"
+    "支払者変更"
 } else {
-    "Change Payer"
+    "Payer"
 };
 
 pub const EXPENSE_SUB_VIEW_PAYER_TITLE: &str = if cfg!(feature = "ja") {
@@ -1960,12 +1948,6 @@ pub const PARTICIPANT_SOURCE_MEMBERS_LABEL: &str = if cfg!(feature = "ja") {
     "Add All Members"
 };
 
-pub const PARTICIPANT_SOURCE_CLEAR_ROLES_LABEL: &str = if cfg!(feature = "ja") {
-    "ロール選択をクリア"
-} else {
-    "Clear Role Selection"
-};
-
 pub const PARTICIPANT_SOURCE_CLEAR_MEMBERS_LABEL: &str = if cfg!(feature = "ja") {
     "全員を外す"
 } else {
@@ -1990,22 +1972,10 @@ pub const PICKER_SEARCH_LABEL: &str = if cfg!(feature = "ja") {
     "Search"
 };
 
-pub const PAYER_CLEAR_LABEL: &str = if cfg!(feature = "ja") {
-    "支払者をクリア"
+pub const PICKER_CLEAR_LABEL: &str = if cfg!(feature = "ja") {
+    "クリア"
 } else {
-    "Clear Payer"
-};
-
-pub const INDIVIDUAL_CLEAR_LABEL: &str = if cfg!(feature = "ja") {
-    "個別選択をクリア"
-} else {
-    "Clear Individuals"
-};
-
-pub const ROLE_CLEAR_LABEL: &str = if cfg!(feature = "ja") {
-    "ロール選択をクリア"
-} else {
-    "Clear Roles"
+    "Clear"
 };
 
 pub const SEARCH_BLANK_ERROR: &str = if cfg!(feature = "ja") {
@@ -2107,6 +2077,26 @@ pub const EXPENSE_RECORDED_MESSAGE: &str = if cfg!(feature = "ja") {
 } else {
     "Recorded the expense."
 };
+
+pub fn expense_recorded_summary(
+    amount: impl std::fmt::Display,
+    date: impl std::fmt::Display,
+    participant_count: usize,
+) -> impl std::fmt::Display {
+    std::fmt::from_fn(move |f| {
+        if cfg!(feature = "ja") {
+            write!(
+                f,
+                "金額: {amount}円 / 日付: {date} / 参加者: {participant_count}人"
+            )
+        } else {
+            write!(
+                f,
+                "Amount: {amount} JPY / Date: {date} / Participants: {participant_count}"
+            )
+        }
+    })
+}
 
 pub const EXPENSE_PARTICIPANTS_DRIFTED_CUE: &str = if cfg!(feature = "ja") {
     "対象者が更新されたため確認内容を更新しました。もう一度「記録する」を押してください。"

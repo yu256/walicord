@@ -199,6 +199,32 @@ impl ExpenseDraftSnapshot {
     pub fn confirmation_snapshot(&self) -> Option<&ExpenseConfirmationSnapshot> {
         self.confirmation_snapshot.as_ref()
     }
+
+    pub fn confirmed_view(&self) -> Option<ConfirmedDraftView<'_>> {
+        match (&self.basic_info, &self.confirmation_snapshot) {
+            (Some(basic_info), Some(snapshot)) => Some(ConfirmedDraftView {
+                basic_info,
+                snapshot,
+            }),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConfirmedDraftView<'a> {
+    basic_info: &'a ExpenseBasicInfo,
+    snapshot: &'a ExpenseConfirmationSnapshot,
+}
+
+impl<'a> ConfirmedDraftView<'a> {
+    pub fn basic_info(&self) -> &'a ExpenseBasicInfo {
+        self.basic_info
+    }
+
+    pub fn snapshot(&self) -> &'a ExpenseConfirmationSnapshot {
+        self.snapshot
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1668,5 +1694,32 @@ mod tests {
         );
         let actual = state.require_actor(expected_actor);
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn confirmed_view_exposes_both_fields_when_draft_is_complete() {
+        let draft = ExpenseDraftSnapshot::empty()
+            .with_basic_info(basic_info())
+            .with_confirmation_snapshot(confirmation_snapshot());
+
+        let view = draft
+            .confirmed_view()
+            .expect("complete draft should yield a confirmed view");
+
+        assert_eq!(view.basic_info(), &basic_info());
+        assert_eq!(view.snapshot(), &confirmation_snapshot());
+    }
+
+    #[rstest]
+    #[case::basic_info_missing(
+        ExpenseDraftSnapshot::empty()
+            .with_confirmation_snapshot(confirmation_snapshot())
+    )]
+    #[case::confirmation_snapshot_missing(
+        ExpenseDraftSnapshot::empty()
+            .with_basic_info(basic_info())
+    )]
+    fn confirmed_view_returns_none_for_incomplete_draft(#[case] draft: ExpenseDraftSnapshot) {
+        assert_eq!(draft.confirmed_view(), None);
     }
 }

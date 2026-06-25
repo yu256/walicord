@@ -1,7 +1,8 @@
 use super::expense_component_id::ExpenseComponentId;
 use crate::discord_ledger::{
-    ExpenseConfirmationParticipantRow, ExpenseDraftSummary, ExpenseSurfaceModel, SafeLiteralText,
-    SurfaceActionRow, SurfaceButton, SurfaceInteractiveButtonStyle, SurfaceMemberLabels,
+    ExpenseConfirmationParticipantRow, ExpenseDraftSummary, ExpenseSuccessSurfaceModel,
+    ExpenseSurfaceModel, SafeLiteralText, SurfaceActionRow, SurfaceButton,
+    SurfaceInteractiveButtonStyle, SurfaceMemberLabels,
 };
 use smol_str::SmolStr;
 use std::collections::HashMap;
@@ -90,19 +91,19 @@ pub fn build_expense_confirmation_surface(
                 disabled: false,
             },
             SurfaceButton::Interactive {
-                label: i18n::EXPENSE_WEIGHT_EDIT_LABEL.to_owned(),
-                custom_id: ExpenseComponentId::WeightEdit(nonce).to_string(),
-                style: SurfaceInteractiveButtonStyle::Secondary,
+                label: i18n::EXPENSE_CANCEL_LABEL.to_owned(),
+                custom_id: ExpenseComponentId::Cancel(nonce).to_string(),
+                style: SurfaceInteractiveButtonStyle::Danger,
                 disabled: false,
             },
+        ]),
+        SurfaceActionRow::Buttons(vec![
             SurfaceButton::Interactive {
                 label: i18n::EXPENSE_REVISE_LABEL.to_owned(),
                 custom_id: ExpenseComponentId::ModifySelection(nonce).to_string(),
                 style: SurfaceInteractiveButtonStyle::Secondary,
                 disabled: false,
             },
-        ]),
-        SurfaceActionRow::Buttons(vec![
             SurfaceButton::Interactive {
                 label: i18n::EXPENSE_BASIC_INFO_EDIT_LABEL.to_owned(),
                 custom_id: ExpenseComponentId::BasicEdit(nonce).to_string(),
@@ -110,9 +111,9 @@ pub fn build_expense_confirmation_surface(
                 disabled: false,
             },
             SurfaceButton::Interactive {
-                label: i18n::EXPENSE_CANCEL_LABEL.to_owned(),
-                custom_id: ExpenseComponentId::Cancel(nonce).to_string(),
-                style: SurfaceInteractiveButtonStyle::Danger,
+                label: i18n::EXPENSE_WEIGHT_EDIT_LABEL.to_owned(),
+                custom_id: ExpenseComponentId::WeightEdit(nonce).to_string(),
+                style: SurfaceInteractiveButtonStyle::Secondary,
                 disabled: false,
             },
         ]),
@@ -227,5 +228,62 @@ pub fn build_expense_selection_step_surface(
         validation_message: None,
         action_rows,
         ephemeral: true,
+    }
+}
+
+pub fn build_expense_success_surface(
+    basic_info: &ExpenseBasicInfo,
+    participant_count: usize,
+    canonical_thread_id: Option<u64>,
+) -> ExpenseSuccessSurfaceModel {
+    let mut body_lines = vec![
+        i18n::EXPENSE_RECORDED_MESSAGE.to_owned(),
+        i18n::expense_recorded_summary(
+            basic_info.amount,
+            basic_info.effective_date,
+            participant_count,
+        )
+        .to_string(),
+    ];
+    if let Some(thread_id) = canonical_thread_id {
+        body_lines.push(i18n::void_success_thread_line(format!("<#{thread_id}>")).to_string());
+    }
+    ExpenseSuccessSurfaceModel {
+        body_lines,
+        action_rows: Vec::new(),
+        ephemeral: true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_expense_success_surface;
+    use walicord_application::ledger::{LedgerEffectiveDate, expense_session::ExpenseBasicInfo};
+    use walicord_domain::Money;
+    use walicord_i18n as i18n;
+
+    fn basic_info() -> ExpenseBasicInfo {
+        ExpenseBasicInfo {
+            amount: Money::new(1500, 0),
+            note: None,
+            effective_date: LedgerEffectiveDate::new("2026-06-01").expect("date should be valid"),
+        }
+    }
+
+    #[test]
+    fn success_surface_with_thread_id_has_three_lines_ending_with_thread_link() {
+        let model = build_expense_success_surface(&basic_info(), 3, Some(999));
+
+        assert_eq!(model.body_lines[0], i18n::EXPENSE_RECORDED_MESSAGE);
+        assert_eq!(model.body_lines.len(), 3);
+        assert!(model.body_lines[2].contains("<#999>"));
+    }
+
+    #[test]
+    fn success_surface_without_thread_id_has_two_lines() {
+        let model = build_expense_success_surface(&basic_info(), 2, None);
+
+        assert_eq!(model.body_lines[0], i18n::EXPENSE_RECORDED_MESSAGE);
+        assert_eq!(model.body_lines.len(), 2);
     }
 }

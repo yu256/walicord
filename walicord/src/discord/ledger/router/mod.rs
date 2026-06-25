@@ -25,8 +25,8 @@ use walicord_application::{
     ledger::{
         DiscordLedgerSourceDescriptor, ExpenseAuthoringError, LedgerId,
         expense_session::{
-            ClaimedExpenseSession, ExpenseConfirmationSnapshot, ExpenseDraftScopeId,
-            ExpenseDraftSnapshot, ExpenseLaunchOrigin, ExpenseModalIntent,
+            ClaimedExpenseSession, ExpenseBasicInfo, ExpenseConfirmationSnapshot,
+            ExpenseDraftScopeId, ExpenseDraftSnapshot, ExpenseLaunchOrigin, ExpenseModalIntent,
             ExpenseModalSubmissionBinding, ExpenseModalSubmissionBindingStore,
             ExpenseParticipantSelection, ExpenseSelectionPhase, ExpenseSession,
             ExpenseSessionConstructionError, ExpenseSessionKey, ExpenseSessionStage,
@@ -46,8 +46,9 @@ use walicord_presentation::discord_ledger::{
     ReadViewPageModel, ReadViewRoute, RecoveryCta, RenderBudgetError, ReviewPageInputs,
     SurfaceActionRow, SurfaceButton, SurfaceInteractiveButtonStyle, SurfaceMemberLabels,
     SurfaceSelectMenu, VoidRetargetReason, VoidSurfaceModel, build_expense_confirmation_surface,
-    build_expense_selection_step_surface, build_ledger_empty_page_model, build_ledger_page_model,
-    build_review_empty_page_model, build_review_no_transfers_page_model, build_review_page_model,
+    build_expense_selection_step_surface, build_expense_success_surface,
+    build_ledger_empty_page_model, build_ledger_page_model, build_review_empty_page_model,
+    build_review_no_transfers_page_model, build_review_page_model,
     expense_component_id::ExpenseComponentId,
     paginate_read_view_model,
     picker_types::{ExpensePickerKind, PagedPickerState, PickerSnapshotId},
@@ -1943,8 +1944,22 @@ impl LedgerRouter {
 
         match outcome {
             RecordExpenseOutcome::Recorded { .. } => {
+                let confirmed = claim
+                    .session()
+                    .draft()
+                    .confirmed_view()
+                    .expect("InConfirmation stage guarantees confirmed_view is present");
+                let basic_info = confirmed.basic_info().clone();
+                let participant_count = confirmed.snapshot().participants.len();
                 claim.discard();
-                self.respond_record_success(ctx, component).await
+                self.respond_record_success(
+                    ctx,
+                    component,
+                    &basic_info,
+                    participant_count,
+                    binding.canonical_thread_id(),
+                )
+                .await
             }
             RecordExpenseOutcome::DriftDetected {
                 drift,
@@ -2041,11 +2056,21 @@ impl LedgerRouter {
         &self,
         ctx: &Context,
         component: &ComponentInteraction,
+        basic_info: &ExpenseBasicInfo,
+        participant_count: usize,
+        canonical_thread_id: serenity::all::ChannelId,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
+        let model = build_expense_success_surface(
+            basic_info,
+            participant_count,
+            Some(canonical_thread_id.get()),
+        );
+        let rendered = DiscordLedgerPresenter::render_expense_success(&model)?;
+        let (body, components) = rendered_surface_to_message(rendered);
         let response = CreateInteractionResponse::UpdateMessage(
             safe_interaction_response_message()
-                .content(i18n::EXPENSE_RECORDED_MESSAGE)
-                .components(Vec::new()),
+                .content(body)
+                .components(components),
         );
         component
             .create_response(&ctx.http, response)

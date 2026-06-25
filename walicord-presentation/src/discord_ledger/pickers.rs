@@ -140,32 +140,6 @@ impl ExpenseForwardAction {
     }
 }
 
-#[cfg(test)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ModalValidationFailure {
-    Amount,
-    NoteLength,
-    Date,
-}
-
-#[cfg(test)]
-pub fn first_invalid_modal_field(
-    amount_valid: bool,
-    note_valid: bool,
-    date_valid: bool,
-) -> Option<ModalValidationFailure> {
-    if !amount_valid {
-        return Some(ModalValidationFailure::Amount);
-    }
-    if !note_valid {
-        return Some(ModalValidationFailure::NoteLength);
-    }
-    if !date_valid {
-        return Some(ModalValidationFailure::Date);
-    }
-    None
-}
-
 pub fn individual_selection_title(count: usize, names: &[SafeLiteralText]) -> String {
     let base = i18n::individual_selection_prefix(count).to_string();
     summarize_selected_names(names)
@@ -174,32 +148,12 @@ pub fn individual_selection_title(count: usize, names: &[SafeLiteralText]) -> St
 }
 
 #[cfg(test)]
-pub fn payer_picker_utility_labels() -> [&'static str; 4] {
+pub fn picker_utility_labels() -> [&'static str; 4] {
     [
         i18n::PICKER_PREVIOUS_PAGE_LABEL,
         i18n::PICKER_NEXT_PAGE_LABEL,
         i18n::PICKER_SEARCH_LABEL,
-        i18n::PAYER_CLEAR_LABEL,
-    ]
-}
-
-#[cfg(test)]
-pub fn individual_picker_utility_labels() -> [&'static str; 4] {
-    [
-        i18n::PICKER_PREVIOUS_PAGE_LABEL,
-        i18n::PICKER_NEXT_PAGE_LABEL,
-        i18n::PICKER_SEARCH_LABEL,
-        i18n::INDIVIDUAL_CLEAR_LABEL,
-    ]
-}
-
-#[cfg(test)]
-pub fn role_picker_utility_labels() -> [&'static str; 4] {
-    [
-        i18n::PICKER_PREVIOUS_PAGE_LABEL,
-        i18n::PICKER_NEXT_PAGE_LABEL,
-        i18n::PICKER_SEARCH_LABEL,
-        i18n::ROLE_CLEAR_LABEL,
+        i18n::PICKER_CLEAR_LABEL,
     ]
 }
 
@@ -209,14 +163,6 @@ pub fn participant_source_entry_labels() -> [&'static str; 3] {
         i18n::PARTICIPANT_SOURCE_INDIVIDUAL_LABEL,
         i18n::PARTICIPANT_SOURCE_ROLE_LABEL,
         i18n::PARTICIPANT_SOURCE_MEMBERS_LABEL,
-    ]
-}
-
-#[cfg(test)]
-pub fn participant_source_clear_labels() -> [&'static str; 2] {
-    [
-        i18n::PARTICIPANT_SOURCE_CLEAR_ROLES_LABEL,
-        i18n::PARTICIPANT_SOURCE_CLEAR_MEMBERS_LABEL,
     ]
 }
 
@@ -265,10 +211,8 @@ pub fn summarize_selected_names(names: &[SafeLiteralText]) -> Option<String> {
 mod tests {
     use super::{
         ExpenseConfirmationParticipantRow, ExpenseDraftSummary, ExpenseForwardAction,
-        ExpenseStepTitle, ModalValidationFailure, PickerPageChrome, first_invalid_modal_field,
-        individual_picker_utility_labels, individual_selection_title,
-        participant_source_clear_labels, participant_source_entry_labels,
-        payer_picker_utility_labels, role_picker_utility_labels, summarize_selected_names,
+        ExpenseStepTitle, PickerPageChrome, individual_selection_title,
+        participant_source_entry_labels, picker_utility_labels, summarize_selected_names,
     };
     use crate::discord_ledger::{
         budgets::{validate_button_label, validate_component_placeholder},
@@ -342,8 +286,8 @@ mod tests {
 
     #[test]
     fn expense_step_titles_use_the_fixed_stage_framing() {
-        assert_eq!(ExpenseStepTitle::Participants.render(), "1/2 参加者");
-        assert_eq!(ExpenseStepTitle::Confirm.render(), "2/2 確認");
+        assert_eq!(ExpenseStepTitle::Participants.render(), "参加者");
+        assert_eq!(ExpenseStepTitle::Confirm.render(), "最終確認");
     }
 
     #[test]
@@ -402,35 +346,10 @@ mod tests {
     }
 
     #[test]
-    fn modal_validation_precedence_is_amount_then_note_then_date() {
+    fn picker_utility_row_uses_the_fixed_button_order() {
         assert_eq!(
-            first_invalid_modal_field(false, false, false),
-            Some(ModalValidationFailure::Amount)
-        );
-        assert_eq!(
-            first_invalid_modal_field(true, false, false),
-            Some(ModalValidationFailure::NoteLength)
-        );
-        assert_eq!(
-            first_invalid_modal_field(true, true, false),
-            Some(ModalValidationFailure::Date)
-        );
-        assert_eq!(first_invalid_modal_field(true, true, true), None);
-    }
-
-    #[test]
-    fn picker_utility_rows_use_the_fixed_button_order() {
-        assert_eq!(
-            payer_picker_utility_labels(),
-            ["前のページ", "次のページ", "検索", "支払者をクリア"]
-        );
-        assert_eq!(
-            individual_picker_utility_labels(),
-            ["前のページ", "次のページ", "検索", "個別選択をクリア"]
-        );
-        assert_eq!(
-            role_picker_utility_labels(),
-            ["前のページ", "次のページ", "検索", "ロール選択をクリア"]
+            picker_utility_labels(),
+            ["前のページ", "次のページ", "検索", "クリア"]
         );
     }
 
@@ -439,10 +358,6 @@ mod tests {
         assert_eq!(
             participant_source_entry_labels(),
             ["個別選択", "ロール選択", "全員を追加"]
-        );
-        assert_eq!(
-            participant_source_clear_labels(),
-            ["ロール選択をクリア", "全員を外す"]
         );
         assert_eq!(ExpenseForwardAction::ToConfirm.render(), "確認へ");
         assert_eq!(ExpenseForwardAction::Record.render(), "記録する");
@@ -465,16 +380,18 @@ mod tests {
             i18n::PICKER_PREVIOUS_PAGE_LABEL,
             i18n::PICKER_NEXT_PAGE_LABEL,
             i18n::PICKER_SEARCH_LABEL,
-            i18n::PAYER_CLEAR_LABEL,
-            i18n::INDIVIDUAL_CLEAR_LABEL,
-            i18n::ROLE_CLEAR_LABEL,
+            i18n::PICKER_CLEAR_LABEL,
             i18n::PARTICIPANT_SOURCE_INDIVIDUAL_LABEL,
             i18n::PARTICIPANT_SOURCE_ROLE_LABEL,
             i18n::PARTICIPANT_SOURCE_MEMBERS_LABEL,
-            i18n::PARTICIPANT_SOURCE_CLEAR_ROLES_LABEL,
             i18n::PARTICIPANT_SOURCE_CLEAR_MEMBERS_LABEL,
             i18n::EXPENSE_TO_CONFIRM_LABEL,
             i18n::EXPENSE_RECORD_LABEL,
+            i18n::EXPENSE_CANCEL_LABEL,
+            i18n::EXPENSE_REVISE_LABEL,
+            i18n::EXPENSE_BASIC_INFO_EDIT_LABEL,
+            i18n::EXPENSE_WEIGHT_EDIT_LABEL,
+            i18n::EXPENSE_SWITCH_TO_PAYER_LABEL,
         ] {
             validate_button_label(label).expect("button label should fit Discord limits");
         }

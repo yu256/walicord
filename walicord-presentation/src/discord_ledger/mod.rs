@@ -15,13 +15,14 @@ pub use read_view_builder::{
     balance_adjustment_summaries, balance_rows_for_state, build_ledger_empty_page_model,
     build_ledger_page_model, build_review_empty_page_model, build_review_no_transfers_page_model,
     build_review_page_model, participant_names_for_state, preview_transfer_rows,
-    public_participant_rows, sealed_range_summary, summary_for_view, voided_entry_rows,
+    sealed_range_summary, summary_for_view, voided_entry_rows,
 };
 
 pub use read_view_pagination::{READ_VIEW_ITEMS_PER_PAGE, paginate_read_view_model};
 
 pub use expense_confirmation::{
     build_expense_confirmation_surface, build_expense_selection_step_surface,
+    build_expense_success_surface,
 };
 
 pub use budgets::{

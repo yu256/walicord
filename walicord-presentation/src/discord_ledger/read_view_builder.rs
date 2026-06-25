@@ -1,9 +1,9 @@
-use std::{collections::HashMap, fmt::Write as _};
+use std::fmt::Write as _;
 
 use walicord_application::{
     ledger::{
-        AllocationSnapshot, BalanceAdjusted, LedgerEffectiveDate, LedgerEntry, LedgerEntryId,
-        LedgerEvent, LedgerId, LedgerState, projection::VerifiedLedgerEntryView,
+        BalanceAdjusted, LedgerEffectiveDate, LedgerEntryId, LedgerEvent, LedgerId, LedgerState,
+        projection::VerifiedLedgerEntryView,
     },
     settle_up::PreviewedSettlement,
 };
@@ -15,8 +15,7 @@ use super::{
     sanitizer::{BusinessDateTime, SafeLiteralText},
     surfaces::{
         BalanceAdjustmentSummary, BalanceDirection, BalanceImpactRow, BalanceRow,
-        LedgerSurfaceSummary, ParticipantShareRow, RecoveryReference, SealedRangeSummary,
-        TransferRow, VoidedEntryRow,
+        LedgerSurfaceSummary, RecoveryReference, SealedRangeSummary, TransferRow, VoidedEntryRow,
     },
 };
 
@@ -80,53 +79,6 @@ pub fn preview_transfer_rows(
             amount: transfer.amount.to_string(),
         })
         .collect()
-}
-
-pub fn public_participant_rows(
-    entry: &LedgerEntry,
-    labels: &SurfaceMemberLabels,
-) -> Vec<ParticipantShareRow> {
-    let LedgerEvent::ExpenseRecorded(event) = &entry.event else {
-        return Vec::new();
-    };
-    let owed_by = event
-        .owed_by()
-        .iter()
-        .map(|owed| (owed.member_id, owed.amount))
-        .collect::<HashMap<_, _>>();
-    let mut rows = match &entry.metadata.allocation_snapshot {
-        Some(AllocationSnapshot::Weighted { resolved_weights }) => resolved_weights
-            .iter()
-            .map(|member_weight| {
-                (
-                    member_weight.member_id,
-                    ParticipantShareRow {
-                        display_name: labels.safe_member_label(member_weight.member_id),
-                        share_amount: owed_by
-                            .get(&member_weight.member_id)
-                            .copied()
-                            .unwrap_or(Money::ZERO)
-                            .to_string(),
-                    },
-                )
-            })
-            .collect::<Vec<_>>(),
-        _ => event
-            .owed_by()
-            .iter()
-            .map(|owed| {
-                (
-                    owed.member_id,
-                    ParticipantShareRow {
-                        display_name: labels.safe_member_label(owed.member_id),
-                        share_amount: owed.amount.to_string(),
-                    },
-                )
-            })
-            .collect::<Vec<_>>(),
-    };
-    rows.sort_by(|(lhs_id, _), (rhs_id, _)| labels.compare_members(*lhs_id, *rhs_id));
-    rows.into_iter().map(|(_, row)| row).collect()
 }
 
 pub fn balance_adjustment_rows(
