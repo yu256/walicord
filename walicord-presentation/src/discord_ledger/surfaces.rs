@@ -584,6 +584,12 @@ pub struct UncertainWriteSurfaceModel {
     pub ephemeral: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CanonicalMessageKind {
+    Full,
+    Truncated,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenderedCanonicalMessage {
     body: String,
@@ -594,59 +600,30 @@ const PUBLIC_COMPACT_REASON_LIMIT: usize = 48;
 const PUBLIC_COMPACT_IMPACT_LIMIT: usize = 96;
 
 impl RenderedCanonicalMessage {
-    pub fn new(body: impl Into<String>) -> Result<Self, RenderBudgetError> {
-        let body = body.into();
+    pub(crate) fn new(
+        content_lines: &[String],
+        recovery_reference: &RecoveryReference,
+        kind: CanonicalMessageKind,
+    ) -> Result<Self, RenderBudgetError> {
+        use std::fmt::Write;
+        let mut body = content_lines.join("\n");
+        if kind == CanonicalMessageKind::Truncated {
+            write!(
+                body,
+                "\n{}\n{}",
+                i18n::PUBLIC_TRUNCATION_OMITTED,
+                i18n::PUBLIC_TRUNCATION_LEDGER_GUIDANCE
+            )
+            .unwrap();
+        }
+        write!(body, "\n{}", recovery_reference.render_line()).unwrap();
         validate_message_content(&body)?;
-        validate_canonical_message_recovery_shape(&body)?;
         Ok(Self { body })
     }
 
     pub fn body(&self) -> &str {
         &self.body
     }
-}
-
-fn validate_canonical_message_recovery_shape(body: &str) -> Result<(), RenderBudgetError> {
-    let lines: Vec<&str> = body.lines().collect();
-    let recovery_reference_indices = lines
-        .iter()
-        .enumerate()
-        .filter(|(_, line)| line.starts_with(i18n::RECOVERY_REFERENCE_PREFIX))
-        .map(|(index, _)| index)
-        .collect::<Vec<_>>();
-    let recovery_reference_count = recovery_reference_indices.len();
-
-    match recovery_reference_count {
-        0 => return Err(RenderBudgetError::MissingRecoveryReference),
-        1 => {}
-        actual => return Err(RenderBudgetError::MultipleRecoveryReferences { actual }),
-    }
-
-    if recovery_reference_indices[0] + 1 != lines.len() {
-        return Err(RenderBudgetError::MissingRecoveryReference);
-    }
-
-    let truncation_marker_count = lines
-        .iter()
-        .filter(|line| **line == i18n::PUBLIC_TRUNCATION_OMITTED)
-        .count();
-    let attachment_guidance_count = lines
-        .iter()
-        .filter(|line| **line == i18n::PUBLIC_TRUNCATION_ATTACHMENT_GUIDANCE)
-        .count();
-    if truncation_marker_count != attachment_guidance_count || truncation_marker_count > 1 {
-        return Err(RenderBudgetError::InvalidPublicTruncationCue);
-    }
-
-    if truncation_marker_count == 1
-        && (lines.len() < 3
-            || lines[lines.len() - 3] != i18n::PUBLIC_TRUNCATION_OMITTED
-            || lines[lines.len() - 2] != i18n::PUBLIC_TRUNCATION_ATTACHMENT_GUIDANCE)
-    {
-        return Err(RenderBudgetError::InvalidPublicTruncationCue);
-    }
-
-    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -783,25 +760,30 @@ impl DiscordLedgerPresenter {
     ) -> Result<RenderedCanonicalMessage, RenderBudgetError> {
         match model {
             PublicCanonicalMessageModel::Expense(model) => render_compacted_canonical_message(
-                render_public_expense_full(model),
-                render_public_expense_compact(model),
+                &render_public_expense_full(model),
+                &render_public_expense_compact(model),
+                &model.recovery_reference,
             ),
             PublicCanonicalMessageModel::Settlement(model) => render_compacted_canonical_message(
-                render_public_settlement_full(model),
-                render_public_settlement_compact(model),
+                &render_public_settlement_full(model),
+                &render_public_settlement_compact(model),
+                &model.recovery_reference,
             ),
             PublicCanonicalMessageModel::Void(model) => render_compacted_canonical_message(
-                render_public_void_full(model),
-                render_public_void_compact(model),
+                &render_public_void_full(model),
+                &render_public_void_compact(model),
+                &model.recovery_reference,
             ),
             PublicCanonicalMessageModel::Seal(model) => render_compacted_canonical_message(
-                render_public_seal_full(model),
-                render_public_seal_compact(model),
+                &render_public_seal_full(model),
+                &render_public_seal_compact(model),
+                &model.recovery_reference,
             ),
             PublicCanonicalMessageModel::BalanceAdjustment(model) => {
                 render_compacted_canonical_message(
-                    render_public_balance_adjustment_full(model),
-                    render_public_balance_adjustment_compact(model),
+                    &render_public_balance_adjustment_full(model),
+                    &render_public_balance_adjustment_compact(model),
+                    &model.recovery_reference,
                 )
             }
         }
@@ -1030,7 +1012,6 @@ fn render_public_expense_full(model: &PublicExpenseMessageModel) -> Vec<String> 
     }
     lines.push(i18n::public_recorded_by_line(&model.actor_display_name).to_string());
     lines.push(i18n::public_recorded_at_line(&model.recorded_at).to_string());
-    lines.push(model.recovery_reference.render_line());
     lines
 }
 
@@ -1051,7 +1032,6 @@ fn render_public_expense_compact(model: &PublicExpenseMessageModel) -> Vec<Strin
     );
     lines.push(i18n::public_recorded_by_line(&model.actor_display_name).to_string());
     lines.push(i18n::public_recorded_at_line(&model.recorded_at).to_string());
-    lines.extend(public_truncation_lines(&model.recovery_reference));
     lines
 }
 
@@ -1064,7 +1044,6 @@ fn render_public_settlement_full(model: &PublicSettlementMessageModel) -> Vec<St
     lines.extend(model.transfers.iter().map(render_transfer_row));
     lines.push(i18n::public_confirmed_by_line(&model.actor_display_name).to_string());
     lines.push(i18n::public_recorded_at_line(&model.recorded_at).to_string());
-    lines.push(model.recovery_reference.render_line());
     lines
 }
 
@@ -1083,7 +1062,6 @@ fn render_public_settlement_compact(model: &PublicSettlementMessageModel) -> Vec
     );
     lines.push(i18n::public_confirmed_by_line(&model.actor_display_name).to_string());
     lines.push(i18n::public_recorded_at_line(&model.recorded_at).to_string());
-    lines.extend(public_truncation_lines(&model.recovery_reference));
     lines
 }
 
@@ -1098,12 +1076,11 @@ fn render_public_void_full(model: &PublicVoidMessageModel) -> Vec<String> {
         .to_string(),
         i18n::PUBLIC_VOID_PRESERVED_LINE.to_owned(),
         i18n::public_recorded_at_line(&model.recorded_at).to_string(),
-        model.recovery_reference.render_line(),
     ]
 }
 
 fn render_public_void_compact(model: &PublicVoidMessageModel) -> Vec<String> {
-    let mut lines = vec![
+    vec![
         i18n::public_void_line(
             model.entry_id.0,
             &model.voider_display_name,
@@ -1113,9 +1090,7 @@ fn render_public_void_compact(model: &PublicVoidMessageModel) -> Vec<String> {
         .to_string(),
         i18n::PUBLIC_VOID_PRESERVED_LINE.to_owned(),
         i18n::public_recorded_at_line(&model.recorded_at).to_string(),
-    ];
-    lines.extend(public_truncation_lines(&model.recovery_reference));
-    lines
+    ]
 }
 
 fn render_public_seal_full(model: &PublicSealMessageModel) -> Vec<String> {
@@ -1128,12 +1103,11 @@ fn render_public_seal_full(model: &PublicSealMessageModel) -> Vec<String> {
         )
         .to_string(),
         i18n::public_recorded_at_line(&model.recorded_at).to_string(),
-        model.recovery_reference.render_line(),
     ]
 }
 
 fn render_public_seal_compact(model: &PublicSealMessageModel) -> Vec<String> {
-    let mut lines = vec![
+    vec![
         i18n::public_seal_line(
             &model.actor_display_name,
             model.through_entry_id.0,
@@ -1144,9 +1118,7 @@ fn render_public_seal_compact(model: &PublicSealMessageModel) -> Vec<String> {
         )
         .to_string(),
         i18n::public_recorded_at_line(&model.recorded_at).to_string(),
-    ];
-    lines.extend(public_truncation_lines(&model.recovery_reference));
-    lines
+    ]
 }
 
 fn render_public_balance_adjustment_full(
@@ -1161,14 +1133,13 @@ fn render_public_balance_adjustment_full(
         )
         .to_string(),
         i18n::public_recorded_at_line(&model.recorded_at).to_string(),
-        model.recovery_reference.render_line(),
     ]
 }
 
 fn render_public_balance_adjustment_compact(
     model: &PublicBalanceAdjustmentMessageModel,
 ) -> Vec<String> {
-    let mut lines = vec![
+    vec![
         i18n::public_balance_adjustment_line(
             &model.actor_display_name,
             excerpt_with_ellipsis(model.reason.as_str(), PUBLIC_COMPACT_REASON_LIMIT),
@@ -1179,29 +1150,26 @@ fn render_public_balance_adjustment_compact(
         )
         .to_string(),
         i18n::public_recorded_at_line(&model.recorded_at).to_string(),
-    ];
-    lines.extend(public_truncation_lines(&model.recovery_reference));
-    lines
+    ]
 }
 
 fn render_compacted_canonical_message(
-    full_lines: Vec<String>,
-    compact_lines: Vec<String>,
+    full_content: &[String],
+    compact_content: &[String],
+    recovery_reference: &RecoveryReference,
 ) -> Result<RenderedCanonicalMessage, RenderBudgetError> {
-    let full = full_lines.join("\n");
-    if validate_message_content(&full).is_ok() {
-        return RenderedCanonicalMessage::new(full);
+    match RenderedCanonicalMessage::new(
+        full_content,
+        recovery_reference,
+        CanonicalMessageKind::Full,
+    ) {
+        Err(RenderBudgetError::MessageContentTooLong { .. }) => RenderedCanonicalMessage::new(
+            compact_content,
+            recovery_reference,
+            CanonicalMessageKind::Truncated,
+        ),
+        result => result,
     }
-
-    RenderedCanonicalMessage::new(compact_lines.join("\n"))
-}
-
-fn public_truncation_lines(recovery_reference: &RecoveryReference) -> Vec<String> {
-    vec![
-        i18n::PUBLIC_TRUNCATION_OMITTED.to_owned(),
-        i18n::PUBLIC_TRUNCATION_ATTACHMENT_GUIDANCE.to_owned(),
-        recovery_reference.render_line(),
-    ]
 }
 
 fn render_review_balances_section(model: &ReadViewPageModel) -> String {
@@ -1525,11 +1493,9 @@ mod tests {
         PublicExpenseMessageModel, PublicSealMessageModel, PublicSettlementMessageModel,
         PublicVoidMessageModel, ReadViewKind, ReadViewPageModel, ReadViewRoute,
         ReadViewSectionVisibility, RecoveryContext, RecoveryCta, RecoveryReference,
-        RenderBudgetError, RenderedCanonicalMessage, SafeLiteralText, SealedRangeSummary,
-        SurfaceActionRow, SurfaceButton, SurfaceInteractiveButtonStyle, SurfaceSelectMenu,
-        SurfaceSelectOption, TransferRow, UncertainWriteSurfaceModel, VoidedEntryRow,
-        render_public_balance_adjustment_compact, render_public_seal_compact,
-        render_public_void_compact,
+        SafeLiteralText, SealedRangeSummary, SurfaceActionRow, SurfaceButton,
+        SurfaceInteractiveButtonStyle, SurfaceSelectMenu, SurfaceSelectOption, TransferRow,
+        UncertainWriteSurfaceModel, VoidedEntryRow,
     };
     use crate::discord_ledger::{
         budgets::{validate_button_label, validate_component_placeholder},
@@ -1684,6 +1650,11 @@ mod tests {
         );
         assert!(!actual.body().contains("省略されるメモ"));
         assert!(actual.body().contains(i18n::PUBLIC_TRUNCATION_OMITTED));
+        assert!(
+            actual
+                .body()
+                .contains(i18n::PUBLIC_TRUNCATION_LEDGER_GUIDANCE)
+        );
         assert!(!actual.body().contains("参加者11"));
     }
 
@@ -1692,12 +1663,12 @@ mod tests {
         let payer = format!("支払者{}", "い".repeat(80));
         let actor = format!("記録者{}", "う".repeat(80));
         let participant = format!("参加者10{}", "あ".repeat(80));
-        let participants = (1..=10)
+        let participants = (1..=20)
             .map(|index| participant_share(&format!("参加者{index:02}{}", "あ".repeat(80)), "100"))
             .collect::<Vec<_>>();
 
-        let actual = RenderedCanonicalMessage::new(
-            super::render_public_expense_compact(&PublicExpenseMessageModel {
+        let actual = DiscordLedgerPresenter::render_public_entry(
+            &PublicCanonicalMessageModel::Expense(PublicExpenseMessageModel {
                 entry_id: LedgerEntryId(7),
                 effective_date: date("2026-05-25"),
                 payer_display_name: name(&payer),
@@ -1707,14 +1678,14 @@ mod tests {
                 actor_display_name: name(&actor),
                 recorded_at: timestamp("2026-05-25 18:55"),
                 recovery_reference: recovery_reference(7),
-            })
-            .join("\n"),
+            }),
         )
         .expect("compact message should preserve full labels");
 
         assert!(actual.body().contains(&payer));
         assert!(actual.body().contains(&actor));
         assert!(actual.body().contains(&participant));
+        assert!(actual.body().contains(i18n::PUBLIC_TRUNCATION_OMITTED));
     }
 
     #[test]
@@ -1789,11 +1760,7 @@ mod tests {
 
         assert!(actual.body().contains(&format!("Bob10{}", "い".repeat(60))));
         assert!(!actual.body().contains("Bob11"));
-        assert!(
-            actual
-                .body()
-                .contains(i18n::PUBLIC_TRUNCATION_ATTACHMENT_GUIDANCE)
-        );
+        assert!(actual.body().contains(i18n::PUBLIC_TRUNCATION_OMITTED));
     }
 
     #[test]
@@ -1801,7 +1768,7 @@ mod tests {
         let actor = format!("確定者{}", "う".repeat(60));
         let sender = format!("送金者10{}", "あ".repeat(60));
         let receiver = format!("受取者10{}", "い".repeat(60));
-        let transfers = (1..=10)
+        let transfers = (1..=15)
             .map(|index| {
                 transfer(
                     &format!("送金者{index:02}{}", "あ".repeat(60)),
@@ -1811,22 +1778,22 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        let actual = RenderedCanonicalMessage::new(
-            super::render_public_settlement_compact(&PublicSettlementMessageModel {
+        let actual = DiscordLedgerPresenter::render_public_entry(
+            &PublicCanonicalMessageModel::Settlement(PublicSettlementMessageModel {
                 entry_id: LedgerEntryId(8),
                 recorded_date: date("2026-05-25"),
                 transfers,
                 actor_display_name: name(&actor),
                 recorded_at: timestamp("2026-05-25 18:55"),
                 recovery_reference: recovery_reference(8),
-            })
-            .join("\n"),
+            }),
         )
         .expect("compact message should preserve full labels");
 
         assert!(actual.body().contains(&actor));
         assert!(actual.body().contains(&sender));
         assert!(actual.body().contains(&receiver));
+        assert!(actual.body().contains(i18n::PUBLIC_TRUNCATION_OMITTED));
     }
 
     #[test]
@@ -1956,38 +1923,6 @@ mod tests {
     }
 
     #[test]
-    fn public_void_compact_branch_keeps_the_truncation_cue_and_recovery_reference() {
-        let actual = RenderedCanonicalMessage::new(
-            render_public_void_compact(&PublicVoidMessageModel {
-                entry_id: LedgerEntryId(9),
-                voider_display_name: name("Alice"),
-                voided_at: timestamp("2026-05-25 18:55"),
-                original_summary: LedgerSurfaceSummary::Expense {
-                    date: date("2026-05-24"),
-                    payer_display_name: name("Bob"),
-                    amount: "1200".to_owned(),
-                    note: Some(note("ランチ")),
-                },
-                recorded_at: timestamp("2026-05-25 18:55"),
-                recovery_reference: recovery_reference(9),
-            })
-            .join("\n"),
-        )
-        .expect("compact message should satisfy Discord limits");
-
-        assert!(
-            actual
-                .body()
-                .contains(i18n::PUBLIC_TRUNCATION_ATTACHMENT_GUIDANCE)
-        );
-        assert!(
-            actual
-                .body()
-                .contains("復旧用の参照: ledger:abcd1234/entry:9")
-        );
-    }
-
-    #[test]
     fn public_void_compact_branch_truncates_extreme_original_summaries_and_still_renders() {
         let actual = DiscordLedgerPresenter::render_public_entry(
             &PublicCanonicalMessageModel::Void(PublicVoidMessageModel {
@@ -2009,89 +1944,47 @@ mod tests {
     }
 
     #[test]
-    fn public_void_compact_branch_preserves_amount_and_status_cues() {
-        let voider = format!("取消者{}", "あ".repeat(80));
-        let payer = format!("支払者{}", "い".repeat(80));
-        let actual = RenderedCanonicalMessage::new(
-            render_public_void_compact(&PublicVoidMessageModel {
-                entry_id: LedgerEntryId(9),
-                voider_display_name: name(&voider),
-                voided_at: timestamp("2026-05-25 18:55"),
-                original_summary: LedgerSurfaceSummary::Expense {
-                    date: date("2026-05-24"),
-                    payer_display_name: name(&payer),
-                    amount: "1200".to_owned(),
-                    note: Some(note("ランチ")),
-                },
-                recorded_at: timestamp("2026-05-25 18:55"),
-                recovery_reference: recovery_reference(9),
-            })
-            .join("\n"),
-        )
-        .expect("compact message should preserve full labels");
-
-        assert!(actual.body().contains("支払い 1200円"));
-        assert!(actual.body().contains(&voider));
-        assert!(actual.body().contains(&payer));
-        assert!(
-            actual
-                .body()
-                .contains(i18n::PUBLIC_TRUNCATION_ATTACHMENT_GUIDANCE)
-        );
-    }
-
-    #[test]
     fn public_seal_compact_branch_keeps_the_truncation_cue_and_drops_the_header() {
-        let actual = RenderedCanonicalMessage::new(
-            render_public_seal_compact(&PublicSealMessageModel {
+        let actual = DiscordLedgerPresenter::render_public_entry(
+            &PublicCanonicalMessageModel::Seal(PublicSealMessageModel {
                 entry_id: LedgerEntryId(10),
-                actor_display_name: name("Operator"),
+                actor_display_name: name(&format!("Operator{}", "あ".repeat(1200))),
                 through_entry_id: LedgerEntryId(4),
                 through_summary: LedgerSurfaceSummary::Settlement {
                     date: date("2026-05-20"),
-                    from_display_name: name("Alice"),
+                    from_display_name: name(&format!("Alice{}", "い".repeat(1200))),
                     to_display_name: name("Bob"),
                     amount: "400".to_owned(),
                     additional_transfers: 2,
                 },
                 recorded_at: timestamp("2026-05-25 18:55"),
                 recovery_reference: recovery_reference(10),
-            })
-            .join("\n"),
+            }),
         )
         .expect("compact message should satisfy Discord limits");
 
-        assert!(
-            actual
-                .body()
-                .contains(i18n::PUBLIC_TRUNCATION_ATTACHMENT_GUIDANCE)
-        );
+        assert!(actual.body().contains(i18n::PUBLIC_TRUNCATION_OMITTED));
         assert!(!actual.body().contains("確認 [#10]"));
     }
 
     #[test]
     fn public_balance_adjustment_compact_branch_keeps_the_truncation_cue_and_drops_header() {
-        let actual = RenderedCanonicalMessage::new(
-            render_public_balance_adjustment_compact(&PublicBalanceAdjustmentMessageModel {
+        let actual = DiscordLedgerPresenter::render_public_entry(
+            &PublicCanonicalMessageModel::BalanceAdjustment(PublicBalanceAdjustmentMessageModel {
                 entry_id: LedgerEntryId(11),
-                actor_display_name: name("Operator"),
-                reason: note("差額補正"),
+                actor_display_name: name(&format!("Operator{}", "あ".repeat(1200))),
+                reason: note(&format!("差額補正{}", "う".repeat(1200))),
                 impacts: vec![
                     impact("Alice", "300", BalanceDirection::Receive),
                     impact("Bob", "300", BalanceDirection::Pay),
                 ],
                 recorded_at: timestamp("2026-05-25 18:55"),
                 recovery_reference: recovery_reference(11),
-            })
-            .join("\n"),
+            }),
         )
         .expect("compact message should satisfy Discord limits");
 
-        assert!(
-            actual
-                .body()
-                .contains(i18n::PUBLIC_TRUNCATION_ATTACHMENT_GUIDANCE)
-        );
+        assert!(actual.body().contains(i18n::PUBLIC_TRUNCATION_OMITTED));
         assert!(!actual.body().contains("残高補正 [#11]"));
     }
 
@@ -2783,75 +2676,6 @@ mod tests {
             "書き込み確認中\n\n前回の書き込み結果を確認中です。\n\n復旧用の参照: ledger:abcd1234/entry:7"
         );
         assert_eq!(actual.action_rows.len(), 1);
-    }
-
-    #[test]
-    fn canonical_message_accepts_a_single_recovery_reference_line() {
-        let actual = RenderedCanonicalMessage::new(
-            "支出 [#7]\n日付: 2026-05-25\n記録者: Alice\n記録日時: 2026-05-25 18:55\n復旧用の参照: ledger:abcd1234/entry:7",
-        );
-
-        assert!(actual.is_ok());
-    }
-
-    #[test]
-    fn canonical_message_accepts_the_standard_public_truncation_cue() {
-        let actual = RenderedCanonicalMessage::new(format!(
-            "清算 [#8]\n日付: 2026-05-25\n記録日時: 2026-05-25 18:55\n{}\n{}\n復旧用の参照: ledger:abcd1234/entry:8 | <https://discord.com/channels/1/2/8>",
-            i18n::PUBLIC_TRUNCATION_OMITTED,
-            i18n::PUBLIC_TRUNCATION_ATTACHMENT_GUIDANCE
-        ));
-
-        assert!(actual.is_ok());
-    }
-
-    #[test]
-    fn canonical_message_requires_one_recovery_reference_line() {
-        let actual = RenderedCanonicalMessage::new("支出 [#7]\n日付: 2026-05-25");
-
-        assert_eq!(actual, Err(RenderBudgetError::MissingRecoveryReference));
-    }
-
-    #[test]
-    fn canonical_message_rejects_multiple_recovery_reference_lines() {
-        let actual = RenderedCanonicalMessage::new(
-            "支出 [#7]\n復旧用の参照: ledger:abcd1234/entry:7\n復旧用の参照: ledger:abcd1234/entry:7 | <https://discord.com/channels/1/2/7>",
-        );
-
-        assert_eq!(
-            actual,
-            Err(RenderBudgetError::MultipleRecoveryReferences { actual: 2 })
-        );
-    }
-
-    #[test]
-    fn canonical_message_rejects_partial_truncation_cue() {
-        let actual = RenderedCanonicalMessage::new(format!(
-            "清算 [#8]\n{}\n復旧用の参照: ledger:abcd1234/entry:8",
-            i18n::PUBLIC_TRUNCATION_OMITTED
-        ));
-
-        assert_eq!(actual, Err(RenderBudgetError::InvalidPublicTruncationCue));
-    }
-
-    #[test]
-    fn canonical_message_requires_the_recovery_reference_to_be_the_final_line() {
-        let actual = RenderedCanonicalMessage::new(
-            "支出 [#7]\n復旧用の参照: ledger:abcd1234/entry:7\n記録日時: 2026-05-25 18:55",
-        );
-
-        assert_eq!(actual, Err(RenderBudgetError::MissingRecoveryReference));
-    }
-
-    #[test]
-    fn canonical_message_requires_the_truncation_cue_to_stay_in_the_final_tail() {
-        let actual = RenderedCanonicalMessage::new(format!(
-            "清算 [#8]\n{}\n記録日時: 2026-05-25 18:55\n{}\n復旧用の参照: ledger:abcd1234/entry:8 | <https://discord.com/channels/1/2/8>",
-            i18n::PUBLIC_TRUNCATION_OMITTED,
-            i18n::PUBLIC_TRUNCATION_ATTACHMENT_GUIDANCE
-        ));
-
-        assert_eq!(actual, Err(RenderBudgetError::InvalidPublicTruncationCue));
     }
 
     fn note(value: &str) -> SafeLiteralText {

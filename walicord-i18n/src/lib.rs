@@ -45,8 +45,7 @@ pub mod strings {
     pub const SLASH_RENDER_FAILED: &str = "清算結果の画像を生成できませんでした。";
     pub const RECOVERY_REFERENCE_PREFIX: &str = "復旧用の参照: ";
     pub const PUBLIC_TRUNCATION_OMITTED: &str = "... (省略されました)";
-    pub const PUBLIC_TRUNCATION_ATTACHMENT_GUIDANCE: &str =
-        "詳細はこのメッセージの添付ファイル (walicord-ledger-entry.json) で確認できます。";
+    pub const PUBLIC_TRUNCATION_LEDGER_GUIDANCE: &str = "残高は /ledger で確認できます。";
 }
 
 #[cfg(feature = "en")]
@@ -90,8 +89,7 @@ pub mod strings {
     pub const SLASH_RENDER_FAILED: &str = "Failed to render settlement image.";
     pub const RECOVERY_REFERENCE_PREFIX: &str = "Recovery reference: ";
     pub const PUBLIC_TRUNCATION_OMITTED: &str = "... (truncated)";
-    pub const PUBLIC_TRUNCATION_ATTACHMENT_GUIDANCE: &str =
-        "See this message's attachment (walicord-ledger-entry.json) for the full details.";
+    pub const PUBLIC_TRUNCATION_LEDGER_GUIDANCE: &str = "Use /ledger to check balances.";
 }
 
 #[cfg(not(any(feature = "ja", feature = "en")))]
@@ -135,8 +133,7 @@ pub mod strings {
     pub const SLASH_RENDER_FAILED: &str = "Failed to render settlement image.";
     pub const RECOVERY_REFERENCE_PREFIX: &str = "Recovery reference: ";
     pub const PUBLIC_TRUNCATION_OMITTED: &str = "... (truncated)";
-    pub const PUBLIC_TRUNCATION_ATTACHMENT_GUIDANCE: &str =
-        "See this message's attachment (walicord-ledger-entry.json) for the full details.";
+    pub const PUBLIC_TRUNCATION_LEDGER_GUIDANCE: &str = "Use /ledger to check balances.";
 }
 
 pub use strings::*;

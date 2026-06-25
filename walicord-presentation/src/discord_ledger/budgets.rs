@@ -33,12 +33,6 @@ pub enum RenderBudgetError {
         max_values: u8,
         option_count: usize,
     },
-    #[error("recovery reference is missing")]
-    MissingRecoveryReference,
-    #[error("multiple recovery references ({actual}) are not allowed")]
-    MultipleRecoveryReferences { actual: usize },
-    #[error("public surface truncation cue is invalid")]
-    InvalidPublicTruncationCue,
 }
 
 pub fn validate_message_content(content: &str) -> Result<(), RenderBudgetError> {

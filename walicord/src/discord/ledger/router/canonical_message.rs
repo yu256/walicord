@@ -1,8 +1,8 @@
 //! Adapter-side composers that turn a freshly recorded `LedgerEntry` plus the live
 //! Discord roster into a budget-validated `RenderedCanonicalMessage`. Each composer
 //! lives behind a `Recordable*Entry` newtype so the caller never has to discriminate
-//! between event variants; the budget shape comes from `RenderedCanonicalMessage::new`
-//! invoked by `DiscordLedgerPresenter::render_public_entry`.
+//! between event variants; the budget validation comes from
+//! `DiscordLedgerPresenter::render_public_entry`.
 
 use std::collections::HashMap;
 
