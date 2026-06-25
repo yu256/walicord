@@ -785,8 +785,14 @@ pub enum DiscordCallSite {
     ExpenseBasicEditModalCreateResponse,
     #[error("expense confirmation page create_response")]
     ExpenseConfirmationCreateResponse,
-    #[error("expense record success ack")]
-    ExpenseRecordSuccessAck,
+    #[error("expense record defer ack")]
+    ExpenseRecordDeferAck,
+    #[error("expense record success edit")]
+    ExpenseRecordSuccessEdit,
+    #[error("expense record drift edit")]
+    ExpenseRecordDriftEdit,
+    #[error("expense record uncertain edit")]
+    ExpenseRecordUncertainEdit,
     #[error("expense uncertain-write reply")]
     ExpenseUncertainWriteReply,
     #[error("canonical thread create")]
@@ -1882,11 +1888,13 @@ impl LedgerRouter {
             return Ok(InteractionDispatch::Handled);
         };
         if !matches!(claim.session().stage(), ExpenseSessionStage::InConfirmation) {
-            // Defensive: the record button is only rendered on the confirmation page;
-            // a non-confirmation stage here means a stale cached interaction. Restart
-            // the actor cleanly.
             return self.respond_expense_session_missing(ctx, component).await;
         }
+
+        component
+            .defer(&ctx.http)
+            .await
+            .map_err(discord_call_error(DiscordCallSite::ExpenseRecordDeferAck))?;
 
         let binding = self.resolve_or_bootstrap_expense_ledger(ctx, scope).await?;
         let ledger_id = binding.ledger_id();
@@ -1982,12 +1990,12 @@ impl LedgerRouter {
             | RecordExpenseOutcome::UncertainAppendFailed => {
                 let (message, components) =
                     self.uncertain_write_block_response(ledger_id, true, false);
-                self.reply_component_ephemeral_with_components(
+                self.edit_component_response_with_components(
                     ctx,
                     component,
                     message,
                     components,
-                    DiscordCallSite::ExpenseUncertainWriteReply,
+                    DiscordCallSite::ExpenseRecordUncertainEdit,
                 )
                 .await
             }
@@ -2037,17 +2045,13 @@ impl LedgerRouter {
             body.push_str(i18n::EXPENSE_PARTICIPANTS_DRIFTED_CUE);
         }
 
-        let response = CreateInteractionResponse::UpdateMessage(
-            safe_interaction_response_message()
-                .content(body)
-                .components(components),
-        );
+        let response = safe_edit_interaction_response()
+            .content(body)
+            .components(components);
         component
-            .create_response(&ctx.http, response)
+            .edit_response(&ctx.http, response)
             .await
-            .map_err(discord_call_error(
-                DiscordCallSite::ExpenseConfirmationCreateResponse,
-            ))?;
+            .map_err(discord_call_error(DiscordCallSite::ExpenseRecordDriftEdit))?;
         claim.replace(refreshed_session);
         Ok(InteractionDispatch::Handled)
     }
@@ -2067,15 +2071,15 @@ impl LedgerRouter {
         );
         let rendered = DiscordLedgerPresenter::render_expense_success(&model)?;
         let (body, components) = rendered_surface_to_message(rendered);
-        let response = CreateInteractionResponse::UpdateMessage(
-            safe_interaction_response_message()
-                .content(body)
-                .components(components),
-        );
+        let response = safe_edit_interaction_response()
+            .content(body)
+            .components(components);
         component
-            .create_response(&ctx.http, response)
+            .edit_response(&ctx.http, response)
             .await
-            .map_err(discord_call_error(DiscordCallSite::ExpenseRecordSuccessAck))?;
+            .map_err(discord_call_error(
+                DiscordCallSite::ExpenseRecordSuccessEdit,
+            ))?;
         Ok(InteractionDispatch::Handled)
     }
 
