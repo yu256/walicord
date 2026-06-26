@@ -482,7 +482,7 @@ mod tests {
         assert_eq!(
             actual
                 .iter()
-                .map(|entry| entry.entry().id)
+                .map(|entry| entry.entry_id())
                 .collect::<Vec<_>>(),
             vec![LedgerEntryId(4), LedgerEntryId(1)]
         );
@@ -506,7 +506,7 @@ mod tests {
         assert_eq!(
             actual
                 .iter()
-                .map(|entry| entry.entry().id)
+                .map(|entry| entry.entry_id())
                 .collect::<Vec<_>>(),
             vec![LedgerEntryId(3)]
         );
@@ -526,7 +526,7 @@ mod tests {
         assert_eq!(
             actual
                 .iter()
-                .map(|entry| entry.entry().id)
+                .map(|entry| entry.entry_id())
                 .collect::<Vec<_>>(),
             vec![LedgerEntryId(2), LedgerEntryId(1)]
         );
@@ -547,7 +547,7 @@ mod tests {
         assert_eq!(
             actual
                 .iter()
-                .map(|entry| entry.entry().id)
+                .map(|entry| entry.entry_id())
                 .collect::<Vec<_>>(),
             vec![LedgerEntryId(3), LedgerEntryId(2)]
         );

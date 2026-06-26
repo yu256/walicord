@@ -1,4 +1,6 @@
-use super::surfaces::{LedgerSurfaceSummary, RecoveryCta, RecoveryReference, SurfaceActionRow};
+use super::surfaces::{
+    ExpenseOrSettlementSummary, RecoveryCta, RecoveryReference, SurfaceActionRow,
+};
 use walicord_i18n as i18n;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -19,13 +21,13 @@ pub enum VoidRetargetReason {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VoidCandidateRow {
-    pub summary: LedgerSurfaceSummary,
+    pub summary: ExpenseOrSettlementSummary,
     pub recovery_reference: RecoveryReference,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VoidConfirmationRecap {
-    pub summary: LedgerSurfaceSummary,
+    pub summary: ExpenseOrSettlementSummary,
     pub total_amount: String,
     pub recovery_reference: RecoveryReference,
 }

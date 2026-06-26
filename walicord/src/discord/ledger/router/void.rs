@@ -7,20 +7,20 @@ use std::fmt::Write as _;
 
 use serenity::all::{ComponentInteraction, ComponentInteractionDataKind};
 use walicord_application::ledger::{
-    LedgerEntry, LedgerEntryId, LedgerEvent, LedgerId, projection::VerifiedLedgerEntryView,
-    void_flow::VoidComposeError,
+    LedgerEntryId, LedgerId,
+    projection::{ExpenseOrSettlementEvent, ExpenseOrSettlementView},
 };
 use walicord_domain::Money;
 use walicord_i18n as i18n;
 use walicord_presentation::discord_ledger::{
     RecoveryReference, SafeLiteralText, SurfaceActionRow, SurfaceButton,
     SurfaceInteractiveButtonStyle, SurfaceMemberLabels, SurfaceSelectMenu, SurfaceSelectOption,
-    VoidCandidateRow, VoidConfirmationRecap, VoidSurfaceModel, summary_for_view,
+    VoidCandidateRow, VoidConfirmationRecap, VoidSurfaceModel, expense_or_settlement_summary,
 };
 
 use super::{
-    InternalLedgerRouteError, LedgerRouteError, VOID_CANCEL_CUSTOM_ID_PREFIX,
-    VOID_CONFIRM_CUSTOM_ID_PREFIX, VOID_PICK_CUSTOM_ID_PREFIX, VOID_RESELECT_CUSTOM_ID_PREFIX,
+    LedgerRouteError, VOID_CANCEL_CUSTOM_ID_PREFIX, VOID_CONFIRM_CUSTOM_ID_PREFIX,
+    VOID_PICK_CUSTOM_ID_PREFIX, VOID_RESELECT_CUSTOM_ID_PREFIX,
 };
 
 pub(super) fn selected_void_target(component: &ComponentInteraction) -> Option<LedgerEntryId> {
@@ -35,7 +35,7 @@ pub(super) fn selected_void_target(component: &ComponentInteraction) -> Option<L
 
 #[allow(clippy::result_large_err)] // LedgerRouteError is the router-wide error envelope.
 pub(super) fn void_candidate_rows(
-    candidates: &[VerifiedLedgerEntryView],
+    candidates: &[ExpenseOrSettlementView],
     labels: &SurfaceMemberLabels,
     ledger_id: LedgerId,
 ) -> Result<Vec<VoidCandidateRow>, LedgerRouteError> {
@@ -43,7 +43,7 @@ pub(super) fn void_candidate_rows(
         .iter()
         .map(|view| {
             Ok(VoidCandidateRow {
-                summary: summary_for_view(view, labels)?,
+                summary: expense_or_settlement_summary(view, labels),
                 recovery_reference: void_recovery_reference(view, ledger_id),
             })
         })
@@ -51,19 +51,19 @@ pub(super) fn void_candidate_rows(
 }
 
 pub(super) fn void_recovery_reference(
-    view: &VerifiedLedgerEntryView,
+    view: &ExpenseOrSettlementView,
     ledger_id: LedgerId,
 ) -> RecoveryReference {
     RecoveryReference {
         ledger_id_short: format!("{ledger_id:08x}"),
-        entry_id: view.entry().id,
+        entry_id: view.entry_id(),
         message_link: Some(view.message_link().to_owned()),
     }
 }
 
 pub(super) fn void_selection_action_rows(
     nonce: walicord_application::SessionNonce,
-    candidates: &[VerifiedLedgerEntryView],
+    candidates: &[ExpenseOrSettlementView],
     labels: &SurfaceMemberLabels,
 ) -> Vec<SurfaceActionRow> {
     let n = nonce;
@@ -73,7 +73,7 @@ pub(super) fn void_selection_action_rows(
         options: candidates
             .iter()
             .map(|view| SurfaceSelectOption {
-                value: view.entry().id.0.to_string(),
+                value: view.entry_id().to_string(),
                 label: void_candidate_select_label(view, labels),
                 description: None,
                 selected: false,
@@ -112,12 +112,13 @@ pub(super) fn void_confirmation_action_rows(
 }
 
 fn void_candidate_select_label(
-    view: &VerifiedLedgerEntryView,
+    view: &ExpenseOrSettlementView,
     labels: &SurfaceMemberLabels,
 ) -> SafeLiteralText {
     let mut label = String::new();
-    match &view.entry().event {
-        LedgerEvent::ExpenseRecorded(event) => {
+    let entry_id = view.entry_id();
+    match view.event() {
+        ExpenseOrSettlementEvent::Expense(event) => {
             let payer = event
                 .paid_by()
                 .first()
@@ -128,28 +129,23 @@ fn void_candidate_select_label(
                 .map(|paid| paid.amount)
                 .sum::<Money>();
             let _ = match payer {
-                Some(payer) => write!(label, "#{} 支出 {amount}円 {payer}", view.entry().id.0),
-                None => write!(label, "#{} 支出 {amount}円", view.entry().id.0),
+                Some(payer) => write!(label, "#{entry_id} 支出 {amount}円 {payer}"),
+                None => write!(label, "#{entry_id} 支出 {amount}円"),
             };
         }
-        LedgerEvent::NormalizedSettlementPlanRecorded(event) => {
-            let _ = write!(label, "#{} 清算", view.entry().id.0);
-            if let Some(first) = event.transfers().first() {
-                let _ = write!(
-                    label,
-                    " {}->{} {}円",
-                    labels.safe_member_label(first.from),
-                    labels.safe_member_label(first.to),
-                    first.amount
-                );
-            }
+        ExpenseOrSettlementEvent::Settlement(event) => {
+            let first = event.transfers().first();
+            let _ = write!(
+                label,
+                "#{entry_id} 清算 {}->{} {}円",
+                labels.safe_member_label(first.from),
+                labels.safe_member_label(first.to),
+                first.amount
+            );
             let additional = event.transfers().len().saturating_sub(1);
             if additional > 0 {
                 let _ = write!(label, " {}", i18n::additional_items(additional));
             }
-        }
-        _ => {
-            let _ = write!(label, "#{}", view.entry().id.0);
         }
     }
     SafeLiteralText::from_roster_label(&label).expect("void candidate select label should sanitize")
@@ -157,7 +153,7 @@ fn void_candidate_select_label(
 
 #[allow(clippy::result_large_err)] // LedgerRouteError is the router-wide error envelope.
 pub(super) fn void_confirmation_model(
-    target: &VerifiedLedgerEntryView,
+    target: &ExpenseOrSettlementView,
     labels: &SurfaceMemberLabels,
     ledger_id: LedgerId,
     nonce: walicord_application::SessionNonce,
@@ -165,8 +161,8 @@ pub(super) fn void_confirmation_model(
     Ok(VoidSurfaceModel::confirmation(
         i18n::VOID_CONFIRMATION_TITLE,
         VoidConfirmationRecap {
-            summary: summary_for_view(target, labels)?,
-            total_amount: void_confirmation_total_amount(target.entry())?,
+            summary: expense_or_settlement_summary(target, labels),
+            total_amount: void_confirmation_total_amount(target),
             recovery_reference: void_recovery_reference(target, ledger_id),
         },
         void_confirmation_action_rows(nonce),
@@ -174,27 +170,19 @@ pub(super) fn void_confirmation_model(
     ))
 }
 
-#[allow(clippy::result_large_err)] // LedgerRouteError is the router-wide error envelope.
-pub(super) fn void_confirmation_total_amount(
-    entry: &LedgerEntry,
-) -> Result<String, LedgerRouteError> {
-    match &entry.event {
-        LedgerEvent::ExpenseRecorded(event) => Ok(event
+pub(super) fn void_confirmation_total_amount(view: &ExpenseOrSettlementView) -> String {
+    match view.event() {
+        ExpenseOrSettlementEvent::Expense(event) => event
             .paid_by()
             .iter()
             .map(|paid| paid.amount)
             .sum::<Money>()
-            .to_string()),
-        LedgerEvent::NormalizedSettlementPlanRecorded(event) => Ok(event
+            .to_string(),
+        ExpenseOrSettlementEvent::Settlement(event) => event
             .transfers()
             .iter()
             .map(|transfer| transfer.amount)
             .sum::<Money>()
-            .to_string()),
-        _ => Err(LedgerRouteError::Internal(
-            InternalLedgerRouteError::VoidCompose(VoidComposeError::TargetNoLongerVoidable {
-                target_entry_id: entry.id,
-            }),
-        )),
+            .to_string(),
     }
 }

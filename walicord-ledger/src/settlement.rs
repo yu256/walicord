@@ -1,10 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
-use walicord_domain::{Money, Transfer, model::MemberId};
+use walicord_domain::{Money, NonEmptyVec, Transfer, model::MemberId};
 
 /// Records normalized transfers without closing ledger history.
 #[derive(Debug, Clone, PartialEq)]
 pub struct NormalizedSettlementPlanRecorded {
-    transfers: Vec<Transfer>,
+    transfers: NonEmptyVec<Transfer>,
 }
 
 impl NormalizedSettlementPlanRecorded {
@@ -58,15 +58,17 @@ impl NormalizedSettlementPlanRecorded {
                 .or_insert(Money::ZERO) += transfer.amount;
         }
 
-        let transfers = canonical
+        let transfers: Vec<Transfer> = canonical
             .into_iter()
             .map(|((from, to), amount)| Transfer { from, to, amount })
             .collect();
 
-        Ok(Self { transfers })
+        Ok(Self {
+            transfers: NonEmptyVec::new(transfers).expect("non-empty input validated above"),
+        })
     }
 
-    pub fn transfers(&self) -> &[Transfer] {
+    pub fn transfers(&self) -> &NonEmptyVec<Transfer> {
         &self.transfers
     }
 }

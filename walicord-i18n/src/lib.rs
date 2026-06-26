@@ -657,7 +657,7 @@ pub fn all_zero_weights() -> impl std::fmt::Display {
     });
 }
 
-pub fn public_expense_header(entry_id: u64) -> impl std::fmt::Display {
+pub fn public_expense_header(entry_id: impl std::fmt::Display) -> impl std::fmt::Display {
     std::fmt::from_fn(move |f| {
         if cfg!(feature = "ja") {
             write!(f, "支出 [#{entry_id}]")
@@ -667,7 +667,7 @@ pub fn public_expense_header(entry_id: u64) -> impl std::fmt::Display {
     })
 }
 
-pub fn public_settlement_header(entry_id: u64) -> impl std::fmt::Display {
+pub fn public_settlement_header(entry_id: impl std::fmt::Display) -> impl std::fmt::Display {
     std::fmt::from_fn(move |f| {
         if cfg!(feature = "ja") {
             write!(f, "清算 [#{entry_id}]")
@@ -677,7 +677,7 @@ pub fn public_settlement_header(entry_id: u64) -> impl std::fmt::Display {
     })
 }
 
-pub fn public_seal_header(entry_id: u64) -> impl std::fmt::Display {
+pub fn public_seal_header(entry_id: impl std::fmt::Display) -> impl std::fmt::Display {
     std::fmt::from_fn(move |f| {
         if cfg!(feature = "ja") {
             write!(f, "確認 [#{entry_id}]")
@@ -687,7 +687,9 @@ pub fn public_seal_header(entry_id: u64) -> impl std::fmt::Display {
     })
 }
 
-pub fn public_balance_adjustment_header(entry_id: u64) -> impl std::fmt::Display {
+pub fn public_balance_adjustment_header(
+    entry_id: impl std::fmt::Display,
+) -> impl std::fmt::Display {
     std::fmt::from_fn(move |f| {
         if cfg!(feature = "ja") {
             write!(f, "残高補正 [#{entry_id}]")
@@ -698,7 +700,7 @@ pub fn public_balance_adjustment_header(entry_id: u64) -> impl std::fmt::Display
 }
 
 pub fn public_void_line(
-    entry_id: u64,
+    entry_id: impl std::fmt::Display,
     voider: impl std::fmt::Display,
     voided_at: impl std::fmt::Display,
     original_summary: impl std::fmt::Display,
@@ -808,7 +810,7 @@ pub const PUBLIC_VOID_PRESERVED_LINE: &str = if cfg!(feature = "ja") {
 
 pub fn public_seal_line(
     actor: impl std::fmt::Display,
-    through_entry_id: u64,
+    through_entry_id: impl std::fmt::Display,
     through_summary: impl std::fmt::Display,
 ) -> impl std::fmt::Display {
     std::fmt::from_fn(move |f| {
@@ -988,7 +990,7 @@ pub const SEALED_RANGE_NONE: &str = if cfg!(feature = "ja") {
 };
 
 pub fn sealed_range_line(
-    through_entry_id: u64,
+    through_entry_id: impl std::fmt::Display,
     effective_date: impl std::fmt::Display,
     summary: impl std::fmt::Display,
 ) -> impl std::fmt::Display {
@@ -1158,6 +1160,25 @@ pub const PARTICIPANTS_HEADING: &str = if cfg!(feature = "ja") {
 } else {
     "Participants"
 };
+
+pub const RECENT_ENTRIES_HEADING: &str = if cfg!(feature = "ja") {
+    "最近の記録"
+} else {
+    "Recent entries"
+};
+
+pub const RECENT_ENTRIES_NONE: &str = if cfg!(feature = "ja") {
+    "記録なし"
+} else {
+    "No entries"
+};
+
+pub fn recent_entry_line(
+    entry_id: impl std::fmt::Display,
+    summary: impl std::fmt::Display,
+) -> impl std::fmt::Display {
+    std::fmt::from_fn(move |f| write!(f, "[#{entry_id}] {summary}"))
+}
 
 pub const VOIDED_HEADING: &str = if cfg!(feature = "ja") {
     "取り消し済み"

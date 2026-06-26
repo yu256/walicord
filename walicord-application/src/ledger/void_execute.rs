@@ -21,7 +21,7 @@ use crate::{
         },
         expense_session::{VoidSession, VoidSessionKey, VoidSessionStore},
         observability::LedgerObservability,
-        projection::{NextLedgerEntryIdError, VerifiedLedgerEntryView},
+        projection::{ExpenseOrSettlementView, NextLedgerEntryIdError},
         void_flow::{VoidComposeError, compose_void_entry, enumerate_void_candidates},
         write_coordinator::{
             UncertainWriteRegistry, WriteCoordinator, WriteTargetKey, resolve_uncertain_write_v1,
@@ -37,7 +37,7 @@ pub trait VoidEntryRenderer: Send + Sync {
     fn render_public_body(
         &self,
         entry: &LedgerEntry,
-        target: &VerifiedLedgerEntryView,
+        target: &ExpenseOrSettlementView,
         ledger_id: LedgerId,
     ) -> Result<String, VoidRenderError>;
 }
@@ -169,7 +169,7 @@ where
 
     let Some(target_view) = enumerate_void_candidates(&load)?
         .into_iter()
-        .find(|view| view.entry().id == target_id)
+        .find(|view| view.entry_id() == target_id)
     else {
         void_sessions.clear(session_key);
         return Ok(VoidExecuteOutcome::TargetGone);
@@ -392,7 +392,7 @@ mod tests {
         fn render_public_body(
             &self,
             _: &LedgerEntry,
-            _: &crate::ledger::projection::VerifiedLedgerEntryView,
+            _: &crate::ledger::projection::ExpenseOrSettlementView,
             _: LedgerId,
         ) -> Result<String, VoidRenderError> {
             Ok("VOID-BODY".to_owned())

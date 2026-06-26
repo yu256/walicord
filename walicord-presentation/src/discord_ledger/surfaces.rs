@@ -154,7 +154,7 @@ pub struct BalanceImpactRow {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LedgerSurfaceSummary {
+pub enum ExpenseOrSettlementSummary {
     Expense {
         date: LedgerEffectiveDate,
         payer_display_name: SafeLiteralText,
@@ -168,34 +168,16 @@ pub enum LedgerSurfaceSummary {
         amount: String,
         additional_transfers: usize,
     },
-    Void {
-        date: LedgerEffectiveDate,
-        voider_display_name: SafeLiteralText,
-        recorded_at: BusinessDateTime,
-    },
-    Sealed {
-        date: LedgerEffectiveDate,
-        actor_display_name: SafeLiteralText,
-    },
-    BalanceAdjustment {
-        date: LedgerEffectiveDate,
-        actor_display_name: SafeLiteralText,
-        impact_summary: SafeLiteralText,
-    },
 }
 
-impl LedgerSurfaceSummary {
-    fn date(&self) -> &LedgerEffectiveDate {
+impl ExpenseOrSettlementSummary {
+    pub fn date(&self) -> &LedgerEffectiveDate {
         match self {
-            Self::Expense { date, .. }
-            | Self::Settlement { date, .. }
-            | Self::Void { date, .. }
-            | Self::Sealed { date, .. }
-            | Self::BalanceAdjustment { date, .. } => date,
+            Self::Expense { date, .. } | Self::Settlement { date, .. } => date,
         }
     }
 
-    fn render_void_candidate_summary(&self) -> String {
+    pub fn render_candidate_summary(&self) -> String {
         match self {
             Self::Expense {
                 date,
@@ -238,84 +220,6 @@ impl LedgerSurfaceSummary {
                 }
                 summary
             }
-            Self::Void {
-                date,
-                voider_display_name,
-                ..
-            } => i18n::void_candidate_void_summary(date, voider_display_name).to_string(),
-            Self::Sealed {
-                date,
-                actor_display_name,
-            } => i18n::void_candidate_seal_summary(date, actor_display_name).to_string(),
-            Self::BalanceAdjustment {
-                date,
-                impact_summary,
-                ..
-            } => i18n::void_candidate_adjustment_summary(date, impact_summary).to_string(),
-        }
-    }
-
-    fn render_public_void_compact_summary(&self) -> String {
-        match self {
-            Self::Expense {
-                date,
-                payer_display_name,
-                amount,
-                note,
-            } => {
-                let mut summary =
-                    i18n::void_candidate_expense_summary(date, payer_display_name, amount)
-                        .to_string();
-                if let Some(note) = note {
-                    summary.push(' ');
-                    summary.push_str(
-                        &i18n::void_candidate_note_excerpt(excerpt_with_ascii_ellipsis(
-                            note.as_str(),
-                            30,
-                        ))
-                        .to_string(),
-                    );
-                }
-                summary
-            }
-            Self::Settlement {
-                date,
-                from_display_name,
-                to_display_name,
-                amount,
-                additional_transfers,
-            } => {
-                let mut summary = i18n::void_candidate_settlement_summary(
-                    date,
-                    from_display_name,
-                    to_display_name,
-                    amount,
-                )
-                .to_string();
-                if *additional_transfers > 0 {
-                    summary.push(' ');
-                    summary.push_str(&i18n::additional_items(*additional_transfers).to_string());
-                }
-                summary
-            }
-            Self::Void {
-                date,
-                voider_display_name,
-                ..
-            } => i18n::void_candidate_void_summary(date, voider_display_name).to_string(),
-            Self::Sealed {
-                date,
-                actor_display_name,
-            } => i18n::void_candidate_seal_summary(date, actor_display_name).to_string(),
-            Self::BalanceAdjustment {
-                date,
-                impact_summary,
-                ..
-            } => i18n::void_candidate_adjustment_summary(
-                date,
-                excerpt_with_ellipsis(impact_summary.as_str(), PUBLIC_COMPACT_IMPACT_LIMIT),
-            )
-            .to_string(),
         }
     }
 
@@ -340,21 +244,10 @@ impl LedgerSurfaceSummary {
                 }
                 summary
             }
-            Self::Void { .. } => i18n::SEALED_VOID_SUMMARY.to_owned(),
-            Self::Sealed {
-                actor_display_name, ..
-            } => i18n::sealed_prior_seal_summary(actor_display_name).to_string(),
-            Self::BalanceAdjustment {
-                actor_display_name, ..
-            } => i18n::sealed_adjustment_summary(actor_display_name).to_string(),
         }
     }
 
-    fn render_sealed_through_summary(&self) -> String {
-        format!("{} {}", self.date(), self.render_sealed_summary())
-    }
-
-    fn render_confirmation_target(&self) -> String {
+    pub fn render_confirmation_target(&self) -> String {
         match self {
             Self::Expense {
                 payer_display_name, ..
@@ -378,17 +271,63 @@ impl LedgerSurfaceSummary {
                 }
                 target
             }
-            _ => self.render_void_candidate_summary(),
         }
     }
 
-    fn confirmation_note_excerpt(&self) -> Option<String> {
+    pub fn confirmation_note_excerpt(&self) -> Option<String> {
         match self {
             Self::Expense { note, .. } => note
                 .as_ref()
                 .map(|note| excerpt_with_ascii_ellipsis(note.as_str(), 30)),
-            _ => None,
+            Self::Settlement { .. } => None,
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LedgerSurfaceSummary {
+    ExpenseOrSettlement(ExpenseOrSettlementSummary),
+    Void {
+        date: LedgerEffectiveDate,
+        voider_display_name: SafeLiteralText,
+        recorded_at: BusinessDateTime,
+    },
+    Sealed {
+        date: LedgerEffectiveDate,
+        actor_display_name: SafeLiteralText,
+    },
+    BalanceAdjustment {
+        date: LedgerEffectiveDate,
+        actor_display_name: SafeLiteralText,
+        impact_summary: SafeLiteralText,
+    },
+}
+
+impl LedgerSurfaceSummary {
+    fn date(&self) -> &LedgerEffectiveDate {
+        match self {
+            Self::ExpenseOrSettlement(inner) => inner.date(),
+            Self::Void { date, .. }
+            | Self::Sealed { date, .. }
+            | Self::BalanceAdjustment { date, .. } => date,
+        }
+    }
+
+    fn render_sealed_summary(&self) -> String {
+        match self {
+            Self::ExpenseOrSettlement(inner) => inner.render_sealed_summary(),
+            Self::Void { .. } => i18n::SEALED_VOID_SUMMARY.to_owned(),
+            Self::Sealed {
+                actor_display_name, ..
+            } => i18n::sealed_prior_seal_summary(actor_display_name).to_string(),
+            Self::BalanceAdjustment {
+                actor_display_name, ..
+            } => i18n::sealed_adjustment_summary(actor_display_name).to_string(),
+        }
+    }
+
+    fn render_sealed_through_summary(&self) -> String {
+        format!("{} {}", self.date(), self.render_sealed_summary())
     }
 }
 
@@ -405,7 +344,7 @@ impl RecoveryReference {
             "{}ledger:{}/entry:{}",
             i18n::RECOVERY_REFERENCE_PREFIX,
             self.ledger_id_short,
-            self.entry_id.0
+            self.entry_id
         );
         if let Some(message_link) = &self.message_link {
             line.push_str(" | <");
@@ -444,7 +383,7 @@ pub struct PublicVoidMessageModel {
     pub entry_id: LedgerEntryId,
     pub voider_display_name: SafeLiteralText,
     pub voided_at: BusinessDateTime,
-    pub original_summary: LedgerSurfaceSummary,
+    pub original_summary: ExpenseOrSettlementSummary,
     pub recorded_at: BusinessDateTime,
     pub recovery_reference: RecoveryReference,
 }
@@ -479,13 +418,6 @@ pub enum PublicCanonicalMessageModel {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ReadViewKind {
-    #[default]
-    Review,
-    Ledger,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ReadViewRoute {
     #[default]
     ReviewThread,
@@ -495,55 +427,24 @@ pub enum ReadViewRoute {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VoidedEntryRow {
-    pub void_entry_id: LedgerEntryId,
-    pub voider_display_name: SafeLiteralText,
-    pub voided_at: BusinessDateTime,
-    pub original_summary: LedgerSurfaceSummary,
+pub struct RecentEntryRow {
+    pub entry_id: LedgerEntryId,
+    pub summary: ExpenseOrSettlementSummary,
     pub recovery_reference: RecoveryReference,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SealedRangeSummary {
-    pub through_entry_id: LedgerEntryId,
-    pub through_summary: LedgerSurfaceSummary,
+pub enum ReadViewContent {
+    Ledger {
+        recent_entries: Option<Vec<RecentEntryRow>>,
+    },
+    Review {
+        transfers: Option<Vec<TransferRow>>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BalanceAdjustmentSummary {
-    pub actor_display_name: SafeLiteralText,
-    pub reason: SafeLiteralText,
-    pub impacts: Vec<BalanceImpactRow>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ReadViewSectionVisibility {
-    pub balances: bool,
-    pub transfers: bool,
-    pub participants: bool,
-    pub voided_entries: bool,
-    pub confirmed: bool,
-    pub route_guidance: bool,
-    pub footer: bool,
-}
-
-impl Default for ReadViewSectionVisibility {
-    fn default() -> Self {
-        Self {
-            balances: true,
-            transfers: true,
-            participants: true,
-            voided_entries: true,
-            confirmed: true,
-            route_guidance: true,
-            footer: true,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ReadViewPageModel {
-    pub kind: ReadViewKind,
     pub route: ReadViewRoute,
     pub title: std::borrow::Cow<'static, str>,
     pub uncertain_write: bool,
@@ -554,17 +455,12 @@ pub struct ReadViewPageModel {
     pub recovery_cta: RecoveryCta,
     pub recovery_url: Option<String>,
     pub missing_thread_note: bool,
-    pub balances: Vec<BalanceRow>,
-    pub transfers: Vec<TransferRow>,
-    pub participants: Vec<SafeLiteralText>,
-    pub voided_entries: Vec<VoidedEntryRow>,
-    pub sealed_range: Option<SealedRangeSummary>,
-    pub balance_adjustments: Vec<BalanceAdjustmentSummary>,
+    pub balances: Option<Vec<BalanceRow>>,
     pub footer_lines: Vec<String>,
-    pub visible_sections: ReadViewSectionVisibility,
     pub empty_state: Option<std::borrow::Cow<'static, str>>,
     pub action_rows: Vec<SurfaceActionRow>,
     pub ephemeral: bool,
+    pub content: ReadViewContent,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -802,10 +698,15 @@ impl DiscordLedgerPresenter {
             model.recovery_url.as_deref(),
         );
 
+        let stale_message = match &model.content {
+            ReadViewContent::Review { .. } => i18n::STALE_REVIEW_PAGE_MESSAGE,
+            ReadViewContent::Ledger { .. } => i18n::STALE_LEDGER_PAGE_MESSAGE,
+        };
+
         let body = if model.stale_page {
             render_sections([
                 Some(model.title.as_ref()),
-                Some(read_view_stale_message(model.kind)),
+                Some(stale_message),
                 model
                     .missing_thread_note
                     .then_some(i18n::NO_LEDGER_THREAD_YET_NOTE),
@@ -820,10 +721,15 @@ impl DiscordLedgerPresenter {
                     .then_some(i18n::NO_LEDGER_THREAD_YET_NOTE),
             ])
         } else {
-            match model.kind {
-                ReadViewKind::Review => {
-                    let balances_section = render_review_balances_section(model);
-                    let transfers_section = render_review_transfers_section(model);
+            match &model.content {
+                ReadViewContent::Review { transfers } => {
+                    let balances_section = model
+                        .balances
+                        .as_ref()
+                        .map(|b| render_review_balances_section(b));
+                    let transfers_section = transfers
+                        .as_ref()
+                        .map(|t| render_review_transfers_section(t));
                     let route_guidance: Vec<&str> = model
                         .route_guidance_lines
                         .iter()
@@ -839,58 +745,32 @@ impl DiscordLedgerPresenter {
                         advisory.as_deref(),
                         model.page_indicator.as_deref(),
                         model.snapshot_notice.as_deref(),
-                        model
-                            .visible_sections
-                            .balances
-                            .then_some(balances_section.as_str()),
-                        model
-                            .visible_sections
-                            .transfers
-                            .then_some(transfers_section.as_str()),
+                        balances_section.as_deref(),
+                        transfers_section.as_deref(),
                         Some(review_instruction),
-                        model
-                            .visible_sections
-                            .route_guidance
-                            .then(|| non_empty_join(&route_guidance))
-                            .flatten()
-                            .as_deref(),
+                        non_empty_join(&route_guidance).as_deref(),
                         model
                             .missing_thread_note
                             .then_some(i18n::NO_LEDGER_THREAD_YET_NOTE),
                     ])
                 }
-                ReadViewKind::Ledger => {
-                    let balances_section = render_ledger_balances_section(model);
-                    let participants_section = render_ledger_participants_section(model);
-                    let voided_section = render_ledger_voided_section(model);
-                    let confirmed_section = render_ledger_confirmed_section(model);
+                ReadViewContent::Ledger { recent_entries } => {
+                    let balances_section = model
+                        .balances
+                        .as_ref()
+                        .map(|b| render_ledger_balances_section(b));
+                    let recent_entries_section = recent_entries
+                        .as_ref()
+                        .map(|e| render_ledger_recent_entries_section(e));
                     let footer = render_ledger_footer(model);
                     render_sections([
                         Some(model.title.as_ref()),
                         advisory.as_deref(),
                         model.page_indicator.as_deref(),
                         model.snapshot_notice.as_deref(),
-                        model
-                            .visible_sections
-                            .balances
-                            .then_some(balances_section.as_str()),
-                        model
-                            .visible_sections
-                            .participants
-                            .then_some(participants_section.as_str()),
-                        model
-                            .visible_sections
-                            .voided_entries
-                            .then_some(voided_section.as_str()),
-                        model
-                            .visible_sections
-                            .confirmed
-                            .then_some(confirmed_section.as_str()),
-                        model
-                            .visible_sections
-                            .footer
-                            .then_some(footer.as_deref())
-                            .flatten(),
+                        balances_section.as_deref(),
+                        recent_entries_section.as_deref(),
+                        footer.as_deref().filter(|s| !s.is_empty()),
                         model
                             .missing_thread_note
                             .then_some(i18n::NO_LEDGER_THREAD_YET_NOTE),
@@ -995,7 +875,7 @@ impl DiscordLedgerPresenter {
 
 fn render_public_expense_full(model: &PublicExpenseMessageModel) -> Vec<String> {
     let mut lines = vec![
-        i18n::public_expense_header(model.entry_id.0).to_string(),
+        i18n::public_expense_header(model.entry_id).to_string(),
         i18n::public_date_line(model.effective_date).to_string(),
         i18n::public_payer_line(&model.payer_display_name).to_string(),
         i18n::public_amount_line(&model.amount).to_string(),
@@ -1017,7 +897,7 @@ fn render_public_expense_full(model: &PublicExpenseMessageModel) -> Vec<String> 
 
 fn render_public_expense_compact(model: &PublicExpenseMessageModel) -> Vec<String> {
     let mut lines = vec![
-        i18n::public_expense_header(model.entry_id.0).to_string(),
+        i18n::public_expense_header(model.entry_id).to_string(),
         i18n::public_date_line(model.effective_date).to_string(),
         i18n::public_payer_line(&model.payer_display_name).to_string(),
         i18n::public_amount_line(&model.amount).to_string(),
@@ -1037,7 +917,7 @@ fn render_public_expense_compact(model: &PublicExpenseMessageModel) -> Vec<Strin
 
 fn render_public_settlement_full(model: &PublicSettlementMessageModel) -> Vec<String> {
     let mut lines = vec![
-        i18n::public_settlement_header(model.entry_id.0).to_string(),
+        i18n::public_settlement_header(model.entry_id).to_string(),
         i18n::public_date_line(model.recorded_date).to_string(),
         i18n::PUBLIC_TRANSFER_HEADING.to_owned(),
     ];
@@ -1049,7 +929,7 @@ fn render_public_settlement_full(model: &PublicSettlementMessageModel) -> Vec<St
 
 fn render_public_settlement_compact(model: &PublicSettlementMessageModel) -> Vec<String> {
     let mut lines = vec![
-        i18n::public_settlement_header(model.entry_id.0).to_string(),
+        i18n::public_settlement_header(model.entry_id).to_string(),
         i18n::public_date_line(model.recorded_date).to_string(),
         i18n::PUBLIC_TRANSFER_HEADING.to_owned(),
     ];
@@ -1068,10 +948,10 @@ fn render_public_settlement_compact(model: &PublicSettlementMessageModel) -> Vec
 fn render_public_void_full(model: &PublicVoidMessageModel) -> Vec<String> {
     vec![
         i18n::public_void_line(
-            model.entry_id.0,
+            model.entry_id,
             &model.voider_display_name,
             &model.voided_at,
-            model.original_summary.render_void_candidate_summary(),
+            model.original_summary.render_candidate_summary(),
         )
         .to_string(),
         i18n::PUBLIC_VOID_PRESERVED_LINE.to_owned(),
@@ -1082,10 +962,10 @@ fn render_public_void_full(model: &PublicVoidMessageModel) -> Vec<String> {
 fn render_public_void_compact(model: &PublicVoidMessageModel) -> Vec<String> {
     vec![
         i18n::public_void_line(
-            model.entry_id.0,
+            model.entry_id,
             &model.voider_display_name,
             &model.voided_at,
-            model.original_summary.render_public_void_compact_summary(),
+            model.original_summary.render_candidate_summary(),
         )
         .to_string(),
         i18n::PUBLIC_VOID_PRESERVED_LINE.to_owned(),
@@ -1095,10 +975,10 @@ fn render_public_void_compact(model: &PublicVoidMessageModel) -> Vec<String> {
 
 fn render_public_seal_full(model: &PublicSealMessageModel) -> Vec<String> {
     vec![
-        i18n::public_seal_header(model.entry_id.0).to_string(),
+        i18n::public_seal_header(model.entry_id).to_string(),
         i18n::public_seal_line(
             &model.actor_display_name,
-            model.through_entry_id.0,
+            model.through_entry_id,
             model.through_summary.render_sealed_through_summary(),
         )
         .to_string(),
@@ -1110,7 +990,7 @@ fn render_public_seal_compact(model: &PublicSealMessageModel) -> Vec<String> {
     vec![
         i18n::public_seal_line(
             &model.actor_display_name,
-            model.through_entry_id.0,
+            model.through_entry_id,
             excerpt_with_ellipsis(
                 &model.through_summary.render_sealed_through_summary(),
                 PUBLIC_COMPACT_SUMMARY_LIMIT,
@@ -1125,7 +1005,7 @@ fn render_public_balance_adjustment_full(
     model: &PublicBalanceAdjustmentMessageModel,
 ) -> Vec<String> {
     vec![
-        i18n::public_balance_adjustment_header(model.entry_id.0).to_string(),
+        i18n::public_balance_adjustment_header(model.entry_id).to_string(),
         i18n::public_balance_adjustment_line(
             &model.actor_display_name,
             model.reason.as_str(),
@@ -1172,65 +1052,49 @@ fn render_compacted_canonical_message(
     }
 }
 
-fn render_review_balances_section(model: &ReadViewPageModel) -> String {
+fn render_review_balances_section(balances: &[BalanceRow]) -> String {
     let mut lines = vec![i18n::BALANCES_EXPLAINER.to_owned()];
-    if model.balances.is_empty() {
+    if balances.is_empty() {
         lines.push(i18n::REVIEW_ZERO_BALANCES.to_owned());
     } else {
-        lines.extend(model.balances.iter().map(render_balance_row));
+        lines.extend(balances.iter().map(render_balance_row));
     }
     render_section(i18n::BALANCES_HEADING, lines)
 }
 
-fn render_review_transfers_section(model: &ReadViewPageModel) -> String {
-    let lines = model
-        .transfers
+fn render_review_transfers_section(transfers: &[TransferRow]) -> String {
+    let lines = transfers
         .iter()
         .map(render_transfer_row)
         .collect::<Vec<_>>();
     render_section(i18n::SETTLEMENT_PLAN_HEADING, lines)
 }
 
-fn render_ledger_balances_section(model: &ReadViewPageModel) -> String {
+fn render_ledger_recent_entries_section(entries: &[RecentEntryRow]) -> String {
+    let lines = if entries.is_empty() {
+        vec![i18n::RECENT_ENTRIES_NONE.to_owned()]
+    } else {
+        entries.iter().map(render_recent_entry_row).collect()
+    };
+    render_section(i18n::RECENT_ENTRIES_HEADING, lines)
+}
+
+fn render_recent_entry_row(row: &RecentEntryRow) -> String {
+    format!(
+        "{} | {}",
+        i18n::recent_entry_line(row.entry_id, row.summary.render_candidate_summary()),
+        row.recovery_reference.render_line()
+    )
+}
+
+fn render_ledger_balances_section(balances: &[BalanceRow]) -> String {
     let mut lines = vec![i18n::BALANCES_EXPLAINER.to_owned()];
-    if model.balances.is_empty() {
+    if balances.is_empty() {
         lines.push(i18n::LEDGER_ZERO_BALANCES.to_owned());
     } else {
-        lines.extend(model.balances.iter().map(render_balance_row));
+        lines.extend(balances.iter().map(render_balance_row));
     }
     render_section(i18n::BALANCES_HEADING, lines)
-}
-
-fn render_ledger_participants_section(model: &ReadViewPageModel) -> String {
-    let mut lines = vec![i18n::PARTICIPANTS_EXPLAINER.to_owned()];
-    lines.extend(
-        model
-            .participants
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>(),
-    );
-    render_section(i18n::PARTICIPANTS_HEADING, lines)
-}
-
-fn render_ledger_voided_section(model: &ReadViewPageModel) -> String {
-    let lines = if model.voided_entries.is_empty() {
-        vec![i18n::VOIDED_NONE.to_owned()]
-    } else {
-        model.voided_entries.iter().map(render_voided_row).collect()
-    };
-    render_section(i18n::VOIDED_HEADING, lines)
-}
-
-fn render_ledger_confirmed_section(model: &ReadViewPageModel) -> String {
-    let mut lines = vec![render_sealed_range(model.sealed_range.as_ref())];
-    lines.extend(
-        model
-            .balance_adjustments
-            .iter()
-            .map(render_balance_adjustment_summary),
-    );
-    render_section(i18n::CONFIRMED_HEADING, lines)
 }
 
 fn render_section(heading: &str, lines: Vec<String>) -> String {
@@ -1335,46 +1199,6 @@ fn render_compact_transfer_row(row: &TransferRow) -> String {
         .to_string()
 }
 
-fn render_voided_row(row: &VoidedEntryRow) -> String {
-    format!(
-        "{} | {}",
-        i18n::public_void_line(
-            row.void_entry_id.0,
-            &row.voider_display_name,
-            &row.voided_at,
-            row.original_summary.render_void_candidate_summary(),
-        ),
-        row.recovery_reference.render_line()
-    )
-}
-
-fn render_ledger_footer(model: &ReadViewPageModel) -> Option<String> {
-    non_empty_join(&model.footer_lines)
-}
-
-fn render_sealed_range(sealed_range: Option<&SealedRangeSummary>) -> String {
-    sealed_range.map_or_else(
-        || i18n::SEALED_RANGE_NONE.to_owned(),
-        |sealed_range| {
-            i18n::sealed_range_line(
-                sealed_range.through_entry_id.0,
-                sealed_range.through_summary.date(),
-                sealed_range.through_summary.render_sealed_summary(),
-            )
-            .to_string()
-        },
-    )
-}
-
-fn render_balance_adjustment_summary(summary: &BalanceAdjustmentSummary) -> String {
-    i18n::balance_adjustment_row(
-        &summary.actor_display_name,
-        summary.reason.as_str(),
-        render_impact_summary(&summary.impacts),
-    )
-    .to_string()
-}
-
 fn render_impact_summary(rows: &[BalanceImpactRow]) -> String {
     rows.iter()
         .map(|row| match row.direction {
@@ -1389,10 +1213,14 @@ fn render_impact_summary(rows: &[BalanceImpactRow]) -> String {
         .join(", ")
 }
 
+fn render_ledger_footer(model: &ReadViewPageModel) -> Option<String> {
+    non_empty_join(&model.footer_lines)
+}
+
 fn render_void_candidate_line(candidate: &super::void_surfaces::VoidCandidateRow) -> String {
     format!(
         "{} | {}",
-        candidate.summary.render_void_candidate_summary(),
+        candidate.summary.render_candidate_summary(),
         candidate.recovery_reference.render_line()
     )
 }
@@ -1408,13 +1236,6 @@ fn render_void_confirmation_lines(recap: &VoidConfirmationRecap) -> Vec<String> 
     }
     lines.push(recap.recovery_reference.render_line());
     lines
-}
-
-fn read_view_stale_message(kind: ReadViewKind) -> &'static str {
-    match kind {
-        ReadViewKind::Review => i18n::STALE_REVIEW_PAGE_MESSAGE,
-        ReadViewKind::Ledger => i18n::STALE_LEDGER_PAGE_MESSAGE,
-    }
 }
 
 fn append_recovery_cta_row(
@@ -1487,15 +1308,14 @@ fn excerpt_with_ascii_ellipsis(text: &str, limit: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        BalanceAdjustmentSummary, BalanceDirection, BalanceImpactRow, BalanceRow, BusinessDateTime,
-        DiscordLedgerPresenter, ExpenseSurfaceModel, LedgerSurfaceSummary, PanelButtonStates,
+        BalanceDirection, BalanceImpactRow, BalanceRow, BusinessDateTime, DiscordLedgerPresenter,
+        ExpenseOrSettlementSummary, ExpenseSurfaceModel, LedgerSurfaceSummary, PanelButtonStates,
         PanelSurfaceModel, PublicBalanceAdjustmentMessageModel, PublicCanonicalMessageModel,
         PublicExpenseMessageModel, PublicSealMessageModel, PublicSettlementMessageModel,
-        PublicVoidMessageModel, ReadViewKind, ReadViewPageModel, ReadViewRoute,
-        ReadViewSectionVisibility, RecoveryContext, RecoveryCta, RecoveryReference,
-        SafeLiteralText, SealedRangeSummary, SurfaceActionRow, SurfaceButton,
-        SurfaceInteractiveButtonStyle, SurfaceSelectMenu, SurfaceSelectOption, TransferRow,
-        UncertainWriteSurfaceModel, VoidedEntryRow,
+        PublicVoidMessageModel, ReadViewContent, ReadViewPageModel, ReadViewRoute, RecentEntryRow,
+        RecoveryContext, RecoveryCta, RecoveryReference, SafeLiteralText, SurfaceActionRow,
+        SurfaceButton, SurfaceInteractiveButtonStyle, SurfaceSelectMenu, SurfaceSelectOption,
+        TransferRow, UncertainWriteSurfaceModel,
     };
     use crate::discord_ledger::{
         budgets::{validate_button_label, validate_component_placeholder},
@@ -1547,7 +1367,6 @@ mod tests {
     fn recovery_reference_only_and_none_do_not_emit_dead_cta_buttons() {
         for recovery_cta in [RecoveryCta::RecoveryReferenceOnly, RecoveryCta::None] {
             let actual = DiscordLedgerPresenter::render_read_view_page(&ReadViewPageModel {
-                kind: ReadViewKind::Review,
                 route: ReadViewRoute::ReviewParent,
                 title: std::borrow::Cow::Borrowed("清算確認"),
                 uncertain_write: false,
@@ -1558,17 +1377,14 @@ mod tests {
                 recovery_cta,
                 recovery_url: Some("https://discord.com/channels/1/2".to_owned()),
                 missing_thread_note: false,
-                balances: Vec::new(),
-                transfers: Vec::new(),
-                participants: Vec::new(),
-                voided_entries: Vec::new(),
-                sealed_range: None,
-                balance_adjustments: Vec::new(),
+                balances: Some(Vec::new()),
                 footer_lines: Vec::new(),
-                visible_sections: ReadViewSectionVisibility::default(),
                 empty_state: Some(std::borrow::Cow::Borrowed("empty")),
                 action_rows: Vec::new(),
                 ephemeral: true,
+                content: ReadViewContent::Review {
+                    transfers: Some(Vec::new()),
+                },
             })
             .expect("surface should render");
 
@@ -1829,7 +1645,7 @@ mod tests {
                 entry_id: LedgerEntryId(9),
                 voider_display_name: name("Alice"),
                 voided_at: timestamp("2026-05-25 18:55"),
-                original_summary: LedgerSurfaceSummary::Expense {
+                original_summary: ExpenseOrSettlementSummary::Expense {
                     date: date("2026-05-24"),
                     payer_display_name: name("Bob"),
                     amount: "1200".to_owned(),
@@ -1854,7 +1670,7 @@ mod tests {
                 entry_id: LedgerEntryId(9),
                 voider_display_name: name("Alice"),
                 voided_at: timestamp("2026-05-25 18:55"),
-                original_summary: LedgerSurfaceSummary::Expense {
+                original_summary: ExpenseOrSettlementSummary::Expense {
                     date: date("2026-05-24"),
                     payer_display_name: name("Bob"),
                     amount: "1200".to_owned(),
@@ -1880,13 +1696,15 @@ mod tests {
                 entry_id: LedgerEntryId(10),
                 actor_display_name: name("Operator"),
                 through_entry_id: LedgerEntryId(4),
-                through_summary: LedgerSurfaceSummary::Settlement {
-                    date: date("2026-05-20"),
-                    from_display_name: name("Alice"),
-                    to_display_name: name("Bob"),
-                    amount: "400".to_owned(),
-                    additional_transfers: 2,
-                },
+                through_summary: LedgerSurfaceSummary::ExpenseOrSettlement(
+                    ExpenseOrSettlementSummary::Settlement {
+                        date: date("2026-05-20"),
+                        from_display_name: name("Alice"),
+                        to_display_name: name("Bob"),
+                        amount: "400".to_owned(),
+                        additional_transfers: 2,
+                    },
+                ),
                 recorded_at: timestamp("2026-05-25 18:55"),
                 recovery_reference: recovery_reference(10),
             }),
@@ -1929,7 +1747,7 @@ mod tests {
                 entry_id: LedgerEntryId(9),
                 voider_display_name: name(&format!("取消者{}", "あ".repeat(1500))),
                 voided_at: timestamp("2026-05-25 18:55"),
-                original_summary: LedgerSurfaceSummary::Expense {
+                original_summary: ExpenseOrSettlementSummary::Expense {
                     date: date("2026-05-24"),
                     payer_display_name: name(&format!("支払者{}", "い".repeat(1500))),
                     amount: "1200".to_owned(),
@@ -1950,13 +1768,15 @@ mod tests {
                 entry_id: LedgerEntryId(10),
                 actor_display_name: name(&format!("Operator{}", "あ".repeat(1200))),
                 through_entry_id: LedgerEntryId(4),
-                through_summary: LedgerSurfaceSummary::Settlement {
-                    date: date("2026-05-20"),
-                    from_display_name: name(&format!("Alice{}", "い".repeat(1200))),
-                    to_display_name: name("Bob"),
-                    amount: "400".to_owned(),
-                    additional_transfers: 2,
-                },
+                through_summary: LedgerSurfaceSummary::ExpenseOrSettlement(
+                    ExpenseOrSettlementSummary::Settlement {
+                        date: date("2026-05-20"),
+                        from_display_name: name(&format!("Alice{}", "い".repeat(1200))),
+                        to_display_name: name("Bob"),
+                        amount: "400".to_owned(),
+                        additional_transfers: 2,
+                    },
+                ),
                 recorded_at: timestamp("2026-05-25 18:55"),
                 recovery_reference: recovery_reference(10),
             }),
@@ -1991,7 +1811,6 @@ mod tests {
     #[test]
     fn review_view_renders_balances_then_transfers_and_uncertain_write_copy() {
         let actual = DiscordLedgerPresenter::render_read_view_page(&ReadViewPageModel {
-            kind: ReadViewKind::Review,
             route: ReadViewRoute::ReviewThread,
             title: std::borrow::Cow::Borrowed("清算確認"),
             uncertain_write: true,
@@ -2002,20 +1821,17 @@ mod tests {
             recovery_cta: RecoveryCta::ParentLink,
             recovery_url: Some("https://discord.com/channels/1/2/3".to_owned()),
             missing_thread_note: false,
-            balances: vec![
+            balances: Some(vec![
                 balance("Alice", "300", BalanceDirection::Receive),
                 balance("Bob", "300", BalanceDirection::Pay),
-            ],
-            transfers: vec![transfer("Bob", "Alice", "300")],
-            participants: Vec::new(),
-            voided_entries: Vec::new(),
-            sealed_range: None,
-            balance_adjustments: Vec::new(),
+            ]),
             footer_lines: Vec::new(),
-            visible_sections: ReadViewSectionVisibility::default(),
             empty_state: None,
             action_rows: Vec::new(),
             ephemeral: true,
+            content: ReadViewContent::Review {
+                transfers: Some(vec![transfer("Bob", "Alice", "300")]),
+            },
         })
         .expect("surface should render");
 
@@ -2114,9 +1930,8 @@ mod tests {
     }
 
     #[test]
-    fn ledger_view_renders_fixed_section_order_with_confirmed_and_voided_rows() {
+    fn ledger_view_renders_balances_and_recent_entries() {
         let actual = DiscordLedgerPresenter::render_read_view_page(&ReadViewPageModel {
-            kind: ReadViewKind::Ledger,
             route: ReadViewRoute::LedgerCommand,
             title: std::borrow::Cow::Borrowed("台帳"),
             uncertain_write: true,
@@ -2127,57 +1942,61 @@ mod tests {
             recovery_cta: RecoveryCta::None,
             recovery_url: None,
             missing_thread_note: false,
-            balances: vec![
+            balances: Some(vec![
                 balance("Alice", "300", BalanceDirection::Receive),
                 balance("Bob", "300", BalanceDirection::Pay),
-            ],
-            transfers: Vec::new(),
-            participants: vec![name("Alice"), name("Bob")],
-            voided_entries: vec![VoidedEntryRow {
-                void_entry_id: LedgerEntryId(9),
-                voider_display_name: name("Alice"),
-                voided_at: timestamp("2026-05-25 18:55"),
-                original_summary: LedgerSurfaceSummary::Expense {
-                    date: date("2026-05-24"),
-                    payer_display_name: name("Bob"),
-                    amount: "1200".to_owned(),
-                    note: Some(note("ランチ")),
-                },
-                recovery_reference: recovery_reference(9),
-            }],
-            sealed_range: Some(SealedRangeSummary {
-                through_entry_id: LedgerEntryId(4),
-                through_summary: LedgerSurfaceSummary::Settlement {
-                    date: date("2026-05-20"),
-                    from_display_name: name("Alice"),
-                    to_display_name: name("Bob"),
-                    amount: "400".to_owned(),
-                    additional_transfers: 1,
-                },
-            }),
-            balance_adjustments: vec![BalanceAdjustmentSummary {
-                actor_display_name: name("Operator"),
-                reason: note("差額補正"),
-                impacts: vec![impact("Alice", "300", BalanceDirection::Receive)],
-            }],
+            ]),
             footer_lines: vec!["表示範囲: 最新の検証済み台帳".to_owned()],
-            visible_sections: ReadViewSectionVisibility::default(),
             empty_state: None,
             action_rows: Vec::new(),
             ephemeral: true,
+            content: ReadViewContent::Ledger {
+                recent_entries: Some(vec![
+                    RecentEntryRow {
+                        entry_id: LedgerEntryId(5),
+                        summary: ExpenseOrSettlementSummary::Expense {
+                            date: date("2026-05-26"),
+                            payer_display_name: name("Alice"),
+                            amount: "1500".to_owned(),
+                            note: Some(note("ランチ")),
+                        },
+                        recovery_reference: recovery_reference(5),
+                    },
+                    RecentEntryRow {
+                        entry_id: LedgerEntryId(3),
+                        summary: ExpenseOrSettlementSummary::Settlement {
+                            date: date("2026-05-25"),
+                            from_display_name: name("Bob"),
+                            to_display_name: name("Alice"),
+                            amount: "300".to_owned(),
+                            additional_transfers: 0,
+                        },
+                        recovery_reference: recovery_reference(3),
+                    },
+                ]),
+            },
         })
         .expect("surface should render");
 
-        assert_eq!(
-            actual.body,
-            "台帳\n\nℹ️ この台帳は現在書き込み確認中です。記録・取り消し・清算は一時的に制限されています。\n\n残高\n確認済み履歴と残高補正を含む現在差額\n- Alice: 受け取り 300円\n- Bob: 支払い 300円\n\n参加者\nこれまで記録に出た人\nAlice\nBob\n\n取り消し済み\n[#9] Alice が 2026-05-25 18:55 に取り消し: 2026-05-24 Bob の支払い 1200円 メモ: ランチ | 復旧用の参照: ledger:abcd1234/entry:9 | <https://discord.com/channels/1/2/9>\n\n確認済み\n確認済み: [#4] 2026-05-20 清算 Alice -> Bob ほか1件 まで\n残高補正 Operator: 差額補正 (Alice 受け取り 300円)\n\n表示範囲: 最新の検証済み台帳"
+        assert!(actual.body.contains("残高\n"));
+        assert!(actual.body.contains("- Alice: 受け取り 300円"));
+        assert!(actual.body.contains("最近の記録\n"));
+        assert!(
+            actual
+                .body
+                .contains("[#5] 2026-05-26 Alice の支払い 1500円")
         );
+        assert!(
+            actual
+                .body
+                .contains("[#3] 2026-05-25 清算 Bob->Alice 300円")
+        );
+        assert!(actual.body.contains("表示範囲: 最新の検証済み台帳"));
     }
 
     #[test]
     fn ledger_view_uses_the_inviting_empty_state_without_scope_footer() {
         let actual = DiscordLedgerPresenter::render_read_view_page(&ReadViewPageModel {
-            kind: ReadViewKind::Ledger,
             route: ReadViewRoute::LedgerPanel,
             title: std::borrow::Cow::Borrowed("台帳"),
             uncertain_write: false,
@@ -2188,17 +2007,14 @@ mod tests {
             recovery_cta: RecoveryCta::None,
             recovery_url: None,
             missing_thread_note: false,
-            balances: Vec::new(),
-            transfers: Vec::new(),
-            participants: Vec::new(),
-            voided_entries: Vec::new(),
-            sealed_range: None,
-            balance_adjustments: Vec::new(),
+            balances: Some(Vec::new()),
             footer_lines: vec!["表示範囲: これは出てはいけない".to_owned()],
-            visible_sections: ReadViewSectionVisibility::default(),
             empty_state: Some(std::borrow::Cow::Borrowed(i18n::LEDGER_EMPTY_STATE)),
             action_rows: Vec::new(),
             ephemeral: true,
+            content: ReadViewContent::Ledger {
+                recent_entries: Some(Vec::new()),
+            },
         })
         .expect("surface should render");
 
@@ -2211,7 +2027,6 @@ mod tests {
     #[test]
     fn parent_review_route_uses_the_thread_handoff_instruction_and_cta_label() {
         let actual = DiscordLedgerPresenter::render_read_view_page(&ReadViewPageModel {
-            kind: ReadViewKind::Review,
             route: ReadViewRoute::ReviewParent,
             title: std::borrow::Cow::Borrowed("清算確認"),
             uncertain_write: false,
@@ -2222,17 +2037,14 @@ mod tests {
             recovery_cta: RecoveryCta::ThreadLink,
             recovery_url: Some("https://discord.com/channels/1/2/4".to_owned()),
             missing_thread_note: false,
-            balances: vec![balance("Alice", "300", BalanceDirection::Receive)],
-            transfers: vec![transfer("Bob", "Alice", "300")],
-            participants: Vec::new(),
-            voided_entries: Vec::new(),
-            sealed_range: None,
-            balance_adjustments: Vec::new(),
+            balances: Some(vec![balance("Alice", "300", BalanceDirection::Receive)]),
             footer_lines: Vec::new(),
-            visible_sections: ReadViewSectionVisibility::default(),
             empty_state: None,
             action_rows: Vec::new(),
             ephemeral: true,
+            content: ReadViewContent::Review {
+                transfers: Some(vec![transfer("Bob", "Alice", "300")]),
+            },
         })
         .expect("surface should render");
 
@@ -2246,7 +2058,6 @@ mod tests {
     #[test]
     fn stale_read_and_void_pages_use_fixed_reopen_copy_and_cta_contracts() {
         let stale_read = DiscordLedgerPresenter::render_read_view_page(&ReadViewPageModel {
-            kind: ReadViewKind::Ledger,
             route: ReadViewRoute::LedgerPanel,
             title: std::borrow::Cow::Borrowed("台帳"),
             uncertain_write: false,
@@ -2257,17 +2068,14 @@ mod tests {
             recovery_cta: RecoveryCta::None,
             recovery_url: None,
             missing_thread_note: true,
-            balances: Vec::new(),
-            transfers: Vec::new(),
-            participants: Vec::new(),
-            voided_entries: Vec::new(),
-            sealed_range: None,
-            balance_adjustments: Vec::new(),
+            balances: Some(Vec::new()),
             footer_lines: Vec::new(),
-            visible_sections: ReadViewSectionVisibility::default(),
             empty_state: None,
             action_rows: Vec::new(),
             ephemeral: true,
+            content: ReadViewContent::Ledger {
+                recent_entries: Some(Vec::new()),
+            },
         })
         .expect("stale ledger view should render");
         let stale_void = DiscordLedgerPresenter::render_void_flow(&VoidSurfaceModel::stale_page(
@@ -2295,65 +2103,41 @@ mod tests {
     }
 
     #[test]
-    fn ledger_view_can_hide_sections_for_snapshot_bound_paging() {
+    fn ledger_view_paged_shows_only_entries_when_balances_empty() {
         let actual = DiscordLedgerPresenter::render_read_view_page(&ReadViewPageModel {
-            kind: ReadViewKind::Ledger,
             route: ReadViewRoute::LedgerCommand,
             title: std::borrow::Cow::Borrowed("台帳"),
             uncertain_write: false,
             stale_page: false,
-            page_indicator: Some(i18n::page_indicator(1, 2).to_string()),
+            page_indicator: Some(i18n::page_indicator(2, 2).to_string()),
             snapshot_notice: Some(i18n::SNAPSHOT_NOTICE.to_owned()),
             route_guidance_lines: Vec::new(),
             recovery_cta: RecoveryCta::None,
             recovery_url: None,
             missing_thread_note: false,
-            balances: vec![balance("Alice", "300", BalanceDirection::Receive)],
-            transfers: Vec::new(),
-            participants: vec![name("Alice"), name("Bob")],
-            voided_entries: vec![VoidedEntryRow {
-                void_entry_id: LedgerEntryId(9),
-                voider_display_name: name("Alice"),
-                voided_at: timestamp("2026-05-25 18:55"),
-                original_summary: LedgerSurfaceSummary::Expense {
-                    date: date("2026-05-24"),
-                    payer_display_name: name("Bob"),
-                    amount: "1200".to_owned(),
-                    note: Some(note("ランチ")),
-                },
-                recovery_reference: recovery_reference(9),
-            }],
-            sealed_range: Some(SealedRangeSummary {
-                through_entry_id: LedgerEntryId(4),
-                through_summary: LedgerSurfaceSummary::Settlement {
-                    date: date("2026-05-20"),
-                    from_display_name: name("Alice"),
-                    to_display_name: name("Bob"),
-                    amount: "400".to_owned(),
-                    additional_transfers: 1,
-                },
-            }),
-            balance_adjustments: Vec::new(),
-            footer_lines: vec!["表示範囲: 最新の検証済み台帳".to_owned()],
-            visible_sections: ReadViewSectionVisibility {
-                balances: false,
-                transfers: false,
-                participants: true,
-                voided_entries: true,
-                confirmed: false,
-                route_guidance: false,
-                footer: false,
-            },
+            balances: None,
+            footer_lines: Vec::new(),
             empty_state: None,
             action_rows: Vec::new(),
             ephemeral: true,
+            content: ReadViewContent::Ledger {
+                recent_entries: Some(vec![RecentEntryRow {
+                    entry_id: LedgerEntryId(1),
+                    summary: ExpenseOrSettlementSummary::Expense {
+                        date: date("2026-05-20"),
+                        payer_display_name: name("Alice"),
+                        amount: "800".to_owned(),
+                        note: None,
+                    },
+                    recovery_reference: recovery_reference(1),
+                }]),
+            },
         })
         .expect("paged ledger view should render");
 
-        assert_eq!(
-            actual.body,
-            "台帳\n\nページ 1/2\n\n-# この表示は固定スナップショットです。更新するには開き直してください。\n\n参加者\nこれまで記録に出た人\nAlice\nBob\n\n取り消し済み\n[#9] Alice が 2026-05-25 18:55 に取り消し: 2026-05-24 Bob の支払い 1200円 メモ: ランチ | 復旧用の参照: ledger:abcd1234/entry:9 | <https://discord.com/channels/1/2/9>"
-        );
+        assert!(actual.body.contains("ページ 2/2"));
+        assert!(actual.body.contains("[#1] 2026-05-20 Alice の支払い 800円"));
+        assert!(!actual.body.contains(i18n::LEDGER_ZERO_BALANCES));
     }
 
     #[test]
@@ -2413,7 +2197,7 @@ mod tests {
             "取り消し",
             vec![
                 VoidCandidateRow {
-                    summary: LedgerSurfaceSummary::Expense {
+                    summary: ExpenseOrSettlementSummary::Expense {
                         date: date("2026-05-24"),
                         payer_display_name: name("Bob"),
                         amount: "1200".to_owned(),
@@ -2422,7 +2206,7 @@ mod tests {
                     recovery_reference: recovery_reference(7),
                 },
                 VoidCandidateRow {
-                    summary: LedgerSurfaceSummary::Settlement {
+                    summary: ExpenseOrSettlementSummary::Settlement {
                         date: date("2026-05-25"),
                         from_display_name: name("Alice"),
                         to_display_name: name("Bob"),
@@ -2450,7 +2234,7 @@ mod tests {
         let model = VoidSurfaceModel::confirmation(
             "取り消し確認",
             VoidConfirmationRecap {
-                summary: LedgerSurfaceSummary::Expense {
+                summary: ExpenseOrSettlementSummary::Expense {
                     date: date("2026-05-24"),
                     payer_display_name: name("Bob"),
                     amount: "1200".to_owned(),
@@ -2478,7 +2262,7 @@ mod tests {
         );
 
         let settlement_recap = VoidConfirmationRecap {
-            summary: LedgerSurfaceSummary::Settlement {
+            summary: ExpenseOrSettlementSummary::Settlement {
                 date: date("2026-05-25"),
                 from_display_name: name("Alice"),
                 to_display_name: name("Bob"),
@@ -2495,7 +2279,7 @@ mod tests {
     #[test]
     fn void_confirmation_lines_use_ascii_ellipsis_for_note_excerpts() {
         let lines = super::render_void_confirmation_lines(&VoidConfirmationRecap {
-            summary: LedgerSurfaceSummary::Expense {
+            summary: ExpenseOrSettlementSummary::Expense {
                 date: date("2026-05-24"),
                 payer_display_name: name("Bob"),
                 amount: "1200".to_owned(),
@@ -2511,7 +2295,7 @@ mod tests {
     #[test]
     fn void_candidate_lines_truncate_overlong_note_excerpts_with_ellipsis() {
         let actual = super::render_void_candidate_line(&VoidCandidateRow {
-            summary: LedgerSurfaceSummary::Expense {
+            summary: ExpenseOrSettlementSummary::Expense {
                 date: date("2026-05-24"),
                 payer_display_name: name("Bob"),
                 amount: "1200".to_owned(),
@@ -2532,7 +2316,7 @@ mod tests {
             DiscordLedgerPresenter::render_void_flow(&VoidSurfaceModel::missing_selection(
                 "取り消し",
                 vec![VoidCandidateRow {
-                    summary: LedgerSurfaceSummary::Expense {
+                    summary: ExpenseOrSettlementSummary::Expense {
                         date: date("2026-05-24"),
                         payer_display_name: name("Bob"),
                         amount: "1200".to_owned(),
@@ -2559,7 +2343,7 @@ mod tests {
             "取り消し",
             VoidRetargetReason::EnteredSealedRange,
             vec![VoidCandidateRow {
-                summary: LedgerSurfaceSummary::Settlement {
+                summary: ExpenseOrSettlementSummary::Settlement {
                     date: date("2026-05-25"),
                     from_display_name: name("Alice"),
                     to_display_name: name("Bob"),

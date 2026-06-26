@@ -1,9 +1,14 @@
 use std::{collections::BTreeMap, time::SystemTime};
 
 use super::{
-    entry::LedgerEntry, hash_chain::VerifiedLedgerStoreEnvelope, load::VerifiedLedgerSnapshot,
+    entry::{LedgerEntry, LedgerEntryMetadata},
+    hash_chain::VerifiedLedgerStoreEnvelope,
+    load::VerifiedLedgerSnapshot,
 };
-use walicord_ledger::{LedgerEntryId, ProjectedEntryInfo, ProjectedEntryKind};
+use walicord_ledger::{
+    ExpenseRecorded, LedgerEntryId, LedgerEvent, NormalizedSettlementPlanRecorded,
+    ProjectedEntryInfo,
+};
 
 /// Adapter-supplied transport metadata for a single verified canonical entry. The
 /// application keeps just what projection callers consume — the recovery link and the
@@ -210,24 +215,106 @@ pub fn project_verified_entries<ExternalId>(
     Ok(out)
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum ExpenseOrSettlementEvent {
+    Expense(ExpenseRecorded),
+    Settlement(NormalizedSettlementPlanRecorded),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExpenseOrSettlementView {
+    entry_id: LedgerEntryId,
+    event: ExpenseOrSettlementEvent,
+    metadata: LedgerEntryMetadata,
+    recorded_at: SystemTime,
+    message_link: String,
+    sealed: bool,
+}
+
+impl ExpenseOrSettlementView {
+    pub fn entry_id(&self) -> LedgerEntryId {
+        self.entry_id
+    }
+
+    pub fn event(&self) -> &ExpenseOrSettlementEvent {
+        &self.event
+    }
+
+    pub fn metadata(&self) -> &LedgerEntryMetadata {
+        &self.metadata
+    }
+
+    pub fn recorded_at(&self) -> SystemTime {
+        self.recorded_at
+    }
+
+    pub fn message_link(&self) -> &str {
+        &self.message_link
+    }
+
+    pub fn sealed(&self) -> bool {
+        self.sealed
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("entry {entry_id:?} is not an expense or settlement")]
+pub struct NotExpenseOrSettlement {
+    pub entry_id: LedgerEntryId,
+}
+
+impl TryFrom<VerifiedLedgerEntryView> for ExpenseOrSettlementView {
+    type Error = NotExpenseOrSettlement;
+
+    fn try_from(view: VerifiedLedgerEntryView) -> Result<Self, Self::Error> {
+        let sealed = view.projected().sealed;
+        let entry_id = view.entry.id;
+        let event = match view.entry.event {
+            LedgerEvent::ExpenseRecorded(e) => ExpenseOrSettlementEvent::Expense(e),
+            LedgerEvent::NormalizedSettlementPlanRecorded(e) => {
+                ExpenseOrSettlementEvent::Settlement(e)
+            }
+            _ => return Err(NotExpenseOrSettlement { entry_id }),
+        };
+        Ok(ExpenseOrSettlementView {
+            entry_id,
+            metadata: view.entry.metadata,
+            event,
+            recorded_at: view.recorded_at,
+            message_link: view.message_link,
+            sealed,
+        })
+    }
+}
+
 pub fn project_recent_voidable_entries<ExternalId>(
     load: &VerifiedLedgerThreadLoad<ExternalId>,
     limit: usize,
-) -> Result<Vec<VerifiedLedgerEntryView>, ProjectionConsistencyError> {
+) -> Result<Vec<ExpenseOrSettlementView>, ProjectionConsistencyError> {
     let all = project_verified_entries(load)?;
-    let mut candidates = all
+    let mut candidates: Vec<ExpenseOrSettlementView> = all
         .into_iter()
-        .filter(|entry| {
-            matches!(
-                entry.projected().kind,
-                ProjectedEntryKind::Expense | ProjectedEntryKind::SettlementTransfer
-            ) && !entry.projected().voided
-                && !entry.projected().sealed
-        })
-        .collect::<Vec<_>>();
+        .filter(|v| !v.projected().voided && !v.projected().sealed)
+        .flat_map(ExpenseOrSettlementView::try_from)
+        .collect();
     candidates.reverse();
     candidates.truncate(limit);
     Ok(candidates)
+}
+
+pub fn project_recent_entries<ExternalId>(
+    load: &VerifiedLedgerThreadLoad<ExternalId>,
+    limit: usize,
+) -> Result<Vec<ExpenseOrSettlementView>, ProjectionConsistencyError> {
+    let all = project_verified_entries(load)?;
+    let mut entries: Vec<ExpenseOrSettlementView> = all
+        .into_iter()
+        .filter(|v| !v.projected().voided)
+        .flat_map(ExpenseOrSettlementView::try_from)
+        .collect();
+    entries.reverse();
+    entries.truncate(limit);
+    Ok(entries)
 }
 
 #[cfg(test)]

@@ -131,7 +131,7 @@ pub fn validate_older_than_twenty_void<ExternalId>(
         .map_err(|_| MaintenanceValidationError::TargetNotInLedger { target_entry_id })?;
     let target_in_window = recent_voidable
         .iter()
-        .any(|view| view.entry().id == target_entry_id);
+        .any(|view| view.entry_id() == target_entry_id);
     if target_in_window {
         return Err(MaintenanceValidationError::TargetInsideWindow {
             target_entry_id,

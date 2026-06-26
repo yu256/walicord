@@ -10,7 +10,7 @@ use walicord_application::ledger::{
     LedgerEntry, LedgerId, MemberAmount,
     expense_flow::ConfirmationBuildError,
     expense_write::RecordableExpenseEntry,
-    projection::VerifiedLedgerEntryView,
+    projection::ExpenseOrSettlementView,
     record_expense::{ExpenseEntryRenderer, ExpenseRenderError},
     settle_execute::{SettlementEntryRenderer, SettlementRenderError},
     settle_flow::RecordableSettlementEntry,
@@ -22,7 +22,7 @@ use walicord_presentation::discord_ledger::{
     BusinessDateTime, DiscordLedgerPresenter, ParticipantShareRow, PublicCanonicalMessageModel,
     PublicExpenseMessageModel, PublicSettlementMessageModel, PublicVoidMessageModel,
     RecoveryReference, RenderedCanonicalMessage, SafeLiteralText, SurfaceMemberLabels, TransferRow,
-    summary_for_view,
+    expense_or_settlement_summary,
 };
 
 use super::{InternalLedgerRouteError, LedgerRouteError, format_money_for_modal};
@@ -94,7 +94,7 @@ impl VoidEntryRenderer for DiscordVoidEntryRenderer<'_> {
     fn render_public_body(
         &self,
         entry: &LedgerEntry,
-        target: &VerifiedLedgerEntryView,
+        target: &ExpenseOrSettlementView,
         ledger_id: LedgerId,
     ) -> Result<String, VoidRenderError> {
         let rendered =
@@ -297,7 +297,7 @@ pub(super) fn render_public_settlement_message(
 #[allow(clippy::result_large_err)] // LedgerRouteError is the router-wide error envelope.
 pub(super) fn render_public_void_message(
     entry: &LedgerEntry,
-    target: &VerifiedLedgerEntryView,
+    target: &ExpenseOrSettlementView,
     ledger_id: LedgerId,
     labels: &SurfaceMemberLabels,
 ) -> Result<RenderedCanonicalMessage, LedgerRouteError> {
@@ -313,7 +313,7 @@ pub(super) fn render_public_void_message(
         entry_id: entry.id,
         voider_display_name: labels.safe_member_label(actor_member_id),
         voided_at: BusinessDateTime::from_system_time(recorded_at),
-        original_summary: summary_for_view(target, labels)?,
+        original_summary: expense_or_settlement_summary(target, labels),
         recorded_at: BusinessDateTime::from_system_time(recorded_at),
         recovery_reference: RecoveryReference {
             ledger_id_short: format!("{ledger_id:08x}"),

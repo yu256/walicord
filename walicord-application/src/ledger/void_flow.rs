@@ -10,7 +10,7 @@ use crate::{
         },
         make_unverified_envelope_sha256_v1,
         projection::{
-            ProjectionConsistencyError, VerifiedLedgerEntryView, VerifiedLedgerThreadLoad,
+            ExpenseOrSettlementView, ProjectionConsistencyError, VerifiedLedgerThreadLoad,
             project_recent_voidable_entries,
         },
     },
@@ -34,7 +34,7 @@ pub enum VoidCandidateEnumerationError {
 /// path is responsible for them.
 pub fn enumerate_void_candidates<ExternalId>(
     load: &VerifiedLedgerThreadLoad<ExternalId>,
-) -> Result<Vec<VerifiedLedgerEntryView>, VoidCandidateEnumerationError> {
+) -> Result<Vec<ExpenseOrSettlementView>, VoidCandidateEnumerationError> {
     project_recent_voidable_entries(load, VOID_CANDIDATE_WINDOW)
         .map_err(VoidCandidateEnumerationError::Projection)
 }
@@ -58,7 +58,7 @@ pub fn bootstrap_void_session<ExternalId>(
     load: &VerifiedLedgerThreadLoad<ExternalId>,
     clock: &dyn Clock,
     nonce_provider: &dyn SessionNonceProvider,
-) -> Result<(VoidSession, SessionNonce, Vec<VerifiedLedgerEntryView>), VoidSessionBootstrapError> {
+) -> Result<(VoidSession, SessionNonce, Vec<ExpenseOrSettlementView>), VoidSessionBootstrapError> {
     let candidates = enumerate_void_candidates(load).map_err(|error| match error {
         VoidCandidateEnumerationError::Projection(err) => {
             VoidSessionBootstrapError::Projection(err)
@@ -97,7 +97,7 @@ pub enum VoidConfirmTransitionError {
 pub fn transition_to_confirm(
     session: VoidSession,
     target_entry_id: LedgerEntryId,
-    candidates: &[VerifiedLedgerEntryView],
+    candidates: &[ExpenseOrSettlementView],
     clock: &dyn Clock,
 ) -> Result<VoidSession, VoidConfirmTransitionError> {
     if !matches!(session.stage(), VoidSessionStage::SelectingCandidate) {
@@ -105,7 +105,7 @@ pub fn transition_to_confirm(
     }
     let still_in_window = candidates
         .iter()
-        .any(|view| view.entry().id == target_entry_id);
+        .any(|view| view.entry_id() == target_entry_id);
     if !still_in_window {
         return Err(VoidConfirmTransitionError::CandidateNotFound { target_entry_id });
     }
@@ -159,12 +159,12 @@ pub fn compose_void_entry<ExternalId>(
         })?;
     let target = candidates
         .iter()
-        .find(|view| view.entry().id == selection.target_entry_id())
+        .find(|view| view.entry_id() == selection.target_entry_id())
         .ok_or(VoidComposeError::TargetNoLongerVoidable {
             target_entry_id: selection.target_entry_id(),
         })?;
 
-    let entry = build_discord_void_entry(new_entry_id, actor_id, target.entry().id, source, clock)
+    let entry = build_discord_void_entry(new_entry_id, actor_id, target.entry_id(), source, clock)
         .map_err(VoidComposeError::EntryBuild)?;
 
     let previous_hash = load

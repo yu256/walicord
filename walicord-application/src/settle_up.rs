@@ -1617,7 +1617,10 @@ mod tests {
             transfer(1, 2, 50),
         ])
         .expect("ledger event should be representable");
-        assert_eq!(previewed.plan().transfers, canonical.transfers());
+        assert_eq!(
+            previewed.plan().transfers.as_slice(),
+            &**canonical.transfers()
+        );
         assert_eq!(
             previewed.ledger_event_outcome(),
             &recorded_outcome(canonical.transfers().to_vec())

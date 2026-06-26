@@ -7,6 +7,12 @@ use std::num::NonZeroU64;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct LedgerEntryId(pub u64);
 
+impl std::fmt::Display for LedgerEntryId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 impl LedgerEntryId {
     /// Provide the schema-v1 canonical representation without making hash encoders
     /// depend on the tuple layout.

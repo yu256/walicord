@@ -18,8 +18,6 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-#[cfg(test)]
-use walicord_application::ledger::LedgerEntry;
 use walicord_application::{
     Clock, SessionNonceProvider, SettlementPlanner,
     ledger::{
@@ -59,8 +57,6 @@ use crate::channel::ChannelManager;
 mod canonical_message;
 mod expense_picker;
 mod void;
-#[cfg(test)]
-use self::void::void_confirmation_total_amount;
 use canonical_message::{
     DiscordExpenseEntryRenderer, DiscordSettlementEntryRenderer, DiscordVoidEntryRenderer,
 };
@@ -124,7 +120,7 @@ use walicord_application::ledger::{
     expense_modal::{ExpenseModalValidationError, validate_expense_modal_submission},
     expense_write::ExpenseWriteOrchestrationError,
     preview_store::{PreviewStore, PreviewStoreError, PreviewStoreKey, PreviewStoreTransition},
-    projection::{NextLedgerEntryIdError, project_verified_entries},
+    projection::{NextLedgerEntryIdError, project_recent_entries, project_verified_entries},
     read_view_session::{ReadViewSession, ReadViewSessionKey, ReadViewSessionStore},
     record_expense::{
         ExpenseRenderError, RecordExpenseCommand, RecordExpenseError, RecordExpenseOutcome,
@@ -3847,14 +3843,14 @@ impl LedgerRouter {
                 .map(|(member_id, name)| (*member_id, Some(name.as_str()))),
         );
 
-        let views = project_verified_entries(&load).map_err(LedgerRouteError::from)?;
+        let recent_views = project_recent_entries(&load, 60).map_err(LedgerRouteError::from)?;
 
-        let pages = if views.is_empty() {
+        let pages = if load.verified().is_empty() {
             vec![build_ledger_empty_page_model(route, uncertain_write)]
         } else {
             let model = build_ledger_page_model(LedgerPageInputs {
                 route,
-                views: &views,
+                recent_views: &recent_views,
                 state: load.snapshot().projected().state(),
                 labels: &labels,
                 ledger_id: binding.ledger_id(),
@@ -4562,7 +4558,7 @@ impl LedgerRouter {
                 );
                 let target = candidates
                     .iter()
-                    .find(|view| view.entry().id == target_entry_id)
+                    .find(|view| view.entry_id() == target_entry_id)
                     .expect("transition_to_confirm verified target is present");
                 let model =
                     void_confirmation_model(target, &labels, ledger_id, next_session.nonce())?;
@@ -5285,12 +5281,10 @@ mod tests {
     use walicord_application::{
         PreviewInstanceId, SessionNonce,
         ledger::{
-            AllocationSnapshot, ExpenseRecorded, LedgerEntryId, MemberAmount,
-            NormalizedSettlementPlanRecorded, expense_session::ExpenseSelectionState,
-            ledger_chain_genesis_sha256_v1, participant_resolution::RosterSnapshot,
+            LedgerEntryId, expense_session::ExpenseSelectionState, ledger_chain_genesis_sha256_v1,
+            participant_resolution::RosterSnapshot,
         },
     };
-    use walicord_domain::{Money, Transfer};
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum ExpectedClearPolicy {
@@ -5323,21 +5317,6 @@ mod tests {
         assert_eq!(actor_can_view_channel(permissions), expected);
     }
 
-    fn member_amount(member_id: u64, amount: i64) -> MemberAmount {
-        MemberAmount {
-            member_id: MemberId(member_id),
-            amount: Money::from_i64(amount),
-        }
-    }
-
-    fn transfer(from: u64, to: u64, amount: i64) -> Transfer {
-        Transfer {
-            from: MemberId(from),
-            to: MemberId(to),
-            amount: Money::from_i64(amount),
-        }
-    }
-
     fn expense_claim_session() -> ExpenseSession {
         ExpenseSession::new(
             ExpenseSessionKey::new(
@@ -5362,28 +5341,6 @@ mod tests {
             store.restore_claim(claimed);
             session
         }))
-    }
-
-    fn expense_entry(amount: i64) -> LedgerEntry {
-        LedgerEntry::expense(
-            LedgerEntryId(1),
-            ExpenseRecorded::new(
-                vec![member_amount(1, amount)],
-                vec![member_amount(2, amount)],
-                None,
-            )
-            .expect("expense should be valid"),
-            AllocationSnapshot::Even,
-        )
-        .expect("expense entry should be valid")
-    }
-
-    fn settlement_entry(amount: i64) -> LedgerEntry {
-        LedgerEntry::non_expense(
-            LedgerEntryId(2),
-            NormalizedSettlementPlanRecorded::new(vec![transfer(2, 1, amount)])
-                .expect("settlement should be valid"),
-        )
     }
 
     #[test]
@@ -5702,19 +5659,6 @@ mod tests {
         #[case] expected: DiscordLedgerSourceDescriptor,
     ) {
         assert_eq!(expense_source_descriptor(origin), expected);
-    }
-
-    #[rstest]
-    #[case::expense(expense_entry(1200), "1200")]
-    #[case::settlement(settlement_entry(900), "900")]
-    fn void_confirmation_total_amount_uses_recorded_amount(
-        #[case] entry: LedgerEntry,
-        #[case] expected: &str,
-    ) {
-        let actual =
-            void_confirmation_total_amount(&entry).expect("entry should support void confirmation");
-
-        assert_eq!(actual, expected);
     }
 
     #[rstest]
