@@ -264,6 +264,7 @@ pub trait LedgerThreadLoader: Send + Sync {
         ctx: &Context,
         canonical_thread_id: ChannelId,
         ledger_id: LedgerId,
+        guild_id: GuildId,
     ) -> Result<VerifiedLedgerThreadLoad, Arc<StoreLoadError>>;
 }
 
@@ -970,6 +971,7 @@ impl LedgerRouter {
             store: self.deps.canonical_store.as_ref(),
             canonical_thread_id: binding.canonical_thread_id(),
             ledger_id: binding.ledger_id(),
+            guild_id: binding.guild_id(),
             load_route_label: CanonicalLoadRoute::WritePrelude.label(),
         };
         resolve_uncertain_write_v1(
@@ -991,7 +993,12 @@ impl LedgerRouter {
         match self
             .deps
             .thread_loader
-            .load(ctx, binding.canonical_thread_id(), binding.ledger_id())
+            .load(
+                ctx,
+                binding.canonical_thread_id(),
+                binding.ledger_id(),
+                binding.guild_id(),
+            )
             .await
         {
             Ok(load) => Ok(load),
@@ -1920,6 +1927,7 @@ impl LedgerRouter {
             store: self.deps.canonical_store.as_ref(),
             canonical_thread_id: binding.canonical_thread_id(),
             ledger_id,
+            guild_id: binding.guild_id(),
             load_route_label: CanonicalLoadRoute::WritePrelude.label(),
         };
         let renderer = DiscordExpenseEntryRenderer {
@@ -4132,6 +4140,7 @@ impl LedgerRouter {
             store: self.deps.canonical_store.as_ref(),
             canonical_thread_id: binding.canonical_thread_id(),
             ledger_id,
+            guild_id: binding.guild_id(),
             load_route_label: CanonicalLoadRoute::WritePrelude.label(),
         };
         let renderer = DiscordSettlementEntryRenderer {
@@ -4287,6 +4296,7 @@ impl LedgerRouter {
             store: self.deps.canonical_store.as_ref(),
             canonical_thread_id: binding.canonical_thread_id(),
             ledger_id,
+            guild_id: binding.guild_id(),
             load_route_label: CanonicalLoadRoute::WritePrelude.label(),
         };
         let renderer = DiscordSettlementEntryRenderer {
@@ -4704,6 +4714,7 @@ impl LedgerRouter {
             store: self.deps.canonical_store.as_ref(),
             canonical_thread_id: binding.canonical_thread_id(),
             ledger_id,
+            guild_id: binding.guild_id(),
             load_route_label: CanonicalLoadRoute::WritePrelude.label(),
         };
         let renderer = DiscordVoidEntryRenderer { labels: &labels };

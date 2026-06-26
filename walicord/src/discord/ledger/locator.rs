@@ -144,6 +144,10 @@ impl CanonicalThreadBinding {
         self.tracked_parent
     }
 
+    pub(crate) fn guild_id(self) -> GuildId {
+        self.tracked_parent.guild_id()
+    }
+
     pub(crate) fn canonical_thread_id(self) -> ChannelId {
         self.canonical_thread_id
     }

@@ -145,7 +145,11 @@ impl CanonicalThreadDiscoveryPort for DiscordCanonicalThreadDiscovery {
     ) -> Result<Option<LocatorDiscoveryCandidate>, LocatorError> {
         let discovered = self
             .store
-            .load_verified_thread_discovering_id(&self.http, canonical_thread_id)
+            .load_verified_thread_discovering_id(
+                &self.http,
+                canonical_thread_id,
+                tracked_parent.guild_id(),
+            )
             .await
             .map(|discovered| discovered.map(|(ledger_id, _)| ledger_id));
         classify_discovered_candidate(
@@ -341,12 +345,19 @@ impl LedgerThreadLoader for DiscordLedgerThreadLoader {
         ctx: &Context,
         canonical_thread_id: ChannelId,
         ledger_id: LedgerId,
+        guild_id: GuildId,
     ) -> Result<VerifiedLedgerThreadLoad, Arc<StoreLoadError>> {
         match self
             .singleflight
             .do_or_wait((canonical_thread_id, ledger_id), || async {
                 self.store
-                    .load_verified_thread(ctx, canonical_thread_id, ledger_id, self.route_label)
+                    .load_verified_thread(
+                        ctx,
+                        canonical_thread_id,
+                        ledger_id,
+                        guild_id,
+                        self.route_label,
+                    )
                     .await
                     .map_err(Arc::new)
             })

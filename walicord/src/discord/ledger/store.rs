@@ -51,7 +51,7 @@ pub struct DisplayDriftObservation {
     pub ledger_id: LedgerId,
     pub entry_id: LedgerEntryId,
     pub message_id: MessageId,
-    pub guild_id: Option<GuildId>,
+    pub guild_id: GuildId,
     pub channel_id: ChannelId,
     pub recorded_at: SystemTime,
     pub edited_at: Option<SystemTime>,
@@ -62,6 +62,7 @@ pub struct DisplayDriftObservation {
 
 impl DisplayDriftObservation {
     fn from_record(
+        guild_id: GuildId,
         ledger_id: LedgerId,
         envelope: &VerifiedLedgerStoreEnvelope<MessageId>,
         record: &CanonicalMessageRecord,
@@ -70,7 +71,7 @@ impl DisplayDriftObservation {
             ledger_id,
             entry_id: envelope.payload().entry.id,
             message_id: record.message_id,
-            guild_id: record.guild_id,
+            guild_id,
             channel_id: record.channel_id,
             recorded_at: record.recorded_at,
             edited_at: record.edited_at,
@@ -156,6 +157,7 @@ trait LineageRecord {
 }
 
 fn build_transport_entries(
+    guild_id: GuildId,
     canonical_thread_id: ChannelId,
     verified: &[VerifiedLedgerStoreEnvelope<MessageId>],
     records: &[CanonicalMessageRecord],
@@ -178,9 +180,6 @@ fn build_transport_entries(
                         message_id,
                     },
                 ))?;
-        let guild_id = record.guild_id.ok_or(StoreLoadError::MetadataCoherence(
-            MetadataCoherenceFailure::MissingGuildContext { message_id },
-        ))?;
         if record.channel_id != canonical_thread_id {
             return Err(StoreLoadError::MetadataCoherence(
                 MetadataCoherenceFailure::MismatchedChannel {
@@ -210,8 +209,6 @@ pub enum MetadataCoherenceFailure {
         entry_id: LedgerEntryId,
         message_id: MessageId,
     },
-    #[error("message {message_id} is missing guild context for a recovery link")]
-    MissingGuildContext { message_id: MessageId },
     #[error(
         "message {message_id} was loaded from channel {actual} but expected canonical thread {expected}"
     )]
@@ -729,6 +726,7 @@ impl DiscordCanonicalLedgerStore {
         ctx: &Context,
         canonical_thread_id: ChannelId,
         ledger_id: LedgerId,
+        guild_id: GuildId,
         route_label: &'static str,
     ) -> Result<VerifiedLedgerThreadLoad, StoreLoadError> {
         let fetched_entry_count = Arc::new(AtomicUsize::new(0));
@@ -776,12 +774,14 @@ impl DiscordCanonicalLedgerStore {
 
                 let display_drift_guard = self.display_drift_guard;
                 self.load_verified_thread_from_candidate_records_with_guard(
+                    guild_id,
                     canonical_thread_id,
                     ledger_id,
                     records,
                     move |envelope, record| {
-                        let observation =
-                            DisplayDriftObservation::from_record(ledger_id, envelope, record);
+                        let observation = DisplayDriftObservation::from_record(
+                            guild_id, ledger_id, envelope, record,
+                        );
                         display_drift_guard(&observation)
                     },
                 )
@@ -903,9 +903,10 @@ impl DiscordCanonicalLedgerStore {
         &self,
         http: &Http,
         canonical_thread_id: ChannelId,
+        guild_id: GuildId,
     ) -> Result<Option<(LedgerId, VerifiedLedgerThreadLoad)>, StoreLoadError> {
         let result = self
-            .load_verified_thread_discovering_id_inner(http, canonical_thread_id)
+            .load_verified_thread_discovering_id_inner(http, canonical_thread_id, guild_id)
             .await;
         self.observe_load_permission_result(None, canonical_thread_id, result)
     }
@@ -914,6 +915,7 @@ impl DiscordCanonicalLedgerStore {
         &self,
         http: &Http,
         canonical_thread_id: ChannelId,
+        guild_id: GuildId,
     ) -> Result<Option<(LedgerId, VerifiedLedgerThreadLoad)>, StoreLoadError> {
         let messages = fetch_stable_channel_messages_with_http(http, canonical_thread_id).await?;
         let pending_records: Vec<PendingCanonicalMessageRecord> = messages
@@ -930,24 +932,31 @@ impl DiscordCanonicalLedgerStore {
         let Some(ledger_id) = discover_ledger_id_from_records(&records)? else {
             return Ok(None);
         };
-        let load =
-            self.load_verified_thread_from_records(canonical_thread_id, ledger_id, records)?;
+        let load = self.load_verified_thread_from_records(
+            guild_id,
+            canonical_thread_id,
+            ledger_id,
+            records,
+        )?;
         Ok(Some((ledger_id, load)))
     }
 
     fn load_verified_thread_from_records(
         &self,
+        guild_id: GuildId,
         canonical_thread_id: ChannelId,
         ledger_id: LedgerId,
         records: Vec<CanonicalMessageRecord>,
     ) -> Result<VerifiedLedgerThreadLoad, StoreLoadError> {
         let display_drift_guard = self.display_drift_guard;
         self.load_verified_thread_from_records_with_guard(
+            guild_id,
             canonical_thread_id,
             ledger_id,
             records,
             move |envelope, record| {
-                let observation = DisplayDriftObservation::from_record(ledger_id, envelope, record);
+                let observation =
+                    DisplayDriftObservation::from_record(guild_id, ledger_id, envelope, record);
                 display_drift_guard(&observation)
             },
         )
@@ -955,6 +964,7 @@ impl DiscordCanonicalLedgerStore {
 
     fn load_verified_thread_from_records_with_guard<F>(
         &self,
+        guild_id: GuildId,
         canonical_thread_id: ChannelId,
         ledger_id: LedgerId,
         records: Vec<CanonicalMessageRecord>,
@@ -973,6 +983,7 @@ impl DiscordCanonicalLedgerStore {
         self.validate_writer_lineage(Some(ledger_id), &records)?;
 
         self.load_verified_thread_from_candidate_records_with_guard(
+            guild_id,
             canonical_thread_id,
             ledger_id,
             records,
@@ -982,6 +993,7 @@ impl DiscordCanonicalLedgerStore {
 
     fn load_verified_thread_from_candidate_records_with_guard<F>(
         &self,
+        guild_id: GuildId,
         canonical_thread_id: ChannelId,
         ledger_id: LedgerId,
         records: Vec<CanonicalMessageRecord>,
@@ -1042,7 +1054,8 @@ impl DiscordCanonicalLedgerStore {
                     entry_count: snapshot.canonical_entry_count() as u64,
                 });
         }
-        let transport_entries = build_transport_entries(canonical_thread_id, &verified, &records)?;
+        let transport_entries =
+            build_transport_entries(guild_id, canonical_thread_id, &verified, &records)?;
         let records_by_message_id: BTreeMap<MessageId, &CanonicalMessageRecord> = records
             .iter()
             .map(|record| (record.message_id, record))
@@ -1215,7 +1228,6 @@ struct CanonicalMessageRecord {
     author_id: UserId,
     author_is_bot: bool,
     webhook_id: Option<u64>,
-    guild_id: Option<GuildId>,
     channel_id: ChannelId,
     recorded_at: SystemTime,
     edited_at: Option<SystemTime>,
@@ -1251,7 +1263,6 @@ struct PendingCanonicalMessageRecord {
     author_id: UserId,
     author_is_bot: bool,
     webhook_id: Option<u64>,
-    guild_id: Option<GuildId>,
     channel_id: ChannelId,
     recorded_at: SystemTime,
     edited_at: Option<SystemTime>,
@@ -1297,7 +1308,6 @@ fn pending_canonical_message_record(message: Message) -> PendingCanonicalMessage
         author_id: message.author.id,
         author_is_bot: message.author.bot,
         webhook_id: message.webhook_id.map(|webhook_id| webhook_id.get()),
-        guild_id: message.guild_id,
         channel_id: message.channel_id,
         recorded_at: timestamp_to_system_time(message.timestamp.unix_timestamp()),
         edited_at: message
@@ -1368,7 +1378,6 @@ async fn download_canonical_message_record(
         author_id: record.author_id,
         author_is_bot: record.author_is_bot,
         webhook_id: record.webhook_id,
-        guild_id: record.guild_id,
         channel_id: record.channel_id,
         recorded_at: record.recorded_at,
         edited_at: record.edited_at,
@@ -1490,6 +1499,7 @@ pub(crate) struct RequestBoundCanonicalReader<'a> {
     pub(crate) store: &'a DiscordCanonicalLedgerStore,
     pub(crate) canonical_thread_id: ChannelId,
     pub(crate) ledger_id: LedgerId,
+    pub(crate) guild_id: GuildId,
     pub(crate) load_route_label: &'static str,
 }
 
@@ -1522,6 +1532,7 @@ impl CanonicalThreadReader for RequestBoundCanonicalReader<'_> {
                 self.ctx,
                 self.canonical_thread_id,
                 self.ledger_id,
+                self.guild_id,
                 self.load_route_label,
             )
             .await
@@ -1579,11 +1590,7 @@ fn allow_immediate_self_link_completion_edit_only(
     let Some(edited_at) = observation.edited_at else {
         return Ok(());
     };
-    let Some(guild_id) = observation.guild_id else {
-        return Err(StoreLoadError::DisplayDrift {
-            message_id: observation.message_id,
-        });
-    };
+    let guild_id = observation.guild_id;
     let Ok(edit_age) = edited_at.duration_since(observation.recorded_at) else {
         return Err(StoreLoadError::DisplayDrift {
             message_id: observation.message_id,
@@ -1734,7 +1741,6 @@ pub(super) fn verified_thread_load_for_test(
             author_id: UserId::new(900),
             author_is_bot: true,
             webhook_id: None,
-            guild_id: Some(GuildId::new(500)),
             channel_id,
             recorded_at: UNIX_EPOCH + Duration::from_secs(message_id),
             edited_at: None,
@@ -1753,7 +1759,7 @@ pub(super) fn verified_thread_load_for_test(
         reject_edited_messages,
         Arc::new(CapturingLedgerObservability::new()),
     )
-    .load_verified_thread_from_records(channel_id, ledger_id, records)
+    .load_verified_thread_from_records(GuildId::new(500), channel_id, ledger_id, records)
     .expect("load should succeed")
 }
 
@@ -1841,7 +1847,6 @@ mod tests {
     fn canonical_record(
         message_id: u64,
         author_id: u64,
-        guild_id: u64,
         channel_id: u64,
         recorded_at: u64,
         envelope_bytes: Vec<u8>,
@@ -1851,7 +1856,6 @@ mod tests {
             author_id: UserId::new(author_id),
             author_is_bot: true,
             webhook_id: None,
-            guild_id: Some(GuildId::new(guild_id)),
             channel_id: ChannelId::new(channel_id),
             recorded_at: UNIX_EPOCH + Duration::from_secs(recorded_at),
             edited_at: None,
@@ -1877,7 +1881,7 @@ mod tests {
         )
         .expect("envelope should build");
         let bytes = CanonicalAttachmentCodec::encode(&envelope).expect("attachment should encode");
-        let records = vec![canonical_record(1, 900, 500, 42, 1, bytes)];
+        let records = vec![canonical_record(1, 900, 42, 1, bytes)];
 
         assert!(matches!(
             discover_ledger_id_from_records(&records),
@@ -1895,7 +1899,6 @@ mod tests {
             author_id: UserId::new(author_id),
             author_is_bot: true,
             webhook_id: None,
-            guild_id: Some(GuildId::new(700)),
             channel_id: ChannelId::new(channel_id),
             recorded_at: UNIX_EPOCH,
             edited_at: None,
@@ -1915,7 +1918,6 @@ mod tests {
             author_id: UserId::new(42),
             author_is_bot: false,
             webhook_id: None,
-            guild_id: Some(GuildId::new(700)),
             channel_id: ChannelId::new(channel_id),
             recorded_at: UNIX_EPOCH,
             edited_at: None,
@@ -1930,8 +1932,7 @@ mod tests {
         channel_id: u64,
         envelope_bytes: Vec<u8>,
     ) -> CanonicalMessageRecord {
-        let mut record =
-            canonical_record(message_id, 42, 700, channel_id, message_id, envelope_bytes);
+        let mut record = canonical_record(message_id, 42, channel_id, message_id, envelope_bytes);
         record.author_is_bot = false;
         record
     }
@@ -1951,7 +1952,6 @@ mod tests {
             records.push(canonical_record(
                 message_id,
                 900,
-                500,
                 channel_id.get(),
                 message_id,
                 bytes,
@@ -1996,7 +1996,6 @@ mod tests {
             author_id: UserId::new(900),
             author_is_bot: true,
             webhook_id: None,
-            guild_id: Some(GuildId::new(500)),
             channel_id: ChannelId::new(channel_id),
             recorded_at: UNIX_EPOCH + Duration::from_secs(message_id),
             edited_at: None,
@@ -2140,7 +2139,7 @@ mod tests {
             WriterLineagePolicy::new(UserId::new(900)),
             observability.clone(),
         );
-        let records = vec![canonical_record(1, 800, 500, 77, 1, Vec::new())];
+        let records = vec![canonical_record(1, 800, 77, 1, Vec::new())];
 
         let _ = store.validate_writer_lineage(
             Some(walicord_ledger::test_fixtures::ledger_id(77)),
@@ -2168,7 +2167,7 @@ mod tests {
             WriterLineagePolicy::new(UserId::new(900)),
             observability.clone(),
         );
-        let records = vec![canonical_record(1, 800, 500, 77, 1, Vec::new())];
+        let records = vec![canonical_record(1, 800, 77, 1, Vec::new())];
 
         let _ = store.validate_writer_lineage(None, &records);
 
@@ -2193,7 +2192,7 @@ mod tests {
             WriterLineagePolicy::new(UserId::new(900)),
             observability.clone(),
         );
-        let mut records = vec![canonical_record(1, 900, 500, 77, 1, Vec::new())];
+        let mut records = vec![canonical_record(1, 900, 77, 1, Vec::new())];
         records[0].webhook_id = Some(7);
 
         let _ = store.validate_writer_lineage(
@@ -2253,6 +2252,7 @@ mod tests {
 
         let actual = store()
             .load_verified_thread_from_records(
+                GuildId::new(500),
                 ChannelId::new(77),
                 walicord_ledger::test_fixtures::ledger_id(77),
                 records,
@@ -2274,6 +2274,7 @@ mod tests {
     #[test]
     fn load_verified_thread_rejects_missing_authoritative_attachment() {
         let actual = store().load_verified_thread_from_records(
+            GuildId::new(500),
             ChannelId::new(77),
             walicord_ledger::test_fixtures::ledger_id(77),
             vec![unrelated_attachment_record(1, 900, 77)],
@@ -2306,6 +2307,7 @@ mod tests {
         ];
 
         let actual = store().load_verified_thread_from_records(
+            GuildId::new(500),
             ChannelId::new(77),
             walicord_ledger::test_fixtures::ledger_id(77),
             vec![record],
@@ -2338,6 +2340,7 @@ mod tests {
         ];
 
         let actual = store().load_verified_thread_from_records(
+            GuildId::new(500),
             ChannelId::new(77),
             walicord_ledger::test_fixtures::ledger_id(77),
             vec![record],
@@ -2363,6 +2366,7 @@ mod tests {
         }];
 
         let actual = store().load_verified_thread_from_records(
+            GuildId::new(500),
             ChannelId::new(77),
             walicord_ledger::test_fixtures::ledger_id(77),
             vec![record],
@@ -2385,6 +2389,7 @@ mod tests {
         records[0].author_id = UserId::new(901);
 
         let actual = store().load_verified_thread_from_records(
+            GuildId::new(500),
             ChannelId::new(77),
             walicord_ledger::test_fixtures::ledger_id(77),
             records,
@@ -2406,6 +2411,7 @@ mod tests {
         records[0].webhook_id = Some(7);
 
         let actual = store().load_verified_thread_from_records(
+            GuildId::new(500),
             ChannelId::new(77),
             walicord_ledger::test_fixtures::ledger_id(77),
             records,
@@ -2431,6 +2437,7 @@ mod tests {
         records.insert(1, user_authored);
 
         let actual = store().load_verified_thread_from_records(
+            GuildId::new(500),
             ChannelId::new(77),
             walicord_ledger::test_fixtures::ledger_id(77),
             records,
@@ -2454,6 +2461,7 @@ mod tests {
         records.insert(1, user_chatter_record(99, 77));
 
         let actual = store().load_verified_thread_from_records(
+            GuildId::new(500),
             ChannelId::new(77),
             walicord_ledger::test_fixtures::ledger_id(77),
             records,
@@ -2481,6 +2489,7 @@ mod tests {
             serde_json::to_vec(&value).expect("tampered attachment should serialize");
 
         let actual = store().load_verified_thread_from_records(
+            GuildId::new(500),
             ChannelId::new(77),
             walicord_ledger::test_fixtures::ledger_id(77),
             records,
@@ -2496,6 +2505,7 @@ mod tests {
         records[0].attachments[0].bytes = b"{".to_vec();
 
         let actual = store().load_verified_thread_from_records(
+            GuildId::new(500),
             ChannelId::new(77),
             walicord_ledger::test_fixtures::ledger_id(77),
             records,
@@ -2518,6 +2528,7 @@ mod tests {
             serde_json::to_vec(&value).expect("tampered attachment should serialize");
 
         let actual = store().load_verified_thread_from_records(
+            GuildId::new(500),
             ChannelId::new(77),
             walicord_ledger::test_fixtures::ledger_id(77),
             records,
@@ -2543,6 +2554,7 @@ mod tests {
             serde_json::to_vec(&value).expect("tampered attachment should serialize");
 
         let actual = store().load_verified_thread_from_records(
+            GuildId::new(500),
             ChannelId::new(77),
             walicord_ledger::test_fixtures::ledger_id(77),
             records,
@@ -2571,6 +2583,7 @@ mod tests {
             serde_json::to_vec(&value).expect("tampered attachment should serialize");
 
         let actual = store().load_verified_thread_from_records(
+            GuildId::new(500),
             ChannelId::new(77),
             walicord_ledger::test_fixtures::ledger_id(77),
             records,
@@ -2610,6 +2623,7 @@ mod tests {
     #[test]
     fn load_verified_thread_rejects_structure_failures() {
         let actual = store().load_verified_thread_from_records(
+            GuildId::new(500),
             ChannelId::new(77),
             walicord_ledger::test_fixtures::ledger_id(77),
             encode_entries_as_records(vec![
@@ -2624,6 +2638,7 @@ mod tests {
     #[test]
     fn load_verified_thread_rejects_projection_failures() {
         let actual = store().load_verified_thread_from_records(
+            GuildId::new(500),
             ChannelId::new(77),
             walicord_ledger::test_fixtures::ledger_id(77),
             encode_entries_as_records(vec![settlement_entry(1, 1, 2, 100)]),
@@ -2633,31 +2648,12 @@ mod tests {
     }
 
     #[test]
-    fn load_verified_thread_rejects_missing_guild_transport_metadata() {
-        let mut records =
-            encode_entries_as_records(vec![expense_entry(1, 1, &[(1, 5_000), (2, 5_000)])]);
-        records[0].guild_id = None;
-
-        let actual = store().load_verified_thread_from_records(
-            ChannelId::new(77),
-            walicord_ledger::test_fixtures::ledger_id(77),
-            records,
-        );
-
-        assert!(matches!(
-            actual,
-            Err(StoreLoadError::MetadataCoherence(
-                MetadataCoherenceFailure::MissingGuildContext { message_id }
-            )) if message_id == MessageId::new(1)
-        ));
-    }
-
-    #[test]
     fn load_verified_thread_rejects_display_drift() {
         let records =
             encode_entries_as_records(vec![expense_entry(1, 1, &[(1, 5_000), (2, 5_000)])]);
 
         let actual = store().load_verified_thread_from_records_with_guard(
+            GuildId::new(500),
             ChannelId::new(77),
             walicord_ledger::test_fixtures::ledger_id(77),
             records,
@@ -2695,6 +2691,7 @@ mod tests {
             format!("支出 [#1]\n復旧用の参照: ledger:{ledger_id_short}/entry:1 | <{message_link}>");
 
         let actual = store().load_verified_thread_from_records_with_guard(
+            GuildId::new(500),
             ChannelId::new(77),
             walicord_ledger::test_fixtures::ledger_id(77),
             records,
@@ -2746,6 +2743,7 @@ mod tests {
         );
 
         let actual = store().load_verified_thread_from_records_with_guard(
+            GuildId::new(500),
             ChannelId::new(77),
             walicord_ledger::test_fixtures::ledger_id(77),
             records,
@@ -2798,6 +2796,7 @@ mod tests {
         );
 
         let actual = store().load_verified_thread_from_records_with_guard(
+            GuildId::new(500),
             ChannelId::new(77),
             walicord_ledger::test_fixtures::ledger_id(77),
             records,
@@ -2844,6 +2843,7 @@ mod tests {
             format!("復旧用の参照: ledger:{ledger_id_short}/entry:1 | <{message_link}>");
 
         let actual = store().load_verified_thread_from_records(
+            GuildId::new(500),
             ChannelId::new(77),
             walicord_ledger::test_fixtures::ledger_id(77),
             records,
@@ -2872,6 +2872,7 @@ mod tests {
             format!("tampered\n復旧用の参照: ledger:{ledger_id_short}/entry:1 | <{message_link}>");
 
         let actual = store().load_verified_thread_from_records(
+            GuildId::new(500),
             ChannelId::new(77),
             walicord_ledger::test_fixtures::ledger_id(77),
             records,
@@ -2896,6 +2897,7 @@ mod tests {
         records[0].edited_at = Some(UNIX_EPOCH + Duration::from_secs(90));
 
         let actual = store().load_verified_thread_from_records(
+            GuildId::new(500),
             ChannelId::new(77),
             walicord_ledger::test_fixtures::ledger_id(77),
             records,
@@ -2920,6 +2922,7 @@ mod tests {
             format!("支出 [#1]\n復旧用の参照: ledger:{ledger_id_short}/entry:1 | <{message_link}>");
 
         let actual = store().load_verified_thread_from_records(
+            GuildId::new(500),
             ChannelId::new(77),
             walicord_ledger::test_fixtures::ledger_id(77),
             records,
@@ -2935,6 +2938,7 @@ mod tests {
     fn load_verified_thread_keeps_external_message_ids_outside_ledger_entry_ids() {
         let actual = store()
             .load_verified_thread_from_records(
+                GuildId::new(500),
                 ChannelId::new(77),
                 walicord_ledger::test_fixtures::ledger_id(77),
                 encode_entries_as_records(vec![expense_entry(10, 1, &[(1, 5_000), (2, 5_000)])]),
@@ -2952,6 +2956,7 @@ mod tests {
         records[0].channel_id = ChannelId::new(78);
 
         let actual = store().load_verified_thread_from_records(
+            GuildId::new(500),
             ChannelId::new(77),
             walicord_ledger::test_fixtures::ledger_id(77),
             records,
@@ -2975,6 +2980,7 @@ mod tests {
     fn replayed_void_window_fixture_keeps_recent_business_entries_addressable() {
         let actual = store()
             .load_verified_thread_from_records(
+                GuildId::new(500),
                 ChannelId::new(77),
                 walicord_ledger::test_fixtures::ledger_id(77),
                 encode_entries_as_records(vec![

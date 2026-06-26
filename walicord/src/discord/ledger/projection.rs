@@ -370,8 +370,10 @@ mod tests {
             ),
             (
                 StoreLoadError::MetadataCoherence(
-                    crate::discord::ledger::store::MetadataCoherenceFailure::MissingGuildContext {
+                    crate::discord::ledger::store::MetadataCoherenceFailure::MismatchedChannel {
                         message_id: MessageId::new(5),
+                        expected: serenity::all::ChannelId::new(1),
+                        actual: serenity::all::ChannelId::new(2),
                     },
                 ),
                 CanonicalLoadFailure::MetadataCoherence { route },
