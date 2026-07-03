@@ -6,21 +6,21 @@ pub mod picker_types;
 mod pickers;
 mod read_view_builder;
 mod read_view_pagination;
+mod read_view_svg;
 mod sanitizer;
 mod surfaces;
 mod void_surfaces;
 
 pub use read_view_builder::{
-    LedgerPageInputs, ReadViewBuildError, ReviewPageInputs, build_ledger_empty_page_model,
-    build_ledger_page_model, build_review_empty_page_model, build_review_no_transfers_page_model,
-    build_review_page_model, expense_or_settlement_summary, preview_transfer_rows,
+    LedgerPageInputs, ReadViewBuildError, ReviewPageInputs, build_ledger_document,
+    build_review_document, expense_or_settlement_summary, preview_transfer_rows,
 };
 
-pub use read_view_pagination::{READ_VIEW_ITEMS_PER_PAGE, paginate_read_view_model};
+pub use read_view_pagination::READ_VIEW_ITEMS_PER_PAGE;
 
 pub use expense_confirmation::{
-    build_expense_confirmation_surface, build_expense_selection_step_surface,
-    build_expense_success_surface,
+    ExpenseConfirmationSurfaceError, build_expense_confirmation_surface,
+    build_expense_selection_step_surface, build_expense_success_surface,
 };
 
 pub use budgets::{
@@ -28,21 +28,26 @@ pub use budgets::{
     validate_component_placeholder, validate_custom_id, validate_message_content,
     validate_modal_title, validate_text_input_label, validate_text_input_placeholder,
 };
-pub use member_labels::{SurfaceMemberLabel, SurfaceMemberLabels, unknown_member_label};
+pub use member_labels::{
+    SurfaceMemberLabel, SurfaceMemberLabels, unknown_member_label, unknown_role_safe_label,
+};
 pub use pickers::{
     ExpenseConfirmationParticipantRow, ExpenseDraftSummary, PickerSurfaceModel,
     individual_selection_title,
 };
-pub use sanitizer::{BusinessDateTime, SafeLiteralText};
+pub use sanitizer::{BusinessDateTime, SafeLiteralText, SafeLiteralTextError};
 pub use surfaces::{
-    BalanceDirection, BalanceRow, DiscordLedgerPresenter, ExpenseOrSettlementSummary,
-    ExpenseSuccessSurfaceModel, ExpenseSurfaceModel, LedgerSurfaceSummary, PanelButtonStates,
-    PanelSurfaceModel, ParticipantShareRow, PublicBalanceAdjustmentMessageModel,
-    PublicCanonicalMessageModel, PublicExpenseMessageModel, PublicSealMessageModel,
-    PublicSettlementMessageModel, PublicVoidMessageModel, ReadViewContent, ReadViewPageModel,
-    ReadViewRoute, RecentEntryRow, RecoveryContext, RecoveryCta, RecoveryReference,
-    RenderedCanonicalMessage, RenderedSurface, SurfaceActionRow, SurfaceButton,
-    SurfaceInteractiveButtonStyle, SurfaceSelectMenu, SurfaceSelectOption, TransferRow,
+    BalanceDirection, BalanceRow, DiscordLedgerPresenter, DiscordLinkUrl, DiscordLinkUrlError,
+    DocumentRoute, ExpenseOrSettlementSummary, ExpenseSuccessSurfaceModel, ExpenseSurfaceModel,
+    LedgerRoute, LedgerSurfaceSummary, MessageContent, MessageContentBuilder, PageSection,
+    PanelButtonStates, PanelSurfaceModel, ParticipantShareRow, PresentationSurfaceBody,
+    PublicBalanceAdjustmentMessageModel, PublicCanonicalMessageModel, PublicExpenseMessageModel,
+    PublicSealMessageModel, PublicSettlementMessageModel, PublicVoidMessageModel, ReadViewData,
+    ReadViewDocument, ReadViewDocumentState, ReadViewPageData, ReadViewPageModel,
+    ReadViewPageState, RecentEntryRow, RecoveryAction, RecoveryReference, RenderedCanonicalMessage,
+    RenderedSurface, RenderedSurfaceParts, RequiredPageSection, ReviewRoute, ReviewSettleAction,
+    Section, SurfaceActionRow, SurfaceButton, SurfaceInteractiveButtonStyle, SurfaceSelectMenu,
+    SurfaceSelectOption, TextRenderedSurface, TextRenderedSurfaceParts, TransferRow,
     UncertainWriteSurfaceModel, WriteRejectionSurfaceModel,
 };
 pub use void_surfaces::{

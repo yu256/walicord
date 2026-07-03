@@ -1,9 +1,11 @@
-use super::locator::LocatorRecoveryReference;
+use super::{locator::LocatorRecoveryReference, response_writer::DiscordTextMessage};
 use serenity::{
     all::Permissions,
     builder::{CreateActionRow, CreateButton, CreateCommand},
 };
 use walicord_i18n as i18n;
+#[cfg(test)]
+use walicord_presentation::discord_ledger::DiscordLinkUrl;
 
 const CANONICAL_SURFACE_PERMISSIONS: &[(Permissions, &str)] =
     &[(Permissions::VIEW_CHANNEL, "View Channel")];
@@ -186,8 +188,8 @@ impl RecoveryOutcomeMessage {
         &self.components
     }
 
-    pub(crate) fn into_parts(self) -> (String, Vec<CreateActionRow>) {
-        (self.body, self.components)
+    pub(crate) fn into_text_message(self) -> DiscordTextMessage {
+        DiscordTextMessage::fit_to_discord_limit(self.body, self.components)
     }
 }
 
@@ -199,13 +201,13 @@ pub(crate) fn recovery_reference_components(
             thread_link: Some(thread_link),
             ..
         } => vec![CreateActionRow::Buttons(vec![
-            CreateButton::new_link(thread_link.clone()).label(i18n::OPEN_LEDGER_THREAD_LABEL),
+            CreateButton::new_link(thread_link.as_str()).label(i18n::OPEN_LEDGER_THREAD_LABEL),
         ])],
         LocatorRecoveryReference::Channel {
             channel_link: Some(channel_link),
             ..
         } => vec![CreateActionRow::Buttons(vec![
-            CreateButton::new_link(channel_link.clone()).label(i18n::OPEN_PARENT_CHANNEL_LABEL),
+            CreateButton::new_link(channel_link.as_str()).label(i18n::OPEN_PARENT_CHANNEL_LABEL),
         ])],
         LocatorRecoveryReference::Ledger {
             thread_link: None, ..
@@ -388,12 +390,15 @@ mod tests {
     fn channel_recovery_reference() -> LocatorRecoveryReference {
         LocatorRecoveryReference::channel(
             ChannelId::new(10),
-            Some("https://discord.example/channels/1/10"),
+            Some(DiscordLinkUrl::parse("https://discord.example/channels/1/10").expect("url")),
         )
     }
 
     fn ledger_recovery_reference() -> LocatorRecoveryReference {
-        LocatorRecoveryReference::ledger("abcd1234", Some("https://discord.example/channels/1/20"))
+        LocatorRecoveryReference::ledger(
+            "abcd1234",
+            Some(DiscordLinkUrl::parse("https://discord.example/channels/1/20").expect("url")),
+        )
     }
 
     #[test]

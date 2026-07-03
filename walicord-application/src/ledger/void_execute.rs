@@ -255,12 +255,12 @@ mod tests {
     fn confirming_session(target: LedgerEntryId) -> VoidSession {
         VoidSession::new(
             crate::ledger::expense_session::VoidSessionKey::new(ledger_id(), MemberId(1)),
-            VoidSessionStage::Confirming,
-            Some(VoidCandidateSelection::new(target)),
+            VoidSessionStage::Confirming {
+                selection: VoidCandidateSelection::new(target),
+            },
             SessionNonce::new(1).unwrap(),
             UNIX_EPOCH,
         )
-        .unwrap()
     }
 
     fn empty_load() -> VerifiedLedgerThreadLoad<()> {

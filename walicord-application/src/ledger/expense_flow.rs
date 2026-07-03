@@ -105,11 +105,10 @@ pub fn build_confirmation_for_session(
         selection.weight_overrides.remove(member_id);
     }
 
-    let drift = session
-        .draft()
-        .confirmation_snapshot()
-        .map(|previous| drift_between_snapshot_and_resolution(previous, &outcome.resolved))
-        .unwrap_or_default();
+    let drift = confirmation_drift_from_previous_snapshot(
+        session.draft().confirmation_snapshot(),
+        &outcome.resolved,
+    );
 
     let snapshot = ExpenseConfirmationSnapshot {
         participants: outcome.resolved.clone(),
@@ -136,6 +135,16 @@ pub fn build_confirmation_for_session(
         defaulted_members: outcome.defaulted_members,
         dropped_overrides: outcome.dropped_overrides,
     })
+}
+
+fn confirmation_drift_from_previous_snapshot(
+    previous: Option<&ExpenseConfirmationSnapshot>,
+    resolved: &[ExpenseParticipantSelection],
+) -> Vec<ParticipantDrift> {
+    match previous {
+        Some(previous) => drift_between_snapshot_and_resolution(previous, resolved),
+        None => Vec::new(),
+    }
 }
 
 pub fn confirmation_payer_and_participants(

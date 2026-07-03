@@ -19,12 +19,20 @@ use walicord_application::{
 use walicord_domain::{Money, model::MemberId};
 use walicord_i18n as i18n;
 
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ExpenseConfirmationSurfaceError {
+    #[error("expense authoring: {0}")]
+    ExpenseAuthoring(#[from] ExpenseAuthoringError),
+    #[error("safe literal text: {0}")]
+    SafeLiteral(#[from] crate::discord_ledger::SafeLiteralTextError),
+}
+
 pub fn build_expense_confirmation_surface(
     basic_info: &ExpenseBasicInfo,
     participants: &[ExpenseParticipantSelection],
     display_names: &HashMap<MemberId, SmolStr>,
     nonce: SessionNonce,
-) -> Result<ExpenseSurfaceModel, ExpenseAuthoringError> {
+) -> Result<ExpenseSurfaceModel, ExpenseConfirmationSurfaceError> {
     let labels = SurfaceMemberLabels::from_member_names(participants.iter().map(|row| {
         (
             row.member_id,
@@ -32,10 +40,11 @@ pub fn build_expense_confirmation_surface(
         )
     }));
 
-    let summary_note = basic_info.note.as_ref().map(|note| {
-        SafeLiteralText::from_note(note.as_str())
-            .expect("validated ExpenseNote should always produce a SafeLiteralText")
-    });
+    let summary_note = basic_info
+        .note
+        .as_ref()
+        .map(|note| SafeLiteralText::parse_note(note.as_str()))
+        .transpose()?;
     let summary = ExpenseDraftSummary {
         amount: basic_info.amount.to_string(),
         effective_date: basic_info.effective_date,
@@ -60,15 +69,7 @@ pub fn build_expense_confirmation_surface(
         .all(|p| p.weight == participants[0].weight);
     let mut detail_lines: Vec<String> = Vec::new();
     for row in participants {
-        let display_name = labels
-            .member(row.member_id)
-            .map(|label| label.visible().clone())
-            .unwrap_or_else(|| {
-                SafeLiteralText::from_roster_label(
-                    &i18n::unknown_user_label(row.member_id.0).to_string(),
-                )
-                .expect("unknown_user_label is a fixed fallback that always sanitises")
-            });
+        let display_name = labels.safe_member_label(row.member_id);
         let share_amount = share_by_member
             .get(&row.member_id)
             .map(|amount| amount.to_string());

@@ -6,8 +6,6 @@ expression: "render_snapshot_body(&complex_review_result(), &member_directory())
 <svg xmlns="http://www.w3.org/2000/svg" width="360" height="398" viewBox="0 0 360 398">
 <style>text { font-family: Noto Sans CJK JP; font-size: 14px; }</style>
 <g transform="translate(81, 0)">
-
-
 <rect width="198" height="206" fill="#cbd5e0" rx="4" />
 <rect x="1" y="1" width="196" height="34" fill="#4a5568" rx="3" />
 <text x="10" y="22" fill="#ffffff" text-anchor="start">メンバー</text>
@@ -29,8 +27,6 @@ expression: "render_snapshot_body(&complex_review_result(), &member_directory())
 <text x="188" y="193" fill="#1a202c" text-anchor="end">-23</text>
 </g>
 <g transform="translate(0, 226)">
-
-
 <rect width="360" height="172" fill="#cbd5e0" rx="4" />
 <rect x="1" y="1" width="358" height="34" fill="#4a5568" rx="3" />
 <text x="10" y="22" fill="#ffffff" text-anchor="start">支払者</text>

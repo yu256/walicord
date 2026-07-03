@@ -40,15 +40,14 @@ use walicord_application::{
 use walicord_domain::model::{MemberId, RoleId};
 use walicord_i18n as i18n;
 use walicord_presentation::discord_ledger::{
-    DiscordLedgerPresenter, ExpenseSurfaceModel, LedgerPageInputs, ReadViewBuildError,
-    ReadViewPageModel, ReadViewRoute, RecoveryCta, RenderBudgetError, ReviewPageInputs,
-    SurfaceActionRow, SurfaceButton, SurfaceInteractiveButtonStyle, SurfaceMemberLabels,
-    SurfaceSelectMenu, VoidRetargetReason, VoidSurfaceModel, build_expense_confirmation_surface,
-    build_expense_selection_step_surface, build_expense_success_surface,
-    build_ledger_empty_page_model, build_ledger_page_model, build_review_empty_page_model,
-    build_review_no_transfers_page_model, build_review_page_model,
+    DiscordLedgerPresenter, DiscordLinkUrl, ExpenseConfirmationSurfaceError, ExpenseSurfaceModel,
+    LedgerPageInputs, LedgerRoute, ReadViewBuildError, ReadViewDocument, ReadViewPageModel,
+    RecoveryAction, RenderBudgetError, ReviewPageInputs, ReviewRoute, ReviewSettleAction,
+    SafeLiteralTextError, SurfaceActionRow, SurfaceMemberLabels, SurfaceSelectMenu,
+    VoidRetargetReason, VoidSurfaceModel, build_expense_confirmation_surface,
+    build_expense_selection_step_surface, build_expense_success_surface, build_ledger_document,
+    build_review_document,
     expense_component_id::ExpenseComponentId,
-    paginate_read_view_model,
     picker_types::{ExpensePickerKind, PagedPickerState, PickerSnapshotId},
 };
 
@@ -94,12 +93,12 @@ use super::{
     },
     projection::{CanonicalLoadFailure, CanonicalLoadRoute},
     response_writer::{
-        deferred_ephemeral_interaction_response_message, rendered_surface_to_message,
+        DiscordDraft, DiscordTextMessage, deferred_ephemeral_interaction_response_message,
         safe_edit_interaction_response, safe_ephemeral_interaction_response_message,
         safe_interaction_response_message,
     },
     route_guard::{
-        LedgerInteractionGuardError, LedgerInteractionScope,
+        LedgerInteractionGuardError, LedgerInteractionScope, expense_draft_scope_id,
         guard_ledger_interaction_resolving_parent,
     },
     store::{
@@ -389,6 +388,8 @@ pub enum InternalLedgerRouteError {
     Navigation(#[from] NavigationError),
     #[error("expense confirmation build: {0}")]
     ConfirmationBuild(#[from] ConfirmationBuildError),
+    #[error("expense confirmation surface build: {0}")]
+    ConfirmationSurface(#[from] ExpenseConfirmationSurfaceError),
     #[error("roster fetch: {0}")]
     RosterFetch(#[from] RouterRosterFetchError),
     #[error("expense share computation: {0}")]
@@ -422,6 +423,8 @@ pub enum InternalLedgerRouteError {
     NextEntryId(#[from] NextLedgerEntryIdError),
     #[error("read view build: {0}")]
     ReadViewBuild(#[from] ReadViewBuildError),
+    #[error("safe literal text: {0}")]
+    SafeLiteralText(#[from] SafeLiteralTextError),
     #[error("settlement preview composition: {0}")]
     PreviewAttempt(#[from] PreviewAttemptError),
     #[error("settlement commit composition: {0}")]
@@ -508,6 +511,12 @@ impl From<RenderBudgetError> for LedgerRouteError {
 
 impl From<ConfirmationBuildError> for LedgerRouteError {
     fn from(error: ConfirmationBuildError) -> Self {
+        Self::Internal(error.into())
+    }
+}
+
+impl From<ExpenseConfirmationSurfaceError> for LedgerRouteError {
+    fn from(error: ExpenseConfirmationSurfaceError) -> Self {
         Self::Internal(error.into())
     }
 }
@@ -695,6 +704,12 @@ impl From<ReadViewBuildError> for LedgerRouteError {
     }
 }
 
+impl From<SafeLiteralTextError> for LedgerRouteError {
+    fn from(error: SafeLiteralTextError) -> Self {
+        Self::Internal(error.into())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ReadViewNavigation {
     Previous,
@@ -737,13 +752,28 @@ impl DeferredEphemeralInteraction<'_> {
     async fn edit(
         &self,
         ctx: &Context,
-        content: impl Into<String>,
-        components: Vec<serenity::all::CreateActionRow>,
+        message: DiscordTextMessage,
         site: DiscordCallSite,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
+        let (content, components) = message.into_parts();
         let response = safe_edit_interaction_response()
             .content(content)
             .components(components);
+        match self {
+            Self::Command(command) => command.edit_response(&ctx.http, response).await,
+            Self::Component(component) => component.edit_response(&ctx.http, response).await,
+        }
+        .map_err(discord_call_error(site))?;
+        Ok(InteractionDispatch::Handled)
+    }
+
+    async fn edit_draft(
+        &self,
+        ctx: &Context,
+        draft: super::response_writer::DiscordDraft,
+        site: DiscordCallSite,
+    ) -> Result<InteractionDispatch, LedgerRouteError> {
+        let response = draft.into_edit_response();
         match self {
             Self::Command(command) => command.edit_response(&ctx.http, response).await,
             Self::Component(component) => component.edit_response(&ctx.http, response).await,
@@ -1027,8 +1057,7 @@ impl LedgerRouter {
     }
 
     pub(crate) fn clear_tracked_parent_channel(&self, tracked_parent_channel_id: ChannelId) {
-        let draft_scope_id = ExpenseDraftScopeId::new(tracked_parent_channel_id.get())
-            .expect("serenity channel IDs are always non-zero");
+        let draft_scope_id = expense_draft_scope_id(tracked_parent_channel_id);
         self.deps.expense_sessions.clear_draft_scope(draft_scope_id);
         self.deps.expense_nonces.clear_draft_scope(draft_scope_id);
         self.deps.picker_states.remove_draft_scope(draft_scope_id);
@@ -1413,11 +1442,11 @@ impl LedgerRouter {
                     })
             })
         });
-        let (content, components) = if !authorized {
-            (
+        let message = if !authorized {
+            DiscordTextMessage::parse(
                 render_ledger_refresh_acknowledgement(LedgerRefreshAcknowledgement::Unauthorized),
                 Vec::new(),
-            )
+            )?
         } else {
             let state = self
                 .deps
@@ -1426,21 +1455,21 @@ impl LedgerRouter {
                 .await?;
             self.observe_blocked_locator_state(&state);
             match state {
-                CanonicalThreadLocatorState::ReadyNoThread { .. } => (
+                CanonicalThreadLocatorState::ReadyNoThread { .. } => DiscordTextMessage::parse(
                     render_ledger_refresh_acknowledgement(
                         LedgerRefreshAcknowledgement::ReadyNoThread,
                     ),
                     Vec::new(),
-                ),
-                CanonicalThreadLocatorState::ReadyEmptyThread { .. } => (
+                )?,
+                CanonicalThreadLocatorState::ReadyEmptyThread { .. } => DiscordTextMessage::parse(
                     render_ledger_refresh_acknowledgement(LedgerRefreshAcknowledgement::Ready),
                     Vec::new(),
-                ),
+                )?,
                 state @ (CanonicalThreadLocatorState::DuplicateBlocked { .. }
                 | CanonicalThreadLocatorState::DamagedBlocked { .. }) => {
                     render_panel_post_message_for_locator_state(&state)
                         .expect_err("blocked locator state must render a recovery response")
-                        .into_parts()
+                        .into_text_message()
                 }
                 CanonicalThreadLocatorState::Provisioned(binding)
                 | CanonicalThreadLocatorState::ReadyBound(binding) => {
@@ -1450,21 +1479,22 @@ impl LedgerRouter {
                         .current(binding.ledger_id())
                         .is_none()
                     {
-                        (
+                        DiscordTextMessage::parse(
                             render_ledger_refresh_acknowledgement(
                                 LedgerRefreshAcknowledgement::Ready,
                             ),
                             Vec::new(),
-                        )
+                        )?
                     } else {
                         render_ledger_refresh_uncertain_write_message(
                             &ledger_refresh_recovery_reference(binding),
                         )
-                        .into_parts()
+                        .into_text_message()
                     }
                 }
             }
         };
+        let (content, components) = message.into_parts();
         command
             .create_response(
                 &ctx.http,
@@ -1488,14 +1518,14 @@ impl LedgerRouter {
             .guard_scope(ctx, command.guild_id, command.channel_id, command)
             .await?;
         if let Some(ledger_id) = self.blocked_expense_launcher_ledger(ctx, scope).await? {
-            let (message, components) =
-                self.uncertain_write_block_response(ledger_id, false, false);
+            let message = self.uncertain_write_block_response(ledger_id, false, false);
+            let (content, components) = message.into_parts();
             command
                 .create_response(
                     &ctx.http,
                     CreateInteractionResponse::Message(
                         safe_ephemeral_interaction_response_message()
-                            .content(message)
+                            .content(content)
                             .components(components),
                     ),
                 )
@@ -1843,11 +1873,12 @@ impl LedgerRouter {
             nonce,
         )?;
         let rendered = DiscordLedgerPresenter::render_expense_step(&model)?;
-        let (body, components) = rendered_surface_to_message(rendered);
+        let message = DiscordTextMessage::from(rendered);
+        let (content, components) = message.into_parts();
 
         let response = CreateInteractionResponse::UpdateMessage(
             safe_interaction_response_message()
-                .content(body)
+                .content(content)
                 .components(components),
         );
         component
@@ -1992,13 +2023,11 @@ impl LedgerRouter {
             }
             RecordExpenseOutcome::UncertainBlocked
             | RecordExpenseOutcome::UncertainAppendFailed => {
-                let (message, components) =
-                    self.uncertain_write_block_response(ledger_id, true, false);
+                let message = self.uncertain_write_block_response(ledger_id, true, false);
                 self.edit_component_response_with_components(
                     ctx,
                     component,
                     message,
-                    components,
                     DiscordCallSite::ExpenseRecordUncertainEdit,
                 )
                 .await
@@ -2043,14 +2072,12 @@ impl LedgerRouter {
         let model =
             build_expense_confirmation_surface(&basic_info, &refreshed, display_names, nonce)?;
         let rendered = DiscordLedgerPresenter::render_expense_step(&model)?;
-        let (mut body, components) = rendered_surface_to_message(rendered);
-        if !drift.is_empty() {
-            body.push('\n');
-            body.push_str(i18n::EXPENSE_PARTICIPANTS_DRIFTED_CUE);
-        }
+        let message =
+            append_participants_drift_cue(DiscordTextMessage::from(rendered), !drift.is_empty())?;
 
+        let (content, components) = message.into_parts();
         let response = safe_edit_interaction_response()
-            .content(body)
+            .content(content)
             .components(components);
         component
             .edit_response(&ctx.http, response)
@@ -2074,9 +2101,10 @@ impl LedgerRouter {
             Some(canonical_thread_id.get()),
         );
         let rendered = DiscordLedgerPresenter::render_expense_success(&model)?;
-        let (body, components) = rendered_surface_to_message(rendered);
+        let message = DiscordTextMessage::from(rendered);
+        let (content, components) = message.into_parts();
         let response = safe_edit_interaction_response()
-            .content(body)
+            .content(content)
             .components(components);
         component
             .edit_response(&ctx.http, response)
@@ -2302,10 +2330,11 @@ impl LedgerRouter {
     ) -> Result<InteractionDispatch, LedgerRouteError> {
         let model = self.build_expense_step_model(ctx, scope, session).await?;
         let rendered = DiscordLedgerPresenter::render_expense_step(&model)?;
-        let (body, components) = rendered_surface_to_message(rendered);
+        let message = DiscordTextMessage::from(rendered);
+        let (content, components) = message.into_parts();
         let response = CreateInteractionResponse::UpdateMessage(
             safe_interaction_response_message()
-                .content(body)
+                .content(content)
                 .components(components),
         );
         component
@@ -2926,17 +2955,18 @@ impl LedgerRouter {
             Ok(mut model) => {
                 model.validation_message = Some(error_message.to_owned());
                 let rendered = DiscordLedgerPresenter::render_expense_step(&model)?;
-                let (body, components) = rendered_surface_to_message(rendered);
+                let message = DiscordTextMessage::from(rendered);
+                let (content, components) = message.into_parts();
                 if Self::modal_originated_from_ephemeral(modal) {
                     CreateInteractionResponse::UpdateMessage(
                         safe_interaction_response_message()
-                            .content(body)
+                            .content(content)
                             .components(components),
                     )
                 } else {
                     CreateInteractionResponse::Message(
                         safe_ephemeral_interaction_response_message()
-                            .content(body)
+                            .content(content)
                             .components(components),
                     )
                 }
@@ -3144,21 +3174,21 @@ impl LedgerRouter {
             nonce,
         )?;
         let rendered = DiscordLedgerPresenter::render_expense_step(&model)?;
-        let (mut body, components) = rendered_surface_to_message(rendered);
-        if !outcome.drift.is_empty() {
-            body.push('\n');
-            body.push_str(i18n::EXPENSE_PARTICIPANTS_DRIFTED_CUE);
-        }
+        let message = append_participants_drift_cue(
+            DiscordTextMessage::from(rendered),
+            !outcome.drift.is_empty(),
+        )?;
+        let (content, components) = message.into_parts();
         let response = if Self::modal_originated_from_ephemeral(modal) {
             CreateInteractionResponse::UpdateMessage(
                 safe_interaction_response_message()
-                    .content(body)
+                    .content(content)
                     .components(components),
             )
         } else {
             CreateInteractionResponse::Message(
                 safe_ephemeral_interaction_response_message()
-                    .content(body)
+                    .content(content)
                     .components(components),
             )
         };
@@ -3260,17 +3290,18 @@ impl LedgerRouter {
             .build_expense_step_model(ctx, scope, claim.session())
             .await?;
         let rendered = DiscordLedgerPresenter::render_expense_step(&model)?;
-        let (body, components) = rendered_surface_to_message(rendered);
+        let message = DiscordTextMessage::from(rendered);
+        let (content, components) = message.into_parts();
         let response = if Self::modal_originated_from_ephemeral(modal) {
             CreateInteractionResponse::UpdateMessage(
                 safe_interaction_response_message()
-                    .content(body)
+                    .content(content)
                     .components(components),
             )
         } else {
             CreateInteractionResponse::Message(
                 safe_ephemeral_interaction_response_message()
-                    .content(body)
+                    .content(content)
                     .components(components),
             )
         };
@@ -3468,17 +3499,18 @@ impl LedgerRouter {
             model.detail_lines.insert(0, notice.to_owned());
         }
         let rendered = DiscordLedgerPresenter::render_expense_step(&model)?;
-        let (body, components) = rendered_surface_to_message(rendered);
+        let message = DiscordTextMessage::from(rendered);
+        let (content, components) = message.into_parts();
         let response = if Self::modal_originated_from_ephemeral(modal) {
             CreateInteractionResponse::UpdateMessage(
                 safe_interaction_response_message()
-                    .content(body)
+                    .content(content)
                     .components(components),
             )
         } else {
             CreateInteractionResponse::Message(
                 safe_ephemeral_interaction_response_message()
-                    .content(body)
+                    .content(content)
                     .components(components),
             )
         };
@@ -3496,18 +3528,23 @@ impl LedgerRouter {
         content: impl Into<String>,
         site: DiscordCallSite,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
-        self.edit_command_response_with_components(ctx, command, content, Vec::new(), site)
-            .await
+        self.edit_command_response_with_components(
+            ctx,
+            command,
+            DiscordTextMessage::parse(content, Vec::new())?,
+            site,
+        )
+        .await
     }
 
     async fn edit_command_response_with_components(
         &self,
         ctx: &Context,
         command: &CommandInteraction,
-        content: impl Into<String>,
-        components: Vec<CreateActionRow>,
+        message: DiscordTextMessage,
         site: DiscordCallSite,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
+        let (content, components) = message.into_parts();
         command
             .edit_response(
                 &ctx.http,
@@ -3525,12 +3562,12 @@ impl LedgerRouter {
         ledger_id: LedgerId,
         preserve_input: bool,
         preserve_preview: bool,
-    ) -> (String, Vec<CreateActionRow>) {
+    ) -> DiscordTextMessage {
         let mut message = uncertain_write_block_message(preserve_input, preserve_preview);
         let Some(UncertainWriteState::Abandoned(retained)) =
             self.deps.uncertain_writes.current(ledger_id)
         else {
-            return (message, Vec::new());
+            return DiscordTextMessage::fit_to_discord_limit(message, Vec::new());
         };
         message.push('\n');
         let _ = write!(
@@ -3538,7 +3575,7 @@ impl LedgerRouter {
             "{}",
             i18n::abandoned_uncertain_write_message(retained.last_known_summary())
         );
-        (
+        DiscordTextMessage::fit_to_discord_limit(
             message,
             vec![CreateActionRow::Buttons(vec![
                 CreateButton::new(UNCERTAIN_WRITE_ACKNOWLEDGE_CUSTOM_ID)
@@ -3551,10 +3588,10 @@ impl LedgerRouter {
         &self,
         ctx: &Context,
         component: &ComponentInteraction,
-        content: impl Into<String>,
-        components: Vec<serenity::all::CreateActionRow>,
+        message: DiscordTextMessage,
         site: DiscordCallSite,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
+        let (content, components) = message.into_parts();
         component
             .create_response(
                 &ctx.http,
@@ -3576,18 +3613,23 @@ impl LedgerRouter {
         content: impl Into<String>,
         site: DiscordCallSite,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
-        self.edit_component_response_with_components(ctx, component, content, Vec::new(), site)
-            .await
+        self.edit_component_response_with_components(
+            ctx,
+            component,
+            DiscordTextMessage::parse(content, Vec::new())?,
+            site,
+        )
+        .await
     }
 
     pub(super) async fn edit_component_response_with_components(
         &self,
         ctx: &Context,
         component: &ComponentInteraction,
-        content: impl Into<String>,
-        components: Vec<CreateActionRow>,
+        message: DiscordTextMessage,
         site: DiscordCallSite,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
+        let (content, components) = message.into_parts();
         component
             .edit_response(
                 &ctx.http,
@@ -3607,18 +3649,23 @@ impl LedgerRouter {
         content: impl Into<String>,
         site: DiscordCallSite,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
-        self.reply_component_ephemeral_with_components(ctx, component, content, Vec::new(), site)
-            .await
+        self.reply_component_ephemeral_with_components(
+            ctx,
+            component,
+            DiscordTextMessage::parse(content, Vec::new())?,
+            site,
+        )
+        .await
     }
 
     async fn reply_component_ephemeral_with_components(
         &self,
         ctx: &Context,
         component: &ComponentInteraction,
-        content: impl Into<String>,
-        components: Vec<CreateActionRow>,
+        message: DiscordTextMessage,
         site: DiscordCallSite,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
+        let (content, components) = message.into_parts();
         component
             .create_response(
                 &ctx.http,
@@ -3662,16 +3709,17 @@ impl LedgerRouter {
             }
         };
         self.observe_blocked_locator_state(&locator_state);
-        let (body, components) = match render_panel_post_message_for_locator_state(&locator_state) {
+        let message = match render_panel_post_message_for_locator_state(&locator_state) {
             Ok(rendered) => rendered,
-            Err(message) => message.into_parts(),
+            Err(message) => message.into_text_message(),
         };
+        let (content, components) = message.into_parts();
         if deferred {
             command
                 .edit_response(
                     &ctx.http,
                     safe_edit_interaction_response()
-                        .content(body)
+                        .content(content)
                         .components(components),
                 )
                 .await
@@ -3682,7 +3730,7 @@ impl LedgerRouter {
                     &ctx.http,
                     CreateInteractionResponse::Message(
                         safe_interaction_response_message()
-                            .content(body)
+                            .content(content)
                             .components(components),
                     ),
                 )
@@ -3701,14 +3749,12 @@ impl LedgerRouter {
             .guard_scope(ctx, component.guild_id, component.channel_id, component)
             .await?;
         if let Some(ledger_id) = self.blocked_expense_launcher_ledger(ctx, scope).await? {
-            let (message, components) =
-                self.uncertain_write_block_response(ledger_id, false, false);
+            let message = self.uncertain_write_block_response(ledger_id, false, false);
             return self
                 .reply_component_ephemeral_with_components(
                     ctx,
                     component,
                     message,
-                    components,
                     DiscordCallSite::ExpenseUncertainWriteReply,
                 )
                 .await;
@@ -3749,7 +3795,7 @@ impl LedgerRouter {
             ctx,
             scope,
             DeferredEphemeralInteraction::Component(component),
-            ReadViewRoute::ReviewParent,
+            ReviewRoute::Parent,
         )
         .await
     }
@@ -3766,7 +3812,7 @@ impl LedgerRouter {
             ctx,
             scope,
             DeferredEphemeralInteraction::Component(component),
-            ReadViewRoute::LedgerPanel,
+            LedgerRoute::Panel,
         )
         .await
     }
@@ -3806,7 +3852,7 @@ impl LedgerRouter {
             ctx,
             scope,
             DeferredEphemeralInteraction::Command(command),
-            ReadViewRoute::LedgerCommand,
+            LedgerRoute::Command,
         )
         .await
     }
@@ -3816,18 +3862,18 @@ impl LedgerRouter {
         ctx: &Context,
         scope: LedgerInteractionScope,
         interaction: DeferredEphemeralInteraction<'_>,
-        route: ReadViewRoute,
+        route: LedgerRoute,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
         interaction
             .defer(ctx, DiscordCallSite::LedgerDeferEphemeral)
             .await?;
         let Some(binding) = self.resolve_readable_ledger(ctx, scope).await? else {
-            let rendered = DiscordLedgerPresenter::render_read_view_page(
-                &build_ledger_empty_page_model(route, false),
-            )?;
-            let (body, components) = rendered_surface_to_message(rendered);
+            let doc = ReadViewDocument::ledger_empty(route, false);
+            let pages = doc.into_pages();
+            let rendered = DiscordLedgerPresenter::render_read_view_page(pages.first())?;
+            let draft = DiscordDraft::resolve(rendered, crate::discord::svg_renderer::svg_to_png);
             return interaction
-                .edit(ctx, body, components, DiscordCallSite::LedgerEditResponse)
+                .edit_draft(ctx, draft, DiscordCallSite::LedgerEditResponse)
                 .await;
         };
         let uncertain_write = self
@@ -3853,19 +3899,15 @@ impl LedgerRouter {
 
         let recent_views = project_recent_entries(&load, 60).map_err(LedgerRouteError::from)?;
 
-        let pages = if load.verified().is_empty() {
-            vec![build_ledger_empty_page_model(route, uncertain_write)]
-        } else {
-            let model = build_ledger_page_model(LedgerPageInputs {
-                route,
-                recent_views: &recent_views,
-                state: load.snapshot().projected().state(),
-                labels: &labels,
-                ledger_id: binding.ledger_id(),
-                uncertain_write,
-            })?;
-            paginate_read_view_model(model)
-        };
+        let doc = build_ledger_document(LedgerPageInputs {
+            route,
+            recent_views: &recent_views,
+            state: load.snapshot().projected().state(),
+            labels: &labels,
+            ledger_id: binding.ledger_id(),
+            uncertain_write,
+        })?;
+        let pages = doc.into_pages();
 
         let nonce = self.deps.nonce_provider.next_session_nonce();
         let actor_id = MemberId(interaction.user_id().get());
@@ -3881,15 +3923,15 @@ impl LedgerRouter {
         let total_pages = pages.len();
         self.deps.read_view_sessions.replace(session);
 
-        let rendered = DiscordLedgerPresenter::render_read_view_page(&pages[0])
+        let rendered = DiscordLedgerPresenter::render_read_view_page(pages.first())
             .map_err(LedgerRouteError::from)?;
-        let (body, mut components) = rendered_surface_to_message(rendered);
+        let mut draft = DiscordDraft::resolve(rendered, crate::discord::svg_renderer::svg_to_png);
         if total_pages > 1 {
-            components.push(read_view_navigation_row(nonce, 0, total_pages));
+            draft.push_component(read_view_navigation_row(nonce, 0, total_pages));
         }
 
         interaction
-            .edit(ctx, body, components, DiscordCallSite::LedgerEditResponse)
+            .edit_draft(ctx, draft, DiscordCallSite::LedgerEditResponse)
             .await
     }
 
@@ -3915,7 +3957,7 @@ impl LedgerRouter {
             ctx,
             scope,
             DeferredEphemeralInteraction::Command(command),
-            ReadViewRoute::ReviewThread,
+            ReviewRoute::Thread,
         )
         .await
     }
@@ -3925,21 +3967,26 @@ impl LedgerRouter {
         ctx: &Context,
         scope: LedgerInteractionScope,
         interaction: DeferredEphemeralInteraction<'_>,
-        route: ReadViewRoute,
+        route: ReviewRoute,
     ) -> Result<InteractionDispatch, LedgerRouteError> {
         interaction
             .defer(ctx, DiscordCallSite::ReviewDeferEphemeral)
             .await?;
         let Some(binding) = self.resolve_readable_ledger(ctx, scope).await? else {
-            let rendered = DiscordLedgerPresenter::render_read_view_page(
-                &build_review_empty_page_model(route, false, None),
-            )?;
-            let (body, components) = rendered_surface_to_message(rendered);
+            let doc = ReadViewDocument::review_empty(
+                route,
+                false,
+                empty_review_recovery_action(route, scope),
+            );
+            let pages = doc.into_pages();
+            let rendered = DiscordLedgerPresenter::render_read_view_page(pages.first())?;
+            let draft = DiscordDraft::resolve(rendered, crate::discord::svg_renderer::svg_to_png);
             return interaction
-                .edit(ctx, body, components, DiscordCallSite::ReviewEditResponse)
+                .edit_draft(ctx, draft, DiscordCallSite::ReviewEditResponse)
                 .await;
         };
         let ledger_id = binding.ledger_id();
+        let recovery_action = review_recovery_action(route, scope, binding);
         let uncertain_write = self.deps.uncertain_writes.current(ledger_id).is_some();
         let load = self
             .load_verified_thread(ctx, binding, CanonicalLoadRoute::Preview)
@@ -3977,7 +4024,8 @@ impl LedgerRouter {
                     },
                 );
             }
-            vec![build_review_empty_page_model(route, uncertain_write, None)]
+            ReadViewDocument::review_empty(route, uncertain_write, recovery_action.clone())
+                .into_pages()
         } else {
             let actor_id = MemberId(interaction.user_id().get());
             match compose_and_store_preview(
@@ -4008,8 +4056,7 @@ impl LedgerRouter {
                     return interaction
                         .edit(
                             ctx,
-                            message,
-                            Vec::new(),
+                            DiscordTextMessage::parse(message, Vec::new())?,
                             DiscordCallSite::ReviewEditResponse,
                         )
                         .await;
@@ -4025,39 +4072,33 @@ impl LedgerRouter {
                                 },
                             );
                         }
-                        vec![build_review_no_transfers_page_model(route, uncertain_write)]
+                        ReadViewDocument::review_no_transfers(
+                            route,
+                            uncertain_write,
+                            recovery_action.clone(),
+                        )
+                        .into_pages()
                     }
                     PreviewAttemptOutcome::Stored {
                         record,
                         preview_instance_id,
                     } => {
                         stored_preview_instance_id = Some(preview_instance_id);
-                        let mut model = build_review_page_model(ReviewPageInputs {
+                        let mut doc = build_review_document(ReviewPageInputs {
                             route,
                             state: load.snapshot().projected().state(),
                             previewed: record.previewed(),
                             labels: &labels,
                             uncertain_write,
-                            recovery_cta: RecoveryCta::ParentLink,
-                            recovery_url: None,
+                            recovery_action: recovery_action.clone(),
+                            settle_action: review_settle_action(ledger_id, uncertain_write),
                         });
                         if prior_preview_instance_id.is_some() {
-                            model.route_guidance_lines =
-                                review_route_guidance_lines_with_replacement_notice();
+                            doc = doc.with_route_guidance(
+                                review_route_guidance_lines_with_replacement_notice(),
+                            );
                         }
-                        if !uncertain_write {
-                            model.action_rows.push(SurfaceActionRow::Buttons(vec![
-                                SurfaceButton::Interactive {
-                                    label: i18n::REVIEW_SETTLE_BUTTON_LABEL.to_owned(),
-                                    custom_id: format!(
-                                        "{REVIEW_SETTLE_CUSTOM_ID_PREFIX}{ledger_id}"
-                                    ),
-                                    style: SurfaceInteractiveButtonStyle::Primary,
-                                    disabled: false,
-                                },
-                            ]));
-                        }
-                        paginate_read_view_model(model)
+                        doc.into_pages()
                     }
                 },
             }
@@ -4076,14 +4117,14 @@ impl LedgerRouter {
         ));
 
         let total_pages = pages.len();
-        let rendered = DiscordLedgerPresenter::render_read_view_page(&pages[0])
+        let rendered = DiscordLedgerPresenter::render_read_view_page(pages.first())
             .map_err(LedgerRouteError::from)?;
-        let (body, mut components) = rendered_surface_to_message(rendered);
+        let mut draft = DiscordDraft::resolve(rendered, crate::discord::svg_renderer::svg_to_png);
         if total_pages > 1 {
-            components.push(read_view_navigation_row(nonce, 0, total_pages));
+            draft.push_component(read_view_navigation_row(nonce, 0, total_pages));
         }
         interaction
-            .edit(ctx, body, components, DiscordCallSite::ReviewEditResponse)
+            .edit_draft(ctx, draft, DiscordCallSite::ReviewEditResponse)
             .await?;
 
         if let Some(preview_instance_id) = stored_preview_instance_id {
@@ -4196,13 +4237,11 @@ impl LedgerRouter {
             }
             SettleExecuteOutcome::UncertainBlocked
             | SettleExecuteOutcome::UncertainAppendFailed => {
-                let (message, components) =
-                    self.uncertain_write_block_response(ledger_id, false, true);
+                let message = self.uncertain_write_block_response(ledger_id, false, true);
                 self.edit_command_response_with_components(
                     ctx,
                     command,
                     message,
-                    components,
                     DiscordCallSite::SettleEditResponse,
                 )
                 .await
@@ -4252,13 +4291,7 @@ impl LedgerRouter {
             Err(ref error) if error.is_internal_failure() => {
                 self.build_settle_retryable_response(button_session_key, error.user_message())
             }
-            Err(error) => {
-                let (body, components) =
-                    self.render_settled_review(button_session_key, error.user_message());
-                safe_edit_interaction_response()
-                    .content(body)
-                    .components(components)
-            }
+            Err(error) => self.render_settled_review(button_session_key, error.user_message()),
         };
         component
             .edit_response(&ctx.http, response)
@@ -4329,7 +4362,7 @@ impl LedgerRouter {
         session_key: ReadViewSessionKey,
         outcome: &SettleExecuteOutcome,
     ) -> EditInteractionResponse {
-        let (body, components) = match outcome {
+        match outcome {
             SettleExecuteOutcome::Recorded { .. } => {
                 self.render_settled_review(session_key, i18n::SETTLEMENT_RECORDED_MESSAGE)
             }
@@ -4343,15 +4376,18 @@ impl LedgerRouter {
             SettleExecuteOutcome::UncertainBlocked
             | SettleExecuteOutcome::UncertainAppendFailed => {
                 self.deps.read_view_sessions.clear(session_key);
-                self.uncertain_write_block_response(session_key.ledger_id, false, true)
+                let message =
+                    self.uncertain_write_block_response(session_key.ledger_id, false, true);
+                let (content, components) = message.into_parts();
+                safe_edit_interaction_response()
+                    .content(content)
+                    .components(components)
+                    .clear_attachments()
             }
             SettleExecuteOutcome::AttemptFailed { error } => {
                 self.render_settled_review(session_key, settle_attempt_error_message(error))
             }
-        };
-        safe_edit_interaction_response()
-            .content(body)
-            .components(components)
+        }
     }
 
     fn build_settle_retryable_response(
@@ -4363,40 +4399,50 @@ impl LedgerRouter {
             .deps
             .read_view_sessions
             .peek(session_key, self.deps.clock.now());
-        if let Some(mut model) = page {
-            model.route_guidance_lines = vec![message.to_owned()];
+        if let Some(model) = page {
+            let model = model.with_route_guidance(vec![message.to_owned()]);
             match DiscordLedgerPresenter::render_read_view_page(&model) {
                 Ok(rendered) => {
-                    let (body, components) = rendered_surface_to_message(rendered);
-                    return safe_edit_interaction_response()
-                        .content(body)
-                        .components(components);
+                    let draft =
+                        DiscordDraft::resolve(rendered, crate::discord::svg_renderer::svg_to_png);
+                    return draft.into_edit_response();
                 }
                 Err(error) => {
                     tracing::warn!(%error, "settle retryable re-render failed, falling back to message only");
                 }
             }
         }
-        safe_edit_interaction_response().content(message)
+        safe_edit_interaction_response()
+            .content(message)
+            .clear_attachments()
     }
 
     fn render_settled_review(
         &self,
         session_key: ReadViewSessionKey,
         status: &str,
-    ) -> (String, Vec<CreateActionRow>) {
+    ) -> EditInteractionResponse {
         if let Some(session) = self.deps.read_view_sessions.clear(session_key) {
-            let mut model = session.current_page().clone();
-            model.route_guidance_lines = vec![status.to_owned()];
-            model.action_rows = Vec::new();
+            let mut model = session
+                .current_page()
+                .clone()
+                .with_route_guidance(vec![status.to_owned()]);
+            model.clear_action_rows();
             match DiscordLedgerPresenter::render_read_view_page(&model) {
-                Ok(rendered) => return rendered_surface_to_message(rendered),
+                Ok(rendered) => {
+                    let draft =
+                        DiscordDraft::resolve(rendered, crate::discord::svg_renderer::svg_to_png);
+                    return draft.into_edit_response();
+                }
                 Err(error) => {
                     tracing::warn!(%error, "settled review re-render failed, falling back to status only");
                 }
             }
         }
-        (status.to_owned(), Vec::new())
+        safe_edit_interaction_response()
+            .content(status)
+            .components(Vec::new())
+            .clear_attachments()
     }
 
     pub(super) async fn dispatch_void_command(
@@ -4438,10 +4484,9 @@ impl LedgerRouter {
         };
         let ledger_id = binding.ledger_id();
         if !self.clear_resolved_uncertain_write(ctx, binding).await {
-            let (message, components) =
-                self.uncertain_write_block_response(ledger_id, false, false);
+            let message = self.uncertain_write_block_response(ledger_id, false, false);
             return interaction
-                .edit(ctx, message, components, DiscordCallSite::VoidEditResponse)
+                .edit(ctx, message, DiscordCallSite::VoidEditResponse)
                 .await;
         }
 
@@ -4569,7 +4614,10 @@ impl LedgerRouter {
                 let target = candidates
                     .iter()
                     .find(|view| view.entry_id() == target_entry_id)
-                    .expect("transition_to_confirm verified target is present");
+                    .expect(
+                        "transition_to_confirm's still_in_window check already verified \
+                         target_entry_id is present in this same candidates slice",
+                    );
                 let model =
                     void_confirmation_model(target, &labels, ledger_id, next_session.nonce())?;
                 self.deps.void_sessions.replace(next_session);
@@ -4646,8 +4694,7 @@ impl LedgerRouter {
         self.update_component_message(
             ctx,
             component,
-            i18n::VOID_CANCELLED_MESSAGE,
-            Vec::new(),
+            DiscordTextMessage::parse(i18n::VOID_CANCELLED_MESSAGE, Vec::new())?,
             DiscordCallSite::VoidUpdateResponse,
         )
         .await
@@ -4672,7 +4719,7 @@ impl LedgerRouter {
         else {
             return Ok(InteractionDispatch::Handled);
         };
-        if !matches!(session.stage(), VoidSessionStage::Confirming) {
+        if !matches!(session.stage(), VoidSessionStage::Confirming { .. }) {
             return self
                 .reply_component_ephemeral(
                     ctx,
@@ -4764,13 +4811,11 @@ impl LedgerRouter {
                 .await
             }
             VoidExecuteOutcome::UncertainBlocked | VoidExecuteOutcome::UncertainAppendFailed => {
-                let (message, components) =
-                    self.uncertain_write_block_response(ledger_id, true, false);
+                let message = self.uncertain_write_block_response(ledger_id, true, false);
                 self.edit_component_response_with_components(
                     ctx,
                     component,
                     message,
-                    components,
                     DiscordCallSite::VoidEditResponse,
                 )
                 .await
@@ -4786,9 +4831,9 @@ impl LedgerRouter {
     ) -> Result<InteractionDispatch, LedgerRouteError> {
         let rendered =
             DiscordLedgerPresenter::render_void_flow(&model).map_err(LedgerRouteError::from)?;
-        let (body, components) = rendered_surface_to_message(rendered);
+        let message = DiscordTextMessage::from(rendered);
         interaction
-            .edit(ctx, body, components, DiscordCallSite::VoidEditResponse)
+            .edit(ctx, message, DiscordCallSite::VoidEditResponse)
             .await
     }
 
@@ -4800,15 +4845,9 @@ impl LedgerRouter {
     ) -> Result<InteractionDispatch, LedgerRouteError> {
         let rendered =
             DiscordLedgerPresenter::render_void_flow(&model).map_err(LedgerRouteError::from)?;
-        let (body, components) = rendered_surface_to_message(rendered);
-        self.update_component_message(
-            ctx,
-            component,
-            body,
-            components,
-            DiscordCallSite::VoidUpdateResponse,
-        )
-        .await
+        let message = DiscordTextMessage::from(rendered);
+        self.update_component_message(ctx, component, message, DiscordCallSite::VoidUpdateResponse)
+            .await
     }
 
     async fn edit_component_with_void_model(
@@ -4819,12 +4858,13 @@ impl LedgerRouter {
     ) -> Result<InteractionDispatch, LedgerRouteError> {
         let rendered =
             DiscordLedgerPresenter::render_void_flow(&model).map_err(LedgerRouteError::from)?;
-        let (body, components) = rendered_surface_to_message(rendered);
+        let message = DiscordTextMessage::from(rendered);
+        let (content, components) = message.into_parts();
         component
             .edit_response(
                 &ctx.http,
                 safe_edit_interaction_response()
-                    .content(body)
+                    .content(content)
                     .components(components),
             )
             .await
@@ -4861,8 +4901,7 @@ impl LedgerRouter {
                         component,
                         VoidSurfaceModel::stale_page(
                             i18n::PANEL_VOID_BUTTON_LABEL,
-                            RecoveryCta::None,
-                            None,
+                            RecoveryAction::None,
                             false,
                             Vec::new(),
                             true,
@@ -4924,11 +4963,9 @@ impl LedgerRouter {
         let refreshed = VoidSession::new(
             session.key(),
             VoidSessionStage::SelectingCandidate,
-            None,
             session.nonce(),
             self.deps.clock.now(),
-        )
-        .expect("selecting void session has no required selection");
+        );
         let rows = void_candidate_rows(&candidates, &labels, ledger_id)?;
         let action_rows = void_selection_action_rows(session.nonce(), &candidates, &labels);
         self.deps.void_sessions.replace(refreshed);
@@ -4996,20 +5033,16 @@ impl LedgerRouter {
         let total_pages = session.page_count();
         let rendered = DiscordLedgerPresenter::render_read_view_page(session.current_page())
             .map_err(LedgerRouteError::from)?;
-        let (body, mut components) = rendered_surface_to_message(rendered);
+        let mut draft = DiscordDraft::resolve(rendered, crate::discord::svg_renderer::svg_to_png);
         if total_pages > 1 {
-            components.push(read_view_navigation_row(nonce, index, total_pages));
+            draft.push_component(read_view_navigation_row(nonce, index, total_pages));
         }
         self.deps.read_view_sessions.replace(session);
 
         component
             .create_response(
                 &ctx.http,
-                CreateInteractionResponse::UpdateMessage(
-                    safe_interaction_response_message()
-                        .content(body)
-                        .components(components),
-                ),
+                CreateInteractionResponse::UpdateMessage(draft.into_update_message()),
             )
             .await
             .map_err(discord_call_error(
@@ -5077,6 +5110,68 @@ fn settle_attempt_error_message(error: &SettleAttemptError) -> &'static str {
 
 fn review_route_guidance_lines_with_replacement_notice() -> Vec<String> {
     vec![i18n::SETTLEMENT_PREVIEW_REPLACED_MESSAGE.to_owned()]
+}
+
+fn append_participants_drift_cue(
+    message: DiscordTextMessage,
+    drifted: bool,
+) -> Result<DiscordTextMessage, RenderBudgetError> {
+    if !drifted {
+        return Ok(message);
+    }
+
+    let mut builder = message.into_builder();
+    builder.push_content_line(i18n::EXPENSE_PARTICIPANTS_DRIFTED_CUE);
+    builder.build()
+}
+
+fn review_settle_action(ledger_id: LedgerId, uncertain_write: bool) -> ReviewSettleAction {
+    if uncertain_write {
+        return ReviewSettleAction::Hidden;
+    }
+
+    ReviewSettleAction::enabled(format!("{REVIEW_SETTLE_CUSTOM_ID_PREFIX}{ledger_id}"))
+}
+
+fn review_recovery_action(
+    route: ReviewRoute,
+    scope: LedgerInteractionScope,
+    binding: CanonicalThreadBinding,
+) -> RecoveryAction {
+    review_recovery_action_for_channels(
+        route,
+        scope.guild_id(),
+        scope.channel_id(),
+        binding.canonical_thread_id(),
+    )
+}
+
+fn review_recovery_action_for_channels(
+    route: ReviewRoute,
+    guild_id: GuildId,
+    parent_channel_id: ChannelId,
+    canonical_thread_id: ChannelId,
+) -> RecoveryAction {
+    match route {
+        ReviewRoute::Parent => {
+            RecoveryAction::thread_link(discord_channel_url(guild_id, canonical_thread_id))
+        }
+        ReviewRoute::Thread => {
+            RecoveryAction::parent_link(discord_channel_url(guild_id, parent_channel_id))
+        }
+    }
+}
+
+fn empty_review_recovery_action(
+    route: ReviewRoute,
+    scope: LedgerInteractionScope,
+) -> RecoveryAction {
+    match route {
+        ReviewRoute::Parent => RecoveryAction::None,
+        ReviewRoute::Thread => {
+            RecoveryAction::parent_link(discord_channel_url(scope.guild_id(), scope.channel_id()))
+        }
+    }
 }
 
 pub(super) fn read_view_navigation_row(
@@ -5187,12 +5282,15 @@ fn recovery_reference_channel_id(reference: &LocatorRecoveryReference) -> Option
 fn ledger_refresh_recovery_reference(binding: CanonicalThreadBinding) -> LocatorRecoveryReference {
     LocatorRecoveryReference::ledger(
         format!("{:08x}", binding.ledger_id()),
-        Some(format!(
-            "https://discord.com/channels/{}/{}",
-            binding.tracked_parent().guild_id().get(),
-            binding.canonical_thread_id().get()
+        Some(discord_channel_url(
+            binding.tracked_parent().guild_id(),
+            binding.canonical_thread_id(),
         )),
     )
+}
+
+fn discord_channel_url(guild_id: GuildId, channel_id: ChannelId) -> DiscordLinkUrl {
+    DiscordLinkUrl::discord_channel(guild_id.get(), channel_id.get())
 }
 
 fn canonical_load_failure_blocks_locator(failure: CanonicalLoadFailure) -> bool {
@@ -5449,6 +5547,30 @@ mod tests {
         assert_eq!(panel_launcher(custom_id), expected);
     }
 
+    #[rstest]
+    #[case::parent_review_links_to_thread(
+        ReviewRoute::Parent,
+        RecoveryAction::thread_link(discord_channel_url(GuildId::new(10), ChannelId::new(40)))
+    )]
+    #[case::thread_review_links_to_parent(
+        ReviewRoute::Thread,
+        RecoveryAction::parent_link(discord_channel_url(GuildId::new(10), ChannelId::new(30)))
+    )]
+    fn review_recovery_action_links_to_the_counterpart_surface(
+        #[case] route: ReviewRoute,
+        #[case] expected: RecoveryAction,
+    ) {
+        assert_eq!(
+            review_recovery_action_for_channels(
+                route,
+                GuildId::new(10),
+                ChannelId::new(30),
+                ChannelId::new(40)
+            ),
+            expected
+        );
+    }
+
     #[test]
     fn route_error_variants_can_be_pattern_matched_distinctly() {
         let cases: [LedgerRouteError; 5] = [
@@ -5619,7 +5741,7 @@ mod tests {
             ledger_refresh_recovery_reference(binding),
             LocatorRecoveryReference::ledger(
                 "0000001e",
-                Some("https://discord.com/channels/10/30")
+                Some(discord_channel_url(GuildId::new(10), ChannelId::new(30)))
             )
         );
     }

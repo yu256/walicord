@@ -43,7 +43,7 @@ pub(super) fn void_candidate_rows(
         .iter()
         .map(|view| {
             Ok(VoidCandidateRow {
-                summary: expense_or_settlement_summary(view, labels),
+                summary: expense_or_settlement_summary(view, labels)?,
                 recovery_reference: void_recovery_reference(view, ledger_id),
             })
         })
@@ -67,18 +67,19 @@ pub(super) fn void_selection_action_rows(
     labels: &SurfaceMemberLabels,
 ) -> Vec<SurfaceActionRow> {
     let n = nonce;
+    let options = candidates
+        .iter()
+        .map(|view| SurfaceSelectOption {
+            value: view.entry_id().to_string(),
+            label: void_candidate_select_label(view, labels),
+            description: None,
+            selected: false,
+        })
+        .collect();
     vec![SurfaceActionRow::Select(SurfaceSelectMenu {
         custom_id: format!("{VOID_PICK_CUSTOM_ID_PREFIX}{n}"),
         placeholder: Some(i18n::VOID_SELECT_PLACEHOLDER.to_owned()),
-        options: candidates
-            .iter()
-            .map(|view| SurfaceSelectOption {
-                value: view.entry_id().to_string(),
-                label: void_candidate_select_label(view, labels),
-                description: None,
-                selected: false,
-            })
-            .collect(),
+        options,
         min_values: 1,
         max_values: 1,
         disabled: false,
@@ -129,15 +130,15 @@ fn void_candidate_select_label(
                 .map(|paid| paid.amount)
                 .sum::<Money>();
             let _ = match payer {
-                Some(payer) => write!(label, "#{entry_id} 支出 {amount}円 {payer}"),
-                None => write!(label, "#{entry_id} 支出 {amount}円"),
+                Some(payer) => write!(label, "\\#{entry_id} 支出 {amount}円 {payer}"),
+                None => write!(label, "\\#{entry_id} 支出 {amount}円"),
             };
         }
         ExpenseOrSettlementEvent::Settlement(event) => {
             let first = event.transfers().first();
             let _ = write!(
                 label,
-                "#{entry_id} 清算 {}->{} {}円",
+                "\\#{entry_id} 清算 {}->{} {}円",
                 labels.safe_member_label(first.from),
                 labels.safe_member_label(first.to),
                 first.amount
@@ -148,7 +149,7 @@ fn void_candidate_select_label(
             }
         }
     }
-    SafeLiteralText::from_roster_label(&label).expect("void candidate select label should sanitize")
+    SafeLiteralText::from_generated_roster_label(label)
 }
 
 #[allow(clippy::result_large_err)] // LedgerRouteError is the router-wide error envelope.
@@ -161,7 +162,7 @@ pub(super) fn void_confirmation_model(
     Ok(VoidSurfaceModel::confirmation(
         i18n::VOID_CONFIRMATION_TITLE,
         VoidConfirmationRecap {
-            summary: expense_or_settlement_summary(target, labels),
+            summary: expense_or_settlement_summary(target, labels)?,
             total_amount: void_confirmation_total_amount(target),
             recovery_reference: void_recovery_reference(target, ledger_id),
         },

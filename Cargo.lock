@@ -3502,6 +3502,7 @@ dependencies = [
  "strum",
  "thiserror 2.0.17",
  "tracing",
+ "url",
  "walicord-application",
  "walicord-domain",
  "walicord-i18n",

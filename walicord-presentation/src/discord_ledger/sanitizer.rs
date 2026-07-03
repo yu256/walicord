@@ -1,18 +1,37 @@
 use std::{fmt, time::SystemTime};
 
-use chrono::{NaiveDateTime, TimeZone, Utc};
+use chrono::{NaiveDateTime, Utc};
 use walicord_application::business_calendar::business_timezone;
+
+use super::budgets::DISCORD_COMPONENT_LABEL_LIMIT;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SafeLiteralText(String);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum SafeLiteralTextError {
+    #[error("note text normalizes to an empty literal")]
+    EmptyNote,
+}
 
 impl SafeLiteralText {
     pub fn from_note(raw: &str) -> Option<Self> {
         normalize_note_like(raw).map(Self)
     }
 
+    pub fn parse_note(raw: &str) -> Result<Self, SafeLiteralTextError> {
+        Self::from_note(raw).ok_or(SafeLiteralTextError::EmptyNote)
+    }
+
     pub fn from_roster_label(raw: &str) -> Option<Self> {
         normalize_roster_label(raw).map(Self)
+    }
+
+    /// Use for roster labels assembled from fixed copy, numeric ids, and existing
+    /// `SafeLiteralText` values. Untrusted user / Discord text must go through
+    /// `from_roster_label`.
+    pub fn from_generated_roster_label(raw: impl Into<String>) -> Self {
+        Self(raw.into())
     }
 
     pub fn as_str(&self) -> &str {
@@ -21,6 +40,17 @@ impl SafeLiteralText {
 
     pub fn into_inner(self) -> String {
         self.0
+    }
+
+    pub fn truncate_for_component_label(&self) -> Self {
+        let actual = self.0.chars().count();
+        if actual <= DISCORD_COMPONENT_LABEL_LIMIT {
+            return self.clone();
+        }
+
+        let keep = DISCORD_COMPONENT_LABEL_LIMIT.saturating_sub(1);
+        let prefix: String = self.0.chars().take(keep).collect();
+        Self(format!("{prefix}…"))
     }
 }
 
@@ -46,19 +76,9 @@ impl BusinessDateTime {
             .map(Self)
     }
 
-    /// Convert a `SystemTime` into the business timezone wall clock. The `expect` is a
-    /// total function: `FixedOffset` validity is checked once when `business_timezone`
-    /// is built, and a fixed offset has no DST fold / gap, so `single()` always
-    /// returns `Some` for any UNIX timestamp.
     pub fn from_system_time(recorded_at: SystemTime) -> Self {
         let recorded_at = chrono::DateTime::<Utc>::from(recorded_at);
-        let local = business_timezone()
-            .timestamp_opt(
-                recorded_at.timestamp(),
-                recorded_at.timestamp_subsec_nanos(),
-            )
-            .single()
-            .expect("fixed-offset timezone has no fold / gap; single() is total");
+        let local = recorded_at.with_timezone(&business_timezone());
         Self(local.naive_local())
     }
 }
@@ -86,12 +106,16 @@ fn is_removed_format_char(ch: char) -> bool {
 }
 
 fn url_like_host_candidate(token: &str) -> Option<&str> {
-    let host = token
-        .split(['/', ':', '?', '#'])
-        .next()
-        .unwrap_or(token)
-        .trim_end_matches([',', '.', ';', '!', '?', ')', ']', '}']);
+    let host =
+        first_url_host_segment(token).trim_end_matches([',', '.', ';', '!', '?', ')', ']', '}']);
     (!host.is_empty()).then_some(host)
+}
+
+fn first_url_host_segment(token: &str) -> &str {
+    match token.find(['/', ':', '?', '#']) {
+        Some(index) => &token[..index],
+        None => token,
+    }
 }
 
 fn looks_like_host_token(token: &str) -> bool {

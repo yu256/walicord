@@ -111,6 +111,12 @@ pub struct MessageCache {
     inner: Arc<DashMap<ChannelId, IndexMap<MessageId, CachedMessage>>>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MessageCacheRead<T> {
+    Loaded(T),
+    NotLoaded,
+}
+
 impl MessageCache {
     pub fn new() -> Self {
         Self {
@@ -161,13 +167,14 @@ impl MessageCache {
         }
     }
 
-    pub fn with_messages<F, R>(&self, channel_id: TrackedChannelId, f: F) -> Option<R>
+    pub fn read_messages<F, R>(&self, channel_id: TrackedChannelId, f: F) -> MessageCacheRead<R>
     where
         F: FnOnce(&IndexMap<MessageId, CachedMessage>) -> R,
     {
-        self.inner
-            .get(&channel_id.get())
-            .map(|ref_val| f(ref_val.value()))
+        match self.inner.get(&channel_id.get()) {
+            Some(ref_val) => MessageCacheRead::Loaded(f(ref_val.value())),
+            None => MessageCacheRead::NotLoaded,
+        }
     }
 
     /// Insert or update a message in the cache for a tracked channel.
@@ -289,11 +296,11 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case::existing_channel_returns_some(ChannelId::new(1), Some(1))]
-    #[case::missing_channel_returns_none(ChannelId::new(99), None)]
-    fn with_messages_returns_result_or_none(
+    #[case::existing_channel_is_loaded(ChannelId::new(1), MessageCacheRead::Loaded(1))]
+    #[case::missing_channel_is_not_loaded(ChannelId::new(99), MessageCacheRead::NotLoaded)]
+    fn read_messages_returns_loaded_or_not_loaded(
         #[case] channel_id: ChannelId,
-        #[case] expected: Option<usize>,
+        #[case] expected: MessageCacheRead<usize>,
     ) {
         let cache = MessageCache::new();
         let mut messages = IndexMap::new();
@@ -301,7 +308,7 @@ mod tests {
         cache.insert(TrackedChannelId::new_for_test(ChannelId::new(1)), messages);
 
         let tracked_id = TrackedChannelId::new_for_test(channel_id);
-        let result = cache.with_messages(tracked_id, |msgs| msgs.len());
+        let result = cache.read_messages(tracked_id, |msgs| msgs.len());
         assert_eq!(result, expected);
     }
 

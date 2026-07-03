@@ -68,6 +68,7 @@ pub struct VerifiedLedgerThreadLoad<ExternalId> {
     snapshot: VerifiedLedgerSnapshot,
     transport_index: VerifiedEntryTransportIndex,
     verified: Vec<VerifiedLedgerStoreEnvelope<ExternalId>>,
+    verified_transport: Vec<VerifiedEntryTransport>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -82,11 +83,13 @@ impl<ExternalId> VerifiedLedgerThreadLoad<ExternalId> {
         verified: Vec<VerifiedLedgerStoreEnvelope<ExternalId>>,
         transport_entries: BTreeMap<LedgerEntryId, VerifiedEntryTransport>,
     ) -> Result<Self, VerifiedLedgerThreadLoadError> {
+        let mut verified_transport = Vec::with_capacity(verified.len());
         for envelope in &verified {
             let entry_id = envelope.payload().entry.id;
-            if !transport_entries.contains_key(&entry_id) {
+            let Some(transport) = transport_entries.get(&entry_id) else {
                 return Err(VerifiedLedgerThreadLoadError::MissingTransport { entry_id });
-            }
+            };
+            verified_transport.push(transport.clone());
         }
         Ok(Self {
             snapshot,
@@ -94,6 +97,7 @@ impl<ExternalId> VerifiedLedgerThreadLoad<ExternalId> {
                 by_entry_id: transport_entries,
             },
             verified,
+            verified_transport,
         })
     }
 
@@ -107,6 +111,17 @@ impl<ExternalId> VerifiedLedgerThreadLoad<ExternalId> {
 
     pub fn verified(&self) -> &[VerifiedLedgerStoreEnvelope<ExternalId>] {
         &self.verified
+    }
+
+    fn verified_with_transport(
+        &self,
+    ) -> impl Iterator<
+        Item = (
+            &VerifiedLedgerStoreEnvelope<ExternalId>,
+            &VerifiedEntryTransport,
+        ),
+    > {
+        self.verified.iter().zip(self.verified_transport.iter())
     }
 
     pub fn next_entry_id(&self) -> Result<LedgerEntryId, NextLedgerEntryIdError> {
@@ -124,6 +139,7 @@ impl<ExternalId> VerifiedLedgerThreadLoad<ExternalId> {
         VerifiedLedgerThreadLoad {
             snapshot: self.snapshot,
             transport_index: self.transport_index,
+            verified_transport: self.verified_transport,
             verified: self
                 .verified
                 .into_iter()
@@ -139,17 +155,15 @@ pub enum NextLedgerEntryIdError {
     Exhausted,
 }
 
+const EMPTY_LEDGER_NEXT_ENTRY_ID: LedgerEntryId = LedgerEntryId(1);
+
 pub fn next_ledger_entry_id(
     entry_ids: impl IntoIterator<Item = LedgerEntryId>,
 ) -> Result<LedgerEntryId, NextLedgerEntryIdError> {
-    entry_ids
-        .into_iter()
-        .map(|entry_id| entry_id.0)
-        .max()
-        .unwrap_or_default()
-        .checked_add(1)
-        .map(LedgerEntryId)
-        .ok_or(NextLedgerEntryIdError::Exhausted)
+    match entry_ids.into_iter().max() {
+        Some(entry_id) => entry_id.next().ok_or(NextLedgerEntryIdError::Exhausted),
+        None => Ok(EMPTY_LEDGER_NEXT_ENTRY_ID),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -190,22 +204,15 @@ pub fn project_verified_entries<ExternalId>(
     let projected = load.snapshot().projected();
     let mut out = Vec::with_capacity(load.verified().len());
 
-    for envelope in load.verified() {
+    for (envelope, transport) in load.verified_with_transport() {
         let entry = envelope.payload().entry.clone();
         let entry_id = entry.id;
         let projected_entry = projected
             .entry(entry_id)
             .cloned()
             .ok_or(ProjectionConsistencyError::MissingProjectedEntry { entry_id })?;
-        let transport = load
-            .transport_index()
-            .get(entry_id)
-            .expect("VerifiedLedgerThreadLoad::new validates every verified envelope has a paired transport entry");
         out.push(VerifiedLedgerEntryView {
-            recorded_at: entry
-                .metadata
-                .recorded_at
-                .unwrap_or_else(|| transport.recorded_at()),
+            recorded_at: recorded_at_with_transport_fallback(&entry.metadata, transport),
             entry,
             projected: projected_entry,
             message_link: transport.message_link().to_owned(),
@@ -213,6 +220,16 @@ pub fn project_verified_entries<ExternalId>(
     }
 
     Ok(out)
+}
+
+fn recorded_at_with_transport_fallback(
+    metadata: &LedgerEntryMetadata,
+    transport: &VerifiedEntryTransport,
+) -> SystemTime {
+    match metadata.recorded_at {
+        Some(recorded_at) => recorded_at,
+        None => transport.recorded_at(),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

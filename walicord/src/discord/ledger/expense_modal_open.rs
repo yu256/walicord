@@ -33,6 +33,15 @@ pub struct ExpenseModalPrefill {
     pub raw_date: Option<String>,
 }
 
+impl ExpenseModalPrefill {
+    fn date_value(&self, clock: &dyn Clock) -> String {
+        match self.raw_date.as_ref() {
+            Some(raw_date) => raw_date.clone(),
+            None => clock.today_business_date().to_string(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ExpenseModalBuildError {
     #[error("modal exceeded a Discord render budget: {0}")]
@@ -90,17 +99,17 @@ pub fn parse_expense_weight_modal_submission(
     modal: &ModalInteraction,
     username_to_member: &BTreeMap<&str, MemberId>,
 ) -> Result<BTreeMap<MemberId, Weight>, ExpenseWeightModalParseError> {
-    let mut raw = None;
+    let mut raw = String::new();
     for row in &modal.data.components {
         for component in &row.components {
             if let ActionRowComponent::InputText(input) = component
                 && input.custom_id == WEIGHTS_FIELD
             {
-                raw = input.value.as_deref();
+                raw = input.value.clone().unwrap_or_default();
             }
         }
     }
-    parse_weight_overrides(raw.unwrap_or_default(), username_to_member)
+    parse_weight_overrides(&raw, username_to_member)
 }
 
 fn parse_weight_overrides(
@@ -155,8 +164,8 @@ pub fn extract_raw_expense_modal_submission(
     }
     Some(RawExpenseModalSubmission {
         raw_amount: amount?,
-        raw_note: note.unwrap_or_default(),
-        raw_date: date.unwrap_or_default(),
+        raw_note: note?,
+        raw_date: date?,
     })
 }
 
@@ -192,8 +201,7 @@ pub fn build_expense_modal_response(
     let date_placeholder = truncate_component_label(i18n::EXPENSE_MODAL_DATE_PLACEHOLDER);
     validate_text_input_placeholder(&date_placeholder).map_err(ExpenseModalBuildError::Budget)?;
 
-    let today_value = clock.today_business_date().to_string();
-    let date_value = prefill.raw_date.clone().unwrap_or(today_value);
+    let date_value = prefill.date_value(clock);
 
     let mut amount_input = CreateInputText::new(InputTextStyle::Short, amount_label, AMOUNT_FIELD)
         .placeholder(amount_placeholder)

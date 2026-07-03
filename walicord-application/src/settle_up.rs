@@ -278,8 +278,8 @@ impl PreviewedSettlement {
     ///                )?;
     /// ```
     ///
-    /// The digest is stable across runs because it is computed from a versioned,
-    /// self-describing canonical byte encoding, not from any session-local state.
+    /// The digest is stable across runs because it is computed from a canonical byte
+    /// encoding, not from any session-local state.
     ///
     /// **Important boundary note:** this digest binds the previewed settlement value
     /// itself, but it does **not** prove that the confirm request is still operating on
@@ -290,7 +290,7 @@ impl PreviewedSettlement {
     /// head after more entries have been appended.
     pub fn digest(&self) -> PreviewedSettlementDigest {
         use sha2::{Digest as _, Sha256};
-        let encoded = encode_previewed_settlement_v1(self);
+        let encoded = encode_previewed_settlement(self);
         PreviewedSettlementDigest(Sha256::digest(encoded).into())
     }
 }
@@ -308,6 +308,10 @@ impl PreviewInstanceId {
         NonZeroU64::new(value)
             .map(Self)
             .ok_or(PreviewInstanceIdError::Zero)
+    }
+
+    pub fn from_nonzero(value: NonZeroU64) -> Self {
+        Self(value)
     }
 }
 
@@ -439,13 +443,8 @@ impl PreviewConfirmationBinding {
     }
 }
 
-const PREVIEWED_SETTLEMENT_DIGEST_DOMAIN_SEPARATOR: &[u8] = b"walicord:previewed-settlement-digest";
-const PREVIEWED_SETTLEMENT_DIGEST_SCHEMA_V1: u32 = 1;
-
-fn encode_previewed_settlement_v1(previewed: &PreviewedSettlement) -> Vec<u8> {
+fn encode_previewed_settlement(previewed: &PreviewedSettlement) -> Vec<u8> {
     let mut out = Vec::new();
-    out.extend_from_slice(PREVIEWED_SETTLEMENT_DIGEST_DOMAIN_SEPARATOR);
-    out.extend_from_slice(&PREVIEWED_SETTLEMENT_DIGEST_SCHEMA_V1.to_be_bytes());
 
     // Canonicalize the inputs so iteration order in HashMap-backed structures cannot
     // shift the digest. Sorting by `MemberId` keeps the digest reproducible across
@@ -456,7 +455,7 @@ fn encode_previewed_settlement_v1(previewed: &PreviewedSettlement) -> Vec<u8> {
         .map(|(id, money)| (*id, *money))
         .collect();
     input_pairs.sort_by_key(|(id, _)| *id);
-    encode_len_u32(&mut out, input_pairs.len());
+    encode_len(&mut out, input_pairs.len());
     for (id, money) in &input_pairs {
         encode_member_id(&mut out, *id);
         encode_money(&mut out, *money);
@@ -466,14 +465,14 @@ fn encode_previewed_settlement_v1(previewed: &PreviewedSettlement) -> Vec<u8> {
     // previews that name the same set in different orders share a digest.
     let mut settle_sorted = previewed.settle_members.clone();
     settle_sorted.sort();
-    encode_len_u32(&mut out, settle_sorted.len());
+    encode_len(&mut out, settle_sorted.len());
     for id in &settle_sorted {
         encode_member_id(&mut out, *id);
     }
 
     // `plan.transfers` is already in canonical (`NormalizedSettlementPlanRecorded`)
     // order, set by `preview`, so iteration order is deterministic.
-    encode_len_u32(&mut out, previewed.plan.transfers().len());
+    encode_len(&mut out, previewed.plan.transfers().len());
     for transfer in previewed.plan.transfers() {
         encode_member_id(&mut out, transfer.from);
         encode_member_id(&mut out, transfer.to);
@@ -486,9 +485,8 @@ fn encode_previewed_settlement_v1(previewed: &PreviewedSettlement) -> Vec<u8> {
     out
 }
 
-fn encode_len_u32(out: &mut Vec<u8>, len: usize) {
-    let len = u32::try_from(len).expect("preview digest section length exceeds u32::MAX");
-    out.extend_from_slice(&len.to_be_bytes());
+fn encode_len(out: &mut Vec<u8>, len: usize) {
+    out.extend_from_slice(&(len as u64).to_be_bytes());
 }
 
 fn encode_member_id(out: &mut Vec<u8>, member_id: MemberId) {
@@ -709,11 +707,7 @@ fn validate_settlement_plan(
 
     let expected_balances = remaining;
     for (member, expected) in &expected_balances {
-        let actual = plan
-            .new_balances
-            .get(member)
-            .copied()
-            .unwrap_or(Money::ZERO);
+        let actual = balance_or_zero(&plan.new_balances, *member);
         if actual != *expected {
             return Err(SettlementPlanValidationError::NewBalancesMismatch {
                 member: *member,
@@ -733,11 +727,7 @@ fn validate_settlement_plan(
     }
 
     for member in settle_members {
-        let balance = plan
-            .new_balances
-            .get(member)
-            .copied()
-            .unwrap_or(Money::ZERO);
+        let balance = balance_or_zero(&plan.new_balances, *member);
         if balance != Money::ZERO {
             return Err(SettlementPlanValidationError::SettleMemberNotZero {
                 member: *member,
@@ -776,6 +766,13 @@ fn validate_settlement_plan(
         },
         ledger_event_outcome,
     })
+}
+
+fn balance_or_zero(balances: &MemberBalances, member: MemberId) -> Money {
+    match balances.get(&member) {
+        Some(balance) => *balance,
+        None => Money::ZERO,
+    }
 }
 
 #[cfg(test)]
@@ -1157,7 +1154,7 @@ mod tests {
     }
 
     #[test]
-    fn previewed_settlement_digest_uses_versioned_self_describing_encoding() {
+    fn previewed_settlement_digest_encoding_starts_with_input_balance_count() {
         let input = balances([(1, 100), (2, -100)]);
         let context = SettlementContext::jpy_default();
         let previewed = SettleUpPolicy::preview(
@@ -1169,23 +1166,10 @@ mod tests {
         )
         .expect("preview should succeed");
 
-        let encoded = encode_previewed_settlement_v1(&previewed);
-        let domain_len = PREVIEWED_SETTLEMENT_DIGEST_DOMAIN_SEPARATOR.len();
-        let schema_start = domain_len;
-        let input_count_start = schema_start + std::mem::size_of::<u32>();
-        let schema =
-            u32::from_be_bytes(encoded[schema_start..input_count_start].try_into().unwrap());
-        let input_count = u32::from_be_bytes(
-            encoded[input_count_start..input_count_start + std::mem::size_of::<u32>()]
-                .try_into()
-                .unwrap(),
-        );
+        let encoded = encode_previewed_settlement(&previewed);
+        let input_count =
+            u64::from_be_bytes(encoded[..std::mem::size_of::<u64>()].try_into().unwrap());
 
-        assert_eq!(
-            &encoded[..domain_len],
-            PREVIEWED_SETTLEMENT_DIGEST_DOMAIN_SEPARATOR
-        );
-        assert_eq!(schema, PREVIEWED_SETTLEMENT_DIGEST_SCHEMA_V1);
         assert_eq!(input_count, 2);
     }
 

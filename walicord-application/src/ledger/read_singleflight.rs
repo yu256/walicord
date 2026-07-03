@@ -1,8 +1,5 @@
-use std::{
-    collections::HashMap,
-    hash::Hash,
-    sync::{Arc, Mutex},
-};
+use parking_lot::Mutex;
+use std::{collections::HashMap, hash::Hash, sync::Arc};
 use tokio::sync::watch;
 
 /// Coalesces concurrent same-key read operations into a single in-flight execution.
@@ -65,10 +62,7 @@ where
         }
 
         let slot: Slot<V, E> = {
-            let mut map = self
-                .in_flight
-                .lock()
-                .expect("ReadSingleflight mutex poisoned");
+            let mut map = self.in_flight.lock();
             if let Some(rx) = map.get(&key) {
                 Slot::Waiter(rx.clone())
             } else {
@@ -101,10 +95,7 @@ where
     }
 
     fn remove(&self, key: &K) {
-        self.in_flight
-            .lock()
-            .expect("ReadSingleflight mutex poisoned")
-            .remove(key);
+        self.in_flight.lock().remove(key);
     }
 }
 

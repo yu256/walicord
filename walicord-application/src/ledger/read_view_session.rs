@@ -7,7 +7,7 @@ use std::{
 use walicord_domain::model::MemberId;
 use walicord_ledger::LedgerId;
 
-use crate::ports::SessionNonce;
+use crate::{ledger::time::non_negative_elapsed_since, ports::SessionNonce};
 
 /// Read-view sessions expire after this long so stale paginated views do not block
 /// the actor from reopening `/ledger` / `/review` with fresh data.
@@ -23,7 +23,7 @@ pub struct ReadViewSessionKey {
 pub struct ReadViewSession<Page> {
     key: ReadViewSessionKey,
     nonce: SessionNonce,
-    pages: Vec<Page>,
+    pages: walicord_domain::NonEmptyVec<Page>,
     current_page: usize,
     last_touched: SystemTime,
 }
@@ -32,13 +32,9 @@ impl<Page> ReadViewSession<Page> {
     pub fn new(
         key: ReadViewSessionKey,
         nonce: SessionNonce,
-        pages: Vec<Page>,
+        pages: walicord_domain::NonEmptyVec<Page>,
         now: SystemTime,
     ) -> Self {
-        debug_assert!(
-            !pages.is_empty(),
-            "read view session must hold at least one page"
-        );
         Self {
             key,
             nonce,
@@ -125,7 +121,7 @@ where
     pub fn peek(&self, key: ReadViewSessionKey, now: SystemTime) -> Option<Page> {
         let mut guard = self.by_key.lock();
         let session = guard.get(&key)?;
-        let elapsed = now.duration_since(session.last_touched).unwrap_or_default();
+        let elapsed = non_negative_elapsed_since(now, session.last_touched);
         if elapsed >= READ_VIEW_SESSION_TTL {
             guard.remove(&key);
             return None;
@@ -153,7 +149,7 @@ where
         let Some(session) = guard.get(&key).cloned() else {
             return Ok(None);
         };
-        let elapsed = now.duration_since(session.last_touched).unwrap_or_default();
+        let elapsed = non_negative_elapsed_since(now, session.last_touched);
         if elapsed >= READ_VIEW_SESSION_TTL {
             guard.remove(&key);
             return Err(ReadViewSessionAccessError::Expired);
@@ -185,8 +181,12 @@ mod tests {
 
     #[test]
     fn advance_and_retreat_walk_pages_within_bounds() {
-        let mut session =
-            ReadViewSession::new(key(), nonce(1), vec!["a", "b", "c"], SystemTime::UNIX_EPOCH);
+        let mut session = ReadViewSession::new(
+            key(),
+            nonce(1),
+            walicord_domain::NonEmptyVec::new(vec!["a", "b", "c"]).expect("test"),
+            SystemTime::UNIX_EPOCH,
+        );
         assert_eq!(*session.current_page(), "a");
         assert!(session.advance(SystemTime::UNIX_EPOCH));
         assert_eq!(*session.current_page(), "b");
@@ -206,7 +206,7 @@ mod tests {
         store.replace(ReadViewSession::new(
             key(),
             nonce(1),
-            vec!["page"],
+            walicord_domain::NonEmptyVec::new(vec!["page"]).expect("test"),
             SystemTime::UNIX_EPOCH,
         ));
         let actual = store
@@ -221,7 +221,7 @@ mod tests {
         store.replace(ReadViewSession::new(
             key(),
             nonce(1),
-            vec!["page"],
+            walicord_domain::NonEmptyVec::new(vec!["page"]).expect("test"),
             SystemTime::UNIX_EPOCH,
         ));
         let actual = store.access(key(), nonce(2), SystemTime::UNIX_EPOCH);
@@ -237,7 +237,7 @@ mod tests {
         store.replace(ReadViewSession::new(
             key(),
             nonce(1),
-            vec!["page"],
+            walicord_domain::NonEmptyVec::new(vec!["page"]).expect("test"),
             SystemTime::UNIX_EPOCH,
         ));
         let later = SystemTime::UNIX_EPOCH + READ_VIEW_SESSION_TTL;
@@ -253,7 +253,7 @@ mod tests {
         store.replace(ReadViewSession::new(
             key(),
             nonce(1),
-            vec!["page"],
+            walicord_domain::NonEmptyVec::new(vec!["page"]).expect("test"),
             SystemTime::UNIX_EPOCH,
         ));
 
@@ -272,7 +272,7 @@ mod tests {
         store.replace(ReadViewSession::new(
             key(),
             nonce(1),
-            vec!["page"],
+            walicord_domain::NonEmptyVec::new(vec!["page"]).expect("test"),
             SystemTime::UNIX_EPOCH,
         ));
 
@@ -297,13 +297,13 @@ mod tests {
         store.replace(ReadViewSession::new(
             key(),
             nonce(1),
-            vec!["removed"],
+            walicord_domain::NonEmptyVec::new(vec!["removed"]).expect("test"),
             SystemTime::UNIX_EPOCH,
         ));
         store.replace(ReadViewSession::new(
             retained_key,
             nonce(2),
-            vec!["retained"],
+            walicord_domain::NonEmptyVec::new(vec!["retained"]).expect("test"),
             SystemTime::UNIX_EPOCH,
         ));
 

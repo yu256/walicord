@@ -14,7 +14,10 @@ use std::{
     sync::OnceLock,
 };
 
-use crate::services::{MemberSetResolutionError, MemberSetResolver};
+use crate::{
+    NonEmptyVec,
+    services::{MemberSetResolutionError, MemberSetResolver},
+};
 
 mod balance_accumulator_impl;
 mod settlement_support;
@@ -145,45 +148,72 @@ impl WeightOverrides {
         &self,
         members: &MemberSet,
         resolver: &MemberSetResolver<'a>,
-    ) -> Option<Vec<Weight>> {
-        let mut weights = vec![Weight(1); members.members().len()];
+    ) -> Option<NonEmptyVec<Weight>> {
+        let mut weights = ResolvedWeightVector::for_members(members)?;
         if self.entries.is_empty() {
-            return Some(weights);
+            return Some(weights.into_non_empty());
         }
-
-        let member_to_index: FxHashMap<MemberId, usize> = members
-            .iter()
-            .enumerate()
-            .map(|(idx, member_id)| (member_id, idx))
-            .collect();
 
         for entry in &self.entries {
             match &entry.target {
                 WeightOverrideTarget::Member(member_id) => {
-                    if let Some(&idx) = member_to_index.get(member_id) {
-                        weights[idx] = entry.weight;
-                    }
+                    weights.set_member_if_present(*member_id, entry.weight);
                 }
                 WeightOverrideTarget::Role(role_id) => {
                     let role_members = resolver.role_members(*role_id)?;
                     for member_id in role_members {
-                        if let Some(&idx) = member_to_index.get(member_id) {
-                            weights[idx] = entry.weight;
-                        }
+                        weights.set_member_if_present(*member_id, entry.weight);
                     }
                 }
                 WeightOverrideTarget::Group(group_name) => {
                     let group_members = resolver.group_members(group_name.as_str())?;
                     for member_id in group_members {
-                        if let Some(&idx) = member_to_index.get(member_id) {
-                            weights[idx] = entry.weight;
-                        }
+                        weights.set_member_if_present(*member_id, entry.weight);
                     }
                 }
             }
         }
 
-        Some(weights)
+        Some(weights.into_non_empty())
+    }
+}
+
+struct ResolvedWeightVector {
+    member_to_index: FxHashMap<MemberId, usize>,
+    first: Weight,
+    rest: Vec<Weight>,
+}
+
+impl ResolvedWeightVector {
+    fn for_members(members: &MemberSet) -> Option<Self> {
+        let mut member_iter = members.iter();
+        let first_member = member_iter.next()?;
+        let mut member_to_index =
+            FxHashMap::with_capacity_and_hasher(members.members().len(), Default::default());
+        member_to_index.insert(first_member, 0);
+        let mut rest = Vec::with_capacity(members.members().len().saturating_sub(1));
+        for (index, member_id) in member_iter.enumerate() {
+            member_to_index.insert(member_id, index + 1);
+            rest.push(Weight(1));
+        }
+
+        Some(Self {
+            member_to_index,
+            first: Weight(1),
+            rest,
+        })
+    }
+
+    fn set_member_if_present(&mut self, member_id: MemberId, weight: Weight) {
+        match self.member_to_index.get(&member_id).copied() {
+            Some(0) => self.first = weight,
+            Some(index) => self.rest[index - 1] = weight,
+            None => {}
+        }
+    }
+
+    fn into_non_empty(self) -> NonEmptyVec<Weight> {
+        NonEmptyVec::from_first_and_rest(self.first, self.rest)
     }
 }
 
@@ -236,13 +266,7 @@ impl AllocationStrategy {
                 let Some(weight_vec) = overrides.resolved_weight_vector(members, resolver) else {
                     return Ok(None);
                 };
-                let ratios = Ratios::try_new(weight_vec).map_err(|err| match err {
-                    SplitError::WeightOverflow => BalanceError::WeightOverflow,
-                    SplitError::ZeroTotalRatio => BalanceError::ZeroTotalWeight,
-                    SplitError::EmptyRatios | SplitError::ZeroRecipients => {
-                        unreachable!("non-empty payee members should produce non-empty ratios")
-                    }
-                })?;
+                let ratios = Ratios::try_from_non_empty(weight_vec).map_err(BalanceError::from)?;
                 Ok(Some(ResolvedAllocationStrategy::Weighted(ratios)))
             }
         }
@@ -366,12 +390,29 @@ pub enum BalanceError {
     ZeroTotalWeight,
 }
 
+impl From<NonEmptyRatioError> for BalanceError {
+    fn from(error: NonEmptyRatioError) -> Self {
+        match error {
+            NonEmptyRatioError::WeightOverflow => Self::WeightOverflow,
+            NonEmptyRatioError::ZeroTotalRatio => Self::ZeroTotalWeight,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum SplitError {
     #[error("split target has zero recipients")]
     ZeroRecipients,
     #[error("split ratios are empty")]
     EmptyRatios,
+    #[error("sum of split ratios is zero")]
+    ZeroTotalRatio,
+    #[error("weight overflow during split")]
+    WeightOverflow,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+enum NonEmptyRatioError {
     #[error("sum of split ratios is zero")]
     ZeroTotalRatio,
     #[error("weight overflow during split")]
@@ -386,17 +427,22 @@ pub struct Ratios {
 
 impl Ratios {
     pub fn try_new(weights: Vec<Weight>) -> Result<Self, SplitError> {
-        if weights.is_empty() {
-            return Err(SplitError::EmptyRatios);
-        }
+        let weights = NonEmptyVec::new(weights).map_err(|_| SplitError::EmptyRatios)?;
+        Self::try_from_non_empty(weights).map_err(|error| match error {
+            NonEmptyRatioError::WeightOverflow => SplitError::WeightOverflow,
+            NonEmptyRatioError::ZeroTotalRatio => SplitError::ZeroTotalRatio,
+        })
+    }
 
+    fn try_from_non_empty(weights: NonEmptyVec<Weight>) -> Result<Self, NonEmptyRatioError> {
+        let weights = weights.into_vec();
         let total: Option<Weight> = weights
             .iter()
             .copied()
             .try_fold(Weight::ZERO, Weight::checked_add);
         match total {
-            None => Err(SplitError::WeightOverflow),
-            Some(Weight::ZERO) => Err(SplitError::ZeroTotalRatio),
+            None => Err(NonEmptyRatioError::WeightOverflow),
+            Some(Weight::ZERO) => Err(NonEmptyRatioError::ZeroTotalRatio),
             Some(total) => Ok(Self { weights, total }),
         }
     }
@@ -626,7 +672,7 @@ impl AmountExpr {
         }
 
         if stack.len() == 1 {
-            Ok(stack.pop().unwrap_or(Decimal::ZERO))
+            Ok(stack[0])
         } else {
             Err(AmountError::Overflow)
         }
@@ -820,7 +866,10 @@ impl MemberIndex {
     {
         let members = members.into_iter();
         let (_, upper) = members.size_hint();
-        let cap = upper.unwrap_or_default().min(M::BITS);
+        let cap = match upper {
+            Some(upper) => upper.min(M::BITS),
+            None => 0,
+        };
 
         let mut idx_to_id = Vec::with_capacity(cap);
         let mut id_to_idx = FxHashMap::with_capacity_and_hasher(cap, Default::default());
@@ -1211,57 +1260,6 @@ impl<'a> Program<'a> {
             accumulator.apply(stmt)?;
         }
         Ok(accumulator.into_balances())
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("vector must not be empty")]
-pub struct EmptyVecError;
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct NonEmptyVec<T> {
-    inner: Vec<T>,
-}
-
-impl<T> NonEmptyVec<T> {
-    pub fn new(inner: Vec<T>) -> Result<Self, EmptyVecError> {
-        if inner.is_empty() {
-            return Err(EmptyVecError);
-        }
-        Ok(Self { inner })
-    }
-
-    pub fn first(&self) -> &T {
-        &self.inner[0]
-    }
-}
-
-impl<T> std::ops::Deref for NonEmptyVec<T> {
-    type Target = [T];
-
-    fn deref(&self) -> &[T] {
-        &self.inner
-    }
-}
-
-impl<T: PartialEq> PartialEq<[T]> for NonEmptyVec<T> {
-    fn eq(&self, other: &[T]) -> bool {
-        self.inner == other
-    }
-}
-
-impl<T: PartialEq, const N: usize> PartialEq<[T; N]> for NonEmptyVec<T> {
-    fn eq(&self, other: &[T; N]) -> bool {
-        self.inner.as_slice() == other
-    }
-}
-
-impl<'a, T> IntoIterator for &'a NonEmptyVec<T> {
-    type Item = &'a T;
-    type IntoIter = std::slice::Iter<'a, T>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.inner.iter()
     }
 }
 

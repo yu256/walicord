@@ -118,6 +118,13 @@ impl ProjectedEntryIndex {
     /// audit-time adjustment. Distinct from `latest_append_entry`, which includes markers
     /// and adjustments.
     pub fn latest_unvoided_expense_or_settlement_entry(&self) -> Option<EntryAppendPosition> {
+        self.latest_unvoided_expense_or_settlement_entry_info()
+            .map(|(position, _)| position)
+    }
+
+    pub fn latest_unvoided_expense_or_settlement_entry_info(
+        &self,
+    ) -> Option<(EntryAppendPosition, &ProjectedEntryInfo)> {
         self.by_entry
             .iter()
             .filter(|(_, info)| {
@@ -127,9 +134,14 @@ impl ProjectedEntryIndex {
                 ) && !info.voided
             })
             .max_by_key(|(_, info)| info.append_position)
-            .map(|(entry_id, info)| EntryAppendPosition {
-                entry_id: *entry_id,
-                append_position: info.append_position,
+            .map(|(entry_id, info)| {
+                (
+                    EntryAppendPosition {
+                        entry_id: *entry_id,
+                        append_position: info.append_position,
+                    },
+                    info,
+                )
             })
     }
 }
@@ -555,7 +567,7 @@ fn validate_settlement_transfer(
     entry_id: LedgerEntryId,
     transfer: &Transfer,
 ) -> Result<(), LedgerProjectionError> {
-    let from_balance = balances.get(&transfer.from).copied().unwrap_or(Money::ZERO);
+    let from_balance = balance_or_zero(balances, transfer.from);
     if from_balance >= Money::ZERO {
         return Err(LedgerProjectionError::SettlementTransferWithoutDebt {
             entry_id,
@@ -572,7 +584,7 @@ fn validate_settlement_transfer(
         });
     }
 
-    let to_balance = balances.get(&transfer.to).copied().unwrap_or(Money::ZERO);
+    let to_balance = balance_or_zero(balances, transfer.to);
     if to_balance <= Money::ZERO {
         return Err(LedgerProjectionError::SettlementTransferWithoutCredit {
             entry_id,
@@ -664,6 +676,13 @@ fn apply_balance_adjustment(
     }
 
     Ok(())
+}
+
+fn balance_or_zero(balances: &MemberBalances, member_id: MemberId) -> Money {
+    match balances.get(&member_id) {
+        Some(balance) => *balance,
+        None => Money::ZERO,
+    }
 }
 
 struct BalanceAdjustmentContext<'a> {

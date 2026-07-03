@@ -21,8 +21,6 @@ L5 command !settleup members=(members=[] roles=[] groups=[core]) cash=(members=[
 <svg xmlns="http://www.w3.org/2000/svg" width="449" height="466" viewBox="0 0 449 466">
 <style>text { font-family: Noto Sans CJK JP; font-size: 14px; }</style>
 <g transform="translate(89, 0)">
-
-
 <rect width="270" height="240" fill="#cbd5e0" rx="4" />
 <rect x="1" y="1" width="268" height="34" fill="#4a5568" rx="3" />
 <text x="10" y="22" fill="#ffffff" text-anchor="start">メンバー</text>
@@ -54,8 +52,6 @@ L5 command !settleup members=(members=[] roles=[] groups=[core]) cash=(members=[
 <text x="172" y="227" fill="#1a202c" text-anchor="start">未確定</text>
 </g>
 <g transform="translate(0, 260)">
-
-
 <rect width="449" height="206" fill="#cbd5e0" rx="4" />
 <rect x="1" y="1" width="447" height="34" fill="#4a5568" rx="3" />
 <text x="10" y="22" fill="#ffffff" text-anchor="start">状態</text>

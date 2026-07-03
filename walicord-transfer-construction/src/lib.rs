@@ -613,7 +613,17 @@ fn is_transfer_result_consistent<MemberId: MemberIdTrait>(
 
     settle_members
         .iter()
-        .all(|member| balances.get(member).copied().unwrap_or(0) == 0)
+        .all(|member| balance_or_zero(&balances, member) == 0)
+}
+
+fn balance_or_zero<MemberId: MemberIdTrait>(
+    balances: &std::collections::HashMap<MemberId, i64>,
+    member: &MemberId,
+) -> i64 {
+    match balances.get(member) {
+        Some(balance) => *balance,
+        None => 0,
+    }
 }
 
 #[derive(Debug)]
@@ -877,9 +887,13 @@ fn solve_transfers_highs<MemberId: MemberIdTrait>(
     let mut z1_cols = Vec::with_capacity(model.cash_edge_indices.len());
     let mut q1000_cols = Vec::with_capacity(model.cash_edge_indices.len());
     let mut r1000_cols = Vec::with_capacity(model.cash_edge_indices.len());
-    let mut z2_cols = include_obj2.then(|| Vec::with_capacity(model.cash_edge_indices.len()));
-    let mut q100_cols = include_obj2.then(|| Vec::with_capacity(model.cash_edge_indices.len()));
-    let mut r100_cols = include_obj2.then(|| Vec::with_capacity(model.cash_edge_indices.len()));
+    let mut obj2_cols = include_obj2.then(|| {
+        (
+            Vec::with_capacity(model.cash_edge_indices.len()),
+            Vec::with_capacity(model.cash_edge_indices.len()),
+            Vec::with_capacity(model.cash_edge_indices.len()),
+        )
+    });
 
     let max_q100 = ((g1 - 1) / g2) as f64;
     for &edge_idx in &model.cash_edge_indices {
@@ -888,16 +902,12 @@ fn solve_transfers_highs<MemberId: MemberIdTrait>(
         let max_q1000 = (edge.upper_bound / g1) as f64;
 
         z1_cols.push(pb.add_integer_column(bounds.obj1_weight as f64, 0.0..=1.0));
-        if let Some(cols) = &mut z2_cols {
-            cols.push(pb.add_integer_column(bounds.obj2_weight as f64, 0.0..=1.0));
-        }
         q1000_cols.push(pb.add_integer_column(0.0, 0.0..=max_q1000));
-        if let Some(cols) = &mut q100_cols {
-            cols.push(pb.add_integer_column(0.0, 0.0..=max_q100));
-        }
         r1000_cols.push(pb.add_integer_column(0.0, 0.0..=(g1 - 1) as f64));
-        if let Some(cols) = &mut r100_cols {
-            cols.push(pb.add_integer_column(0.0, 0.0..=(g2 - 1) as f64));
+        if let Some((z2_cols, q100_cols, r100_cols)) = &mut obj2_cols {
+            z2_cols.push(pb.add_integer_column(bounds.obj2_weight as f64, 0.0..=1.0));
+            q100_cols.push(pb.add_integer_column(0.0, 0.0..=max_q100));
+            r100_cols.push(pb.add_integer_column(0.0, 0.0..=(g2 - 1) as f64));
         }
     }
 
@@ -960,10 +970,10 @@ fn solve_transfers_highs<MemberId: MemberIdTrait>(
             pb.add_row(0.0.., [(r1000, 1.0), (z1, -1.0)]);
             pb.add_row(..=0.0, [(z1, 1.0), (y, -1.0)]);
 
-            if include_obj2 {
-                let z2 = z2_cols.as_ref().expect("z2 columns exist")[cash_idx];
-                let q100 = q100_cols.as_ref().expect("q100 columns exist")[cash_idx];
-                let r100 = r100_cols.as_ref().expect("r100 columns exist")[cash_idx];
+            if let Some((z2_cols, q100_cols, r100_cols)) = obj2_cols.as_ref() {
+                let z2 = z2_cols[cash_idx];
+                let q100 = q100_cols[cash_idx];
+                let r100 = r100_cols[cash_idx];
                 pb.add_row(
                     0.0..=0.0,
                     [(r1000, 1.0), (q100, -(g2 as f64)), (r100, -1.0)],
@@ -1003,16 +1013,13 @@ fn solve_transfers_highs<MemberId: MemberIdTrait>(
             .iter()
             .map(|col| i64::from(round_binary_checked(solution[*col]).is_ok_and(|v| v == 1)))
             .sum::<i64>();
-        let obj2 = z2_cols
-            .as_ref()
-            .map(|cols| {
-                cols.iter()
-                    .map(|col| {
-                        i64::from(round_binary_checked(solution[*col]).is_ok_and(|v| v == 1))
-                    })
-                    .sum::<i64>()
-            })
-            .unwrap_or(0);
+        let obj2 = match obj2_cols.as_ref() {
+            Some((z2_cols, _, _)) => z2_cols
+                .iter()
+                .map(|col| i64::from(round_binary_checked(solution[*col]).is_ok_and(|v| v == 1)))
+                .sum::<i64>(),
+            None => 0,
+        };
         let objw = model
             .edges
             .iter()

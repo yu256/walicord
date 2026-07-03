@@ -73,6 +73,10 @@ impl SessionNonce {
             .map(Self)
             .ok_or(SessionNonceError::Zero)
     }
+
+    pub fn from_nonzero(value: NonZeroU64) -> Self {
+        Self(value)
+    }
 }
 
 impl std::fmt::Display for SessionNonce {

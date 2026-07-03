@@ -6,7 +6,7 @@ fn render_snapshot_body(
     member_directory: &dyn walicord_application::MemberDirectory,
 ) -> String {
     let view = SettlementPresenter::render_with_members(result, member_directory);
-    format!("### combined_svg\n{}\n", view.combined_svg)
+    format!("### combined_svg\n{}\n", view.svg.to_svg_string())
 }
 
 #[test]

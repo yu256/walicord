@@ -64,7 +64,10 @@ impl NormalizedSettlementPlanRecorded {
             .collect();
 
         Ok(Self {
-            transfers: NonEmptyVec::new(transfers).expect("non-empty input validated above"),
+            transfers: NonEmptyVec::new(transfers).expect(
+                "transfers is non-empty (checked above) and the canonicalizing fold only \
+                 inserts entries, never removes them",
+            ),
         })
     }
 

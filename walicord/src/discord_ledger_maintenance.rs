@@ -4,7 +4,7 @@ use std::{
     io::Write as _,
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{SystemTime, SystemTimeError, UNIX_EPOCH},
 };
 use walicord_application::ledger::maintenance::{MaintenanceCommand, TransportChannelId};
 use walicord_infrastructure::{InstanceLockError, acquire_instance_lock};
@@ -52,6 +52,8 @@ pub enum MaintenanceError {
         #[source]
         source: std::io::Error,
     },
+    #[error("system clock is before UNIX_EPOCH: {0}")]
+    Clock(#[from] SystemTimeError),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -122,10 +124,7 @@ fn persist_artifact(
     operation: &'static str,
 ) -> Result<PathBuf, MaintenanceError> {
     let sequence = ARTIFACT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    let issued_at = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
+    let issued_at = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
     let path = readiness.artifact_directory.join(format!(
         "discord-ledger-maintenance-{issued_at}-{}-{sequence}.json",
         std::process::id()

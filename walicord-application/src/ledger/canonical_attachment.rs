@@ -671,7 +671,7 @@ pub enum AttachmentCodecError {
     UnreadableAttachment(String),
     #[error("unsupported canonical attachment version: {0}")]
     UnsupportedTransportVersion(u32),
-    #[error("unknown canonical schema version: {version}{}", entry_id.map(|id| format!(" at entry {}", id.0)).unwrap_or_default())]
+    #[error("unknown canonical schema version: {version}{}", entry_id_suffix(*entry_id))]
     UnknownSchemaVersion {
         version: u32,
         entry_id: Option<LedgerEntryId>,
@@ -709,6 +709,13 @@ pub enum AttachmentCodecError {
     InvalidAdjustmentEvent,
     #[error("invalid hash suite: {0}")]
     InvalidHashSuite(String),
+}
+
+fn entry_id_suffix(entry_id: Option<LedgerEntryId>) -> String {
+    match entry_id {
+        Some(entry_id) => format!(" at entry {entry_id}"),
+        None => String::new(),
+    }
 }
 
 fn pre_self_link_content_sha256(content: &str) -> String {

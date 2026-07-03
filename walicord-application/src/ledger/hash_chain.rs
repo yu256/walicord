@@ -196,6 +196,16 @@ pub fn ledger_chain_genesis_sha256_v1(ledger_id: LedgerId) -> EntryHash {
     EntryHash(hasher.finalize().into())
 }
 
+pub fn append_previous_hash_sha256_v1(
+    ledger_id: LedgerId,
+    current_head_hash: Option<EntryHash>,
+) -> EntryHash {
+    match current_head_hash {
+        Some(head_hash) => head_hash,
+        None => ledger_chain_genesis_sha256_v1(ledger_id),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum LedgerCanonicalEncodeError {
     #[error("unsupported canonical schema version: {version:?}")]

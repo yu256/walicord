@@ -15,8 +15,25 @@ use walicord_domain::model::{MemberId, RoleId};
 use walicord_i18n as i18n;
 
 pub fn unknown_member_label() -> SafeLiteralText {
-    SafeLiteralText::from_roster_label(i18n::UNKNOWN_DISPLAY_LABEL)
-        .expect("fallback unknown label should sanitize")
+    SafeLiteralText::from_generated_roster_label(i18n::UNKNOWN_DISPLAY_LABEL)
+}
+
+fn unknown_user_safe_label(member_id: MemberId) -> SafeLiteralText {
+    let label = i18n::unknown_user_label(member_id.0).to_string();
+    SafeLiteralText::from_generated_roster_label(label)
+}
+
+pub fn unknown_role_safe_label(role_id: RoleId) -> SafeLiteralText {
+    let label = i18n::unknown_role_label(role_id.0).to_string();
+    SafeLiteralText::from_generated_roster_label(label)
+}
+
+fn disambiguated_safe_label(
+    base_visible: &SafeLiteralText,
+    member_id: MemberId,
+) -> SafeLiteralText {
+    let label = i18n::disambiguated_visible_label(base_visible.as_str(), member_id.0).to_string();
+    SafeLiteralText::from_generated_roster_label(label)
 }
 
 fn japanese_collator() -> &'static CollatorBorrowed<'static> {
@@ -32,7 +49,9 @@ fn case_folded(text: &str) -> String {
 }
 
 fn compare_display_text(lhs: &str, rhs: &str) -> Ordering {
-    japanese_collator().compare(&case_folded(lhs), &case_folded(rhs))
+    let lhs = case_folded(lhs);
+    let rhs = case_folded(rhs);
+    japanese_collator().compare(&lhs, &rhs)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,14 +90,10 @@ impl SurfaceMemberLabels {
         let base_labels: Vec<(MemberId, SafeLiteralText)> = members
             .into_iter()
             .map(|(member_id, display_name)| {
-                let visible = display_name
-                    .and_then(SafeLiteralText::from_roster_label)
-                    .unwrap_or_else(|| {
-                        SafeLiteralText::from_roster_label(
-                            &i18n::unknown_user_label(member_id.0).to_string(),
-                        )
-                        .expect("fallback label should always remain valid")
-                    });
+                let visible = match display_name.and_then(SafeLiteralText::from_roster_label) {
+                    Some(label) => label,
+                    None => unknown_user_safe_label(member_id),
+                };
                 (member_id, visible)
             })
             .collect();
@@ -94,17 +109,12 @@ impl SurfaceMemberLabels {
             .into_iter()
             .map(|(member_id, base_visible)| {
                 let sort_key = base_visible.as_str().to_owned();
-                let visible = if collisions
-                    .get(base_visible.as_str())
-                    .copied()
-                    .unwrap_or_default()
-                    > 1
-                {
-                    SafeLiteralText::from_roster_label(
-                        &i18n::disambiguated_visible_label(base_visible.as_str(), member_id.0)
-                            .to_string(),
-                    )
-                    .expect("disambiguated label should always remain valid")
+                let collision_count = match collisions.get(base_visible.as_str()) {
+                    Some(count) => *count,
+                    None => 0,
+                };
+                let visible = if collision_count > 1 {
+                    disambiguated_safe_label(&base_visible, member_id)
                 } else {
                     base_visible
                 };
@@ -149,22 +159,17 @@ impl SurfaceMemberLabels {
     }
 
     pub fn safe_member_label(&self, member_id: MemberId) -> SafeLiteralText {
-        self.member(member_id)
-            .map(|label| label.visible().clone())
-            .unwrap_or_else(|| {
-                SafeLiteralText::from_roster_label(
-                    &i18n::unknown_user_label(member_id.0).to_string(),
-                )
-                .expect("fallback user label should sanitize")
-            })
+        match self.member(member_id) {
+            Some(label) => label.visible().clone(),
+            None => unknown_user_safe_label(member_id),
+        }
     }
 
     pub fn safe_actor_label(&self, entry: &LedgerEntry) -> SafeLiteralText {
-        entry
-            .metadata
-            .recorded_by
-            .map(|member_id| self.safe_member_label(member_id))
-            .unwrap_or_else(unknown_member_label)
+        match entry.metadata.recorded_by {
+            Some(member_id) => self.safe_member_label(member_id),
+            None => unknown_member_label(),
+        }
     }
 }
 

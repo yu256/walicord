@@ -357,11 +357,7 @@ pub fn quantize_balances_with_preferred_members(
              (_, _, score_b, preferred_b, stable_key_b, id_b)| {
                 preferred_b
                     .cmp(preferred_a)
-                    .then_with(|| {
-                        score_b
-                            .partial_cmp(score_a)
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    })
+                    .then_with(|| compare_finite_scores_desc(*score_a, *score_b))
                     .then_with(|| stable_key_a.cmp(stable_key_b))
                     .then_with(|| id_a.cmp(id_b))
             },
@@ -491,6 +487,13 @@ pub fn settlement_epsilon(scale: u32) -> Decimal {
     let epsilon_min = Decimal::from(EPSILON_SAFETY_FACTOR * EPSILON_OP_COUNT_BUDGET)
         * Decimal::from_i128_with_scale(1, 28);
     baseline.max(epsilon_min)
+}
+
+fn compare_finite_scores_desc(lhs: Decimal, rhs: Decimal) -> std::cmp::Ordering {
+    match rhs.partial_cmp(&lhs) {
+        Some(ordering) => ordering,
+        None => std::cmp::Ordering::Equal,
+    }
 }
 
 fn validate_scale(scale: u32) -> Result<(), SettlementRoundingError> {

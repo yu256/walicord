@@ -256,16 +256,20 @@ where
 
     /// Send a settlement result with image attachment
     async fn reply_with_settlement(&self, ctx: &Context, msg: &Message, response: SettlementView) {
-        self.reply_with_settlement_with_io(response, svg_to_png, async move |png| {
-            let create_message = CreateMessage::new()
-                .reference_message(msg)
-                .add_file(CreateAttachment::bytes(png, "settlement.png"));
+        self.reply_with_settlement_with_io(
+            response,
+            |svg| svg_to_png(svg).ok(),
+            async move |png| {
+                let create_message = CreateMessage::new()
+                    .reference_message(msg)
+                    .add_file(CreateAttachment::bytes(png, "settlement.png"));
 
-            msg.channel_id
-                .send_message(&ctx.http, create_message)
-                .await
-                .map(|_| ())
-        })
+                msg.channel_id
+                    .send_message(&ctx.http, create_message)
+                    .await
+                    .map(|_| ())
+            },
+        )
         .await;
     }
 
@@ -275,12 +279,12 @@ where
         render_png: FRender,
         send_message: FSend,
     ) where
-        FRender: FnOnce(&str) -> Option<Vec<u8>>,
+        FRender: FnOnce(&walicord_presentation::RenderedSvg) -> Option<Vec<u8>>,
         FSend: FnOnce(Vec<u8>) -> FutSend,
         FutSend: Future<Output = Result<(), E>>,
         E: Debug,
     {
-        let Some(png) = render_png(&response.combined_svg) else {
+        let Some(png) = render_png(&response.svg) else {
             tracing::error!("Failed to render settlement SVG to PNG");
             return;
         };
@@ -655,7 +659,7 @@ mod tests {
             "### resolver_input\n{}\n### source\n{content}\n### ast\n{}\n### combined_svg\n{}\n",
             format_role_resolver_input(),
             format_script_ast(&script),
-            view.combined_svg
+            view.svg.to_svg_string()
         )
     }
 
@@ -726,7 +730,9 @@ mod tests {
         let roster_provider = MockRosterProvider::new();
         let service = make_settlement_service(&processor, &roster_provider);
         let response = SettlementView {
-            combined_svg: "<svg/>".to_string(),
+            svg: walicord_presentation::svg_table::SvgTableBuilder::new()
+                .headers([std::borrow::Cow::Borrowed("X")])
+                .build(),
         };
 
         let sent_png = Arc::new(Mutex::new(None::<Vec<u8>>));

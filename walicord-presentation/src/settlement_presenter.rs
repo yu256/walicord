@@ -1,16 +1,16 @@
-use crate::svg_table::{Alignment, SvgTableBuilder};
+use crate::svg_table::{Alignment, RenderedSvg, SvgTableBuilder, combine_svgs_vertically};
 use std::{
     borrow::Cow,
     collections::{HashMap, HashSet},
 };
 use walicord_application::{MemberDirectory, PersonBalance, SettlementResult};
-use walicord_domain::{Money, Transfer, model::MemberId};
+use walicord_domain::{Money, NonEmptyVec, Transfer, model::MemberId};
 use walicord_i18n as i18n;
 
 pub struct SettlementPresenter;
 
 pub struct SettlementView {
-    pub combined_svg: String,
+    pub svg: RenderedSvg,
 }
 
 impl SettlementPresenter {
@@ -18,9 +18,7 @@ impl SettlementPresenter {
         result: &SettlementResult,
         member_directory: &dyn MemberDirectory,
     ) -> SettlementView {
-        use crate::svg_table::combine_svgs_vertically;
-
-        let combined_svg = if let Some(settle_up) = &result.settle_up {
+        let svg = if let Some(settle_up) = &result.settle_up {
             let balance_table_svg = Self::build_settle_up_balance_table_svg(
                 &result.balances,
                 &settle_up.settle_members,
@@ -41,8 +39,8 @@ impl SettlementPresenter {
                     result.quantization_scale,
                 );
 
-                combine_svgs_vertically(&[&balance_table_svg, &transfer_table_svg])
-                    .unwrap_or(balance_table_svg)
+                let svgs = NonEmptyVec::pair(balance_table_svg, transfer_table_svg);
+                combine_svgs_vertically(&svgs)
             }
         } else {
             let balance_table_svg = Self::build_balance_table_svg(
@@ -59,22 +57,22 @@ impl SettlementPresenter {
                     member_directory,
                     result.quantization_scale,
                 );
-                combine_svgs_vertically(&[&balance_table_svg, &transfer_table_svg])
-                    .unwrap_or(balance_table_svg)
+                let svgs = NonEmptyVec::pair(balance_table_svg, transfer_table_svg);
+                combine_svgs_vertically(&svgs)
             }
         };
 
-        SettlementView { combined_svg }
+        SettlementView { svg }
     }
 
     pub fn build_balance_table_svg(
         person_balances: &[PersonBalance],
         member_directory: &dyn MemberDirectory,
         quantization_scale: u32,
-    ) -> String {
+    ) -> RenderedSvg {
         let mut builder = SvgTableBuilder::new()
             .alignments(&[Alignment::Left, Alignment::Right])
-            .headers(&[Cow::Borrowed(i18n::MEMBER), Cow::Borrowed(i18n::BALANCE)]);
+            .headers([Cow::Borrowed(i18n::MEMBER), Cow::Borrowed(i18n::BALANCE)]);
 
         for person in person_balances {
             let sign = if person.balance.signum() >= 0 {
@@ -99,7 +97,7 @@ impl SettlementPresenter {
         balances: &[PersonBalance],
         member_directory: &dyn MemberDirectory,
         quantization_scale: u32,
-    ) -> String {
+    ) -> RenderedSvg {
         let mut running = balances_map(balances);
 
         let mut builder = SvgTableBuilder::new()
@@ -109,7 +107,7 @@ impl SettlementPresenter {
                 Alignment::Right,
                 Alignment::Right,
             ])
-            .headers(&[
+            .headers([
                 Cow::Borrowed(i18n::FROM),
                 Cow::Borrowed(i18n::TO),
                 Cow::Borrowed(i18n::AMOUNT),
@@ -118,7 +116,7 @@ impl SettlementPresenter {
 
         for transfer in transfers {
             apply_transfer(&mut running, transfer);
-            let to_balance = running.get(&transfer.to).copied().unwrap_or(Money::ZERO);
+            let to_balance = balance_or_zero(&running, transfer.to);
             builder = builder.row([
                 format_member_label(transfer.from, member_directory),
                 format_member_label(transfer.to, member_directory),
@@ -138,7 +136,7 @@ impl SettlementPresenter {
         balances: &[PersonBalance],
         member_directory: &dyn MemberDirectory,
         quantization_scale: u32,
-    ) -> String {
+    ) -> RenderedSvg {
         let mut running = balances_map(balances);
 
         let mut builder = SvgTableBuilder::new()
@@ -149,7 +147,7 @@ impl SettlementPresenter {
                 Alignment::Right,
                 Alignment::Right,
             ])
-            .headers(&[
+            .headers([
                 Cow::Borrowed(i18n::STATUS),
                 Cow::Borrowed(i18n::FROM),
                 Cow::Borrowed(i18n::TO),
@@ -172,7 +170,7 @@ impl SettlementPresenter {
 
         for transfer in &confirmed {
             apply_transfer(&mut running, transfer);
-            let to_balance = running.get(&transfer.to).copied().unwrap_or(Money::ZERO);
+            let to_balance = balance_or_zero(&running, transfer.to);
             builder = builder.row([
                 Cow::Borrowed(i18n::SETTLED_TRANSFER),
                 format_member_label(transfer.from, member_directory),
@@ -186,7 +184,7 @@ impl SettlementPresenter {
 
         for transfer in &planned {
             apply_transfer(&mut running, transfer);
-            let to_balance = running.get(&transfer.to).copied().unwrap_or(Money::ZERO);
+            let to_balance = balance_or_zero(&running, transfer.to);
             builder = builder.row([
                 Cow::Borrowed(i18n::PLANNED_TRANSFER),
                 format_member_label(transfer.from, member_directory),
@@ -206,11 +204,11 @@ impl SettlementPresenter {
         settle_members: &[MemberId],
         member_directory: &dyn MemberDirectory,
         quantization_scale: u32,
-    ) -> String {
+    ) -> RenderedSvg {
         let settle_member_lookup: HashSet<_> = settle_members.iter().copied().collect();
         let mut builder = SvgTableBuilder::new()
             .alignments(&[Alignment::Left, Alignment::Right, Alignment::Left])
-            .headers(&[
+            .headers([
                 Cow::Borrowed(i18n::MEMBER),
                 Cow::Borrowed(i18n::BALANCE),
                 Cow::Borrowed(i18n::STATUS),
@@ -286,6 +284,13 @@ fn balances_map(balances: &[PersonBalance]) -> HashMap<MemberId, Money> {
     balances.iter().map(|b| (b.id, b.balance)).collect()
 }
 
+fn balance_or_zero(balances: &HashMap<MemberId, Money>, member_id: MemberId) -> Money {
+    match balances.get(&member_id) {
+        Some(balance) => *balance,
+        None => Money::ZERO,
+    }
+}
+
 fn apply_transfer(balances: &mut HashMap<MemberId, Money>, transfer: &Transfer) {
     *balances.entry(transfer.from).or_insert(Money::ZERO) += transfer.amount; // debtor clears debt
     *balances.entry(transfer.to).or_insert(Money::ZERO) -= transfer.amount; // creditor clears credit
@@ -356,20 +361,24 @@ mod tests {
 
         let view = SettlementPresenter::render_with_members(&sample_result(), &directory);
 
-        assert!(view.combined_svg.contains(expected_balance_contains));
+        assert!(view.svg.to_svg_string().contains(expected_balance_contains));
         if let Some(forbidden) = forbidden_balance {
-            assert!(!view.combined_svg.contains(forbidden));
+            assert!(!view.svg.to_svg_string().contains(forbidden));
         }
-        assert!(view.combined_svg.contains(expected_transfer_contains));
+        assert!(
+            view.svg
+                .to_svg_string()
+                .contains(expected_transfer_contains)
+        );
     }
 
     #[test]
     fn transfer_table_shows_receiver_balance_column() {
         let directory = HashMap::from([(MemberId(1), "Alice".into()), (MemberId(2), "Bob".into())]);
         let view = SettlementPresenter::render_with_members(&sample_result(), &directory);
-        assert!(view.combined_svg.contains(i18n::RECEIVER_BALANCE));
+        assert!(view.svg.to_svg_string().contains(i18n::RECEIVER_BALANCE));
         // After transfer of 120 from Bob(-120) to Alice(+120), Alice's (creditor) balance becomes 0
-        assert!(view.combined_svg.contains("+0 ✓"));
+        assert!(view.svg.to_svg_string().contains("+0 ✓"));
     }
 
     #[test]
@@ -387,7 +396,7 @@ mod tests {
         };
 
         let view = SettlementPresenter::render_with_members(&result, &EmptyMemberDirectory);
-        assert!(view.combined_svg.contains("+1.123457"));
+        assert!(view.svg.to_svg_string().contains("+1.123457"));
     }
 
     #[test]
@@ -405,7 +414,7 @@ mod tests {
         };
 
         let view = SettlementPresenter::render_with_members(&result, &EmptyMemberDirectory);
-        assert!(view.combined_svg.contains("+2"));
+        assert!(view.svg.to_svg_string().contains("+2"));
     }
 
     #[test]
@@ -440,12 +449,12 @@ mod tests {
         };
 
         let view = SettlementPresenter::render_with_members(&result, &EmptyMemberDirectory);
-        assert!(view.combined_svg.contains(i18n::STATUS));
-        assert!(view.combined_svg.contains(i18n::SETTLED_MEMBER));
-        assert!(view.combined_svg.contains(i18n::UNSETTLED_MEMBER));
-        assert!(view.combined_svg.contains(i18n::SETTLED_TRANSFER));
-        assert!(view.combined_svg.contains(i18n::PLANNED_TRANSFER));
-        assert!(view.combined_svg.contains(i18n::RECEIVER_BALANCE));
+        assert!(view.svg.to_svg_string().contains(i18n::STATUS));
+        assert!(view.svg.to_svg_string().contains(i18n::SETTLED_MEMBER));
+        assert!(view.svg.to_svg_string().contains(i18n::UNSETTLED_MEMBER));
+        assert!(view.svg.to_svg_string().contains(i18n::SETTLED_TRANSFER));
+        assert!(view.svg.to_svg_string().contains(i18n::PLANNED_TRANSFER));
+        assert!(view.svg.to_svg_string().contains(i18n::RECEIVER_BALANCE));
     }
 
     #[test]
@@ -473,9 +482,10 @@ mod tests {
             0,
         );
 
-        assert!(svg.contains("Bob"));
-        assert!(svg.contains("+0 ✓"));
-        assert!(!svg.contains("+100"));
+        let xml = svg.to_svg_string();
+        assert!(xml.contains("Bob"));
+        assert!(xml.contains("+0 ✓"));
+        assert!(!xml.contains("+100"));
     }
 
     #[test]
@@ -522,9 +532,10 @@ mod tests {
             0,
         );
 
+        let xml = svg.to_svg_string();
         // First confirmed row (Alice→Bob 50): Bob's intermediate balance should be +50
-        assert!(svg.contains("+50"));
+        assert!(xml.contains("+50"));
         // Second confirmed row (Charlie→Bob 50): Bob's final balance should be 0
-        assert!(svg.contains("+0 ✓"));
+        assert!(xml.contains("+0 ✓"));
     }
 }

@@ -1,8 +1,7 @@
 use chrono::FixedOffset;
 
-/// JST. Business date boundaries align with Asia/Tokyo because the only deployment
-/// today targets that audience; criterion 258 fixes the business timezone choice for
-/// every date / timestamp render.
+/// Business date boundaries use fixed JST (UTC+09:00), as required by criterion 258
+/// for date / timestamp rendering.
 pub const BUSINESS_TIMEZONE_OFFSET_SECONDS: i32 = 9 * 60 * 60;
 
 pub fn business_timezone() -> FixedOffset {

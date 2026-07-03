@@ -1,124 +1,219 @@
-use crate::discord_ledger::{ReadViewContent, ReadViewPageModel};
+use crate::discord_ledger::surfaces::{
+    PageSection, ReadViewData, ReadViewDocument, ReadViewDocumentState, ReadViewPageModel,
+    RequiredPageSection, Section,
+};
+use walicord_domain::NonEmptyVec;
 use walicord_i18n as i18n;
 
 pub const READ_VIEW_ITEMS_PER_PAGE: usize = 20;
 
-pub fn paginate_read_view_model(model: ReadViewPageModel) -> Vec<ReadViewPageModel> {
-    if model.empty_state.is_some() {
-        return vec![model];
-    }
-    match &model.content {
-        ReadViewContent::Review { .. } => paginate_review_model(model),
-        ReadViewContent::Ledger { .. } => paginate_ledger_model(model),
+impl ReadViewDocument {
+    pub fn into_pages(self) -> NonEmptyVec<ReadViewPageModel> {
+        match self.state() {
+            ReadViewDocumentState::Empty { empty_state } => {
+                NonEmptyVec::singleton(ReadViewPageModel::empty(&self, empty_state.clone()))
+            }
+            ReadViewDocumentState::Populated(data) => match data {
+                ReadViewData::Ledger {
+                    balances,
+                    recent_entries,
+                } => paginate_ledger(&self, balances, recent_entries),
+                ReadViewData::Review {
+                    balances,
+                    transfers,
+                } => paginate_review(&self, balances, transfers),
+            },
+        }
     }
 }
 
-fn paginate_review_model(model: ReadViewPageModel) -> Vec<ReadViewPageModel> {
-    let ReadViewContent::Review {
-        transfers: Some(ref transfers),
-    } = model.content
-    else {
-        return vec![model];
+struct PageWindow {
+    page_indicator: Option<String>,
+    snapshot_notice: Option<String>,
+}
+
+fn paginate_ledger(
+    doc: &ReadViewDocument,
+    balances: &Section<BalanceRow>,
+    recent_entries: &Section<RecentEntryRow>,
+) -> NonEmptyVec<ReadViewPageModel> {
+    let bal_items = section_items(balances);
+    let ent_items = section_items(recent_entries);
+    let bal_count = bal_items.len().max(1);
+    let ent_count = ent_items.len().max(1);
+    let total = bal_count + ent_count;
+
+    if total <= READ_VIEW_ITEMS_PER_PAGE {
+        return NonEmptyVec::singleton(ReadViewPageModel::ledger_page(
+            doc,
+            section_to_page_section(balances),
+            section_to_page_section(recent_entries),
+            None,
+            None,
+        ));
+    }
+
+    let total_pages = total.div_ceil(READ_VIEW_ITEMS_PER_PAGE);
+    let first_page = ledger_page_at(
+        doc,
+        balances,
+        recent_entries,
+        bal_count,
+        total,
+        total_pages,
+        0,
+    );
+    let rest = (1..total_pages).map(|i| {
+        ledger_page_at(
+            doc,
+            balances,
+            recent_entries,
+            bal_count,
+            total,
+            total_pages,
+            i,
+        )
+    });
+    NonEmptyVec::from_first_and_rest(first_page, rest)
+}
+
+use crate::discord_ledger::surfaces::{BalanceRow, RecentEntryRow, TransferRow};
+
+fn paginate_review(
+    doc: &ReadViewDocument,
+    balances: &Section<BalanceRow>,
+    transfers: &NonEmptyVec<TransferRow>,
+) -> NonEmptyVec<ReadViewPageModel> {
+    let bal_items = section_items(balances);
+    let trans_items: &[TransferRow] = transfers;
+    let bal_count = bal_items.len().max(1);
+    let trans_count = trans_items.len();
+    let total = bal_count + trans_count;
+
+    if total <= READ_VIEW_ITEMS_PER_PAGE {
+        return NonEmptyVec::singleton(ReadViewPageModel::review_page(
+            doc,
+            section_to_page_section(balances),
+            RequiredPageSection::Rows(transfers.clone()),
+            None,
+            None,
+        ));
+    }
+
+    let total_pages = total.div_ceil(READ_VIEW_ITEMS_PER_PAGE);
+    let first_page = review_page_at(doc, balances, transfers, bal_count, total, total_pages, 0);
+    let rest = (1..total_pages)
+        .map(|i| review_page_at(doc, balances, transfers, bal_count, total, total_pages, i));
+    NonEmptyVec::from_first_and_rest(first_page, rest)
+}
+
+fn ledger_page_at(
+    doc: &ReadViewDocument,
+    balances: &Section<BalanceRow>,
+    recent_entries: &Section<RecentEntryRow>,
+    bal_count: usize,
+    total: usize,
+    total_pages: usize,
+    page_index: usize,
+) -> ReadViewPageModel {
+    let w = page_window(page_index, total_pages);
+    let (start, end) = page_bounds(page_index, total);
+    ReadViewPageModel::ledger_page(
+        doc,
+        slice_page_section(balances, start, end, 0),
+        slice_page_section(recent_entries, start, end, bal_count),
+        w.page_indicator,
+        w.snapshot_notice,
+    )
+}
+
+fn review_page_at(
+    doc: &ReadViewDocument,
+    balances: &Section<BalanceRow>,
+    transfers: &NonEmptyVec<TransferRow>,
+    bal_count: usize,
+    total: usize,
+    total_pages: usize,
+    page_index: usize,
+) -> ReadViewPageModel {
+    let w = page_window(page_index, total_pages);
+    let (start, end) = page_bounds(page_index, total);
+    let bal_section = slice_page_section(balances, start, end, 0);
+    let transfers = slice_required_page_section(transfers, start, end, bal_count);
+    ReadViewPageModel::review_page(
+        doc,
+        bal_section,
+        transfers,
+        w.page_indicator,
+        w.snapshot_notice,
+    )
+}
+
+fn page_window(page_index: usize, total_pages: usize) -> PageWindow {
+    PageWindow {
+        page_indicator: Some(i18n::page_indicator(page_index + 1, total_pages).to_string()),
+        snapshot_notice: Some(i18n::SNAPSHOT_NOTICE.to_owned()),
+    }
+}
+
+fn section_items<T>(section: &Section<T>) -> &[T] {
+    match section {
+        Section::Empty => &[],
+        Section::Rows(rows) => rows,
+    }
+}
+
+fn section_to_page_section<T: Clone>(section: &Section<T>) -> PageSection<T> {
+    match section {
+        Section::Empty => PageSection::Empty,
+        Section::Rows(rows) => PageSection::Rows(rows.clone()),
+    }
+}
+
+fn slice_page_section<T: Clone>(
+    section: &Section<T>,
+    page_start: usize,
+    page_end: usize,
+    section_offset: usize,
+) -> PageSection<T> {
+    let virtual_len = section_virtual_len(section);
+    let on_this_page = page_start < (section_offset + virtual_len) && page_end > section_offset;
+    if !on_this_page {
+        return PageSection::Hidden;
+    }
+
+    let Section::Rows(items) = section else {
+        return PageSection::Empty;
     };
-    let balances = model.balances.as_deref().unwrap_or_default();
-    let balances_item_count = balances.len().max(1);
-    let total_items = balances_item_count + transfers.len();
-    if total_items <= READ_VIEW_ITEMS_PER_PAGE {
-        return vec![model];
+
+    let sliced = section_slice(items, page_start, page_end, section_offset);
+    match NonEmptyVec::new(sliced) {
+        Ok(non_empty) => PageSection::Rows(non_empty),
+        Err(_) => PageSection::Hidden,
     }
-
-    let total_pages = total_items.div_ceil(READ_VIEW_ITEMS_PER_PAGE);
-    let transfers_offset = balances_item_count;
-    (0..total_pages)
-        .map(|page_index| {
-            let (page_start, page_end) = page_bounds(page_index, total_items);
-            let mut page = model.clone();
-            page.page_indicator =
-                Some(i18n::page_indicator(page_index + 1, total_pages).to_string());
-            page.snapshot_notice = Some(i18n::SNAPSHOT_NOTICE.to_owned());
-            let sliced_balances = slice_section(balances, page_start, page_end, 0);
-            let balances_on_this_page = page_start < balances_item_count && page_end > 0;
-            page.balances = if balances_on_this_page {
-                Some(sliced_balances)
-            } else {
-                None
-            };
-            let ReadViewContent::Review {
-                transfers: Some(ref transfers),
-            } = model.content
-            else {
-                unreachable!()
-            };
-            let sliced_transfers = slice_section(transfers, page_start, page_end, transfers_offset);
-            page.content = ReadViewContent::Review {
-                transfers: if sliced_transfers.is_empty() {
-                    None
-                } else {
-                    Some(sliced_transfers)
-                },
-            };
-            page
-        })
-        .collect()
 }
 
-fn paginate_ledger_model(model: ReadViewPageModel) -> Vec<ReadViewPageModel> {
-    let ReadViewContent::Ledger {
-        recent_entries: Some(ref recent_entries),
-    } = model.content
-    else {
-        return vec![model];
-    };
-    let balances = model.balances.as_deref().unwrap_or_default();
-    let balances_item_count = balances.len().max(1);
-    let total_items = balances_item_count + recent_entries.len();
-    if total_items <= READ_VIEW_ITEMS_PER_PAGE {
-        return vec![model];
+fn slice_required_page_section<T: Clone>(
+    items: &NonEmptyVec<T>,
+    page_start: usize,
+    page_end: usize,
+    section_offset: usize,
+) -> RequiredPageSection<T> {
+    let sliced = section_slice(items, page_start, page_end, section_offset);
+    match NonEmptyVec::new(sliced) {
+        Ok(non_empty) => RequiredPageSection::Rows(non_empty),
+        Err(_) => RequiredPageSection::Hidden,
     }
-
-    let total_pages = total_items.div_ceil(READ_VIEW_ITEMS_PER_PAGE);
-    let entries_offset = balances_item_count;
-    (0..total_pages)
-        .map(|page_index| {
-            let (page_start, page_end) = page_bounds(page_index, total_items);
-            let mut page = model.clone();
-            page.page_indicator =
-                Some(i18n::page_indicator(page_index + 1, total_pages).to_string());
-            page.snapshot_notice = Some(i18n::SNAPSHOT_NOTICE.to_owned());
-            let sliced_balances = slice_section(balances, page_start, page_end, 0);
-            let balances_on_this_page = page_start < balances_item_count && page_end > 0;
-            page.balances = if balances_on_this_page {
-                Some(sliced_balances)
-            } else {
-                None
-            };
-            let ReadViewContent::Ledger {
-                recent_entries: Some(ref recent_entries),
-            } = model.content
-            else {
-                unreachable!()
-            };
-            let sliced_entries =
-                slice_section(recent_entries, page_start, page_end, entries_offset);
-            page.content = ReadViewContent::Ledger {
-                recent_entries: if sliced_entries.is_empty() {
-                    None
-                } else {
-                    Some(sliced_entries)
-                },
-            };
-            page
-        })
-        .collect()
 }
 
-fn page_bounds(page_index: usize, total_items: usize) -> (usize, usize) {
-    let page_start = page_index * READ_VIEW_ITEMS_PER_PAGE;
-    let page_end = ((page_index + 1) * READ_VIEW_ITEMS_PER_PAGE).min(total_items);
-    (page_start, page_end)
+fn section_virtual_len<T>(section: &Section<T>) -> usize {
+    match section {
+        Section::Empty => 1,
+        Section::Rows(rows) => rows.len(),
+    }
 }
 
-fn slice_section<T: Clone>(
+fn section_slice<T: Clone>(
     items: &[T],
     page_start: usize,
     page_end: usize,
@@ -130,6 +225,12 @@ fn slice_section<T: Clone>(
         return Vec::new();
     };
     items[slice_start..slice_end].to_vec()
+}
+
+fn page_bounds(page_index: usize, total_items: usize) -> (usize, usize) {
+    let page_start = page_index * READ_VIEW_ITEMS_PER_PAGE;
+    let page_end = ((page_index + 1) * READ_VIEW_ITEMS_PER_PAGE).min(total_items);
+    (page_start, page_end)
 }
 
 fn section_overlap(
@@ -152,9 +253,9 @@ fn section_overlap(
 mod tests {
     use super::*;
     use crate::discord_ledger::{
-        BalanceDirection, BalanceRow, ExpenseOrSettlementSummary, ReadViewContent,
-        ReadViewPageModel, ReadViewRoute, RecentEntryRow, RecoveryCta, RecoveryReference,
-        SafeLiteralText, TransferRow,
+        BalanceDirection, BalanceRow, ExpenseOrSettlementSummary, LedgerRoute, ReadViewPageData,
+        ReadViewPageState, RecentEntryRow, RecoveryReference, ReviewRoute, SafeLiteralText,
+        TransferRow,
     };
     use walicord_application::ledger::{LedgerEffectiveDate, LedgerEntryId};
 
@@ -195,118 +296,225 @@ mod tests {
         }
     }
 
-    fn review_model(balances: usize, transfers: usize) -> ReadViewPageModel {
-        ReadViewPageModel {
-            route: ReadViewRoute::ReviewThread,
-            title: std::borrow::Cow::Borrowed("review"),
-            uncertain_write: false,
-            stale_page: false,
-            page_indicator: None,
-            snapshot_notice: None,
-            route_guidance_lines: Vec::new(),
-            recovery_cta: RecoveryCta::None,
-            recovery_url: None,
-            missing_thread_note: false,
-            balances: Some((0..balances).map(balance).collect()),
-            footer_lines: Vec::new(),
-            empty_state: None,
-            action_rows: Vec::new(),
-            ephemeral: true,
-            content: ReadViewContent::Review {
-                transfers: Some((0..transfers).map(transfer).collect()),
-            },
+    fn make_balances(count: usize) -> Section<BalanceRow> {
+        let rows: Vec<_> = (0..count).map(balance).collect();
+        match NonEmptyVec::new(rows) {
+            Ok(v) => Section::Rows(v),
+            Err(_) => Section::Empty,
         }
     }
 
-    fn ledger_model(balances: usize, entries: usize) -> ReadViewPageModel {
-        ReadViewPageModel {
-            route: ReadViewRoute::LedgerCommand,
-            title: std::borrow::Cow::Borrowed("ledger"),
-            uncertain_write: false,
-            stale_page: false,
-            page_indicator: None,
-            snapshot_notice: None,
-            route_guidance_lines: Vec::new(),
-            recovery_cta: RecoveryCta::None,
-            recovery_url: None,
-            missing_thread_note: false,
-            balances: Some((0..balances).map(balance).collect()),
-            footer_lines: Vec::new(),
-            empty_state: None,
-            action_rows: Vec::new(),
-            ephemeral: true,
-            content: ReadViewContent::Ledger {
-                recent_entries: Some((0..entries).map(recent_entry).collect()),
-            },
+    fn make_transfers(count: usize) -> NonEmptyVec<TransferRow> {
+        NonEmptyVec::new((1..=count).map(transfer).collect()).expect("non-empty transfers")
+    }
+
+    fn make_recent_entries(count: usize) -> Section<RecentEntryRow> {
+        let rows: Vec<_> = (0..count).map(recent_entry).collect();
+        match NonEmptyVec::new(rows) {
+            Ok(v) => Section::Rows(v),
+            Err(_) => Section::Empty,
+        }
+    }
+
+    fn review_doc(balance_count: usize, transfer_count: usize) -> ReadViewDocument {
+        ReadViewDocument::review(
+            ReviewRoute::Thread,
+            make_balances(balance_count),
+            make_transfers(transfer_count),
+            false,
+            crate::discord_ledger::RecoveryAction::None,
+            crate::discord_ledger::ReviewSettleAction::Hidden,
+        )
+    }
+
+    fn ledger_doc(balance_count: usize, entry_count: usize) -> ReadViewDocument {
+        ReadViewDocument::ledger(
+            LedgerRoute::Command,
+            make_balances(balance_count),
+            make_recent_entries(entry_count),
+            false,
+        )
+    }
+
+    fn page_balance_count(page: &ReadViewPageModel) -> Option<usize> {
+        match page.state() {
+            ReadViewPageState::Populated(ReadViewPageData::Ledger { balances, .. })
+            | ReadViewPageState::Populated(ReadViewPageData::Review { balances, .. }) => {
+                match balances {
+                    PageSection::Hidden => None,
+                    PageSection::Empty => Some(0),
+                    PageSection::Rows(rows) => Some(rows.len()),
+                }
+            }
+            _ => None,
         }
     }
 
     #[test]
     fn review_single_page_returns_as_is() {
-        let model = review_model(5, 10);
-        let pages = paginate_read_view_model(model);
+        let doc = review_doc(5, 10);
+        let pages = doc.into_pages();
         assert_eq!(pages.len(), 1);
-        assert_eq!(pages[0].balances.as_ref().unwrap().len(), 5);
+        assert_eq!(page_balance_count(pages.first()), Some(5));
     }
 
     #[test]
     fn review_multi_page_splits_balances_then_transfers() {
-        let model = review_model(15, 15);
-        let pages = paginate_read_view_model(model);
+        let doc = review_doc(15, 15);
+        let pages = doc.into_pages();
         assert_eq!(pages.len(), 2);
-        assert_eq!(pages[0].balances.as_ref().unwrap().len(), 15);
-        let ReadViewContent::Review {
-            transfers: Some(ref transfers),
-        } = pages[0].content
+        assert_eq!(page_balance_count(pages.first()), Some(15));
+
+        let ReadViewPageState::Populated(ReadViewPageData::Review { transfers, .. }) =
+            pages.first().state()
         else {
-            panic!("expected Review content with transfers");
+            panic!("expected Review");
         };
-        assert_eq!(transfers.len(), 5);
-        assert!(pages[1].balances.is_none());
-        let ReadViewContent::Review {
-            transfers: Some(ref transfers),
-        } = pages[1].content
+        let RequiredPageSection::Rows(t) = transfers else {
+            panic!("expected transfers")
+        };
+        assert_eq!(t.len(), 5);
+
+        assert_eq!(page_balance_count(&pages[1]), None);
+        let ReadViewPageState::Populated(ReadViewPageData::Review { transfers, .. }) =
+            pages[1].state()
         else {
-            panic!("expected Review content with transfers");
+            panic!("expected Review");
         };
-        assert_eq!(transfers.len(), 10);
+        let RequiredPageSection::Rows(t) = transfers else {
+            panic!("expected transfers")
+        };
+        assert_eq!(t.len(), 10);
     }
 
     #[test]
     fn ledger_single_page_returns_as_is() {
-        let model = ledger_model(3, 10);
-        let pages = paginate_read_view_model(model);
+        let doc = ledger_doc(3, 10);
+        let pages = doc.into_pages();
         assert_eq!(pages.len(), 1);
     }
 
     #[test]
     fn ledger_multi_page_splits_balances_then_entries() {
-        let model = ledger_model(5, 25);
-        let pages = paginate_read_view_model(model);
+        let doc = ledger_doc(5, 25);
+        let pages = doc.into_pages();
         assert_eq!(pages.len(), 2);
-        assert_eq!(pages[0].balances.as_ref().unwrap().len(), 5);
-        let ReadViewContent::Ledger {
-            recent_entries: Some(ref entries),
-        } = pages[0].content
+        assert_eq!(page_balance_count(pages.first()), Some(5));
+        let ReadViewPageState::Populated(ReadViewPageData::Ledger { recent_entries, .. }) =
+            pages.first().state()
         else {
-            panic!("expected Ledger content with entries");
+            panic!("expected Ledger");
         };
-        assert_eq!(entries.len(), 15);
-        assert!(pages[1].balances.is_none());
-        let ReadViewContent::Ledger {
-            recent_entries: Some(ref entries),
-        } = pages[1].content
+        let PageSection::Rows(e) = recent_entries else {
+            panic!("expected entries")
+        };
+        assert_eq!(e.len(), 15);
+
+        assert_eq!(page_balance_count(&pages[1]), None);
+        let ReadViewPageState::Populated(ReadViewPageData::Ledger { recent_entries, .. }) =
+            pages[1].state()
         else {
-            panic!("expected Ledger content with entries");
+            panic!("expected Ledger");
         };
-        assert_eq!(entries.len(), 10);
+        let PageSection::Rows(e) = recent_entries else {
+            panic!("expected entries")
+        };
+        assert_eq!(e.len(), 10);
     }
 
     #[test]
     fn empty_state_skips_pagination() {
-        let mut model = ledger_model(0, 0);
-        model.empty_state = Some(std::borrow::Cow::Borrowed("empty"));
-        let pages = paginate_read_view_model(model);
+        let doc = ReadViewDocument::ledger_empty(LedgerRoute::Command, false);
+        let pages = doc.into_pages();
         assert_eq!(pages.len(), 1);
+        assert!(matches!(
+            pages.first().state(),
+            ReadViewPageState::Empty { .. }
+        ));
+    }
+
+    #[test]
+    fn ledger_zero_balances_zero_entries_single_page() {
+        let doc =
+            ReadViewDocument::ledger(LedgerRoute::Command, Section::Empty, Section::Empty, false);
+        let pages = doc.into_pages();
+        assert_eq!(pages.len(), 1);
+        assert!(matches!(
+            pages.first().state(),
+            ReadViewPageState::Empty { .. }
+        ));
+    }
+
+    #[test]
+    fn ledger_one_balance_one_entry_single_page() {
+        let doc = ledger_doc(1, 1);
+        let pages = doc.into_pages();
+        assert_eq!(pages.len(), 1);
+        assert_eq!(page_balance_count(pages.first()), Some(1));
+    }
+
+    #[test]
+    fn ledger_exactly_20_items_single_page() {
+        let doc = ledger_doc(10, 10);
+        let pages = doc.into_pages();
+        assert_eq!(pages.len(), 1);
+    }
+
+    #[test]
+    fn ledger_21_items_splits_into_two_pages() {
+        let doc = ledger_doc(10, 11);
+        let pages = doc.into_pages();
+        assert_eq!(pages.len(), 2);
+        assert!(pages.first().page_indicator().is_some());
+        assert!(pages[1].page_indicator().is_some());
+    }
+
+    #[test]
+    fn review_exactly_20_items_single_page() {
+        let doc = review_doc(10, 10);
+        let pages = doc.into_pages();
+        assert_eq!(pages.len(), 1);
+        assert!(pages.first().page_indicator().is_none());
+    }
+
+    #[test]
+    fn review_21_items_splits_into_two_pages() {
+        let doc = review_doc(10, 11);
+        let pages = doc.into_pages();
+        assert_eq!(pages.len(), 2);
+    }
+
+    #[test]
+    fn ledger_empty_balances_with_entries_uses_virtual_slot() {
+        let doc = ledger_doc(0, 20);
+        let pages = doc.into_pages();
+        assert_eq!(pages.len(), 2);
+        assert_eq!(page_balance_count(pages.first()), Some(0));
+        assert_eq!(page_balance_count(&pages[1]), None);
+    }
+
+    #[test]
+    fn ledger_empty_recent_entries_uses_virtual_slot() {
+        let doc = ledger_doc(20, 0);
+        let pages = doc.into_pages();
+        assert_eq!(pages.len(), 2);
+
+        let ReadViewPageState::Populated(ReadViewPageData::Ledger { recent_entries, .. }) =
+            pages[1].state()
+        else {
+            panic!("expected Ledger");
+        };
+        assert_eq!(recent_entries, &PageSection::Empty);
+    }
+
+    #[test]
+    fn stale_ledger_page_is_constructed_without_document_state() {
+        let page = ReadViewPageModel::stale_ledger(LedgerRoute::Panel, true);
+        assert!(matches!(
+            page.state(),
+            ReadViewPageState::Stale {
+                missing_thread_note: true
+            }
+        ));
     }
 }

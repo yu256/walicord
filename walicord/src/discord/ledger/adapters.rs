@@ -197,7 +197,7 @@ fn classify_discovered_candidate(
             Ok(Some(LocatorDiscoveryCandidate::Verified(
                 VerifiedCanonicalThreadCandidate::new(
                     canonical_thread_id,
-                    LocatorRecoveryReference::channel(canonical_thread_id, None::<String>),
+                    LocatorRecoveryReference::channel(canonical_thread_id, None),
                     cached_binding.is_some_and(|binding| {
                         binding.canonical_thread_id() == canonical_thread_id
                             && binding.ledger_id() == ledger_id
@@ -208,13 +208,13 @@ fn classify_discovered_candidate(
         Ok(Some(_)) => Ok(Some(LocatorDiscoveryCandidate::Damaged(
             super::locator::DamagedCanonicalThreadCandidate::new(
                 canonical_thread_id,
-                LocatorRecoveryReference::channel(canonical_thread_id, None::<String>),
+                LocatorRecoveryReference::channel(canonical_thread_id, None),
             ),
         ))),
         Ok(None) => Ok(Some(LocatorDiscoveryCandidate::Empty(
             EmptyCanonicalThreadCandidate::new(
                 canonical_thread_id,
-                LocatorRecoveryReference::channel(canonical_thread_id, None::<String>),
+                LocatorRecoveryReference::channel(canonical_thread_id, None),
             )
             .with_provisioned_binding(
                 cached_binding
@@ -235,7 +235,7 @@ fn classify_discovered_candidate(
         Err(_) => Ok(Some(LocatorDiscoveryCandidate::Damaged(
             super::locator::DamagedCanonicalThreadCandidate::new(
                 canonical_thread_id,
-                LocatorRecoveryReference::channel(canonical_thread_id, None::<String>),
+                LocatorRecoveryReference::channel(canonical_thread_id, None),
             ),
         ))),
     }
@@ -427,7 +427,7 @@ mod tests {
             Ok(Some(LocatorDiscoveryCandidate::Empty(
                 EmptyCanonicalThreadCandidate::new(
                     ChannelId::new(20),
-                    LocatorRecoveryReference::channel(ChannelId::new(20), None::<String>),
+                    LocatorRecoveryReference::channel(ChannelId::new(20), None),
                 )
             )))
         );

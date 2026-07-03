@@ -1,5 +1,6 @@
 use chrono::Utc;
 use std::{
+    num::NonZeroU64,
     sync::atomic::{AtomicU64, Ordering},
     time::SystemTime,
 };
@@ -51,25 +52,28 @@ impl ProcessSessionNonceProvider {
 impl SessionNonceProvider for ProcessSessionNonceProvider {
     fn next_session_nonce(&self) -> SessionNonce {
         let counter = self.session_counter.fetch_add(1, Ordering::Relaxed);
-        SessionNonce::new(mix(self.salt, counter)).expect("non-zero by construction")
+        SessionNonce::from_nonzero(mix(self.salt, counter))
     }
 
     fn next_preview_instance_id(&self) -> PreviewInstanceId {
         let counter = self.preview_counter.fetch_add(1, Ordering::Relaxed);
-        PreviewInstanceId::new(mix(self.salt, counter)).expect("non-zero by construction")
+        PreviewInstanceId::from_nonzero(mix(self.salt, counter))
     }
 }
 
-fn mix(salt: u64, counter: u64) -> u64 {
+fn mix(salt: u64, counter: u64) -> NonZeroU64 {
     let combined = salt.wrapping_add(counter).wrapping_mul(0x9E3779B97F4A7C15);
-    combined.max(1)
+    match NonZeroU64::new(combined) {
+        Some(value) => value,
+        None => NonZeroU64::MIN,
+    }
 }
 
 fn system_time_nanos_since_epoch() -> u64 {
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|duration| duration.as_nanos() as u64)
-        .unwrap_or(1)
+    match SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) {
+        Ok(duration) => duration.as_nanos() as u64,
+        Err(error) => error.duration().as_nanos() as u64,
+    }
 }
 
 #[cfg(test)]

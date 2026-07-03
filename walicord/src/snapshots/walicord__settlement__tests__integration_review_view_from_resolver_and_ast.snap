@@ -19,8 +19,6 @@ L4 command !review
 <svg xmlns="http://www.w3.org/2000/svg" width="351" height="398" viewBox="0 0 351 398">
 <style>text { font-family: Noto Sans CJK JP; font-size: 14px; }</style>
 <g transform="translate(81, 0)">
-
-
 <rect width="189" height="206" fill="#cbd5e0" rx="4" />
 <rect x="1" y="1" width="187" height="34" fill="#4a5568" rx="3" />
 <text x="10" y="22" fill="#ffffff" text-anchor="start">メンバー</text>
@@ -42,8 +40,6 @@ L4 command !review
 <text x="179" y="193" fill="#1a202c" text-anchor="end">-5100</text>
 </g>
 <g transform="translate(0, 226)">
-
-
 <rect width="351" height="172" fill="#cbd5e0" rx="4" />
 <rect x="1" y="1" width="349" height="34" fill="#4a5568" rx="3" />
 <text x="10" y="22" fill="#ffffff" text-anchor="start">支払者</text>

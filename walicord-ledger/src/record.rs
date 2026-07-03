@@ -14,6 +14,10 @@ impl std::fmt::Display for LedgerEntryId {
 }
 
 impl LedgerEntryId {
+    pub fn next(self) -> Option<Self> {
+        self.0.checked_add(1).map(Self)
+    }
+
     /// Provide the schema-v1 canonical representation without making hash encoders
     /// depend on the tuple layout.
     pub fn with_canonical_bytes(self, consume: impl FnOnce(&[u8])) {

@@ -16,4 +16,5 @@ pub use discord_ledger::{
 };
 pub use error_presenter::format_program_parse_error;
 pub use settlement_presenter::{SettlementPresenter, SettlementView};
+pub use svg_table::RenderedSvg;
 pub use variables_presenter::VariablesPresenter;

@@ -1,5 +1,7 @@
-use serenity::all::{ChannelId, CreateActionRow};
+use serenity::all::ChannelId;
 use walicord_i18n as i18n;
+#[cfg(test)]
+use walicord_presentation::discord_ledger::DiscordLinkUrl;
 use walicord_presentation::{
     DiscordLedgerPresenter,
     discord_ledger::{PanelButtonStates, PanelSurfaceModel},
@@ -8,7 +10,7 @@ use walicord_presentation::{
 use super::{
     locator::{CanonicalThreadLocatorState, LocatorRecoveryReference},
     permissions::{RecoveryOutcomeMessage, recovery_reference_components},
-    response_writer::rendered_surface_to_message,
+    response_writer::DiscordTextMessage,
 };
 #[cfg(test)]
 use super::{
@@ -54,7 +56,7 @@ pub(crate) fn render_panel_post_failure_message(
 
 pub(crate) fn render_panel_post_message(
     canonical_thread_id: Option<ChannelId>,
-) -> Result<(String, Vec<CreateActionRow>), RecoveryOutcomeMessage> {
+) -> Result<DiscordTextMessage, RecoveryOutcomeMessage> {
     let thread_cue = canonical_thread_id.map_or_else(String::new, |id| {
         format!(
             "{}",
@@ -67,13 +69,13 @@ pub(crate) fn render_panel_post_message(
         button_states: PanelButtonStates::default(),
         ephemeral: false,
     })
-    .map(rendered_surface_to_message)
+    .map(DiscordTextMessage::from)
     .map_err(|_| RecoveryOutcomeMessage::from_body(i18n::PANEL_RENDER_RETRY_MESSAGE))
 }
 
 pub(crate) fn render_panel_post_message_for_locator_state(
     locator_state: &CanonicalThreadLocatorState,
-) -> Result<(String, Vec<CreateActionRow>), RecoveryOutcomeMessage> {
+) -> Result<DiscordTextMessage, RecoveryOutcomeMessage> {
     match locator_state {
         CanonicalThreadLocatorState::DuplicateBlocked {
             authoritative_candidate_known,
@@ -157,17 +159,23 @@ mod tests {
     fn ledger_recovery_reference(label: &str) -> LocatorRecoveryReference {
         LocatorRecoveryReference::ledger(
             label,
-            Some(format!("https://discord.example/messages/{label}")),
+            Some(
+                DiscordLinkUrl::parse(format!("https://discord.example/messages/{label}"))
+                    .expect("url"),
+            ),
         )
     }
 
     fn channel_recovery_reference(channel_id: ChannelId) -> LocatorRecoveryReference {
         LocatorRecoveryReference::channel(
             channel_id,
-            Some(format!(
-                "https://discord.example/channels/1/{}",
-                channel_id.get()
-            )),
+            Some(
+                DiscordLinkUrl::parse(format!(
+                    "https://discord.example/channels/1/{}",
+                    channel_id.get()
+                ))
+                .expect("url"),
+            ),
         )
     }
 

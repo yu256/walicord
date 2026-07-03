@@ -8,6 +8,7 @@ use std::{collections::HashSet, num::NonZeroU64, sync::Arc};
 use tokio::sync::Mutex;
 use walicord_application::ledger::{LedgerId, canonical_write::LocatorBindingPublisher};
 use walicord_i18n as i18n;
+use walicord_presentation::discord_ledger::DiscordLinkUrl;
 
 #[cfg(test)]
 use super::route_guard::startup_channel_is_track_target;
@@ -22,29 +23,29 @@ pub(crate) fn is_canonical_thread_name(name: &str) -> bool {
 pub(crate) enum LocatorRecoveryReference {
     Ledger {
         ledger_id_short: String,
-        thread_link: Option<String>,
+        thread_link: Option<DiscordLinkUrl>,
     },
     Channel {
         channel_id: ChannelId,
-        channel_link: Option<String>,
+        channel_link: Option<DiscordLinkUrl>,
     },
 }
 
 impl LocatorRecoveryReference {
     pub(crate) fn ledger(
         ledger_id_short: impl Into<String>,
-        thread_link: Option<impl Into<String>>,
+        thread_link: Option<DiscordLinkUrl>,
     ) -> Self {
         Self::Ledger {
             ledger_id_short: ledger_id_short.into(),
-            thread_link: thread_link.map(Into::into),
+            thread_link,
         }
     }
 
-    pub(crate) fn channel(channel_id: ChannelId, channel_link: Option<impl Into<String>>) -> Self {
+    pub(crate) fn channel(channel_id: ChannelId, channel_link: Option<DiscordLinkUrl>) -> Self {
         Self::Channel {
             channel_id,
-            channel_link: channel_link.map(Into::into),
+            channel_link,
         }
     }
 
@@ -60,7 +61,7 @@ impl LocatorRecoveryReference {
                 );
                 if let Some(thread_link) = thread_link {
                     line.push_str(" | <");
-                    line.push_str(thread_link);
+                    line.push_str(thread_link.as_str());
                     line.push('>');
                 }
                 line
@@ -76,7 +77,7 @@ impl LocatorRecoveryReference {
                 );
                 if let Some(channel_link) = channel_link {
                     line.push_str(" | <");
-                    line.push_str(channel_link);
+                    line.push_str(channel_link.as_str());
                     line.push('>');
                 }
                 line
@@ -672,17 +673,23 @@ mod tests {
     fn ledger_recovery_reference(label: &str) -> LocatorRecoveryReference {
         LocatorRecoveryReference::ledger(
             label,
-            Some(format!("https://discord.example/messages/{label}")),
+            Some(
+                DiscordLinkUrl::parse(format!("https://discord.example/messages/{label}"))
+                    .expect("url"),
+            ),
         )
     }
 
     fn channel_recovery_reference(channel_id: ChannelId) -> LocatorRecoveryReference {
         LocatorRecoveryReference::channel(
             channel_id,
-            Some(format!(
-                "https://discord.example/channels/1/{}",
-                channel_id.get()
-            )),
+            Some(
+                DiscordLinkUrl::parse(format!(
+                    "https://discord.example/channels/1/{}",
+                    channel_id.get()
+                ))
+                .expect("url"),
+            ),
         )
     }
 

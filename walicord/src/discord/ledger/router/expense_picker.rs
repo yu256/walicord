@@ -14,8 +14,8 @@ use walicord_presentation::discord_ledger::{
     SafeLiteralText, SurfaceActionRow, SurfaceButton, SurfaceInteractiveButtonStyle,
     SurfaceMemberLabels, SurfaceSelectOption,
     picker_types::{ExpensePickerKind, PickerSnapshotId},
-    truncate_component_label, validate_custom_id, validate_modal_title, validate_text_input_label,
-    validate_text_input_placeholder,
+    truncate_component_label, unknown_role_safe_label, validate_custom_id, validate_modal_title,
+    validate_text_input_label, validate_text_input_placeholder,
 };
 
 use super::{LedgerRouteError, RouterRosterSnapshot};
@@ -200,19 +200,20 @@ fn expense_picker_items(
             .roster
             .role_members
             .keys()
-            .map(|role_id| ExpensePickerItem {
-                value: role_id.0,
-                label: roster
+            .map(|role_id| {
+                let label = match roster
                     .role_display_names
                     .get(role_id)
                     .and_then(|name| SafeLiteralText::from_roster_label(name.as_str()))
-                    .unwrap_or_else(|| {
-                        SafeLiteralText::from_roster_label(
-                            &i18n::unknown_role_label(role_id.0).to_string(),
-                        )
-                        .expect("fallback role label should sanitize")
-                    }),
-                selected: selection.selected_roles.contains(role_id),
+                {
+                    Some(label) => label,
+                    None => unknown_role_safe_label(*role_id),
+                };
+                ExpensePickerItem {
+                    value: role_id.0,
+                    label,
+                    selected: selection.selected_roles.contains(role_id),
+                }
             })
             .collect(),
     }

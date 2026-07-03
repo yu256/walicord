@@ -1,9 +1,9 @@
 use super::{
     budgets::{
-        RenderBudgetError, truncate_component_label, validate_action_rows, validate_button_label,
-        validate_buttons_in_row, validate_component_description, validate_component_label,
-        validate_component_placeholder, validate_custom_id, validate_message_content,
-        validate_select_options, validate_select_value_bounds,
+        DISCORD_MESSAGE_CONTENT_LIMIT, RenderBudgetError, validate_action_rows,
+        validate_button_label, validate_buttons_in_row, validate_component_description,
+        validate_component_label, validate_component_placeholder, validate_custom_id,
+        validate_message_content, validate_select_options, validate_select_value_bounds,
     },
     pickers::PickerSurfaceModel,
     sanitizer::{BusinessDateTime, SafeLiteralText},
@@ -19,11 +19,43 @@ pub enum SurfaceInteractiveButtonStyle {
     Danger,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum DiscordLinkUrlError {
+    #[error("invalid Discord link URL")]
+    Invalid,
+    #[error("unsupported Discord link URL scheme: {0}")]
+    UnsupportedScheme(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscordLinkUrl(String);
+
+impl DiscordLinkUrl {
+    pub fn parse(raw: impl Into<String>) -> Result<Self, DiscordLinkUrlError> {
+        let raw = raw.into();
+        let parsed = url::Url::parse(&raw).map_err(|_| DiscordLinkUrlError::Invalid)?;
+        match parsed.scheme() {
+            "http" | "https" => Ok(Self(raw)),
+            scheme => Err(DiscordLinkUrlError::UnsupportedScheme(scheme.to_owned())),
+        }
+    }
+
+    pub fn discord_channel(guild_id: u64, channel_id: u64) -> Self {
+        Self(format!(
+            "https://discord.com/channels/{guild_id}/{channel_id}"
+        ))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SurfaceButton {
     Link {
         label: String,
-        url: String,
+        url: DiscordLinkUrl,
         disabled: bool,
     },
     Interactive {
@@ -50,7 +82,7 @@ impl SurfaceButton {
 
     pub fn url(&self) -> Option<&str> {
         match self {
-            Self::Link { url, .. } => Some(url),
+            Self::Link { url, .. } => Some(url.as_str()),
             Self::Interactive { .. } => None,
         }
     }
@@ -178,20 +210,23 @@ impl ExpenseOrSettlementSummary {
     }
 
     pub fn render_candidate_summary(&self) -> String {
+        format!("{} {}", self.date(), self.render_recent_entry_summary())
+    }
+
+    pub fn render_recent_entry_summary(&self) -> String {
         match self {
             Self::Expense {
-                date,
                 payer_display_name,
                 amount,
                 note,
+                ..
             } => {
                 let mut summary =
-                    i18n::void_candidate_expense_summary(date, payer_display_name, amount)
-                        .to_string();
+                    i18n::sealed_expense_summary(payer_display_name, amount).to_string();
                 if let Some(note) = note {
                     summary.push(' ');
                     summary.push_str(
-                        &i18n::void_candidate_note_excerpt(excerpt_with_ascii_ellipsis(
+                        &i18n::void_candidate_note_excerpt(append_ascii_ellipsis_after_prefix(
                             note.as_str(),
                             30,
                         ))
@@ -201,14 +236,13 @@ impl ExpenseOrSettlementSummary {
                 summary
             }
             Self::Settlement {
-                date,
                 from_display_name,
                 to_display_name,
                 amount,
                 additional_transfers,
+                ..
             } => {
-                let mut summary = i18n::void_candidate_settlement_summary(
-                    date,
+                let mut summary = i18n::sealed_settlement_summary_with_amount(
                     from_display_name,
                     to_display_name,
                     amount,
@@ -278,7 +312,7 @@ impl ExpenseOrSettlementSummary {
         match self {
             Self::Expense { note, .. } => note
                 .as_ref()
-                .map(|note| excerpt_with_ascii_ellipsis(note.as_str(), 30)),
+                .map(|note| append_ascii_ellipsis_after_prefix(note.as_str(), 30)),
             Self::Settlement { .. } => None,
         }
     }
@@ -417,13 +451,67 @@ pub enum PublicCanonicalMessageModel {
     BalanceAdjustment(PublicBalanceAdjustmentMessageModel),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ReadViewRoute {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LedgerRoute {
+    Command,
+    Panel,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewRoute {
+    Thread,
+    Parent,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum ReviewSettleAction {
+    Enabled {
+        custom_id: String,
+    },
     #[default]
-    ReviewThread,
-    ReviewParent,
-    LedgerCommand,
-    LedgerPanel,
+    Hidden,
+}
+
+impl ReviewSettleAction {
+    pub fn enabled(custom_id: impl Into<String>) -> Self {
+        Self::Enabled {
+            custom_id: custom_id.into(),
+        }
+    }
+
+    fn into_action_rows(self) -> Vec<SurfaceActionRow> {
+        match self {
+            Self::Enabled { custom_id } => {
+                vec![SurfaceActionRow::Buttons(vec![
+                    SurfaceButton::Interactive {
+                        label: i18n::REVIEW_SETTLE_BUTTON_LABEL.to_owned(),
+                        custom_id,
+                        style: SurfaceInteractiveButtonStyle::Primary,
+                        disabled: false,
+                    },
+                ])]
+            }
+            Self::Hidden => Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DocumentRoute {
+    Ledger(LedgerRoute),
+    Review(ReviewRoute),
+}
+
+impl From<LedgerRoute> for DocumentRoute {
+    fn from(r: LedgerRoute) -> Self {
+        Self::Ledger(r)
+    }
+}
+
+impl From<ReviewRoute> for DocumentRoute {
+    fn from(r: ReviewRoute) -> Self {
+        Self::Review(r)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -433,34 +521,448 @@ pub struct RecentEntryRow {
     pub recovery_reference: RecoveryReference,
 }
 
+// --- Builder types (pre-pagination) ---
+
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ReadViewContent {
+pub enum Section<T> {
+    Empty,
+    Rows(walicord_domain::NonEmptyVec<T>),
+}
+
+impl<T> Section<T> {
+    pub fn from_rows(rows: Vec<T>) -> Self {
+        match walicord_domain::NonEmptyVec::new(rows) {
+            Ok(rows) => Self::Rows(rows),
+            Err(_) => Self::Empty,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReadViewData {
     Ledger {
-        recent_entries: Option<Vec<RecentEntryRow>>,
+        balances: Section<BalanceRow>,
+        recent_entries: Section<RecentEntryRow>,
     },
     Review {
-        transfers: Option<Vec<TransferRow>>,
+        balances: Section<BalanceRow>,
+        // Populated Review always has transfers; no-transfer state is ReadViewDocumentState::Empty
+        transfers: walicord_domain::NonEmptyVec<TransferRow>,
     },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReadViewDocumentState {
+    Empty {
+        empty_state: std::borrow::Cow<'static, str>,
+    },
+    Populated(ReadViewData),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadViewDocument {
+    route: DocumentRoute,
+    title: std::borrow::Cow<'static, str>,
+    uncertain_write: bool,
+    route_guidance_lines: Vec<String>,
+    recovery_action: RecoveryAction,
+    footer_lines: Vec<String>,
+    action_rows: Vec<SurfaceActionRow>,
+    ephemeral: bool,
+    state: ReadViewDocumentState,
+}
+
+impl ReadViewDocument {
+    pub fn route(&self) -> DocumentRoute {
+        self.route
+    }
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+    pub fn uncertain_write(&self) -> bool {
+        self.uncertain_write
+    }
+    pub fn route_guidance_lines(&self) -> &[String] {
+        &self.route_guidance_lines
+    }
+    pub fn recovery_action(&self) -> &RecoveryAction {
+        &self.recovery_action
+    }
+    pub fn footer_lines(&self) -> &[String] {
+        &self.footer_lines
+    }
+    pub fn action_rows(&self) -> &[SurfaceActionRow] {
+        &self.action_rows
+    }
+    pub fn ephemeral(&self) -> bool {
+        self.ephemeral
+    }
+    pub fn state(&self) -> &ReadViewDocumentState {
+        &self.state
+    }
+    pub fn into_state(self) -> ReadViewDocumentState {
+        self.state
+    }
+
+    pub fn with_route_guidance(mut self, lines: Vec<String>) -> Self {
+        self.route_guidance_lines = lines;
+        self
+    }
+
+    pub fn ledger(
+        route: LedgerRoute,
+        balances: Section<BalanceRow>,
+        recent_entries: Section<RecentEntryRow>,
+        uncertain_write: bool,
+    ) -> Self {
+        let state = if matches!(
+            (&balances, &recent_entries),
+            (Section::Empty, Section::Empty)
+        ) {
+            ReadViewDocumentState::Empty {
+                empty_state: std::borrow::Cow::Borrowed(i18n::LEDGER_EMPTY_STATE),
+            }
+        } else {
+            ReadViewDocumentState::Populated(ReadViewData::Ledger {
+                balances,
+                recent_entries,
+            })
+        };
+        Self {
+            route: route.into(),
+            title: std::borrow::Cow::Borrowed(i18n::PANEL_LEDGER_BUTTON_LABEL),
+            uncertain_write,
+            route_guidance_lines: Vec::new(),
+            recovery_action: RecoveryAction::None,
+            footer_lines: Vec::new(),
+            action_rows: Vec::new(),
+            ephemeral: true,
+            state,
+        }
+    }
+
+    pub fn ledger_empty(route: LedgerRoute, uncertain_write: bool) -> Self {
+        Self {
+            route: route.into(),
+            title: std::borrow::Cow::Borrowed(i18n::PANEL_LEDGER_BUTTON_LABEL),
+            uncertain_write,
+            route_guidance_lines: Vec::new(),
+            recovery_action: RecoveryAction::None,
+            footer_lines: Vec::new(),
+            action_rows: Vec::new(),
+            ephemeral: true,
+            state: ReadViewDocumentState::Empty {
+                empty_state: std::borrow::Cow::Borrowed(i18n::LEDGER_EMPTY_STATE),
+            },
+        }
+    }
+
+    pub fn review(
+        route: ReviewRoute,
+        balances: Section<BalanceRow>,
+        transfers: walicord_domain::NonEmptyVec<TransferRow>,
+        uncertain_write: bool,
+        recovery_action: RecoveryAction,
+        settle_action: ReviewSettleAction,
+    ) -> Self {
+        Self {
+            route: route.into(),
+            title: std::borrow::Cow::Borrowed(i18n::PANEL_REVIEW_BUTTON_LABEL),
+            uncertain_write,
+            route_guidance_lines: Vec::new(),
+            recovery_action,
+            footer_lines: Vec::new(),
+            action_rows: settle_action.into_action_rows(),
+            ephemeral: true,
+            state: ReadViewDocumentState::Populated(ReadViewData::Review {
+                balances,
+                transfers,
+            }),
+        }
+    }
+
+    pub fn review_empty(
+        route: ReviewRoute,
+        uncertain_write: bool,
+        recovery_action: RecoveryAction,
+    ) -> Self {
+        let (empty_state, recovery_action) = match route {
+            ReviewRoute::Parent => (
+                std::borrow::Cow::Borrowed(i18n::REVIEW_PARENT_EMPTY_STATE),
+                RecoveryAction::None,
+            ),
+            ReviewRoute::Thread => (
+                std::borrow::Cow::Borrowed(i18n::REVIEW_THREAD_EMPTY_STATE),
+                recovery_action,
+            ),
+        };
+        Self {
+            route: route.into(),
+            title: std::borrow::Cow::Borrowed(i18n::PANEL_REVIEW_BUTTON_LABEL),
+            uncertain_write,
+            route_guidance_lines: Vec::new(),
+            recovery_action,
+            footer_lines: Vec::new(),
+            action_rows: Vec::new(),
+            ephemeral: true,
+            state: ReadViewDocumentState::Empty { empty_state },
+        }
+    }
+
+    pub fn review_no_transfers(
+        route: ReviewRoute,
+        uncertain_write: bool,
+        recovery_action: RecoveryAction,
+    ) -> Self {
+        use std::fmt::Write as _;
+        let mut body = String::new();
+        let _ = write!(
+            body,
+            "{}\n{}",
+            i18n::SETTLEMENT_ALREADY_NOT_NEEDED_MESSAGE,
+            i18n::SETTLEMENT_PREVIEW_NOT_SAVED_MESSAGE,
+        );
+        Self {
+            route: route.into(),
+            title: std::borrow::Cow::Borrowed(i18n::PANEL_REVIEW_BUTTON_LABEL),
+            uncertain_write,
+            route_guidance_lines: Vec::new(),
+            recovery_action,
+            footer_lines: Vec::new(),
+            action_rows: Vec::new(),
+            ephemeral: true,
+            state: ReadViewDocumentState::Empty {
+                empty_state: std::borrow::Cow::Owned(body),
+            },
+        }
+    }
+}
+
+// --- Page types (post-pagination) ---
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PageSection<T> {
+    Hidden,
+    Empty,
+    Rows(walicord_domain::NonEmptyVec<T>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RequiredPageSection<T> {
+    Hidden,
+    Rows(walicord_domain::NonEmptyVec<T>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReadViewPageData {
+    Ledger {
+        balances: PageSection<BalanceRow>,
+        recent_entries: PageSection<RecentEntryRow>,
+    },
+    Review {
+        balances: PageSection<BalanceRow>,
+        transfers: RequiredPageSection<TransferRow>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReadViewPageState {
+    Stale {
+        missing_thread_note: bool,
+    },
+    Empty {
+        empty_state: std::borrow::Cow<'static, str>,
+    },
+    Populated(ReadViewPageData),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReadViewPageModel {
-    pub route: ReadViewRoute,
-    pub title: std::borrow::Cow<'static, str>,
-    pub uncertain_write: bool,
-    pub stale_page: bool,
-    pub page_indicator: Option<String>,
-    pub snapshot_notice: Option<String>,
-    pub route_guidance_lines: Vec<String>,
-    pub recovery_cta: RecoveryCta,
-    pub recovery_url: Option<String>,
-    pub missing_thread_note: bool,
-    pub balances: Option<Vec<BalanceRow>>,
-    pub footer_lines: Vec<String>,
-    pub empty_state: Option<std::borrow::Cow<'static, str>>,
-    pub action_rows: Vec<SurfaceActionRow>,
-    pub ephemeral: bool,
-    pub content: ReadViewContent,
+    route: DocumentRoute,
+    title: std::borrow::Cow<'static, str>,
+    uncertain_write: bool,
+    page_indicator: Option<String>,
+    snapshot_notice: Option<String>,
+    route_guidance_lines: Vec<String>,
+    recovery_action: RecoveryAction,
+    footer_lines: Vec<String>,
+    action_rows: Vec<SurfaceActionRow>,
+    ephemeral: bool,
+    state: ReadViewPageState,
+}
+
+impl ReadViewPageModel {
+    fn from_doc(
+        doc: &ReadViewDocument,
+        state: ReadViewPageState,
+        page_indicator: Option<String>,
+        snapshot_notice: Option<String>,
+    ) -> Self {
+        Self {
+            route: doc.route,
+            title: doc.title.clone(),
+            uncertain_write: doc.uncertain_write,
+            page_indicator,
+            snapshot_notice,
+            route_guidance_lines: doc.route_guidance_lines.clone(),
+            recovery_action: doc.recovery_action.clone(),
+            footer_lines: doc.footer_lines.clone(),
+            action_rows: doc.action_rows.clone(),
+            ephemeral: doc.ephemeral,
+            state,
+        }
+    }
+
+    pub fn stale_ledger(route: LedgerRoute, missing_thread_note: bool) -> Self {
+        Self {
+            route: route.into(),
+            title: std::borrow::Cow::Borrowed(i18n::PANEL_LEDGER_BUTTON_LABEL),
+            uncertain_write: false,
+            page_indicator: None,
+            snapshot_notice: None,
+            route_guidance_lines: Vec::new(),
+            recovery_action: RecoveryAction::None,
+            footer_lines: Vec::new(),
+            action_rows: Vec::new(),
+            ephemeral: true,
+            state: ReadViewPageState::Stale {
+                missing_thread_note,
+            },
+        }
+    }
+
+    pub(crate) fn empty(
+        doc: &ReadViewDocument,
+        empty_state: std::borrow::Cow<'static, str>,
+    ) -> Self {
+        Self::from_doc(doc, ReadViewPageState::Empty { empty_state }, None, None)
+    }
+
+    pub(crate) fn ledger_page(
+        doc: &ReadViewDocument,
+        balances: PageSection<BalanceRow>,
+        recent_entries: PageSection<RecentEntryRow>,
+        page_indicator: Option<String>,
+        snapshot_notice: Option<String>,
+    ) -> Self {
+        Self::from_doc(
+            doc,
+            ReadViewPageState::Populated(ReadViewPageData::Ledger {
+                balances,
+                recent_entries,
+            }),
+            page_indicator,
+            snapshot_notice,
+        )
+    }
+
+    pub(crate) fn review_page(
+        doc: &ReadViewDocument,
+        balances: PageSection<BalanceRow>,
+        transfers: RequiredPageSection<TransferRow>,
+        page_indicator: Option<String>,
+        snapshot_notice: Option<String>,
+    ) -> Self {
+        Self::from_doc(
+            doc,
+            ReadViewPageState::Populated(ReadViewPageData::Review {
+                balances,
+                transfers,
+            }),
+            page_indicator,
+            snapshot_notice,
+        )
+    }
+
+    pub fn route(&self) -> DocumentRoute {
+        self.route
+    }
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+    pub fn uncertain_write(&self) -> bool {
+        self.uncertain_write
+    }
+    pub fn page_indicator(&self) -> Option<&str> {
+        self.page_indicator.as_deref()
+    }
+    pub fn snapshot_notice(&self) -> Option<&str> {
+        self.snapshot_notice.as_deref()
+    }
+    pub fn route_guidance_lines(&self) -> &[String] {
+        &self.route_guidance_lines
+    }
+    pub fn recovery_action(&self) -> &RecoveryAction {
+        &self.recovery_action
+    }
+    pub fn footer_lines(&self) -> &[String] {
+        &self.footer_lines
+    }
+    pub fn action_rows(&self) -> &[SurfaceActionRow] {
+        &self.action_rows
+    }
+    pub fn ephemeral(&self) -> bool {
+        self.ephemeral
+    }
+    pub fn state(&self) -> &ReadViewPageState {
+        &self.state
+    }
+
+    pub fn with_route_guidance(mut self, lines: Vec<String>) -> Self {
+        self.route_guidance_lines = lines;
+        self
+    }
+
+    pub fn clear_action_rows(&mut self) {
+        self.action_rows.clear();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_fixture(
+        route: DocumentRoute,
+        title: &'static str,
+        uncertain_write: bool,
+        recovery_action: RecoveryAction,
+        footer_lines: Vec<String>,
+        state: ReadViewPageState,
+    ) -> Self {
+        Self {
+            route,
+            title: std::borrow::Cow::Borrowed(title),
+            uncertain_write,
+            page_indicator: None,
+            snapshot_notice: None,
+            route_guidance_lines: Vec::new(),
+            recovery_action,
+            footer_lines,
+            action_rows: Vec::new(),
+            ephemeral: true,
+            state,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_fixture_paged(
+        route: DocumentRoute,
+        title: &'static str,
+        page_indicator: Option<String>,
+        snapshot_notice: Option<String>,
+        state: ReadViewPageState,
+    ) -> Self {
+        Self {
+            route,
+            title: std::borrow::Cow::Borrowed(title),
+            uncertain_write: false,
+            page_indicator,
+            snapshot_notice,
+            route_guidance_lines: Vec::new(),
+            recovery_action: RecoveryAction::None,
+            footer_lines: Vec::new(),
+            action_rows: Vec::new(),
+            ephemeral: true,
+            state,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -522,46 +1024,212 @@ impl RenderedCanonicalMessage {
     }
 }
 
+// Discord-specific presentation type: enforces Discord's 2000-char content limit.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RenderedSurface {
-    pub body: String,
-    pub action_rows: Vec<SurfaceActionRow>,
-    pub ephemeral: bool,
+pub struct MessageContent(String);
+
+impl MessageContent {
+    pub fn parse(raw: impl Into<String>) -> Result<Self, RenderBudgetError> {
+        let s = raw.into();
+        validate_message_content(&s)?;
+        Ok(Self(s))
+    }
+
+    pub fn fit_to_discord_limit(raw: impl Into<String>) -> Self {
+        let s = raw.into();
+        Self(fit_with_ascii_ellipsis(&s, DISCORD_MESSAGE_CONTENT_LIMIT))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_builder(self) -> MessageContentBuilder {
+        MessageContentBuilder { raw: self.0 }
+    }
+
+    pub fn into_string(self) -> String {
+        self.0
+    }
 }
 
-impl RenderedSurface {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessageContentBuilder {
+    raw: String,
+}
+
+impl MessageContentBuilder {
+    pub fn push_line(&mut self, line: &str) {
+        if !self.raw.is_empty() {
+            self.raw.push('\n');
+        }
+        self.raw.push_str(line);
+    }
+
+    pub fn build(self) -> Result<MessageContent, RenderBudgetError> {
+        MessageContent::parse(self.raw)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PresentationSurfaceBody {
+    Text(MessageContent),
+    ImageBacked {
+        compact_text: MessageContent,
+        fallback_text: MessageContent,
+        image: crate::svg_table::RenderedSvg,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextRenderedSurface {
+    body: MessageContent,
+    action_rows: Vec<SurfaceActionRow>,
+    ephemeral: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextRenderedSurfaceParts {
+    pub body: MessageContent,
+    pub action_rows: Vec<SurfaceActionRow>,
+}
+
+impl TextRenderedSurface {
     pub fn new(
         body: impl Into<String>,
         action_rows: Vec<SurfaceActionRow>,
         ephemeral: bool,
     ) -> Result<Self, RenderBudgetError> {
-        let body = body.into();
-        validate_message_content(&body)?;
+        let content = MessageContent::parse(body)?;
         let action_rows = normalize_action_rows(action_rows)?;
         Ok(Self {
-            body,
+            body: content,
             action_rows,
             ephemeral,
         })
     }
+
+    pub fn text_body(&self) -> &str {
+        self.body.as_str()
+    }
+
+    pub fn action_rows(&self) -> &[SurfaceActionRow] {
+        &self.action_rows
+    }
+
+    pub fn into_text_message_parts(self) -> TextRenderedSurfaceParts {
+        TextRenderedSurfaceParts {
+            body: self.body,
+            action_rows: self.action_rows,
+        }
+    }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum RecoveryCta {
-    ThreadLink,
-    ParentLink,
+impl From<TextRenderedSurface> for RenderedSurface {
+    fn from(text: TextRenderedSurface) -> Self {
+        Self {
+            body: PresentationSurfaceBody::Text(text.body),
+            action_rows: text.action_rows,
+            ephemeral: text.ephemeral,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenderedSurface {
+    body: PresentationSurfaceBody,
+    action_rows: Vec<SurfaceActionRow>,
+    ephemeral: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenderedSurfaceParts {
+    pub body: PresentationSurfaceBody,
+    pub action_rows: Vec<SurfaceActionRow>,
+    pub ephemeral: bool,
+}
+
+impl RenderedSurface {
+    fn new_text(
+        body: impl Into<String>,
+        action_rows: Vec<SurfaceActionRow>,
+        ephemeral: bool,
+    ) -> Result<Self, RenderBudgetError> {
+        Ok(TextRenderedSurface::new(body, action_rows, ephemeral)?.into())
+    }
+
+    pub fn new_image_backed(
+        compact_text: impl Into<String>,
+        fallback_text: impl Into<String>,
+        image: crate::svg_table::RenderedSvg,
+        action_rows: Vec<SurfaceActionRow>,
+        ephemeral: bool,
+    ) -> Result<Self, RenderBudgetError> {
+        let compact = MessageContent::parse(compact_text)?;
+        let fallback_raw: String = fallback_text.into();
+        let fallback = MessageContent::fit_to_discord_limit(fallback_raw);
+
+        let action_rows = normalize_action_rows(action_rows)?;
+        Ok(Self {
+            body: PresentationSurfaceBody::ImageBacked {
+                compact_text: compact,
+                fallback_text: fallback,
+                image,
+            },
+            action_rows,
+            ephemeral,
+        })
+    }
+
+    pub fn body(&self) -> &PresentationSurfaceBody {
+        &self.body
+    }
+
+    pub fn into_parts(self) -> RenderedSurfaceParts {
+        RenderedSurfaceParts {
+            body: self.body,
+            action_rows: self.action_rows,
+            ephemeral: self.ephemeral,
+        }
+    }
+
+    pub fn action_rows(&self) -> &[SurfaceActionRow] {
+        &self.action_rows
+    }
+
+    pub fn ephemeral(&self) -> bool {
+        self.ephemeral
+    }
+
+    pub fn text_body(&self) -> &str {
+        match &self.body {
+            PresentationSurfaceBody::Text(content) => content.as_str(),
+            PresentationSurfaceBody::ImageBacked { fallback_text, .. } => fallback_text.as_str(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum RecoveryAction {
+    ThreadLink {
+        url: DiscordLinkUrl,
+    },
+    ParentLink {
+        url: DiscordLinkUrl,
+    },
     RecoveryReferenceOnly,
     #[default]
     None,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct RecoveryContext {
-    pub canonical_thread_known: bool,
-    pub canonical_thread_accessible: bool,
-    pub tracked_parent_known: bool,
-    pub tracked_parent_accessible: bool,
-    pub recovery_reference_available: bool,
+impl RecoveryAction {
+    pub fn thread_link(url: DiscordLinkUrl) -> Self {
+        Self::ThreadLink { url }
+    }
+
+    pub fn parent_link(url: DiscordLinkUrl) -> Self {
+        Self::ParentLink { url }
+    }
 }
 
 pub struct DiscordLedgerPresenter;
@@ -569,8 +1237,8 @@ pub struct DiscordLedgerPresenter;
 impl DiscordLedgerPresenter {
     pub fn render_expense_step(
         model: &ExpenseSurfaceModel,
-    ) -> Result<RenderedSurface, RenderBudgetError> {
-        RenderedSurface::new(
+    ) -> Result<TextRenderedSurface, RenderBudgetError> {
+        TextRenderedSurface::new(
             render_sections([
                 Some(model.title.as_ref()),
                 model.validation_message.as_deref(),
@@ -584,16 +1252,18 @@ impl DiscordLedgerPresenter {
 
     pub fn render_expense_success(
         model: &ExpenseSuccessSurfaceModel,
-    ) -> Result<RenderedSurface, RenderBudgetError> {
-        RenderedSurface::new(
+    ) -> Result<TextRenderedSurface, RenderBudgetError> {
+        TextRenderedSurface::new(
             render_sections([non_empty_join(&model.body_lines).as_deref()]),
             model.action_rows.clone(),
             model.ephemeral,
         )
     }
 
-    pub fn render_panel(model: &PanelSurfaceModel) -> Result<RenderedSurface, RenderBudgetError> {
-        RenderedSurface::new(
+    pub fn render_panel(
+        model: &PanelSurfaceModel,
+    ) -> Result<TextRenderedSurface, RenderBudgetError> {
+        TextRenderedSurface::new(
             render_sections([
                 Some(model.thread_cue.as_str()),
                 model.status_line.as_deref(),
@@ -630,14 +1300,14 @@ impl DiscordLedgerPresenter {
 
     pub fn render_member_picker(
         model: &PickerSurfaceModel,
-    ) -> Result<RenderedSurface, RenderBudgetError> {
+    ) -> Result<TextRenderedSurface, RenderBudgetError> {
         let mut action_rows = Vec::new();
         if let Some(select_menu) = model.select_menu.clone() {
             action_rows.push(SurfaceActionRow::Select(select_menu));
         }
         action_rows.extend(model.action_rows.clone());
 
-        RenderedSurface::new(
+        TextRenderedSurface::new(
             render_sections([
                 Some(model.title.as_ref()),
                 model.selected_summary.as_deref(),
@@ -692,105 +1362,147 @@ impl DiscordLedgerPresenter {
             .uncertain_write
             .then(|| i18n::READ_UNCERTAIN_WRITE_ADVISORY.to_owned());
         let mut action_rows = model.action_rows.clone();
-        append_recovery_cta_row(
-            &mut action_rows,
-            model.recovery_cta,
-            model.recovery_url.as_deref(),
-        );
+        append_recovery_cta_row(&mut action_rows, &model.recovery_action);
 
-        let stale_message = match &model.content {
-            ReadViewContent::Review { .. } => i18n::STALE_REVIEW_PAGE_MESSAGE,
-            ReadViewContent::Ledger { .. } => i18n::STALE_LEDGER_PAGE_MESSAGE,
-        };
-
-        let body = if model.stale_page {
-            render_sections([
-                Some(model.title.as_ref()),
-                Some(stale_message),
-                model
-                    .missing_thread_note
-                    .then_some(i18n::NO_LEDGER_THREAD_YET_NOTE),
-            ])
-        } else if let Some(empty_state) = &model.empty_state {
-            render_sections([
+        let body = match &model.state {
+            ReadViewPageState::Stale {
+                missing_thread_note,
+            } => {
+                let stale_message = match model.route {
+                    DocumentRoute::Review(_) => i18n::STALE_REVIEW_PAGE_MESSAGE,
+                    DocumentRoute::Ledger(_) => i18n::STALE_LEDGER_PAGE_MESSAGE,
+                };
+                render_sections([
+                    Some(model.title.as_ref()),
+                    Some(stale_message),
+                    missing_thread_note.then_some(i18n::NO_LEDGER_THREAD_YET_NOTE),
+                ])
+            }
+            ReadViewPageState::Empty { empty_state } => render_sections([
                 Some(model.title.as_ref()),
                 advisory.as_deref(),
                 Some(empty_state.as_ref()),
-                model
-                    .missing_thread_note
-                    .then_some(i18n::NO_LEDGER_THREAD_YET_NOTE),
-            ])
-        } else {
-            match &model.content {
-                ReadViewContent::Review { transfers } => {
-                    let balances_section = model
-                        .balances
-                        .as_ref()
-                        .map(|b| render_review_balances_section(b));
-                    let transfers_section = transfers
-                        .as_ref()
-                        .map(|t| render_review_transfers_section(t));
-                    let route_guidance: Vec<&str> = model
-                        .route_guidance_lines
-                        .iter()
-                        .map(String::as_str)
-                        .collect();
-                    let review_instruction = if model.uncertain_write {
+            ]),
+            ReadViewPageState::Populated(data) => {
+                use crate::svg_table::combine_svgs_vertically;
+                use walicord_domain::NonEmptyVec;
+
+                let review_instruction = match data {
+                    ReadViewPageData::Review { .. } => Some(if model.uncertain_write {
                         i18n::REVIEW_PREVIEW_BLOCKED_INSTRUCTION
                     } else {
                         i18n::REVIEW_PREVIEW_INSTRUCTION
-                    };
-                    render_sections([
-                        Some(model.title.as_ref()),
-                        advisory.as_deref(),
-                        model.page_indicator.as_deref(),
-                        model.snapshot_notice.as_deref(),
-                        balances_section.as_deref(),
-                        transfers_section.as_deref(),
-                        Some(review_instruction),
-                        non_empty_join(&route_guidance).as_deref(),
-                        model
-                            .missing_thread_note
-                            .then_some(i18n::NO_LEDGER_THREAD_YET_NOTE),
-                    ])
-                }
-                ReadViewContent::Ledger { recent_entries } => {
-                    let balances_section = model
-                        .balances
-                        .as_ref()
-                        .map(|b| render_ledger_balances_section(b));
-                    let recent_entries_section = recent_entries
-                        .as_ref()
-                        .map(|e| render_ledger_recent_entries_section(e));
-                    let footer = render_ledger_footer(model);
-                    render_sections([
-                        Some(model.title.as_ref()),
-                        advisory.as_deref(),
-                        model.page_indicator.as_deref(),
-                        model.snapshot_notice.as_deref(),
-                        balances_section.as_deref(),
-                        recent_entries_section.as_deref(),
-                        footer.as_deref().filter(|s| !s.is_empty()),
-                        model
-                            .missing_thread_note
-                            .then_some(i18n::NO_LEDGER_THREAD_YET_NOTE),
-                    ])
-                }
+                    }),
+                    ReadViewPageData::Ledger { .. } => None,
+                };
+                let route_guidance = non_empty_join(
+                    &model
+                        .route_guidance_lines
+                        .iter()
+                        .map(String::as_str)
+                        .collect::<Vec<_>>(),
+                );
+                let footer = non_empty_join(model.footer_lines());
+
+                let fallback_text = match data {
+                    ReadViewPageData::Review {
+                        balances,
+                        transfers,
+                    } => {
+                        let balances_section =
+                            render_page_section(balances, render_review_balances_section);
+                        let transfers_section = render_required_page_section(
+                            transfers,
+                            render_review_transfers_section,
+                        );
+                        render_sections([
+                            Some(model.title.as_ref()),
+                            advisory.as_deref(),
+                            model.page_indicator.as_deref(),
+                            model.snapshot_notice.as_deref(),
+                            balances_section.as_deref(),
+                            transfers_section.as_deref(),
+                            review_instruction,
+                            route_guidance.as_deref(),
+                            footer.as_deref(),
+                        ])
+                    }
+                    ReadViewPageData::Ledger {
+                        balances,
+                        recent_entries,
+                    } => {
+                        let balances_section =
+                            render_page_section(balances, render_ledger_balances_section);
+                        let recent_entries_section = render_page_section(
+                            recent_entries,
+                            render_ledger_recent_entries_section,
+                        );
+                        render_sections([
+                            Some(model.title.as_ref()),
+                            advisory.as_deref(),
+                            model.page_indicator.as_deref(),
+                            model.snapshot_notice.as_deref(),
+                            balances_section.as_deref(),
+                            recent_entries_section.as_deref(),
+                            route_guidance.as_deref(),
+                            footer.as_deref(),
+                        ])
+                    }
+                };
+
+                let svg_parts: Vec<crate::svg_table::RenderedSvg> = match data {
+                    ReadViewPageData::Ledger {
+                        balances,
+                        recent_entries,
+                    } => [balances.to_svg(), recent_entries.to_svg()]
+                        .into_iter()
+                        .flatten()
+                        .collect(),
+                    ReadViewPageData::Review {
+                        balances,
+                        transfers,
+                    } => [balances.to_svg(), transfers.to_svg()]
+                        .into_iter()
+                        .flatten()
+                        .collect(),
+                };
+
+                let compact_text = render_sections([
+                    Some(model.title.as_ref()),
+                    advisory.as_deref(),
+                    model.page_indicator.as_deref(),
+                    model.snapshot_notice.as_deref(),
+                    review_instruction,
+                    route_guidance.as_deref(),
+                    footer.as_deref(),
+                ]);
+
+                return match NonEmptyVec::new(svg_parts) {
+                    Ok(svgs) => {
+                        let image = combine_svgs_vertically(&svgs);
+                        RenderedSurface::new_image_backed(
+                            compact_text,
+                            fallback_text,
+                            image,
+                            action_rows,
+                            model.ephemeral,
+                        )
+                    }
+                    Err(_) => {
+                        RenderedSurface::new_text(fallback_text, action_rows, model.ephemeral)
+                    }
+                };
             }
         };
 
-        RenderedSurface::new(body, action_rows, model.ephemeral)
+        RenderedSurface::new_text(body, action_rows, model.ephemeral)
     }
 
     pub fn render_void_flow(
         model: &VoidSurfaceModel,
-    ) -> Result<RenderedSurface, RenderBudgetError> {
+    ) -> Result<TextRenderedSurface, RenderBudgetError> {
         let mut action_rows = model.action_rows.clone();
-        append_recovery_cta_row(
-            &mut action_rows,
-            model.recovery_cta,
-            model.recovery_url.as_deref(),
-        );
+        append_recovery_cta_row(&mut action_rows, &model.recovery_action);
 
         let body = if model.stale_page {
             render_sections([
@@ -826,13 +1538,13 @@ impl DiscordLedgerPresenter {
             ])
         };
 
-        RenderedSurface::new(body, action_rows, model.ephemeral)
+        TextRenderedSurface::new(body, action_rows, model.ephemeral)
     }
 
     pub fn render_write_rejection(
         model: &WriteRejectionSurfaceModel,
-    ) -> Result<RenderedSurface, RenderBudgetError> {
-        RenderedSurface::new(
+    ) -> Result<TextRenderedSurface, RenderBudgetError> {
+        TextRenderedSurface::new(
             render_sections([
                 Some(model.title.as_ref()),
                 non_empty_join(&model.body_lines).as_deref(),
@@ -844,8 +1556,8 @@ impl DiscordLedgerPresenter {
 
     pub fn render_uncertain_write_block(
         model: &UncertainWriteSurfaceModel,
-    ) -> Result<RenderedSurface, RenderBudgetError> {
-        RenderedSurface::new(
+    ) -> Result<TextRenderedSurface, RenderBudgetError> {
+        TextRenderedSurface::new(
             render_sections([
                 Some(model.title.as_ref()),
                 non_empty_join(&model.status_lines).as_deref(),
@@ -854,22 +1566,6 @@ impl DiscordLedgerPresenter {
             model.action_rows.clone(),
             model.ephemeral,
         )
-    }
-
-    pub fn select_recovery_cta(context: RecoveryContext) -> RecoveryCta {
-        if context.canonical_thread_known && context.canonical_thread_accessible {
-            return RecoveryCta::ThreadLink;
-        }
-
-        if context.tracked_parent_known && context.tracked_parent_accessible {
-            return RecoveryCta::ParentLink;
-        }
-
-        if context.recovery_reference_available {
-            return RecoveryCta::RecoveryReferenceOnly;
-        }
-
-        RecoveryCta::None
     }
 }
 
@@ -1144,15 +1840,14 @@ fn normalize_action_rows(
                     .into_iter()
                     .map(|option| {
                         validate_custom_id(&option.value)?;
-                        let label = truncate_component_label(option.label.as_str());
-                        validate_component_label(&label)?;
+                        let label = option.label.truncate_for_component_label();
+                        validate_component_label(label.as_str())?;
                         if let Some(description) = &option.description {
                             validate_component_description(description)?;
                         }
                         Ok(SurfaceSelectOption {
                             value: option.value,
-                            label: SafeLiteralText::from_roster_label(&label)
-                                .expect("validated component label should sanitize"),
+                            label,
                             description: option.description,
                             selected: option.selected,
                         })
@@ -1213,8 +1908,25 @@ fn render_impact_summary(rows: &[BalanceImpactRow]) -> String {
         .join(", ")
 }
 
-fn render_ledger_footer(model: &ReadViewPageModel) -> Option<String> {
-    non_empty_join(&model.footer_lines)
+fn render_page_section<T>(
+    section: &PageSection<T>,
+    render_fn: impl FnOnce(&[T]) -> String,
+) -> Option<String> {
+    match section {
+        PageSection::Hidden => None,
+        PageSection::Empty => Some(render_fn(&[])),
+        PageSection::Rows(rows) => Some(render_fn(rows)),
+    }
+}
+
+fn render_required_page_section<T>(
+    section: &RequiredPageSection<T>,
+    render_fn: impl FnOnce(&[T]) -> String,
+) -> Option<String> {
+    match section {
+        RequiredPageSection::Hidden => None,
+        RequiredPageSection::Rows(rows) => Some(render_fn(rows)),
+    }
 }
 
 fn render_void_candidate_line(candidate: &super::void_surfaces::VoidCandidateRow) -> String {
@@ -1240,30 +1952,59 @@ fn render_void_confirmation_lines(recap: &VoidConfirmationRecap) -> Vec<String> 
 
 fn append_recovery_cta_row(
     action_rows: &mut Vec<SurfaceActionRow>,
-    recovery_cta: RecoveryCta,
-    recovery_url: Option<&str>,
+    recovery_action: &RecoveryAction,
 ) {
-    let Some((label, url)) = recovery_cta_button(recovery_cta, recovery_url) else {
-        return;
-    };
-    action_rows.push(SurfaceActionRow::Buttons(vec![SurfaceButton::Link {
-        label,
-        url,
-        disabled: false,
-    }]));
+    match RecoveryCtaButtonRender::from(recovery_action) {
+        RecoveryCtaButtonRender::Button(button) => {
+            action_rows.push(SurfaceActionRow::Buttons(vec![
+                button.into_surface_button(),
+            ]));
+        }
+        RecoveryCtaButtonRender::Omit => {}
+    }
 }
 
-fn recovery_cta_button(
-    recovery_cta: RecoveryCta,
-    recovery_url: Option<&str>,
-) -> Option<(String, String)> {
-    let url = recovery_url?.to_owned();
-    let label = match recovery_cta {
-        RecoveryCta::ThreadLink => i18n::OPEN_LEDGER_THREAD_LABEL,
-        RecoveryCta::ParentLink => i18n::OPEN_PARENT_CHANNEL_LABEL,
-        RecoveryCta::RecoveryReferenceOnly | RecoveryCta::None => return None,
-    };
-    Some((label.to_owned(), url))
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RecoveryCtaButtonRender {
+    Button(RecoveryCtaButton),
+    Omit,
+}
+
+impl From<&RecoveryAction> for RecoveryCtaButtonRender {
+    fn from(recovery_action: &RecoveryAction) -> Self {
+        match recovery_action {
+            RecoveryAction::ThreadLink { url } => {
+                Self::Button(RecoveryCtaButton::ThreadLink { url: url.clone() })
+            }
+            RecoveryAction::ParentLink { url } => {
+                Self::Button(RecoveryCtaButton::ParentLink { url: url.clone() })
+            }
+            RecoveryAction::RecoveryReferenceOnly | RecoveryAction::None => Self::Omit,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RecoveryCtaButton {
+    ThreadLink { url: DiscordLinkUrl },
+    ParentLink { url: DiscordLinkUrl },
+}
+
+impl RecoveryCtaButton {
+    fn into_surface_button(self) -> SurfaceButton {
+        match self {
+            Self::ThreadLink { url } => SurfaceButton::Link {
+                label: i18n::OPEN_LEDGER_THREAD_LABEL.to_owned(),
+                url,
+                disabled: false,
+            },
+            Self::ParentLink { url } => SurfaceButton::Link {
+                label: i18n::OPEN_PARENT_CHANNEL_LABEL.to_owned(),
+                url,
+                disabled: false,
+            },
+        }
+    }
 }
 
 fn render_sections<'a>(sections: impl IntoIterator<Item = Option<&'a str>>) -> String {
@@ -1295,13 +2036,23 @@ fn excerpt_with_ellipsis(text: &str, limit: usize) -> String {
     format!("{prefix}…")
 }
 
-fn excerpt_with_ascii_ellipsis(text: &str, limit: usize) -> String {
+fn append_ascii_ellipsis_after_prefix(text: &str, prefix_chars: usize) -> String {
     let actual = text.chars().count();
-    if actual <= limit {
+    if actual <= prefix_chars {
         return text.to_owned();
     }
 
-    let prefix: String = text.chars().take(limit).collect();
+    let prefix: String = text.chars().take(prefix_chars).collect();
+    format!("{prefix}...")
+}
+
+fn fit_with_ascii_ellipsis(text: &str, max_chars: usize) -> String {
+    let actual = text.chars().count();
+    if actual <= max_chars {
+        return text.to_owned();
+    }
+
+    let prefix: String = text.chars().take(max_chars.saturating_sub(3)).collect();
     format!("{prefix}...")
 }
 
@@ -1309,13 +2060,15 @@ fn excerpt_with_ascii_ellipsis(text: &str, limit: usize) -> String {
 mod tests {
     use super::{
         BalanceDirection, BalanceImpactRow, BalanceRow, BusinessDateTime, DiscordLedgerPresenter,
-        ExpenseOrSettlementSummary, ExpenseSurfaceModel, LedgerSurfaceSummary, PanelButtonStates,
+        DiscordLinkUrl, DiscordLinkUrlError, DocumentRoute, ExpenseOrSettlementSummary,
+        ExpenseSurfaceModel, LedgerRoute, LedgerSurfaceSummary, PageSection, PanelButtonStates,
         PanelSurfaceModel, PublicBalanceAdjustmentMessageModel, PublicCanonicalMessageModel,
         PublicExpenseMessageModel, PublicSealMessageModel, PublicSettlementMessageModel,
-        PublicVoidMessageModel, ReadViewContent, ReadViewPageModel, ReadViewRoute, RecentEntryRow,
-        RecoveryContext, RecoveryCta, RecoveryReference, SafeLiteralText, SurfaceActionRow,
-        SurfaceButton, SurfaceInteractiveButtonStyle, SurfaceSelectMenu, SurfaceSelectOption,
-        TransferRow, UncertainWriteSurfaceModel,
+        PublicVoidMessageModel, ReadViewDocument, ReadViewPageData, ReadViewPageModel,
+        ReadViewPageState, RecentEntryRow, RecoveryAction, RecoveryReference, RequiredPageSection,
+        ReviewRoute, ReviewSettleAction, SafeLiteralText, Section, SurfaceActionRow, SurfaceButton,
+        SurfaceInteractiveButtonStyle, SurfaceSelectMenu, SurfaceSelectOption, TransferRow,
+        UncertainWriteSurfaceModel,
     };
     use crate::discord_ledger::{
         budgets::{validate_button_label, validate_component_placeholder},
@@ -1325,72 +2078,65 @@ mod tests {
         },
     };
     use walicord_application::ledger::{LedgerEffectiveDate, LedgerEntryId};
+    use walicord_domain::NonEmptyVec;
     use walicord_i18n as i18n;
 
     #[test]
-    fn recovery_cta_prefers_the_thread_link_when_it_is_accessible() {
-        let actual = DiscordLedgerPresenter::select_recovery_cta(RecoveryContext {
-            canonical_thread_known: true,
-            canonical_thread_accessible: true,
-            tracked_parent_known: true,
-            tracked_parent_accessible: true,
-            recovery_reference_available: true,
-        });
-
-        assert_eq!(actual, RecoveryCta::ThreadLink);
-    }
-
-    #[test]
-    fn recovery_cta_falls_back_to_parent_then_reference_only_then_none() {
-        let parent = DiscordLedgerPresenter::select_recovery_cta(RecoveryContext {
-            canonical_thread_known: true,
-            canonical_thread_accessible: false,
-            tracked_parent_known: true,
-            tracked_parent_accessible: true,
-            recovery_reference_available: true,
-        });
-        let reference_only = DiscordLedgerPresenter::select_recovery_cta(RecoveryContext {
-            canonical_thread_known: false,
-            canonical_thread_accessible: false,
-            tracked_parent_known: false,
-            tracked_parent_accessible: false,
-            recovery_reference_available: true,
-        });
-        let none = DiscordLedgerPresenter::select_recovery_cta(RecoveryContext::default());
-
-        assert_eq!(parent, RecoveryCta::ParentLink);
-        assert_eq!(reference_only, RecoveryCta::RecoveryReferenceOnly);
-        assert_eq!(none, RecoveryCta::None);
-    }
-
-    #[test]
     fn recovery_reference_only_and_none_do_not_emit_dead_cta_buttons() {
-        for recovery_cta in [RecoveryCta::RecoveryReferenceOnly, RecoveryCta::None] {
-            let actual = DiscordLedgerPresenter::render_read_view_page(&ReadViewPageModel {
-                route: ReadViewRoute::ReviewParent,
-                title: std::borrow::Cow::Borrowed("清算確認"),
-                uncertain_write: false,
-                stale_page: false,
-                page_indicator: None,
-                snapshot_notice: None,
-                route_guidance_lines: Vec::new(),
-                recovery_cta,
-                recovery_url: Some("https://discord.com/channels/1/2".to_owned()),
-                missing_thread_note: false,
-                balances: Some(Vec::new()),
-                footer_lines: Vec::new(),
-                empty_state: Some(std::borrow::Cow::Borrowed("empty")),
-                action_rows: Vec::new(),
-                ephemeral: true,
-                content: ReadViewContent::Review {
-                    transfers: Some(Vec::new()),
-                },
-            })
-            .expect("surface should render");
+        for recovery_action in [RecoveryAction::RecoveryReferenceOnly, RecoveryAction::None] {
+            let actual =
+                DiscordLedgerPresenter::render_read_view_page(&ReadViewPageModel::test_fixture(
+                    DocumentRoute::Review(ReviewRoute::Parent),
+                    "清算確認",
+                    false,
+                    recovery_action,
+                    Vec::new(),
+                    ReadViewPageState::Empty {
+                        empty_state: std::borrow::Cow::Borrowed("empty"),
+                    },
+                ))
+                .expect("surface should render");
 
-            assert!(actual.action_rows.is_empty());
-            assert!(!actual.body.contains("https://discord.com/channels/1/2"));
+            assert!(actual.action_rows().is_empty());
         }
+    }
+
+    #[test]
+    fn discord_link_url_rejects_non_http_schemes() {
+        let actual = DiscordLinkUrl::parse("ftp://discord.example/channels/1/2");
+
+        assert_eq!(
+            actual,
+            Err(DiscordLinkUrlError::UnsupportedScheme("ftp".to_owned()))
+        );
+    }
+
+    #[test]
+    fn review_document_with_settle_action_contains_settle_button() {
+        let doc = ReadViewDocument::review(
+            ReviewRoute::Thread,
+            Section::Empty,
+            NonEmptyVec::new(vec![transfer("Bob", "Alice", "300")]).expect("non-empty"),
+            false,
+            RecoveryAction::None,
+            ReviewSettleAction::enabled("ledger:review:settle:1"),
+        );
+
+        assert_eq!(doc.action_rows().len(), 1);
+    }
+
+    #[test]
+    fn review_document_with_hidden_settle_action_has_no_settle_button() {
+        let doc = ReadViewDocument::review(
+            ReviewRoute::Thread,
+            Section::Empty,
+            NonEmptyVec::new(vec![transfer("Bob", "Alice", "300")]).expect("non-empty"),
+            false,
+            RecoveryAction::None,
+            ReviewSettleAction::Hidden,
+        );
+
+        assert!(doc.action_rows().is_empty());
     }
 
     #[test]
@@ -1406,7 +2152,7 @@ mod tests {
         .expect("surface should render");
 
         assert_eq!(
-            actual.body,
+            actual.text_body(),
             "4/4 確認\n\n参加者を1人以上選んでください。\n\n金額: 1500円\n日付: 2026-05-10\n\n支払者: Alice"
         );
     }
@@ -1810,39 +2556,116 @@ mod tests {
 
     #[test]
     fn review_view_renders_balances_then_transfers_and_uncertain_write_copy() {
-        let actual = DiscordLedgerPresenter::render_read_view_page(&ReadViewPageModel {
-            route: ReadViewRoute::ReviewThread,
-            title: std::borrow::Cow::Borrowed("清算確認"),
-            uncertain_write: true,
-            stale_page: false,
-            page_indicator: None,
-            snapshot_notice: None,
-            route_guidance_lines: Vec::new(),
-            recovery_cta: RecoveryCta::ParentLink,
-            recovery_url: Some("https://discord.com/channels/1/2/3".to_owned()),
-            missing_thread_note: false,
-            balances: Some(vec![
-                balance("Alice", "300", BalanceDirection::Receive),
-                balance("Bob", "300", BalanceDirection::Pay),
-            ]),
-            footer_lines: Vec::new(),
-            empty_state: None,
-            action_rows: Vec::new(),
-            ephemeral: true,
-            content: ReadViewContent::Review {
-                transfers: Some(vec![transfer("Bob", "Alice", "300")]),
-            },
-        })
-        .expect("surface should render");
+        let page = ReadViewPageModel::test_fixture(
+            DocumentRoute::Review(ReviewRoute::Thread),
+            "清算確認",
+            true,
+            RecoveryAction::parent_link(link_url("https://discord.com/channels/1/2/3")),
+            vec!["清算完了".to_owned()],
+            ReadViewPageState::Populated(ReadViewPageData::Review {
+                balances: PageSection::Rows(
+                    NonEmptyVec::new(vec![
+                        balance("Alice", "300", BalanceDirection::Receive),
+                        balance("Bob", "300", BalanceDirection::Pay),
+                    ])
+                    .expect("non-empty"),
+                ),
+                transfers: RequiredPageSection::Rows(
+                    NonEmptyVec::new(vec![transfer("Bob", "Alice", "300")]).expect("non-empty"),
+                ),
+            }),
+        )
+        .with_route_guidance(vec!["/ledger を開き直してください".to_owned()]);
+        let actual =
+            DiscordLedgerPresenter::render_read_view_page(&page).expect("surface should render");
 
         assert_eq!(
-            actual.body,
-            "清算確認\n\nℹ️ この台帳は現在書き込み確認中です。記録・取り消し・清算は一時的に制限されています。\n\n残高\n確認済み履歴と残高補正を含む現在差額\n- Alice: 受け取り 300円\n- Bob: 支払い 300円\n\n送金予定\n- Bob -> Alice 300円\n\nこの台帳は書き込み状態を確認中です。台帳スレッドを確認し、復旧後に /settle を実行してください。"
+            actual.text_body(),
+            "清算確認\n\nℹ️ この台帳は現在書き込み確認中です。記録・取り消し・清算は一時的に制限されています。\n\n残高\n確認済み履歴と残高補正を含む現在差額\n- Alice: 受け取り 300円\n- Bob: 支払い 300円\n\n送金予定\n- Bob -> Alice 300円\n\nこの台帳は書き込み状態を確認中です。台帳スレッドを確認し、復旧後に /settle を実行してください。\n\n/ledger を開き直してください\n\n清算完了"
         );
-        let SurfaceActionRow::Buttons(buttons) = &actual.action_rows[0] else {
+        let SurfaceActionRow::Buttons(buttons) = &actual.action_rows()[0] else {
             panic!("expected recovery button row");
         };
         assert_eq!(buttons[0].label(), "親チャンネルを開く");
+    }
+
+    #[test]
+    fn populated_review_page_renders_image_backed_with_table_free_compact_text() {
+        let actual =
+            DiscordLedgerPresenter::render_read_view_page(&ReadViewPageModel::test_fixture(
+                DocumentRoute::Review(ReviewRoute::Thread),
+                "清算確認",
+                false,
+                RecoveryAction::None,
+                Vec::new(),
+                ReadViewPageState::Populated(ReadViewPageData::Review {
+                    balances: PageSection::Rows(
+                        NonEmptyVec::new(vec![balance("Alice", "300", BalanceDirection::Receive)])
+                            .expect("non-empty"),
+                    ),
+                    transfers: RequiredPageSection::Rows(
+                        NonEmptyVec::new(vec![transfer("Bob", "Alice", "300")]).expect("non-empty"),
+                    ),
+                }),
+            ))
+            .expect("surface should render");
+
+        let super::PresentationSurfaceBody::ImageBacked {
+            compact_text,
+            fallback_text,
+            image,
+        } = actual.body()
+        else {
+            panic!("expected ImageBacked body");
+        };
+        assert!(compact_text.as_str().contains("清算確認"));
+        assert!(
+            compact_text
+                .as_str()
+                .contains(i18n::REVIEW_PREVIEW_INSTRUCTION)
+        );
+        assert!(!compact_text.as_str().contains("Alice"));
+        assert!(fallback_text.as_str().contains("Alice"));
+        let xml = image.to_svg_string();
+        assert!(xml.contains("Alice"));
+        assert!(xml.contains("Bob"));
+    }
+
+    #[test]
+    fn stale_and_empty_pages_render_text_only_bodies() {
+        let stale =
+            DiscordLedgerPresenter::render_read_view_page(&ReadViewPageModel::test_fixture(
+                DocumentRoute::Ledger(LedgerRoute::Panel),
+                "台帳",
+                false,
+                RecoveryAction::None,
+                Vec::new(),
+                ReadViewPageState::Stale {
+                    missing_thread_note: false,
+                },
+            ))
+            .expect("stale should render");
+        assert!(matches!(
+            stale.body(),
+            super::PresentationSurfaceBody::Text(_)
+        ));
+
+        let empty =
+            DiscordLedgerPresenter::render_read_view_page(&ReadViewPageModel::test_fixture(
+                DocumentRoute::Ledger(LedgerRoute::Command),
+                "台帳",
+                false,
+                RecoveryAction::None,
+                Vec::new(),
+                ReadViewPageState::Empty {
+                    empty_state: std::borrow::Cow::Borrowed("empty"),
+                },
+            ))
+            .expect("empty should render");
+        assert!(matches!(
+            empty.body(),
+            super::PresentationSurfaceBody::Text(_)
+        ));
     }
 
     #[test]
@@ -1874,10 +2697,10 @@ mod tests {
         .expect("picker should render");
 
         assert_eq!(
-            actual.body,
+            actual.text_body(),
             "1/4 支払者\n\n選択中: Alice\n\nページ 1/2\n\n1-25 / 30\n\nこの表示は固定スナップショットです。\n\n候補から 1 人を選んでください。"
         );
-        let SurfaceActionRow::Select(select_menu) = &actual.action_rows[0] else {
+        let SurfaceActionRow::Select(select_menu) = &actual.action_rows()[0] else {
             panic!("expected select menu row");
         };
         assert_eq!(select_menu.placeholder.as_deref(), Some("支払者を選択"));
@@ -1916,7 +2739,7 @@ mod tests {
         })
         .expect("picker should render");
 
-        let SurfaceActionRow::Select(select_menu) = &actual.action_rows[0] else {
+        let SurfaceActionRow::Select(select_menu) = &actual.action_rows()[0] else {
             panic!("expected select menu row");
         };
         assert!(
@@ -1931,125 +2754,115 @@ mod tests {
 
     #[test]
     fn ledger_view_renders_balances_and_recent_entries() {
-        let actual = DiscordLedgerPresenter::render_read_view_page(&ReadViewPageModel {
-            route: ReadViewRoute::LedgerCommand,
-            title: std::borrow::Cow::Borrowed("台帳"),
-            uncertain_write: true,
-            stale_page: false,
-            page_indicator: None,
-            snapshot_notice: None,
-            route_guidance_lines: Vec::new(),
-            recovery_cta: RecoveryCta::None,
-            recovery_url: None,
-            missing_thread_note: false,
-            balances: Some(vec![
-                balance("Alice", "300", BalanceDirection::Receive),
-                balance("Bob", "300", BalanceDirection::Pay),
-            ]),
-            footer_lines: vec!["表示範囲: 最新の検証済み台帳".to_owned()],
-            empty_state: None,
-            action_rows: Vec::new(),
-            ephemeral: true,
-            content: ReadViewContent::Ledger {
-                recent_entries: Some(vec![
-                    RecentEntryRow {
-                        entry_id: LedgerEntryId(5),
-                        summary: ExpenseOrSettlementSummary::Expense {
-                            date: date("2026-05-26"),
-                            payer_display_name: name("Alice"),
-                            amount: "1500".to_owned(),
-                            note: Some(note("ランチ")),
-                        },
-                        recovery_reference: recovery_reference(5),
-                    },
-                    RecentEntryRow {
-                        entry_id: LedgerEntryId(3),
-                        summary: ExpenseOrSettlementSummary::Settlement {
-                            date: date("2026-05-25"),
-                            from_display_name: name("Bob"),
-                            to_display_name: name("Alice"),
-                            amount: "300".to_owned(),
-                            additional_transfers: 0,
-                        },
-                        recovery_reference: recovery_reference(3),
-                    },
-                ]),
-            },
-        })
-        .expect("surface should render");
+        let actual =
+            DiscordLedgerPresenter::render_read_view_page(&ReadViewPageModel::test_fixture(
+                DocumentRoute::Ledger(LedgerRoute::Command),
+                "台帳",
+                true,
+                RecoveryAction::None,
+                vec!["表示範囲: 最新の検証済み台帳".to_owned()],
+                ReadViewPageState::Populated(ReadViewPageData::Ledger {
+                    balances: PageSection::Rows(
+                        NonEmptyVec::new(vec![
+                            balance("Alice", "300", BalanceDirection::Receive),
+                            balance("Bob", "300", BalanceDirection::Pay),
+                        ])
+                        .expect("non-empty"),
+                    ),
+                    recent_entries: PageSection::Rows(
+                        NonEmptyVec::new(vec![
+                            RecentEntryRow {
+                                entry_id: LedgerEntryId(5),
+                                summary: ExpenseOrSettlementSummary::Expense {
+                                    date: date("2026-05-26"),
+                                    payer_display_name: name("Alice"),
+                                    amount: "1500".to_owned(),
+                                    note: Some(note("ランチ")),
+                                },
+                                recovery_reference: recovery_reference(5),
+                            },
+                            RecentEntryRow {
+                                entry_id: LedgerEntryId(3),
+                                summary: ExpenseOrSettlementSummary::Settlement {
+                                    date: date("2026-05-25"),
+                                    from_display_name: name("Bob"),
+                                    to_display_name: name("Alice"),
+                                    amount: "300".to_owned(),
+                                    additional_transfers: 0,
+                                },
+                                recovery_reference: recovery_reference(3),
+                            },
+                        ])
+                        .expect("non-empty"),
+                    ),
+                }),
+            ))
+            .expect("surface should render");
 
-        assert!(actual.body.contains("残高\n"));
-        assert!(actual.body.contains("- Alice: 受け取り 300円"));
-        assert!(actual.body.contains("最近の記録\n"));
+        assert!(actual.text_body().contains("残高\n"));
+        assert!(actual.text_body().contains("- Alice: 受け取り 300円"));
+        assert!(actual.text_body().contains("最近の記録\n"));
         assert!(
             actual
-                .body
+                .text_body()
                 .contains("[#5] 2026-05-26 Alice の支払い 1500円")
         );
         assert!(
             actual
-                .body
-                .contains("[#3] 2026-05-25 清算 Bob->Alice 300円")
+                .text_body()
+                .contains("[#3] 2026-05-25 清算 Bob -> Alice 300円")
         );
-        assert!(actual.body.contains("表示範囲: 最新の検証済み台帳"));
+        assert!(actual.text_body().contains("表示範囲: 最新の検証済み台帳"));
     }
 
     #[test]
     fn ledger_view_uses_the_inviting_empty_state_without_scope_footer() {
-        let actual = DiscordLedgerPresenter::render_read_view_page(&ReadViewPageModel {
-            route: ReadViewRoute::LedgerPanel,
-            title: std::borrow::Cow::Borrowed("台帳"),
-            uncertain_write: false,
-            stale_page: false,
-            page_indicator: None,
-            snapshot_notice: None,
-            route_guidance_lines: Vec::new(),
-            recovery_cta: RecoveryCta::None,
-            recovery_url: None,
-            missing_thread_note: false,
-            balances: Some(Vec::new()),
-            footer_lines: vec!["表示範囲: これは出てはいけない".to_owned()],
-            empty_state: Some(std::borrow::Cow::Borrowed(i18n::LEDGER_EMPTY_STATE)),
-            action_rows: Vec::new(),
-            ephemeral: true,
-            content: ReadViewContent::Ledger {
-                recent_entries: Some(Vec::new()),
-            },
-        })
-        .expect("surface should render");
+        let actual =
+            DiscordLedgerPresenter::render_read_view_page(&ReadViewPageModel::test_fixture(
+                DocumentRoute::Ledger(LedgerRoute::Panel),
+                "台帳",
+                false,
+                RecoveryAction::None,
+                vec!["表示範囲: これは出てはいけない".to_owned()],
+                ReadViewPageState::Empty {
+                    empty_state: std::borrow::Cow::Borrowed(i18n::LEDGER_EMPTY_STATE),
+                },
+            ))
+            .expect("surface should render");
 
         assert_eq!(
-            actual.body,
+            actual.text_body(),
             "台帳\n\nまだ記録がありません。/expense または 記録する ボタンで最初の支出を記録してみましょう。"
         );
     }
 
     #[test]
     fn parent_review_route_uses_the_thread_handoff_instruction_and_cta_label() {
-        let actual = DiscordLedgerPresenter::render_read_view_page(&ReadViewPageModel {
-            route: ReadViewRoute::ReviewParent,
-            title: std::borrow::Cow::Borrowed("清算確認"),
-            uncertain_write: false,
-            stale_page: false,
-            page_indicator: None,
-            snapshot_notice: None,
-            route_guidance_lines: Vec::new(),
-            recovery_cta: RecoveryCta::ThreadLink,
-            recovery_url: Some("https://discord.com/channels/1/2/4".to_owned()),
-            missing_thread_note: false,
-            balances: Some(vec![balance("Alice", "300", BalanceDirection::Receive)]),
-            footer_lines: Vec::new(),
-            empty_state: None,
-            action_rows: Vec::new(),
-            ephemeral: true,
-            content: ReadViewContent::Review {
-                transfers: Some(vec![transfer("Bob", "Alice", "300")]),
-            },
-        })
-        .expect("surface should render");
+        let actual =
+            DiscordLedgerPresenter::render_read_view_page(&ReadViewPageModel::test_fixture(
+                DocumentRoute::Review(ReviewRoute::Parent),
+                "清算確認",
+                false,
+                RecoveryAction::thread_link(link_url("https://discord.com/channels/1/2/4")),
+                Vec::new(),
+                ReadViewPageState::Populated(ReadViewPageData::Review {
+                    balances: PageSection::Rows(
+                        NonEmptyVec::new(vec![balance("Alice", "300", BalanceDirection::Receive)])
+                            .expect("non-empty"),
+                    ),
+                    transfers: RequiredPageSection::Rows(
+                        NonEmptyVec::new(vec![transfer("Bob", "Alice", "300")]).expect("non-empty"),
+                    ),
+                }),
+            ))
+            .expect("surface should render");
 
-        assert!(actual.body.contains(i18n::REVIEW_PREVIEW_INSTRUCTION));
-        let SurfaceActionRow::Buttons(buttons) = &actual.action_rows[0] else {
+        assert!(
+            actual
+                .text_body()
+                .contains(i18n::REVIEW_PREVIEW_INSTRUCTION)
+        );
+        let SurfaceActionRow::Buttons(buttons) = &actual.action_rows()[0] else {
             panic!("expected thread handoff button");
         };
         assert_eq!(buttons[0].label(), "台帳スレッドを開く");
@@ -2057,31 +2870,21 @@ mod tests {
 
     #[test]
     fn stale_read_and_void_pages_use_fixed_reopen_copy_and_cta_contracts() {
-        let stale_read = DiscordLedgerPresenter::render_read_view_page(&ReadViewPageModel {
-            route: ReadViewRoute::LedgerPanel,
-            title: std::borrow::Cow::Borrowed("台帳"),
-            uncertain_write: false,
-            stale_page: true,
-            page_indicator: None,
-            snapshot_notice: None,
-            route_guidance_lines: Vec::new(),
-            recovery_cta: RecoveryCta::None,
-            recovery_url: None,
-            missing_thread_note: true,
-            balances: Some(Vec::new()),
-            footer_lines: Vec::new(),
-            empty_state: None,
-            action_rows: Vec::new(),
-            ephemeral: true,
-            content: ReadViewContent::Ledger {
-                recent_entries: Some(Vec::new()),
-            },
-        })
-        .expect("stale ledger view should render");
+        let stale_read =
+            DiscordLedgerPresenter::render_read_view_page(&ReadViewPageModel::test_fixture(
+                DocumentRoute::Ledger(LedgerRoute::Panel),
+                "台帳",
+                false,
+                RecoveryAction::None,
+                Vec::new(),
+                ReadViewPageState::Stale {
+                    missing_thread_note: true,
+                },
+            ))
+            .expect("stale ledger view should render");
         let stale_void = DiscordLedgerPresenter::render_void_flow(&VoidSurfaceModel::stale_page(
             "取り消し",
-            RecoveryCta::ParentLink,
-            Some("https://discord.com/channels/1/2/3".to_owned()),
+            RecoveryAction::parent_link(link_url("https://discord.com/channels/1/2/3")),
             false,
             Vec::new(),
             true,
@@ -2089,14 +2892,14 @@ mod tests {
         .expect("stale void view should render");
 
         assert_eq!(
-            stale_read.body,
+            stale_read.text_body(),
             "台帳\n\nこの表示は期限切れです。/ledger または 台帳 で開き直してください。\n\n-# まだ台帳スレッドはありません。最初の記録後に全件確認できます。"
         );
         assert_eq!(
-            stale_void.body,
+            stale_void.text_body(),
             "取り消し\n\nこの表示は期限切れです。/void または 取り消し で開き直してください。"
         );
-        let SurfaceActionRow::Buttons(buttons) = &stale_void.action_rows[0] else {
+        let SurfaceActionRow::Buttons(buttons) = &stale_void.action_rows()[0] else {
             panic!("expected parent reopen button");
         };
         assert_eq!(buttons[0].label(), "親チャンネルを開く");
@@ -2104,40 +2907,38 @@ mod tests {
 
     #[test]
     fn ledger_view_paged_shows_only_entries_when_balances_empty() {
-        let actual = DiscordLedgerPresenter::render_read_view_page(&ReadViewPageModel {
-            route: ReadViewRoute::LedgerCommand,
-            title: std::borrow::Cow::Borrowed("台帳"),
-            uncertain_write: false,
-            stale_page: false,
-            page_indicator: Some(i18n::page_indicator(2, 2).to_string()),
-            snapshot_notice: Some(i18n::SNAPSHOT_NOTICE.to_owned()),
-            route_guidance_lines: Vec::new(),
-            recovery_cta: RecoveryCta::None,
-            recovery_url: None,
-            missing_thread_note: false,
-            balances: None,
-            footer_lines: Vec::new(),
-            empty_state: None,
-            action_rows: Vec::new(),
-            ephemeral: true,
-            content: ReadViewContent::Ledger {
-                recent_entries: Some(vec![RecentEntryRow {
-                    entry_id: LedgerEntryId(1),
-                    summary: ExpenseOrSettlementSummary::Expense {
-                        date: date("2026-05-20"),
-                        payer_display_name: name("Alice"),
-                        amount: "800".to_owned(),
-                        note: None,
-                    },
-                    recovery_reference: recovery_reference(1),
-                }]),
-            },
-        })
-        .expect("paged ledger view should render");
+        let actual =
+            DiscordLedgerPresenter::render_read_view_page(&ReadViewPageModel::test_fixture_paged(
+                DocumentRoute::Ledger(LedgerRoute::Command),
+                "台帳",
+                Some(i18n::page_indicator(2, 2).to_string()),
+                Some(i18n::SNAPSHOT_NOTICE.to_owned()),
+                ReadViewPageState::Populated(ReadViewPageData::Ledger {
+                    balances: PageSection::Hidden,
+                    recent_entries: PageSection::Rows(
+                        NonEmptyVec::new(vec![RecentEntryRow {
+                            entry_id: LedgerEntryId(1),
+                            summary: ExpenseOrSettlementSummary::Expense {
+                                date: date("2026-05-20"),
+                                payer_display_name: name("Alice"),
+                                amount: "800".to_owned(),
+                                note: None,
+                            },
+                            recovery_reference: recovery_reference(1),
+                        }])
+                        .expect("non-empty"),
+                    ),
+                }),
+            ))
+            .expect("paged ledger view should render");
 
-        assert!(actual.body.contains("ページ 2/2"));
-        assert!(actual.body.contains("[#1] 2026-05-20 Alice の支払い 800円"));
-        assert!(!actual.body.contains(i18n::LEDGER_ZERO_BALANCES));
+        assert!(actual.text_body().contains("ページ 2/2"));
+        assert!(
+            actual
+                .text_body()
+                .contains("[#1] 2026-05-20 Alice の支払い 800円")
+        );
+        assert!(!actual.text_body().contains(i18n::LEDGER_ZERO_BALANCES));
     }
 
     #[test]
@@ -2150,8 +2951,8 @@ mod tests {
         })
         .expect("surface should render");
 
-        assert!(actual.body.is_empty());
-        let SurfaceActionRow::Buttons(buttons) = &actual.action_rows[0] else {
+        assert!(actual.text_body().is_empty());
+        let SurfaceActionRow::Buttons(buttons) = &actual.action_rows()[0] else {
             panic!("expected button row");
         };
         assert_eq!(
@@ -2223,8 +3024,8 @@ mod tests {
             DiscordLedgerPresenter::render_void_flow(&model).expect("surface should render");
 
         assert_eq!(
-            actual.body,
-            "取り消し\n\n2026-05-24 Bob の支払い 1200円 メモ: ランチの会計 | 復旧用の参照: ledger:abcd1234/entry:7 | <https://discord.com/channels/1/2/7>\n2026-05-25 清算 Alice->Bob 300円 ほか2件 | 復旧用の参照: ledger:abcd1234/entry:8 | <https://discord.com/channels/1/2/8>"
+            actual.text_body(),
+            "取り消し\n\n2026-05-24 Bob の支払い 1200円 メモ: ランチの会計 | 復旧用の参照: ledger:abcd1234/entry:7 | <https://discord.com/channels/1/2/7>\n2026-05-25 清算 Alice -> Bob 300円 ほか2件 | 復旧用の参照: ledger:abcd1234/entry:8 | <https://discord.com/channels/1/2/8>"
         );
         assert_eq!(model.primary_action_label.as_deref(), Some("確認へ"));
     }
@@ -2250,7 +3051,7 @@ mod tests {
             DiscordLedgerPresenter::render_void_flow(&model).expect("surface should render");
 
         assert_eq!(
-            actual.body,
+            actual.text_body(),
             "取り消し確認\n\n-# 元の記録は取り消し済みとして残ります。\n\n日付: 2026-05-24\n対象: Bob の支払い\n金額: 1200円\nメモ: ランチの会計\n復旧用の参照: ledger:abcd1234/entry:7 | <https://discord.com/channels/1/2/7>"
         );
         assert_eq!(model.primary_action_label.as_deref(), Some("取り消す"));
@@ -2273,7 +3074,7 @@ mod tests {
             recovery_reference: recovery_reference(8),
         };
         let settlement_lines = super::render_void_confirmation_lines(&settlement_recap);
-        assert_eq!(settlement_lines[1], "対象: 清算 Alice->Bob 300円 ほか2件");
+        assert_eq!(settlement_lines[1], "対象: 清算 Alice -> Bob 300円 ほか2件");
     }
 
     #[test]
@@ -2331,10 +3132,14 @@ mod tests {
 
         assert!(
             actual
-                .body
+                .text_body()
                 .starts_with("取り消し\n\n対象を選択してください。")
         );
-        assert!(actual.body.contains("2026-05-24 Bob の支払い 1200円"));
+        assert!(
+            actual
+                .text_body()
+                .contains("2026-05-24 Bob の支払い 1200円")
+        );
     }
 
     #[test]
@@ -2357,7 +3162,7 @@ mod tests {
         ))
         .expect("surface should render");
 
-        assert!(actual.body.contains(
+        assert!(actual.text_body().contains(
             "対象がもう取り消せません (確認済み範囲に入りました)。もう一度選んでください。"
         ));
     }
@@ -2373,7 +3178,7 @@ mod tests {
         .expect("surface should render");
 
         assert_eq!(
-            actual.body,
+            actual.text_body(),
             "取り消し完了\n\n取り消しました。\nこの取り消しで元の記録の影響は打ち消されます。正しい内容が必要なら記録し直してください。\n台帳スレッドで確認できます: <#1234>"
         );
     }
@@ -2384,16 +3189,15 @@ mod tests {
             DiscordLedgerPresenter::render_void_flow(&VoidSurfaceModel::success_with_recovery(
                 "取り消し完了",
                 None,
-                RecoveryCta::ParentLink,
-                Some("https://discord.com/channels/1/2".to_owned()),
+                RecoveryAction::parent_link(link_url("https://discord.com/channels/1/2")),
                 Vec::new(),
                 true,
             ))
             .expect("surface should render");
 
-        assert!(actual.body.contains("台帳スレッドで確認できます。"));
-        assert!(!actual.body.contains("<#"));
-        let SurfaceActionRow::Buttons(buttons) = &actual.action_rows[0] else {
+        assert!(actual.text_body().contains("台帳スレッドで確認できます。"));
+        assert!(!actual.text_body().contains("<#"));
+        let SurfaceActionRow::Buttons(buttons) = &actual.action_rows()[0] else {
             panic!("expected parent-channel button");
         };
         assert_eq!(buttons[0].label(), "親チャンネルを開く");
@@ -2413,11 +3217,11 @@ mod tests {
         .expect("surface should render");
 
         assert_eq!(
-            empty.body,
+            empty.text_body(),
             "取り消し\n\nまだ記録がありません。/expense または 記録する ボタンで最初の支出を記録してみましょう。"
         );
         assert_eq!(
-            no_candidates.body,
+            no_candidates.text_body(),
             "取り消し\n\n取り消せる対象がありません。確認済みや既に取り消した記録は対象外です。/ledger または 台帳 で状態を確認してください。"
         );
     }
@@ -2434,7 +3238,7 @@ mod tests {
             .expect("surface should render");
 
         assert_eq!(
-            actual.body,
+            actual.text_body(),
             "取り消し\n\n対象がありません (このUIで選べるのは新しい25件までです。古い記録はこのUIから取り消せません。運用担当者に連絡してください)。\n連絡時は対象の公開台帳メッセージのリンク、または控えている 復旧用の参照: ledger:abcd1234/entry:7 | <https://discord.com/channels/1/2/7> と、わかる範囲の日時・支払者・金額・メモ抜粋を伝えてください。"
         );
     }
@@ -2448,7 +3252,7 @@ mod tests {
                 recovery_reference: Some("復旧用の参照: ledger:abcd1234/entry:7".to_owned()),
                 action_rows: vec![SurfaceActionRow::Buttons(vec![SurfaceButton::Link {
                     label: "台帳スレッドを開く".to_owned(),
-                    url: "https://discord.com/channels/1/2/3".to_owned(),
+                    url: link_url("https://discord.com/channels/1/2/3"),
                     disabled: false,
                 }])],
                 ephemeral: true,
@@ -2456,10 +3260,10 @@ mod tests {
             .expect("surface should render");
 
         assert_eq!(
-            actual.body,
+            actual.text_body(),
             "書き込み確認中\n\n前回の書き込み結果を確認中です。\n\n復旧用の参照: ledger:abcd1234/entry:7"
         );
-        assert_eq!(actual.action_rows.len(), 1);
+        assert_eq!(actual.action_rows().len(), 1);
     }
 
     fn note(value: &str) -> SafeLiteralText {
@@ -2484,6 +3288,10 @@ mod tests {
             entry_id: LedgerEntryId(entry_id),
             message_link: Some(format!("https://discord.com/channels/1/2/{entry_id}")),
         }
+    }
+
+    fn link_url(raw: &str) -> DiscordLinkUrl {
+        DiscordLinkUrl::parse(raw).expect("url should parse")
     }
 
     fn participant_share(name: &str, amount: &str) -> super::ParticipantShareRow {

@@ -73,6 +73,7 @@ impl CanonicalLoadFailure {
             StoreLoadError::Structure(_) => Self::Structure { route },
             StoreLoadError::Projection(_) => Self::Projection { route },
             StoreLoadError::MetadataCoherence(_) => Self::MetadataCoherence { route },
+            StoreLoadError::VerifiedLoad(_) => Self::MetadataCoherence { route },
             StoreLoadError::DisplayDrift { .. } => Self::DisplayDrift { route },
             StoreLoadError::Permission(_) => Self::Permission { route },
         }

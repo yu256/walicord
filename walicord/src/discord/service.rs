@@ -51,11 +51,7 @@ fn should_ignore_history_message(message: &Message) -> bool {
 
 /// Convert serenity::Member to MemberInfo
 pub fn to_member_info(member: &Member) -> MemberInfo {
-    let display_name = member
-        .nick
-        .as_deref()
-        .or(member.user.global_name.as_deref())
-        .unwrap_or(member.user.name.as_str());
+    let display_name = discord_member_display_name(member);
 
     MemberInfo {
         id: MemberId(member.user.id.get()),
@@ -65,6 +61,16 @@ pub fn to_member_info(member: &Member) -> MemberInfo {
             .user
             .avatar_url()
             .map(|url| ArcStr::from(url.as_str())),
+    }
+}
+
+fn discord_member_display_name(member: &Member) -> &str {
+    match member.nick.as_deref() {
+        Some(nick) => nick,
+        None => match member.user.global_name.as_deref() {
+            Some(global_name) => global_name,
+            None => member.user.name.as_str(),
+        },
     }
 }
 

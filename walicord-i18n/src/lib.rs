@@ -687,6 +687,14 @@ pub fn public_seal_header(entry_id: impl std::fmt::Display) -> impl std::fmt::Di
     })
 }
 
+pub fn public_seal_header_prefix() -> &'static str {
+    if cfg!(feature = "ja") {
+        "確認 "
+    } else {
+        "Seal "
+    }
+}
+
 pub fn public_balance_adjustment_header(
     entry_id: impl std::fmt::Display,
 ) -> impl std::fmt::Display {
@@ -697,6 +705,14 @@ pub fn public_balance_adjustment_header(
             write!(f, "Balance Adjustment [#{entry_id}]")
         }
     })
+}
+
+pub fn public_balance_adjustment_header_prefix() -> &'static str {
+    if cfg!(feature = "ja") {
+        "残高補正 "
+    } else {
+        "Balance Adjustment "
+    }
 }
 
 pub fn public_void_line(
@@ -895,35 +911,6 @@ pub fn settlement_transfer_row(
     })
 }
 
-pub fn void_candidate_expense_summary(
-    date: impl std::fmt::Display,
-    payer: impl std::fmt::Display,
-    amount: impl std::fmt::Display,
-) -> impl std::fmt::Display {
-    std::fmt::from_fn(move |f| {
-        if cfg!(feature = "ja") {
-            write!(f, "{date} {payer} の支払い {amount}円")
-        } else {
-            write!(f, "{date} expense by {payer} {amount} JPY")
-        }
-    })
-}
-
-pub fn void_candidate_settlement_summary(
-    date: impl std::fmt::Display,
-    from: impl std::fmt::Display,
-    to: impl std::fmt::Display,
-    amount: impl std::fmt::Display,
-) -> impl std::fmt::Display {
-    std::fmt::from_fn(move |f| {
-        if cfg!(feature = "ja") {
-            write!(f, "{date} 清算 {from}->{to} {amount}円")
-        } else {
-            write!(f, "{date} settlement {from}->{to} {amount} JPY")
-        }
-    })
-}
-
 pub fn additional_items(count: usize) -> impl std::fmt::Display {
     std::fmt::from_fn(move |f| {
         if cfg!(feature = "ja") {
@@ -1031,6 +1018,20 @@ pub fn sealed_settlement_summary(
             write!(f, "清算 {from} -> {to}")
         } else {
             write!(f, "settlement {from} -> {to}")
+        }
+    })
+}
+
+pub fn sealed_settlement_summary_with_amount(
+    from: impl std::fmt::Display,
+    to: impl std::fmt::Display,
+    amount: impl std::fmt::Display,
+) -> impl std::fmt::Display {
+    std::fmt::from_fn(move |f| {
+        if cfg!(feature = "ja") {
+            write!(f, "清算 {from} -> {to} {amount}円")
+        } else {
+            write!(f, "settlement {from} -> {to} {amount} JPY")
         }
     })
 }
@@ -1165,6 +1166,18 @@ pub const RECENT_ENTRIES_HEADING: &str = if cfg!(feature = "ja") {
     "最近の記録"
 } else {
     "Recent entries"
+};
+
+pub const DATE_COLUMN: &str = if cfg!(feature = "ja") {
+    "日付"
+} else {
+    "Date"
+};
+
+pub const SUMMARY_COLUMN: &str = if cfg!(feature = "ja") {
+    "概要"
+} else {
+    "Summary"
 };
 
 pub const RECENT_ENTRIES_NONE: &str = if cfg!(feature = "ja") {
@@ -1307,13 +1320,7 @@ pub fn void_confirm_settlement_target(
     to: impl std::fmt::Display,
     amount: impl std::fmt::Display,
 ) -> impl std::fmt::Display {
-    std::fmt::from_fn(move |f| {
-        if cfg!(feature = "ja") {
-            write!(f, "清算 {from}->{to} {amount}円")
-        } else {
-            write!(f, "settlement {from}->{to} {amount} JPY")
-        }
-    })
+    sealed_settlement_summary_with_amount(from, to, amount)
 }
 
 pub const VOID_MISSING_SELECTION_ERROR: &str = if cfg!(feature = "ja") {

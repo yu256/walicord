@@ -24,7 +24,7 @@ use walicord_application::ledger::{
     canonical_read::{CanonicalReadError, CanonicalThreadReader},
     canonical_write::{CanonicalAppendError, CanonicalThreadAppender},
     observability::LedgerObservabilityEvent,
-    projection::VerifiedEntryTransport,
+    projection::{VerifiedEntryTransport, VerifiedLedgerThreadLoadError},
     replay_verified_snapshot, verify_envelope_sha256_v1,
     verify_envelopes_in_append_order_sha256_v1,
     write_coordinator::{CanonicalMessageProbe, LAZY_RETRY_SCAN_WINDOW},
@@ -105,36 +105,18 @@ fn recovery_reference_ledger_id_short(ledger_id: LedgerId) -> String {
 fn expected_canonical_message_prefixes(entry: &LedgerEntry) -> Vec<String> {
     match &entry.event {
         LedgerEvent::ExpenseRecorded(_) => {
-            vec![format!(
-                "{}",
-                walicord_i18n::public_expense_header(entry.id.0)
-            )]
+            vec![walicord_i18n::public_expense_header(entry.id).to_string()]
         }
-        LedgerEvent::NormalizedSettlementPlanRecorded(_) => vec![format!(
-            "{}",
-            walicord_i18n::public_settlement_header(entry.id.0)
-        )],
-        LedgerEvent::EntryVoided(_) => vec![format!("[#{}] ", entry.id.0)],
-        LedgerEvent::LedgerHistorySealed(_) => vec![
-            format!("{}", walicord_i18n::public_seal_header(entry.id.0))
-                .split_once("[#")
-                .map(|(prefix, _)| prefix.to_owned())
-                .unwrap_or_else(|| format!("{}", walicord_i18n::public_seal_header(entry.id.0))),
-        ],
-        LedgerEvent::BalanceAdjusted(_) => vec![
-            format!(
-                "{}",
-                walicord_i18n::public_balance_adjustment_header(entry.id.0)
-            )
-            .split_once("[#")
-            .map(|(prefix, _)| prefix.to_owned())
-            .unwrap_or_else(|| {
-                format!(
-                    "{}",
-                    walicord_i18n::public_balance_adjustment_header(entry.id.0)
-                )
-            }),
-        ],
+        LedgerEvent::NormalizedSettlementPlanRecorded(_) => {
+            vec![walicord_i18n::public_settlement_header(entry.id).to_string()]
+        }
+        LedgerEvent::EntryVoided(_) => vec![format!("[#{}] ", entry.id)],
+        LedgerEvent::LedgerHistorySealed(_) => {
+            vec![walicord_i18n::public_seal_header_prefix().to_owned()]
+        }
+        LedgerEvent::BalanceAdjusted(_) => {
+            vec![walicord_i18n::public_balance_adjustment_header_prefix().to_owned()]
+        }
     }
 }
 
@@ -142,7 +124,7 @@ impl PendingCanonicalMessageRecord {
     fn has_authoritative_attachment(&self) -> bool {
         self.attachments
             .iter()
-            .any(|attachment| attachment.filename == LEDGER_ATTACHMENT_FILENAME)
+            .any(PendingCanonicalAttachmentCandidate::is_authoritative)
     }
 
     fn should_validate_writer_lineage(&self) -> bool {
@@ -299,6 +281,8 @@ pub enum StoreLoadError {
     Projection(LedgerReplayError),
     #[error("canonical message metadata is inconsistent with replayed history: {0}")]
     MetadataCoherence(MetadataCoherenceFailure),
+    #[error("verified canonical thread load is inconsistent: {0}")]
+    VerifiedLoad(#[from] VerifiedLedgerThreadLoadError),
     #[error("canonical display drift detected at message {message_id}")]
     DisplayDrift { message_id: MessageId },
     #[error("canonical thread permissions are not sufficient: {0}")]
@@ -1075,11 +1059,7 @@ impl DiscordCanonicalLedgerStore {
             display_guard(envelope, record)?;
         }
 
-        Ok(
-            VerifiedLedgerThreadLoad::new(snapshot, verified, transport_entries).expect(
-                "build_transport_entries inserts a transport entry for every verified envelope",
-            ),
-        )
+        VerifiedLedgerThreadLoad::new(snapshot, verified, transport_entries).map_err(Into::into)
     }
 }
 
@@ -1285,22 +1265,50 @@ impl LineageRecord for PendingCanonicalMessageRecord {
 }
 
 #[derive(Debug, Clone)]
-struct PendingCanonicalAttachmentCandidate {
-    filename: String,
-    size_bytes: u32,
-    authoritative_attachment: Option<serenity::all::Attachment>,
+enum PendingCanonicalAttachmentCandidate {
+    Authoritative {
+        filename: String,
+        size_bytes: u32,
+        attachment: serenity::all::Attachment,
+    },
+    Other {
+        filename: String,
+        size_bytes: u32,
+    },
+}
+
+impl PendingCanonicalAttachmentCandidate {
+    fn from_discord_attachment(attachment: serenity::all::Attachment) -> Self {
+        if attachment.filename == LEDGER_ATTACHMENT_FILENAME {
+            Self::Authoritative {
+                filename: attachment.filename.clone(),
+                size_bytes: attachment.size,
+                attachment,
+            }
+        } else {
+            Self::Other {
+                filename: attachment.filename,
+                size_bytes: attachment.size,
+            }
+        }
+    }
+
+    fn is_authoritative(&self) -> bool {
+        matches!(self, Self::Authoritative { .. })
+    }
+
+    fn size_bytes(&self) -> u32 {
+        match self {
+            Self::Authoritative { size_bytes, .. } | Self::Other { size_bytes, .. } => *size_bytes,
+        }
+    }
 }
 
 fn pending_canonical_message_record(message: Message) -> PendingCanonicalMessageRecord {
     let mut attachments = Vec::with_capacity(message.attachments.len());
 
     for attachment in message.attachments {
-        let is_authoritative = attachment.filename == LEDGER_ATTACHMENT_FILENAME;
-        attachments.push(PendingCanonicalAttachmentCandidate {
-            filename: attachment.filename.clone(),
-            size_bytes: attachment.size,
-            authoritative_attachment: is_authoritative.then_some(attachment),
-        });
+        attachments.push(PendingCanonicalAttachmentCandidate::from_discord_attachment(attachment));
     }
 
     PendingCanonicalMessageRecord {
@@ -1341,7 +1349,7 @@ async fn download_canonical_message_record(
     let authoritative_attachment_count = record
         .attachments
         .iter()
-        .filter(|attachment| attachment.filename == LEDGER_ATTACHMENT_FILENAME)
+        .filter(|attachment| attachment.is_authoritative())
         .count();
     let should_download_authoritative =
         record.attachments.len() == 1 && authoritative_attachment_count == 1;
@@ -1349,28 +1357,40 @@ async fn download_canonical_message_record(
 
     for attachment in record.attachments {
         let should_download = should_download_authoritative
-            && attachment.filename == LEDGER_ATTACHMENT_FILENAME
-            && attachment.size_bytes <= MAX_AUTHORITATIVE_ATTACHMENT_BYTES;
-        let bytes = if should_download {
-            let authoritative_attachment = attachment
-                .authoritative_attachment
-                .expect("authoritative attachment should remain available until download");
-            validate_authoritative_attachment_url(
-                record.message_id,
-                &authoritative_attachment.url,
-            )?;
-            authoritative_attachment
-                .download()
-                .await
-                .map_err(|error| unreadable_attachment_error(record.message_id, error))?
-        } else {
-            Vec::new()
-        };
-        attachments.push(CanonicalAttachmentCandidate {
-            filename: attachment.filename,
-            size_bytes: attachment.size_bytes,
-            bytes,
-        });
+            && attachment.is_authoritative()
+            && attachment.size_bytes() <= MAX_AUTHORITATIVE_ATTACHMENT_BYTES;
+        match attachment {
+            PendingCanonicalAttachmentCandidate::Authoritative {
+                filename,
+                size_bytes,
+                attachment,
+            } => {
+                let bytes = if should_download {
+                    validate_authoritative_attachment_url(record.message_id, &attachment.url)?;
+                    attachment
+                        .download()
+                        .await
+                        .map_err(|error| unreadable_attachment_error(record.message_id, error))?
+                } else {
+                    Vec::new()
+                };
+                attachments.push(CanonicalAttachmentCandidate {
+                    filename,
+                    size_bytes,
+                    bytes,
+                });
+            }
+            PendingCanonicalAttachmentCandidate::Other {
+                filename,
+                size_bytes,
+            } => {
+                attachments.push(CanonicalAttachmentCandidate {
+                    filename,
+                    size_bytes,
+                    bytes: Vec::new(),
+                });
+            }
+        }
     }
 
     Ok(CanonicalMessageRecord {
@@ -2000,26 +2020,24 @@ mod tests {
             recorded_at: UNIX_EPOCH + Duration::from_secs(message_id),
             edited_at: None,
             content: "canonical".to_owned(),
-            attachments: vec![PendingCanonicalAttachmentCandidate {
+            attachments: vec![PendingCanonicalAttachmentCandidate::Authoritative {
                 filename: LEDGER_ATTACHMENT_FILENAME.to_owned(),
                 size_bytes: 128,
-                authoritative_attachment: Some(
-                    serde_json::from_value(serde_json::json!({
-                        "id": 1_u64,
-                        "filename": LEDGER_ATTACHMENT_FILENAME,
-                        "description": null,
-                        "height": null,
-                        "proxy_url": url,
-                        "size": 128_u32,
-                        "url": url,
-                        "width": null,
-                        "content_type": "application/json",
-                        "ephemeral": false,
-                        "duration_secs": null,
-                        "waveform": null
-                    }))
-                    .expect("attachment should deserialize"),
-                ),
+                attachment: serde_json::from_value(serde_json::json!({
+                    "id": 1_u64,
+                    "filename": LEDGER_ATTACHMENT_FILENAME,
+                    "description": null,
+                    "height": null,
+                    "proxy_url": url,
+                    "size": 128_u32,
+                    "url": url,
+                    "width": null,
+                    "content_type": "application/json",
+                    "ephemeral": false,
+                    "duration_secs": null,
+                    "waveform": null
+                }))
+                .expect("attachment should deserialize"),
             }],
         }
     }

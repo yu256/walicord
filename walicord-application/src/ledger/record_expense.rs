@@ -15,6 +15,7 @@ use crate::{
     Clock,
     ledger::{
         DiscordLedgerSourceDescriptor, ExpenseRecorded, LedgerEntryId, LedgerId,
+        append_previous_hash_sha256_v1,
         canonical_read::{CanonicalReadError, CanonicalThreadReader},
         canonical_write::{
             CanonicalThreadAppender, CommitOrchestrationError, CommitOutcome,
@@ -25,7 +26,6 @@ use crate::{
             ExpenseWriteOrchestrationError, RecordTimeOutcome, RecordableExpenseEntry,
             build_canonical_envelope, compose_expense_entry,
         },
-        ledger_chain_genesis_sha256_v1,
         observability::LedgerObservability,
         participant_resolution::{ParticipantDrift, RosterSnapshot},
         projection::NextLedgerEntryIdError,
@@ -178,10 +178,8 @@ where
 
     let load = reader.load_verified_thread().await?;
     let next_entry_id = load.next_entry_id()?;
-    let previous_hash = load
-        .snapshot()
-        .current_head_hash()
-        .unwrap_or_else(|| ledger_chain_genesis_sha256_v1(ledger_id));
+    let previous_hash =
+        append_previous_hash_sha256_v1(ledger_id, load.snapshot().current_head_hash());
 
     let compose = compose_expense_entry(
         session,

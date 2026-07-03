@@ -75,8 +75,7 @@ impl<'a> BalanceAccumulator<'a> {
                     payment.amount,
                     BalanceDeltaDirection::Increase,
                     &ResolvedAllocationStrategy::Even,
-                )
-                .expect("even distribution should never fail");
+                );
 
                 distribute_balances(
                     &mut self.balances,
@@ -84,8 +83,7 @@ impl<'a> BalanceAccumulator<'a> {
                     payment.amount,
                     BalanceDeltaDirection::Decrease,
                     &resolved_payee_allocation,
-                )
-                .expect("resolved allocation should be valid");
+                );
             }
         }
         Ok(())

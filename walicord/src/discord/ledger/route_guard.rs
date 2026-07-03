@@ -3,6 +3,7 @@ use serenity::{
     all::{ChannelId, ChannelType, GuildId},
     prelude::Context,
 };
+use std::num::NonZeroU64;
 use walicord_application::ledger::expense_session::ExpenseDraftScopeId;
 #[cfg(test)]
 use walicord_i18n as i18n;
@@ -97,6 +98,7 @@ pub(crate) struct LedgerInteractionScope {
     guild_id: GuildId,
     interaction_channel_id: ChannelId,
     tracked_parent_channel_id: ChannelId,
+    expense_draft_scope_id: ExpenseDraftScopeId,
 }
 
 impl LedgerInteractionScope {
@@ -110,8 +112,7 @@ impl LedgerInteractionScope {
         self.interaction_channel_id != self.tracked_parent_channel_id
     }
     pub(crate) fn expense_draft_scope_id(&self) -> ExpenseDraftScopeId {
-        ExpenseDraftScopeId::new(self.tracked_parent_channel_id.get())
-            .expect("serenity channel IDs are always non-zero")
+        self.expense_draft_scope_id
     }
     pub(crate) fn tracked_parent(&self) -> TrackedParentKey {
         TrackedParentKey::from_guarded_parent(self.guild_id, self.tracked_parent_channel_id)
@@ -140,6 +141,7 @@ pub(crate) fn guard_ledger_interaction(
         guild_id,
         interaction_channel_id: channel_id,
         tracked_parent_channel_id: channel_id,
+        expense_draft_scope_id: expense_draft_scope_id(channel_id),
     })
 }
 
@@ -174,7 +176,18 @@ pub(crate) async fn guard_ledger_interaction_resolving_parent(
         guild_id,
         interaction_channel_id,
         tracked_parent_channel_id,
+        expense_draft_scope_id: expense_draft_scope_id(tracked_parent_channel_id),
     })
+}
+
+/// `serenity::ChannelId` is backed by a `NonZeroU64` internally, so this conversion
+/// can never actually fail; centralizing it here keeps that fact in one place instead
+/// of every caller re-deriving (or re-doubting) it.
+pub(crate) fn expense_draft_scope_id(channel_id: ChannelId) -> ExpenseDraftScopeId {
+    ExpenseDraftScopeId::from_nonzero(
+        NonZeroU64::new(channel_id.get())
+            .expect("serenity ChannelId is backed by NonZeroU64 and can never be zero"),
+    )
 }
 
 pub(crate) fn slash_scope_channel_id(

@@ -1,4 +1,4 @@
-use std::{borrow::Cow, fmt::Write};
+use std::{borrow::Cow, fmt::Write, num::NonZeroU32};
 
 const FONT_SIZE: u32 = 14;
 const CELL_PADDING: u32 = 10;
@@ -11,11 +11,53 @@ const ROW_TEXT: &str = "#1a202c";
 const BORDER_COLOR: &str = "#cbd5e0";
 const FONT_FAMILY: &str = "Noto Sans CJK JP";
 const CHAR_WIDTH: f32 = 8.5;
+const COMBINE_SPACING: u32 = 20;
 
-#[derive(Default)]
-pub struct SvgTableBuilder<'a, Seq> {
-    headers: &'a [Cow<'a, str>],
-    rows: Vec<Seq>,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenderedSvg {
+    body: String,
+    width: NonZeroU32,
+    height: NonZeroU32,
+}
+
+impl RenderedSvg {
+    pub fn body(&self) -> &str {
+        &self.body
+    }
+
+    pub fn width(&self) -> NonZeroU32 {
+        self.width
+    }
+
+    pub fn height(&self) -> NonZeroU32 {
+        self.height
+    }
+
+    pub fn to_svg_string(&self) -> String {
+        let w = self.width.get();
+        let h = self.height.get();
+        let mut svg = String::with_capacity(self.body.len() + 256);
+        let _ = writeln!(
+            &mut svg,
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {w} {h}">"#
+        );
+        let _ = writeln!(
+            &mut svg,
+            r#"<style>text {{ font-family: {FONT_FAMILY}; font-size: {FONT_SIZE}px; }}</style>"#
+        );
+        svg.push_str(&self.body);
+        svg.push_str("</svg>");
+        svg
+    }
+}
+
+pub struct SvgTableBuilder<'a> {
+    alignments: Cow<'a, [Alignment]>,
+}
+
+pub struct SvgTableReady<'a, const N: usize> {
+    headers: [Cow<'a, str>; N],
+    rows: Vec<[Cow<'a, str>; N]>,
     alignments: Cow<'a, [Alignment]>,
 }
 
@@ -27,12 +69,11 @@ pub enum Alignment {
     Right,
 }
 
-impl<'a, Seq> SvgTableBuilder<'a, Seq>
-where
-    Seq: AsRef<[Cow<'a, str>]> + Default,
-{
+impl<'a> SvgTableBuilder<'a> {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            alignments: Cow::Borrowed(&[]),
+        }
     }
 
     pub fn alignments(mut self, alignments: &'a [Alignment]) -> Self {
@@ -40,30 +81,33 @@ where
         self
     }
 
-    pub fn headers(mut self, headers: &'a [Cow<'a, str>]) -> Self {
-        self.headers = headers;
-        if self.alignments.is_empty() {
-            self.alignments = Cow::Owned(vec![Alignment::default(); self.headers.len()]);
+    pub fn headers<const N: usize>(self, headers: [Cow<'a, str>; N]) -> SvgTableReady<'a, N> {
+        let alignments = if self.alignments.is_empty() {
+            Cow::Owned(vec![Alignment::default(); N])
+        } else {
+            self.alignments
+        };
+        SvgTableReady {
+            headers,
+            rows: Vec::new(),
+            alignments,
         }
-        self
     }
+}
 
-    pub fn row(mut self, row: Seq) -> Self {
+impl<'a> Default for SvgTableBuilder<'a> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<'a, const N: usize> SvgTableReady<'a, N> {
+    pub fn row(mut self, row: [Cow<'a, str>; N]) -> Self {
         self.rows.push(row);
         self
     }
 
-    pub fn rows(mut self, rows: impl IntoIterator<Item = Seq>) -> Self {
-        self.rows.extend(rows);
-        self
-    }
-
-    pub fn build(self) -> String {
-        let col_count = self.headers.len();
-        if col_count == 0 {
-            return String::new();
-        }
-
+    pub fn build(self) -> RenderedSvg {
         let mut col_widths: Vec<u32> = self
             .headers
             .iter()
@@ -71,34 +115,26 @@ where
             .collect();
 
         for row in &self.rows {
-            for (i, cell) in row.as_ref().iter().enumerate() {
+            for (i, cell) in row.iter().enumerate() {
                 if i < col_widths.len() {
                     col_widths[i] = col_widths[i].max(estimate_text_width(cell));
                 }
             }
         }
 
-        let total_width: u32 =
-            col_widths.iter().sum::<u32>() + (col_count as u32 + 1) * CELL_PADDING;
-        let total_height: u32 = LINE_HEIGHT * (1 + self.rows.len() as u32) + 2;
+        let dimensions = TableDimensions::from_columns_and_rows(&col_widths, self.rows.len());
+        let total_width = dimensions.width.get();
+        let total_height = dimensions.height.get();
 
-        let mut svg = String::with_capacity(4096);
-        let _ = writeln!(
-            &mut svg,
-            r#"<svg xmlns="http://www.w3.org/2000/svg" width="{total_width}" height="{total_height}" viewBox="0 0 {total_width} {total_height}">"#
-        );
-        let _ = writeln!(
-            &mut svg,
-            r#"<style>text {{ font-family: {FONT_FAMILY}; font-size: {FONT_SIZE}px; }}</style>"#
-        );
+        let mut body = String::with_capacity(4096);
 
         let _ = writeln!(
-            &mut svg,
+            &mut body,
             r#"<rect width="{total_width}" height="{total_height}" fill="{BORDER_COLOR}" rx="4" />"#
         );
 
         let _ = writeln!(
-            &mut svg,
+            &mut body,
             r#"<rect x="1" y="1" width="{}" height="{LINE_HEIGHT}" fill="{HEADER_BG}" rx="3" />"#,
             total_width - 2
         );
@@ -106,14 +142,11 @@ where
         let mut x = CELL_PADDING;
         for (i, header) in self.headers.iter().enumerate() {
             let width = col_widths[i];
-            let text_x = compute_text_x(
-                x,
-                width,
-                self.alignments.get(i).copied().unwrap_or_default(),
-            );
-            let anchor = alignment_anchor(self.alignments.get(i).copied().unwrap_or_default());
+            let alignment = alignment_at(&self.alignments, i);
+            let text_x = compute_text_x(x, width, alignment);
+            let anchor = alignment_anchor(alignment);
             let _ = writeln!(
-                &mut svg,
+                &mut body,
                 r#"<text x="{text_x}" y="{}" fill="{HEADER_TEXT}" text-anchor="{anchor}">{}</text>"#,
                 LINE_HEIGHT / 2 + FONT_SIZE / 2 - 2,
                 escape_xml(header)
@@ -129,25 +162,22 @@ where
                 ROW_BG_ODD
             };
             let _ = writeln!(
-                &mut svg,
+                &mut body,
                 r#"<rect x="1" y="{y}" width="{}" height="{LINE_HEIGHT}" fill="{bg}" />"#,
                 total_width - 2
             );
 
             let mut x = CELL_PADDING;
-            for (i, cell) in row.as_ref().iter().enumerate() {
+            for (i, cell) in row.iter().enumerate() {
                 if i >= col_widths.len() {
                     break;
                 }
                 let width = col_widths[i];
-                let text_x = compute_text_x(
-                    x,
-                    width,
-                    self.alignments.get(i).copied().unwrap_or_default(),
-                );
-                let anchor = alignment_anchor(self.alignments.get(i).copied().unwrap_or_default());
+                let alignment = alignment_at(&self.alignments, i);
+                let text_x = compute_text_x(x, width, alignment);
+                let anchor = alignment_anchor(alignment);
                 let _ = writeln!(
-                    &mut svg,
+                    &mut body,
                     r#"<text x="{text_x}" y="{}" fill="{ROW_TEXT}" text-anchor="{anchor}">{}</text>"#,
                     y + LINE_HEIGHT / 2 + FONT_SIZE / 2 - 2,
                     escape_xml(cell)
@@ -156,8 +186,86 @@ where
             }
         }
 
-        svg.push_str("</svg>");
-        svg
+        RenderedSvg {
+            body,
+            width: dimensions.width,
+            height: dimensions.height,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TableDimensions {
+    width: NonZeroU32,
+    height: NonZeroU32,
+}
+
+impl TableDimensions {
+    fn from_columns_and_rows(col_widths: &[u32], row_count: usize) -> Self {
+        let width = col_widths.iter().copied().fold(
+            NonZeroU32::MIN.saturating_add(CELL_PADDING - 1),
+            |width, col_width| width.saturating_add(col_width).saturating_add(CELL_PADDING),
+        );
+        let height = (0..=row_count).fold(NonZeroU32::MIN.saturating_add(1), |height, _| {
+            height.saturating_add(LINE_HEIGHT)
+        });
+        Self { width, height }
+    }
+}
+
+pub fn combine_svgs_vertically(svgs: &walicord_domain::NonEmptyVec<RenderedSvg>) -> RenderedSvg {
+    let dimensions = SvgStackDimensions::from_svgs(svgs);
+    let max_width = dimensions.width.get();
+
+    let base_capacity: usize = svgs.iter().map(|s| s.body().len()).sum();
+    let mut body = String::with_capacity(base_capacity + svgs.len() * 64);
+
+    let mut y_offset = 0u32;
+    for svg in svgs {
+        let x_offset = (max_width - svg.width().get()) / 2;
+        let _ = writeln!(
+            &mut body,
+            r#"<g transform="translate({x_offset}, {y_offset})">"#
+        );
+        body.push_str(svg.body());
+        body.push_str("</g>\n");
+        y_offset += svg.height().get() + COMBINE_SPACING;
+    }
+
+    RenderedSvg {
+        body,
+        width: dimensions.width,
+        height: dimensions.height,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SvgStackDimensions {
+    width: NonZeroU32,
+    height: NonZeroU32,
+}
+
+impl SvgStackDimensions {
+    fn from_svgs(svgs: &walicord_domain::NonEmptyVec<RenderedSvg>) -> Self {
+        let first = svgs.first();
+        let mut dimensions = Self {
+            width: first.width(),
+            height: first.height(),
+        };
+
+        for svg in svgs.iter().skip(1) {
+            dimensions.include_below(svg);
+        }
+
+        dimensions
+    }
+
+    fn include_below(&mut self, svg: &RenderedSvg) {
+        self.width = self.width.max(svg.width());
+        self.height = self
+            .height
+            .saturating_add(COMBINE_SPACING)
+            .saturating_add(svg.height().get());
     }
 }
 
@@ -191,6 +299,13 @@ fn alignment_anchor(alignment: Alignment) -> &'static str {
     }
 }
 
+fn alignment_at(alignments: &[Alignment], column_index: usize) -> Alignment {
+    match alignments.get(column_index) {
+        Some(alignment) => *alignment,
+        None => Alignment::default(),
+    }
+}
+
 fn escape_xml(s: &str) -> Cow<'_, str> {
     if !s.contains(['&', '<', '>', '"', '\'']) {
         return Cow::Borrowed(s);
@@ -210,120 +325,66 @@ fn escape_xml(s: &str) -> Cow<'_, str> {
     Cow::Owned(result)
 }
 
-pub fn combine_svgs_vertically(svgs: &[&str]) -> Option<String> {
-    if svgs.is_empty() {
-        return None;
-    }
-
-    const SPACING: u32 = 20;
-    const SVG_WRAPPER_OVERHEAD: usize = 512;
-    const GROUP_TAG_OVERHEAD: usize = 64;
-
-    let mut total_height = 0u32;
-    let mut max_width = 0u32;
-    let mut svg_data = Vec::new();
-
-    for svg in svgs {
-        let width = extract_svg_dimension(svg, "width")?;
-        let height = extract_svg_dimension(svg, "height")?;
-        let content = extract_svg_content(svg)?;
-
-        max_width = max_width.max(width);
-        svg_data.push((width, height, content));
-    }
-
-    for (idx, (_, height, _)) in svg_data.iter().enumerate() {
-        total_height += height;
-        if idx > 0 {
-            total_height += SPACING;
-        }
-    }
-
-    let base_capacity = svgs.iter().map(|s| s.len()).sum::<usize>();
-    let group_overhead = svg_data.len() * GROUP_TAG_OVERHEAD;
-    let mut combined = String::with_capacity(base_capacity + SVG_WRAPPER_OVERHEAD + group_overhead);
-
-    let _ = writeln!(
-        &mut combined,
-        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{max_width}" height="{total_height}" viewBox="0 0 {max_width} {total_height}">"#
-    );
-    let _ = writeln!(
-        &mut combined,
-        r#"<style>text {{ font-family: {FONT_FAMILY}; font-size: {FONT_SIZE}px; }}</style>"#
-    );
-
-    let mut y_offset = 0u32;
-    for (width, height, content) in svg_data {
-        let x_offset = (max_width - width) / 2;
-        let _ = writeln!(
-            &mut combined,
-            r#"<g transform="translate({x_offset}, {y_offset})">"#
-        );
-        combined.push_str(&content);
-        combined.push_str("</g>\n");
-        y_offset += height + SPACING;
-    }
-
-    combined.push_str("</svg>");
-    Some(combined)
-}
-
-fn extract_svg_dimension(svg: &str, attr: &str) -> Option<u32> {
-    let pattern = format!("{attr}=\"");
-    let start = svg.find(&pattern)? + pattern.len();
-    let end = svg[start..].find('"')? + start;
-    svg[start..end].parse().ok()
-}
-
-fn extract_svg_content(svg: &str) -> Option<Cow<'_, str>> {
-    const STYLE_TAG_OPEN: &str = "<style>";
-    const STYLE_TAG_OPEN_LEN: usize = STYLE_TAG_OPEN.len();
-    const STYLE_TAG_CLOSE: &str = "</style>";
-    const STYLE_TAG_CLOSE_LEN: usize = STYLE_TAG_CLOSE.len();
-
-    let start = svg.find('>')? + 1;
-    let end = svg.rfind("</svg>")?;
-    let content = &svg[start..end];
-
-    let content = if let Some(style_start) = content.find(STYLE_TAG_OPEN)
-        && let Some(style_end) = content[style_start + STYLE_TAG_OPEN_LEN..]
-            .find(STYLE_TAG_CLOSE)
-            .map(|idx| idx + style_start + STYLE_TAG_OPEN_LEN)
-    {
-        let before_style = &content[..style_start];
-        let after_style = &content[style_end + STYLE_TAG_CLOSE_LEN..];
-        Cow::Owned(format!("{before_style}{after_style}"))
-    } else {
-        Cow::Borrowed(content)
-    };
-
-    Some(content)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use rstest::rstest;
 
-    const SVG_SIMPLE_A: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="50"><text>First</text></svg>"#;
-    const SVG_SIMPLE_B: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="120" height="60"><text>Second</text></svg>"#;
-    const SVG_STYLE_INNER: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="50"><style>.foo { fill: red; }</style><text>First</text></svg>"#;
-
     #[test]
-    fn test_simple_table() {
+    fn simple_table_produces_valid_rendered_svg() {
         let svg = SvgTableBuilder::new()
             .alignments(&[Alignment::Left, Alignment::Right])
-            .headers(&[Cow::Borrowed("Name"), Cow::Borrowed("Balance")])
+            .headers([Cow::Borrowed("Name"), Cow::Borrowed("Balance")])
             .row([Cow::Borrowed("Alice"), Cow::Borrowed("+100")])
             .row([Cow::Borrowed("Bob"), Cow::Borrowed("-100")])
             .build();
 
-        assert!(svg.contains("<svg"));
-        assert!(svg.contains("</svg>"));
-        assert!(svg.contains("Alice"));
-        assert!(svg.contains("Bob"));
-        assert!(svg.contains("+100"));
-        assert!(svg.contains("-100"));
+        let xml = svg.to_svg_string();
+        assert!(xml.contains("<svg"));
+        assert!(xml.contains("</svg>"));
+        assert!(xml.contains("Alice"));
+        assert!(xml.contains("Bob"));
+        assert!(xml.contains("+100"));
+        assert!(xml.contains("-100"));
+        assert!(svg.width().get() > 0);
+        assert!(svg.height().get() > 0);
+    }
+
+    #[test]
+    fn body_excludes_svg_wrapper_and_style() {
+        let svg = SvgTableBuilder::new()
+            .headers([Cow::Borrowed("Col")])
+            .build();
+
+        assert!(!svg.body().contains("<svg"));
+        assert!(!svg.body().contains("</svg>"));
+        assert!(!svg.body().contains("<style>"));
+        assert!(svg.body().contains("<rect"));
+    }
+
+    #[test]
+    fn to_svg_string_wraps_body_with_svg_element() {
+        let svg = SvgTableBuilder::new()
+            .headers([Cow::Borrowed("Col")])
+            .build();
+
+        let xml = svg.to_svg_string();
+        assert!(xml.starts_with("<svg"));
+        assert!(xml.ends_with("</svg>"));
+        assert!(xml.contains("<style>"));
+        assert!(xml.contains(svg.body()));
+    }
+
+    #[test]
+    fn malicious_cell_content_is_xml_escaped() {
+        let svg = SvgTableBuilder::new()
+            .headers([Cow::Borrowed("X")])
+            .row([Cow::Borrowed("<script>alert('xss')</script>")])
+            .build();
+
+        let xml = svg.to_svg_string();
+        assert!(!xml.contains("<script>"));
+        assert!(xml.contains("&lt;script&gt;"));
     }
 
     #[rstest]
@@ -334,50 +395,64 @@ mod tests {
         assert_eq!(result, expected);
     }
 
-    #[rstest]
-    #[case::empty(vec![], None, &[])]
-    #[case::simple(
-        vec![SVG_SIMPLE_A, SVG_SIMPLE_B],
-        Some(&[
-            "<svg",
-            "</svg>",
-            "First",
-            "Second",
-            "width=\"120\"",
-            "height=\"130\"",
-        ][..]),
-        &[],
-    )]
-    #[case::centering(
-        vec![SVG_SIMPLE_A, SVG_SIMPLE_B],
-        Some(&[
-            "transform=\"translate(10, 0)\"",
-            "transform=\"translate(0, 70)\"",
-        ][..]),
-        &[],
-    )]
-    #[case::strips_style(
-        vec![SVG_STYLE_INNER, SVG_SIMPLE_B],
-        Some(&["<style>"][..]),
-        &["fill: red"],
-    )]
-    fn test_combine_svgs_vertically_cases(
-        #[case] svgs: Vec<&str>,
-        #[case] expect_contains: Option<&[&str]>,
-        #[case] expect_not: &[&str],
-    ) {
+    #[test]
+    fn combine_single_svg_preserves_content() {
+        let svg = SvgTableBuilder::new()
+            .headers([Cow::Borrowed("X")])
+            .row([Cow::Borrowed("data")])
+            .build();
+
+        let svgs = walicord_domain::NonEmptyVec::new(vec![svg.clone()]).expect("non-empty");
         let combined = combine_svgs_vertically(&svgs);
-        match expect_contains {
-            None => assert!(combined.is_none()),
-            Some(expect_contains) => {
-                let combined = combined.expect("combined svg");
-                for expected in expect_contains {
-                    assert!(combined.contains(expected));
-                }
-                for unexpected in expect_not {
-                    assert!(!combined.contains(unexpected));
-                }
-            }
-        }
+        assert!(combined.to_svg_string().contains("data"));
+        assert_eq!(combined.width(), svg.width());
+        assert_eq!(combined.height(), svg.height());
+    }
+
+    #[test]
+    fn combine_two_svgs_uses_max_width_and_summed_height() {
+        let a = SvgTableBuilder::new()
+            .headers([Cow::Borrowed("Short")])
+            .build();
+        let b = SvgTableBuilder::new()
+            .headers([Cow::Borrowed("A much longer header text")])
+            .build();
+
+        let svgs =
+            walicord_domain::NonEmptyVec::new(vec![a.clone(), b.clone()]).expect("non-empty");
+        let combined = combine_svgs_vertically(&svgs);
+        assert_eq!(combined.width(), a.width().max(b.width()));
+        let expected_height = a.height().get() + b.height().get() + COMBINE_SPACING;
+        assert_eq!(combined.height().get(), expected_height);
+    }
+
+    #[test]
+    fn combine_centers_narrower_svg() {
+        let narrow = SvgTableBuilder::new().headers([Cow::Borrowed("X")]).build();
+        let wide = SvgTableBuilder::new()
+            .headers([Cow::Borrowed("Very wide column header")])
+            .build();
+
+        let svgs = walicord_domain::NonEmptyVec::new(vec![narrow.clone(), wide.clone()])
+            .expect("non-empty");
+        let combined = combine_svgs_vertically(&svgs);
+        let x_offset = (wide.width().get() - narrow.width().get()) / 2;
+        assert!(
+            combined
+                .body()
+                .contains(&format!("translate({x_offset}, 0)"))
+        );
+    }
+
+    #[test]
+    fn header_only_table_has_positive_dimensions() {
+        let svg = SvgTableBuilder::new()
+            .headers([Cow::Borrowed("A"), Cow::Borrowed("B")])
+            .build();
+
+        assert!(svg.width().get() > 0);
+        assert!(svg.height().get() > 0);
+        assert!(svg.to_svg_string().contains("A"));
+        assert!(svg.to_svg_string().contains("B"));
     }
 }

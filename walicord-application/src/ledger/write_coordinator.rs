@@ -2,9 +2,10 @@ use crate::{
     Clock,
     ledger::{
         EntryHash, LedgerEntryId, LedgerId, UnverifiedLedgerStoreEnvelope,
+        append_previous_hash_sha256_v1,
         canonical_read::CanonicalThreadReader,
-        ledger_chain_genesis_sha256_v1,
         observability::{LedgerObservability, LedgerObservabilityEvent},
+        time::non_negative_elapsed_since,
     },
 };
 use dashmap::DashMap;
@@ -106,7 +107,7 @@ impl RetainedCanonicalWrite {
     }
 
     pub fn requires_full_scan(&self, now: SystemTime) -> bool {
-        now.duration_since(self.live_since).unwrap_or_default() >= UNCERTAIN_WRITE_RETAIN_TTL
+        non_negative_elapsed_since(now, self.live_since) >= UNCERTAIN_WRITE_RETAIN_TTL
     }
 }
 
@@ -476,10 +477,8 @@ pub async fn resolve_uncertain_write_v1(
     let Ok((load, probes)) = tokio::try_join!(reader.load_verified_thread(), scan_future) else {
         return false;
     };
-    let observed_head = load
-        .snapshot()
-        .current_head_hash()
-        .unwrap_or_else(|| ledger_chain_genesis_sha256_v1(ledger_id));
+    let observed_head =
+        append_previous_hash_sha256_v1(ledger_id, load.snapshot().current_head_hash());
 
     let scan = UncertainWriteRegistry::scan_for_exact_envelope(
         &retained,

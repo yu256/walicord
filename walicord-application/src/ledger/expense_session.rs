@@ -1,10 +1,13 @@
 use crate::{
     SessionNonce,
-    ledger::{EntryHash, ExpenseNote, LedgerEffectiveDate, LedgerEntryId, LedgerId},
+    ledger::{
+        EntryHash, ExpenseNote, LedgerEffectiveDate, LedgerEntryId, LedgerId,
+        time::non_negative_elapsed_since,
+    },
 };
 use parking_lot::Mutex;
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, hash_map::Entry},
     num::NonZeroU64,
     time::{Duration, SystemTime},
 };
@@ -27,6 +30,10 @@ impl ExpenseDraftScopeId {
         NonZeroU64::new(value)
             .map(Self)
             .ok_or(ExpenseDraftScopeIdError::Zero)
+    }
+
+    pub fn from_nonzero(value: NonZeroU64) -> Self {
+        Self(value)
     }
 }
 
@@ -115,7 +122,16 @@ pub enum ExpenseLaunchOrigin {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VoidSessionStage {
     SelectingCandidate,
-    Confirming,
+    Confirming { selection: VoidCandidateSelection },
+}
+
+impl VoidSessionStage {
+    pub fn selection(&self) -> Option<&VoidCandidateSelection> {
+        match self {
+            Self::SelectingCandidate => None,
+            Self::Confirming { selection } => Some(selection),
+        }
+    }
 }
 
 /// Validated basic info captured from a successful expense-modal submission. Once
@@ -252,12 +268,6 @@ pub enum ExpenseSessionConstructionError {
     InConfirmationRequiresBasicInfoAndSelection,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum VoidSessionConstructionError {
-    #[error("Confirming stage requires a void candidate to be selected")]
-    ConfirmingRequiresCandidate,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExpenseSession {
     key: ExpenseSessionKey,
@@ -325,7 +335,6 @@ impl ExpenseSession {
 pub struct VoidSession {
     key: VoidSessionKey,
     stage: VoidSessionStage,
-    selection: Option<VoidCandidateSelection>,
     nonce: SessionNonce,
     last_touched: SystemTime,
 }
@@ -334,21 +343,14 @@ impl VoidSession {
     pub fn new(
         key: VoidSessionKey,
         stage: VoidSessionStage,
-        selection: Option<VoidCandidateSelection>,
         nonce: SessionNonce,
         last_touched: SystemTime,
-    ) -> Result<Self, VoidSessionConstructionError> {
-        match (&stage, &selection) {
-            (VoidSessionStage::Confirming, None) => {
-                Err(VoidSessionConstructionError::ConfirmingRequiresCandidate)
-            }
-            _ => Ok(Self {
-                key,
-                stage,
-                selection,
-                nonce,
-                last_touched,
-            }),
+    ) -> Self {
+        Self {
+            key,
+            stage,
+            nonce,
+            last_touched,
         }
     }
 
@@ -359,7 +361,7 @@ impl VoidSession {
         &self.stage
     }
     pub fn selection(&self) -> Option<&VoidCandidateSelection> {
-        self.selection.as_ref()
+        self.stage.selection()
     }
     pub fn nonce(&self) -> SessionNonce {
         self.nonce
@@ -462,11 +464,12 @@ impl ExpenseModalSubmissionBindingStore {
         now: SystemTime,
     ) -> Result<ExpenseModalIntent, ModalSubmissionBindingError> {
         let mut guard = self.by_nonce.lock();
-        let Some(binding) = guard.get(&binding_nonce) else {
+        let Entry::Occupied(entry) = guard.entry(binding_nonce) else {
             return Err(ModalSubmissionBindingError::NotFound);
         };
+        let binding = entry.get();
         if now >= binding.expires_at {
-            guard.remove(&binding_nonce);
+            entry.remove();
             return Err(ModalSubmissionBindingError::Expired);
         }
         if binding.actor_id != actor_id {
@@ -475,10 +478,7 @@ impl ExpenseModalSubmissionBindingStore {
         if binding.draft_scope_id != draft_scope_id {
             return Err(ModalSubmissionBindingError::DraftScopeMismatch);
         }
-        Ok(guard
-            .remove(&binding_nonce)
-            .expect("binding was just observed under the same lock")
-            .intent)
+        Ok(entry.remove().intent)
     }
 }
 
@@ -614,12 +614,13 @@ impl ModalRetryBindingStore {
         now: SystemTime,
     ) -> Result<ModalRetryPayload, ModalRetryBindingError> {
         let mut guard = self.by_nonce.lock();
-        let Some(binding) = guard.get(&binding_nonce) else {
+        let Entry::Occupied(entry) = guard.entry(binding_nonce) else {
             return Err(ModalRetryBindingError::NotFound);
         };
+        let binding = entry.get();
         if now >= binding.expires_at {
             let expires_at = binding.expires_at;
-            guard.remove(&binding_nonce);
+            entry.remove();
             return Err(ModalRetryBindingError::Expired { now, expires_at });
         }
         if binding.actor_id != actor_id {
@@ -634,9 +635,7 @@ impl ModalRetryBindingStore {
                 expected: binding.draft_scope_id,
             });
         }
-        let binding = guard
-            .remove(&binding_nonce)
-            .expect("binding was just observed under the same lock");
+        let binding = entry.remove();
         Ok(ModalRetryPayload {
             preserved: binding.preserved,
             intent: binding.intent,
@@ -736,6 +735,8 @@ pub enum SessionAccessError {
     },
     #[error("session interaction is already in flight")]
     InFlight,
+    #[error("session claim token space exhausted")]
+    ClaimTokenExhausted,
 }
 
 pub struct ExpenseSessionStore {
@@ -852,20 +853,21 @@ impl ExpenseSessionStore {
             ExpenseSessionSlot::Available(session) => session.clone(),
             ExpenseSessionSlot::Claimed { .. } => return Err(SessionAccessError::InFlight),
         };
-        let elapsed = now.duration_since(session.last_touched).unwrap_or_default();
+        let elapsed = non_negative_elapsed_since(now, session.last_touched);
         if elapsed >= EXPENSE_SESSION_TTL {
             guard.remove_session(key);
             return Err(SessionAccessError::Expired);
         }
         session.refresh_touched(now);
-        let token = ExpenseSessionClaimToken {
-            key,
-            value: guard.next_claim_token,
-        };
+        let claim_token_value = guard.next_claim_token;
         guard.next_claim_token = guard
             .next_claim_token
             .checked_add(1)
-            .expect("expense session claim token space exhausted");
+            .ok_or(SessionAccessError::ClaimTokenExhausted)?;
+        let token = ExpenseSessionClaimToken {
+            key,
+            value: claim_token_value,
+        };
         guard.insert_session(ExpenseSessionSlot::Claimed {
             token,
             session: session.clone(),
@@ -875,9 +877,7 @@ impl ExpenseSessionStore {
 
     pub fn has_active_session(&self, key: ExpenseSessionKey, now: SystemTime) -> bool {
         self.state.lock().by_key.get(&key).is_some_and(|slot| {
-            now.duration_since(slot.session().last_touched)
-                .unwrap_or_default()
-                < EXPENSE_SESSION_TTL
+            non_negative_elapsed_since(now, slot.session().last_touched) < EXPENSE_SESSION_TTL
         })
     }
 
@@ -1018,7 +1018,7 @@ impl VoidSessionStore {
         let Some(session) = guard.by_key.get(&key).cloned() else {
             return Ok(None);
         };
-        let elapsed = now.duration_since(session.last_touched).unwrap_or_default();
+        let elapsed = non_negative_elapsed_since(now, session.last_touched);
         if elapsed >= VOID_SESSION_TTL {
             guard.remove_session(key);
             return Err(SessionAccessError::Expired);
@@ -1045,7 +1045,7 @@ impl VoidSessionStore {
         })?;
         let session_key = VoidSessionKey::new(ledger_id, actor_id);
         guard.by_key.get(&session_key).and_then(|session| {
-            (now.duration_since(session.last_touched).unwrap_or_default() < VOID_SESSION_TTL
+            (non_negative_elapsed_since(now, session.last_touched) < VOID_SESSION_TTL
                 && session.nonce == observed_nonce)
                 .then_some(actor_id)
         })
@@ -1053,7 +1053,7 @@ impl VoidSessionStore {
 
     pub fn has_active_session(&self, key: VoidSessionKey, now: SystemTime) -> bool {
         self.state.lock().by_key.get(&key).is_some_and(|session| {
-            now.duration_since(session.last_touched).unwrap_or_default() < VOID_SESSION_TTL
+            non_negative_elapsed_since(now, session.last_touched) < VOID_SESSION_TTL
         })
     }
 }
@@ -1167,32 +1167,6 @@ mod tests {
         assert_eq!(actual, expected);
     }
 
-    #[rstest]
-    #[case::confirming_without_selection_rejected(
-        VoidSessionStage::Confirming,
-        None,
-        Err(VoidSessionConstructionError::ConfirmingRequiresCandidate)
-    )]
-    #[case::confirming_with_selection_ok(
-        VoidSessionStage::Confirming,
-        Some(VoidCandidateSelection::new(LedgerEntryId(42))),
-        Ok(()),
-    )]
-    #[case::selecting_without_selection_ok(
-        VoidSessionStage::SelectingCandidate,
-        None,
-        Ok(()),
-    )]
-    fn void_session_constructor_enforces_selection_invariant(
-        #[case] stage: VoidSessionStage,
-        #[case] selection: Option<VoidCandidateSelection>,
-        #[case] expected: Result<(), VoidSessionConstructionError>,
-    ) {
-        let actual =
-            VoidSession::new(void_key(), stage, selection, nonce(1), UNIX_EPOCH).map(|_| ());
-        assert_eq!(actual, expected);
-    }
-
     fn fresh_expense_session(now: SystemTime) -> ExpenseSession {
         ExpenseSession::new(
             expense_key(),
@@ -1286,19 +1260,15 @@ mod tests {
         let first = VoidSession::new(
             void_key(),
             VoidSessionStage::SelectingCandidate,
-            None,
             nonce(1),
             UNIX_EPOCH,
-        )
-        .expect("first session");
+        );
         let second = VoidSession::new(
             void_key(),
             VoidSessionStage::SelectingCandidate,
-            None,
             nonce(2),
             UNIX_EPOCH,
-        )
-        .expect("second session");
+        );
         store.replace(first.clone());
         store.replace(second.clone());
 
@@ -1325,19 +1295,15 @@ mod tests {
         let removed = VoidSession::new(
             void_key(),
             VoidSessionStage::SelectingCandidate,
-            None,
             nonce(1),
             UNIX_EPOCH,
-        )
-        .expect("session");
+        );
         let retained = VoidSession::new(
             retained_key,
             VoidSessionStage::SelectingCandidate,
-            None,
             nonce(2),
             UNIX_EPOCH,
-        )
-        .expect("session");
+        );
         store.replace(removed);
         store.replace(retained.clone());
 
@@ -1385,11 +1351,9 @@ mod tests {
         let session = VoidSession::new(
             void_key(),
             VoidSessionStage::SelectingCandidate,
-            None,
             nonce(1),
             UNIX_EPOCH,
-        )
-        .expect("session");
+        );
         let key = session.key();
         store.replace(session.clone());
 
@@ -1405,21 +1369,17 @@ mod tests {
         let first = VoidSession::new(
             void_key(),
             VoidSessionStage::SelectingCandidate,
-            None,
             nonce(1),
             UNIX_EPOCH,
-        )
-        .expect("session");
+        );
         let ledger = first.key().ledger_id();
         store.replace(first);
         let replacement = VoidSession::new(
             void_key(),
             VoidSessionStage::SelectingCandidate,
-            None,
             nonce(9),
             UNIX_EPOCH,
-        )
-        .expect("session");
+        );
         store.replace(replacement);
 
         assert_eq!(
@@ -1441,11 +1401,9 @@ mod tests {
         let session = VoidSession::new(
             void_key(),
             VoidSessionStage::SelectingCandidate,
-            None,
             nonce(1),
             UNIX_EPOCH,
-        )
-        .expect("session");
+        );
         let key = session.key();
         store.replace(session);
 

@@ -1,6 +1,5 @@
 use super::{
     MemberBalances, MemberId, MemberSet, Money, RemainderPolicy, ResolvedAllocationStrategy,
-    SplitError,
 };
 use rust_decimal::Decimal;
 
@@ -41,21 +40,15 @@ impl BalanceDeltaDirection {
 /// * `direction` - Whether distributed shares increase or decrease balances
 /// * `allocation` - The resolved strategy used to split the amount
 ///
-/// # Returns
-/// * `Ok(())` if distribution succeeded
-///
-/// `allocation` is already validated and resolved, so the current implementation
-/// has no runtime error path. The `Result` return type is retained for API
-/// compatibility with earlier versions of this helper.
 pub fn distribute_balances(
     balances: &mut MemberBalances,
     members: &MemberSet,
     amount: Money,
     direction: BalanceDeltaDirection,
     allocation: &ResolvedAllocationStrategy,
-) -> Result<(), SplitError> {
+) {
     if members.is_empty() {
-        return Ok(());
+        return;
     }
 
     let shares: Vec<Money> = match allocation {
@@ -71,6 +64,4 @@ pub fn distribute_balances(
         let signed = share * direction.factor();
         *balances.entry(member).or_insert(Money::ZERO) += signed;
     }
-
-    Ok(())
 }

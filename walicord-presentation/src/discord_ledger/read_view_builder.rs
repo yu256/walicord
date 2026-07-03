@@ -5,15 +5,15 @@ use walicord_application::{
     },
     settle_up::PreviewedSettlement,
 };
-use walicord_domain::Money;
-use walicord_i18n as i18n;
+use walicord_domain::{Money, NonEmptyVec};
 
 use super::{
-    member_labels::SurfaceMemberLabels,
-    sanitizer::SafeLiteralText,
+    member_labels::{SurfaceMemberLabels, unknown_member_label},
+    sanitizer::{SafeLiteralText, SafeLiteralTextError},
     surfaces::{
-        BalanceDirection, BalanceRow, ExpenseOrSettlementSummary, ReadViewContent, RecentEntryRow,
-        RecoveryReference, TransferRow,
+        BalanceDirection, BalanceRow, ExpenseOrSettlementSummary, LedgerRoute, ReadViewDocument,
+        RecentEntryRow, RecoveryAction, RecoveryReference, ReviewRoute, ReviewSettleAction,
+        Section, TransferRow,
     },
 };
 
@@ -49,6 +49,11 @@ pub fn balance_rows_for_state(
     rows.into_iter().map(|(_, row)| row).collect()
 }
 
+fn balance_section(state: &LedgerState, labels: &SurfaceMemberLabels) -> Section<BalanceRow> {
+    let rows = balance_rows_for_state(state, labels);
+    Section::from_rows(rows)
+}
+
 pub fn preview_transfer_rows(
     previewed: &PreviewedSettlement,
     labels: &SurfaceMemberLabels,
@@ -71,42 +76,47 @@ pub enum ReadViewBuildError {
     MissingVoidTarget { target_id: LedgerEntryId },
     #[error("sealed-through entry {through_id:?} is missing from the verified load")]
     MissingSealedThrough { through_id: LedgerEntryId },
+    #[error("safe literal text: {0}")]
+    SafeLiteral(#[from] SafeLiteralTextError),
 }
 
 pub fn expense_or_settlement_summary(
     view: &ExpenseOrSettlementView,
     labels: &SurfaceMemberLabels,
-) -> ExpenseOrSettlementSummary {
+) -> Result<ExpenseOrSettlementSummary, ReadViewBuildError> {
     match view.event() {
-        ExpenseOrSettlementEvent::Expense(event) => ExpenseOrSettlementSummary::Expense {
-            date: view
-                .metadata()
-                .effective_date
-                .unwrap_or_else(|| LedgerEffectiveDate::from_system_time(view.recorded_at())),
-            payer_display_name: event
-                .paid_by()
-                .first()
-                .map(|paid| labels.safe_member_label(paid.member_id))
-                .unwrap_or_else(super::member_labels::unknown_member_label),
-            amount: event
-                .paid_by()
-                .iter()
-                .map(|paid| paid.amount)
-                .sum::<Money>()
-                .to_string(),
-            note: event
-                .note()
-                .and_then(|note| SafeLiteralText::from_note(note.as_str())),
-        },
+        ExpenseOrSettlementEvent::Expense(event) => {
+            let payer_display_name = match event.paid_by().first() {
+                Some(paid) => labels.safe_member_label(paid.member_id),
+                None => unknown_member_label(),
+            };
+            Ok(ExpenseOrSettlementSummary::Expense {
+                date: match view.metadata().effective_date {
+                    Some(effective_date) => effective_date,
+                    None => LedgerEffectiveDate::from_system_time(view.recorded_at()),
+                },
+                payer_display_name,
+                amount: event
+                    .paid_by()
+                    .iter()
+                    .map(|paid| paid.amount)
+                    .sum::<Money>()
+                    .to_string(),
+                note: event
+                    .note()
+                    .map(|note| SafeLiteralText::parse_note(note.as_str()))
+                    .transpose()?,
+            })
+        }
         ExpenseOrSettlementEvent::Settlement(event) => {
             let first = event.transfers().first();
-            ExpenseOrSettlementSummary::Settlement {
+            Ok(ExpenseOrSettlementSummary::Settlement {
                 date: LedgerEffectiveDate::from_system_time(view.recorded_at()),
                 from_display_name: labels.safe_member_label(first.from),
                 to_display_name: labels.safe_member_label(first.to),
                 amount: first.amount.to_string(),
                 additional_transfers: event.transfers().len().saturating_sub(1),
-            }
+            })
         }
     }
 }
@@ -115,23 +125,34 @@ pub fn recent_entry_rows(
     views: &[ExpenseOrSettlementView],
     labels: &SurfaceMemberLabels,
     ledger_id: LedgerId,
-) -> Vec<RecentEntryRow> {
+) -> Result<Vec<RecentEntryRow>, ReadViewBuildError> {
     views
         .iter()
-        .map(|view| RecentEntryRow {
-            entry_id: view.entry_id(),
-            summary: expense_or_settlement_summary(view, labels),
-            recovery_reference: RecoveryReference {
-                ledger_id_short: format!("{ledger_id:08x}"),
+        .map(|view| {
+            Ok(RecentEntryRow {
                 entry_id: view.entry_id(),
-                message_link: Some(view.message_link().to_owned()),
-            },
+                summary: expense_or_settlement_summary(view, labels)?,
+                recovery_reference: RecoveryReference {
+                    ledger_id_short: format!("{ledger_id:08x}"),
+                    entry_id: view.entry_id(),
+                    message_link: Some(view.message_link().to_owned()),
+                },
+            })
         })
         .collect()
 }
 
+fn recent_entries_section(
+    views: &[ExpenseOrSettlementView],
+    labels: &SurfaceMemberLabels,
+    ledger_id: LedgerId,
+) -> Result<Section<RecentEntryRow>, ReadViewBuildError> {
+    let rows = recent_entry_rows(views, labels, ledger_id)?;
+    Ok(Section::from_rows(rows))
+}
+
 pub struct LedgerPageInputs<'a> {
-    pub route: super::surfaces::ReadViewRoute,
+    pub route: LedgerRoute,
     pub recent_views: &'a [ExpenseOrSettlementView],
     pub state: &'a LedgerState,
     pub labels: &'a SurfaceMemberLabels,
@@ -139,168 +160,42 @@ pub struct LedgerPageInputs<'a> {
     pub uncertain_write: bool,
 }
 
-pub fn build_ledger_page_model(
+pub fn build_ledger_document(
     inputs: LedgerPageInputs<'_>,
-) -> Result<super::surfaces::ReadViewPageModel, ReadViewBuildError> {
-    use super::surfaces::ReadViewPageModel;
-    Ok(ReadViewPageModel {
-        route: inputs.route,
-        title: std::borrow::Cow::Borrowed(i18n::PANEL_LEDGER_BUTTON_LABEL),
-        uncertain_write: inputs.uncertain_write,
-        stale_page: false,
-        page_indicator: None,
-        snapshot_notice: None,
-        route_guidance_lines: Vec::new(),
-        recovery_cta: super::surfaces::RecoveryCta::None,
-        recovery_url: None,
-        missing_thread_note: false,
-        balances: Some(balance_rows_for_state(inputs.state, inputs.labels)),
-        footer_lines: Vec::new(),
-        empty_state: None,
-        action_rows: Vec::new(),
-        ephemeral: true,
-        content: ReadViewContent::Ledger {
-            recent_entries: Some(recent_entry_rows(
-                inputs.recent_views,
-                inputs.labels,
-                inputs.ledger_id,
-            )),
-        },
-    })
-}
-
-pub fn build_ledger_empty_page_model(
-    route: super::surfaces::ReadViewRoute,
-    uncertain_write: bool,
-) -> super::surfaces::ReadViewPageModel {
-    use super::surfaces::ReadViewPageModel;
-    ReadViewPageModel {
-        route,
-        title: std::borrow::Cow::Borrowed(i18n::PANEL_LEDGER_BUTTON_LABEL),
-        uncertain_write,
-        stale_page: false,
-        page_indicator: None,
-        snapshot_notice: None,
-        route_guidance_lines: Vec::new(),
-        recovery_cta: super::surfaces::RecoveryCta::None,
-        recovery_url: None,
-        missing_thread_note: false,
-        balances: Some(Vec::new()),
-        footer_lines: Vec::new(),
-        empty_state: Some(std::borrow::Cow::Borrowed(i18n::LEDGER_EMPTY_STATE)),
-        action_rows: Vec::new(),
-        ephemeral: true,
-        content: ReadViewContent::Ledger {
-            recent_entries: Some(Vec::new()),
-        },
-    }
+) -> Result<ReadViewDocument, ReadViewBuildError> {
+    Ok(ReadViewDocument::ledger(
+        inputs.route,
+        balance_section(inputs.state, inputs.labels),
+        recent_entries_section(inputs.recent_views, inputs.labels, inputs.ledger_id)?,
+        inputs.uncertain_write,
+    ))
 }
 
 pub struct ReviewPageInputs<'a> {
-    pub route: super::surfaces::ReadViewRoute,
+    pub route: ReviewRoute,
     pub state: &'a LedgerState,
     pub previewed: &'a PreviewedSettlement,
     pub labels: &'a SurfaceMemberLabels,
     pub uncertain_write: bool,
-    pub recovery_cta: super::surfaces::RecoveryCta,
-    pub recovery_url: Option<String>,
+    pub recovery_action: RecoveryAction,
+    pub settle_action: ReviewSettleAction,
 }
 
-pub fn build_review_page_model(inputs: ReviewPageInputs<'_>) -> super::surfaces::ReadViewPageModel {
-    use super::surfaces::ReadViewPageModel;
-    ReadViewPageModel {
-        route: inputs.route,
-        title: std::borrow::Cow::Borrowed(i18n::PANEL_REVIEW_BUTTON_LABEL),
-        uncertain_write: inputs.uncertain_write,
-        stale_page: false,
-        page_indicator: None,
-        snapshot_notice: None,
-        route_guidance_lines: Vec::new(),
-        recovery_cta: inputs.recovery_cta,
-        recovery_url: inputs.recovery_url,
-        missing_thread_note: false,
-        balances: Some(balance_rows_for_state(inputs.state, inputs.labels)),
-        footer_lines: Vec::new(),
-        empty_state: None,
-        action_rows: Vec::new(),
-        ephemeral: true,
-        content: ReadViewContent::Review {
-            transfers: Some(preview_transfer_rows(inputs.previewed, inputs.labels)),
-        },
-    }
-}
-
-pub fn build_review_empty_page_model(
-    route: super::surfaces::ReadViewRoute,
-    uncertain_write: bool,
-    recovery_url: Option<String>,
-) -> super::surfaces::ReadViewPageModel {
-    use super::surfaces::{ReadViewPageModel, RecoveryCta};
-    let (empty_state, recovery_cta, recovery_url) = match route {
-        super::surfaces::ReadViewRoute::ReviewParent => (
-            std::borrow::Cow::Borrowed(i18n::REVIEW_PARENT_EMPTY_STATE),
-            RecoveryCta::None,
-            None,
+pub fn build_review_document(inputs: ReviewPageInputs<'_>) -> ReadViewDocument {
+    let transfer_rows = preview_transfer_rows(inputs.previewed, inputs.labels);
+    match NonEmptyVec::new(transfer_rows) {
+        Ok(transfers) => ReadViewDocument::review(
+            inputs.route,
+            balance_section(inputs.state, inputs.labels),
+            transfers,
+            inputs.uncertain_write,
+            inputs.recovery_action,
+            inputs.settle_action,
         ),
-        _ => (
-            std::borrow::Cow::Borrowed(i18n::REVIEW_THREAD_EMPTY_STATE),
-            RecoveryCta::ParentLink,
-            recovery_url,
+        Err(_) => ReadViewDocument::review_no_transfers(
+            inputs.route,
+            inputs.uncertain_write,
+            inputs.recovery_action,
         ),
-    };
-    ReadViewPageModel {
-        route,
-        title: std::borrow::Cow::Borrowed(i18n::PANEL_REVIEW_BUTTON_LABEL),
-        uncertain_write,
-        stale_page: false,
-        page_indicator: None,
-        snapshot_notice: None,
-        route_guidance_lines: Vec::new(),
-        recovery_cta,
-        recovery_url,
-        missing_thread_note: false,
-        balances: Some(Vec::new()),
-        footer_lines: Vec::new(),
-        empty_state: Some(empty_state),
-        action_rows: Vec::new(),
-        ephemeral: true,
-        content: ReadViewContent::Review {
-            transfers: Some(Vec::new()),
-        },
-    }
-}
-
-pub fn build_review_no_transfers_page_model(
-    route: super::surfaces::ReadViewRoute,
-    uncertain_write: bool,
-) -> super::surfaces::ReadViewPageModel {
-    use super::surfaces::ReadViewPageModel;
-    use std::fmt::Write as _;
-    let mut body = String::new();
-    let _ = write!(
-        body,
-        "{}\n{}",
-        i18n::SETTLEMENT_ALREADY_NOT_NEEDED_MESSAGE,
-        i18n::SETTLEMENT_PREVIEW_NOT_SAVED_MESSAGE,
-    );
-    ReadViewPageModel {
-        route,
-        title: std::borrow::Cow::Borrowed(i18n::PANEL_REVIEW_BUTTON_LABEL),
-        uncertain_write,
-        stale_page: false,
-        page_indicator: None,
-        snapshot_notice: None,
-        route_guidance_lines: Vec::new(),
-        recovery_cta: super::surfaces::RecoveryCta::None,
-        recovery_url: None,
-        missing_thread_note: false,
-        balances: Some(Vec::new()),
-        footer_lines: Vec::new(),
-        empty_state: Some(std::borrow::Cow::Owned(body)),
-        action_rows: Vec::new(),
-        ephemeral: true,
-        content: ReadViewContent::Review {
-            transfers: Some(Vec::new()),
-        },
     }
 }

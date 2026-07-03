@@ -108,12 +108,16 @@ fn is_removed_note_format_char(ch: char) -> bool {
 }
 
 fn url_like_host_candidate(token: &str) -> Option<&str> {
-    let host = token
-        .split(['/', ':', '?', '#'])
-        .next()
-        .unwrap_or(token)
-        .trim_end_matches([',', '.', ';', '!', '?', ')', ']', '}']);
+    let host =
+        first_url_host_segment(token).trim_end_matches([',', '.', ';', '!', '?', ')', ']', '}']);
     (!host.is_empty()).then_some(host)
+}
+
+fn first_url_host_segment(token: &str) -> &str {
+    match token.find(['/', ':', '?', '#']) {
+        Some(index) => &token[..index],
+        None => token,
+    }
 }
 
 fn looks_like_host_token(token: &str) -> bool {
@@ -592,21 +596,23 @@ fn distribute_owed_amounts(
     }
 
     let remainder = total_units.saturating_sub(assigned);
-    for index in positive_indices
-        .into_iter()
-        .take(usize::try_from(remainder).unwrap_or(0))
-    {
+    let remainder = usize::try_from(remainder).map_err(|_| ExpenseAuthoringError::InvalidAmount)?;
+    for index in positive_indices.into_iter().take(remainder) {
         units_per_member[index] += 1;
     }
 
-    Ok(participants
-        .iter()
-        .zip(units_per_member)
-        .filter_map(|(participant, units)| {
-            (units > 0).then_some(MemberAmount {
-                member_id: participant.member_id,
-                amount: Money::from_i64(i64::try_from(units).expect("u64 units should fit in i64")),
-            })
-        })
-        .collect())
+    let mut owed = Vec::new();
+    for (participant, units) in participants.iter().zip(units_per_member) {
+        if units == 0 {
+            continue;
+        }
+        let units = i64::try_from(units).expect(
+            "units_per_member entries sum to total_units, which was already proven <= i64::MAX",
+        );
+        owed.push(MemberAmount {
+            member_id: participant.member_id,
+            amount: Money::from_i64(units),
+        });
+    }
+    Ok(owed)
 }

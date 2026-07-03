@@ -21,6 +21,7 @@ pub mod record_expense;
 mod seal;
 pub mod settle_execute;
 pub mod settle_flow;
+mod time;
 pub mod void_execute;
 pub mod void_flow;
 pub mod write_coordinator;
@@ -64,7 +65,7 @@ pub use entry::{
 pub use hash_chain::{
     ChainPositionError, EntryHash, HashedLedgerPayload, LedgerCanonicalEncodeError,
     LedgerHashChainError, LedgerHashSuite, SchemaVersion, UnverifiedLedgerStoreEnvelope,
-    VerifiedLedgerStoreEnvelope, ledger_chain_genesis_sha256_v1,
+    VerifiedLedgerStoreEnvelope, append_previous_hash_sha256_v1, ledger_chain_genesis_sha256_v1,
     make_unverified_envelope_sha256_v1, verify_envelope_sha256_v1,
     verify_envelopes_in_append_order_sha256_v1,
 };

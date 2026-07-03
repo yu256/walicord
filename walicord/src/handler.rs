@@ -8,7 +8,7 @@ use crate::{
         },
         ports::{ChannelService, RosterProvider, ServiceError},
     },
-    message_cache::{CachedMessage, MessageCache, next_line_offset},
+    message_cache::{CachedMessage, MessageCache, MessageCacheRead, next_line_offset},
     reaction::{BotReaction, BotReactionState, MessageValidity, ReactionService},
     role_visibility_feedback,
     settlement::{SettlementService, evaluate_program},
@@ -303,11 +303,12 @@ where
     }
 
     fn has_pending_messages(&self, tracked_id: TrackedChannelId) -> bool {
-        self.message_cache
-            .with_messages(tracked_id, |messages| {
-                messages.values().any(CachedMessage::is_pending_evaluation)
-            })
-            .unwrap_or(false)
+        match self.message_cache.read_messages(tracked_id, |messages| {
+            messages.values().any(CachedMessage::is_pending_evaluation)
+        }) {
+            MessageCacheRead::Loaded(has_pending) => has_pending,
+            MessageCacheRead::NotLoaded => false,
+        }
     }
 
     fn mark_pending(mut cached: CachedMessage) -> CachedMessage {
@@ -361,15 +362,13 @@ where
             return CacheLoadResult::NotTracked;
         };
 
-        if let Some(is_empty) = self
+        match self
             .message_cache
-            .with_messages(tracked_id, |msgs| msgs.is_empty())
+            .read_messages(tracked_id, |msgs| msgs.is_empty())
         {
-            return if is_empty {
-                CacheLoadResult::LoadedEmpty
-            } else {
-                CacheLoadResult::LoadedNonEmpty
-            };
+            MessageCacheRead::Loaded(true) => return CacheLoadResult::LoadedEmpty,
+            MessageCacheRead::Loaded(false) => return CacheLoadResult::LoadedNonEmpty,
+            MessageCacheRead::NotLoaded => {}
         }
 
         match fetch_all_messages().await {
@@ -423,12 +422,19 @@ where
             return;
         };
 
-        let cached: Option<Vec<CachedMessage>> =
-            self.message_cache.with_messages(tracked_id, |msgs| {
+        let mut messages: Vec<CachedMessage> =
+            match self.message_cache.read_messages(tracked_id, |msgs| {
                 msgs.iter().map(|(_, m)| m.clone()).collect()
-            });
-
-        let mut messages = cached.unwrap_or_default();
+            }) {
+                MessageCacheRead::Loaded(messages) => messages,
+                MessageCacheRead::NotLoaded => {
+                    tracing::warn!(
+                        channel_id = %channel_id,
+                        "cache rebuild expected a loaded tracked channel cache"
+                    );
+                    return;
+                }
+            };
 
         if let Some(updated_msg) = updated_cached {
             if let Some(pos) = messages.iter().position(|m| m.id == updated_msg.id) {
@@ -507,9 +513,8 @@ where
         };
 
         let author_id = MemberId(msg.author.id.get());
-        let (cached_contents, next_line_offset) = self
-            .message_cache
-            .with_messages(tracked_id, |messages| {
+        let (cached_contents, next_line_offset) =
+            match self.message_cache.read_messages(tracked_id, |messages| {
                 let offset = next_line_offset(messages.iter().map(|(_, m)| m));
                 let contents: Vec<(ArcStr, Option<MemberId>)> = messages
                     .iter()
@@ -519,8 +524,10 @@ where
                     .map(|(_, m)| (m.content.clone(), Some(MemberId(m.author_id.get()))))
                     .collect();
                 (contents, offset)
-            })
-            .unwrap_or_default();
+            }) {
+                MessageCacheRead::Loaded(snapshot) => snapshot,
+                MessageCacheRead::NotLoaded => (Vec::new(), 0),
+            };
 
         let result = match evaluate_program(
             &self.processor,
@@ -819,9 +826,8 @@ where
             return;
         }
 
-        let cached_contents: Vec<(ArcStr, Option<MemberId>)> = self
-            .message_cache
-            .with_messages(tracked_id, |messages| {
+        let cached_contents: Vec<(ArcStr, Option<MemberId>)> =
+            match self.message_cache.read_messages(tracked_id, |messages| {
                 messages
                     .iter()
                     .filter(|(_, m)| {
@@ -829,8 +835,10 @@ where
                     })
                     .map(|(_, m)| (m.content.clone(), Some(MemberId(m.author_id.get()))))
                     .collect()
-            })
-            .unwrap_or_default();
+            }) {
+                MessageCacheRead::Loaded(cached_contents) => cached_contents,
+                MessageCacheRead::NotLoaded => Vec::new(),
+            };
 
         let command_name = command.data.name.as_str();
 
@@ -893,9 +901,7 @@ where
                     .await
                 {
                     Ok(view) => {
-                        if let Some(png) =
-                            crate::discord::svg_renderer::svg_to_png(&view.combined_svg)
-                        {
+                        if let Ok(png) = crate::discord::svg_renderer::svg_to_png(&view.svg) {
                             let _ = command
                                 .create_followup(
                                     &ctx.http,
@@ -1389,16 +1395,16 @@ where
             event.apply_to_message(&mut old);
             Some(CachedMessage::from_message(old))
         } else {
-            let cached_updated = self
-                .message_cache
-                .with_messages(tracked_id, |msgs| {
-                    msgs.get(&event.id).map(|cached| {
-                        let mut updated = cached.clone();
-                        updated.apply_event(&event);
-                        updated
-                    })
+            let cached_updated = match self.message_cache.read_messages(tracked_id, |msgs| {
+                msgs.get(&event.id).map(|cached| {
+                    let mut updated = cached.clone();
+                    updated.apply_event(&event);
+                    updated
                 })
-                .flatten();
+            }) {
+                MessageCacheRead::Loaded(updated) => updated,
+                MessageCacheRead::NotLoaded => None,
+            };
 
             if let Some(cached) = cached_updated {
                 if cached.is_bot {
@@ -1493,14 +1499,18 @@ where
             return;
         }
 
-        let should_clear = self.message_cache.with_messages(tracked_id, |msgs| {
-            msgs.get(&removed_reaction.message_id).map(|msg| {
-                (removed_check && msg.reaction_state == BotReactionState::HasCheck)
-                    || (removed_cross && msg.reaction_state == BotReactionState::HasCross)
-            })
-        });
-
-        let should_clear = should_clear.flatten().unwrap_or(false);
+        let should_clear = match self.message_cache.read_messages(tracked_id, |msgs| {
+            match msgs.get(&removed_reaction.message_id) {
+                Some(msg) => {
+                    (removed_check && msg.reaction_state == BotReactionState::HasCheck)
+                        || (removed_cross && msg.reaction_state == BotReactionState::HasCross)
+                }
+                None => false,
+            }
+        }) {
+            MessageCacheRead::Loaded(should_clear) => should_clear,
+            MessageCacheRead::NotLoaded => false,
+        };
 
         if should_clear
             && self.message_cache.update_reaction_state(
@@ -2207,8 +2217,8 @@ mod tests {
 
         cache.remove_message(tracked_id, MessageId::new(10));
 
-        let is_empty = cache.with_messages(tracked_id, |msgs| msgs.is_empty());
-        assert_eq!(is_empty, Some(true));
+        let is_empty = cache.read_messages(tracked_id, |msgs| msgs.is_empty());
+        assert_eq!(is_empty, MessageCacheRead::Loaded(true));
     }
 
     #[rstest]
@@ -2232,11 +2242,14 @@ mod tests {
 
         assert!(deferred);
 
-        let stored = handler
+        let stored = match handler
             .message_cache
-            .with_messages(tracked_id, |msgs| msgs.get(&MessageId::new(2)).cloned())
-            .flatten()
-            .expect("current message should be cached");
+            .read_messages(tracked_id, |msgs| msgs.get(&MessageId::new(2)).cloned())
+        {
+            MessageCacheRead::Loaded(cached) => cached,
+            MessageCacheRead::NotLoaded => None,
+        }
+        .expect("current message should be cached");
         assert!(stored.pending_evaluation);
         assert_eq!(stored.reaction_state, BotReactionState::None);
     }

@@ -75,14 +75,11 @@ pub fn seal_through_tail_if_advances(
 pub fn seal_through_latest_unvoided_expense_or_settlement_entry(
     projected: &ProjectedLedger,
 ) -> Result<LedgerHistorySealed, SealThroughTailError> {
-    let tail = projected
+    let (tail, tail_info) = projected
         .entry_index()
-        .latest_unvoided_expense_or_settlement_entry()
+        .latest_unvoided_expense_or_settlement_entry_info()
         .ok_or(SealThroughTailError::EmptyLedger)?;
 
-    let tail_info = projected
-        .entry(tail.entry_id)
-        .expect("latest unvoided expense or settlement entry must be in the entry index");
     if tail_info.sealed {
         return Err(SealThroughTailError::AlreadySealed);
     }

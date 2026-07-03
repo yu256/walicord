@@ -4,10 +4,7 @@ use crate::{
         DiscordLedgerEntryError, DiscordLedgerSourceDescriptor, LedgerCanonicalEncodeError,
         LedgerEntry, LedgerEntryId, LedgerId, UnverifiedLedgerStoreEnvelope,
         build_discord_void_entry,
-        expense_session::{
-            VoidCandidateSelection, VoidSession, VoidSessionConstructionError, VoidSessionKey,
-            VoidSessionStage,
-        },
+        expense_session::{VoidCandidateSelection, VoidSession, VoidSessionKey, VoidSessionStage},
         make_unverified_envelope_sha256_v1,
         projection::{
             ExpenseOrSettlementView, ProjectionConsistencyError, VerifiedLedgerThreadLoad,
@@ -45,8 +42,6 @@ pub enum VoidSessionBootstrapError {
     NoVoidableCandidates,
     #[error("projection consistency: {0}")]
     Projection(#[from] ProjectionConsistencyError),
-    #[error("void session construction failed: {0}")]
-    ConstructionFailed(#[from] VoidSessionConstructionError),
 }
 
 /// Construct a fresh `VoidSession` in `SelectingCandidate` from the latest voidable
@@ -72,11 +67,9 @@ pub fn bootstrap_void_session<ExternalId>(
     let session = VoidSession::new(
         key,
         VoidSessionStage::SelectingCandidate,
-        None,
         nonce,
         clock.now(),
-    )
-    .map_err(VoidSessionBootstrapError::ConstructionFailed)?;
+    );
     Ok((session, nonce, candidates))
 }
 
@@ -86,8 +79,6 @@ pub enum VoidConfirmTransitionError {
     NotInSelection,
     #[error("void candidate {target_entry_id:?} is no longer in the voidable window")]
     CandidateNotFound { target_entry_id: LedgerEntryId },
-    #[error("void session construction failed: {0}")]
-    ConstructionFailed(#[from] VoidSessionConstructionError),
 }
 
 /// Advance a `SelectingCandidate` session to `Confirming` once the actor selects a
@@ -110,14 +101,14 @@ pub fn transition_to_confirm(
         return Err(VoidConfirmTransitionError::CandidateNotFound { target_entry_id });
     }
 
-    VoidSession::new(
+    Ok(VoidSession::new(
         session.key(),
-        VoidSessionStage::Confirming,
-        Some(VoidCandidateSelection::new(target_entry_id)),
+        VoidSessionStage::Confirming {
+            selection: VoidCandidateSelection::new(target_entry_id),
+        },
         session.nonce(),
         clock.now(),
-    )
-    .map_err(VoidConfirmTransitionError::ConstructionFailed)
+    ))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -147,9 +138,6 @@ pub fn compose_void_entry<ExternalId>(
     let Some(selection) = session.selection() else {
         return Err(VoidComposeError::SessionNotConfirming);
     };
-    if !matches!(session.stage(), VoidSessionStage::Confirming) {
-        return Err(VoidComposeError::SessionNotConfirming);
-    }
 
     let candidates =
         project_recent_voidable_entries(load, VOID_CANDIDATE_WINDOW).map_err(|_| {

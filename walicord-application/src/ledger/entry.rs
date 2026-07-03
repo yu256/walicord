@@ -99,15 +99,8 @@ impl LedgerEffectiveDate {
     }
 
     pub fn from_system_time(recorded_at: std::time::SystemTime) -> Self {
-        use chrono::TimeZone;
         let recorded_at = chrono::DateTime::<chrono::Utc>::from(recorded_at);
-        let local = crate::business_calendar::business_timezone()
-            .timestamp_opt(
-                recorded_at.timestamp(),
-                recorded_at.timestamp_subsec_nanos(),
-            )
-            .single()
-            .expect("fixed-offset timezone has no fold / gap; single() is total");
+        let local = recorded_at.with_timezone(&crate::business_calendar::business_timezone());
         Self(local.date_naive())
     }
 

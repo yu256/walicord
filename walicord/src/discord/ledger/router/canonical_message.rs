@@ -17,7 +17,6 @@ use walicord_application::ledger::{
     void_execute::{VoidEntryRenderer, VoidRenderError},
 };
 use walicord_domain::model::MemberId;
-use walicord_i18n as i18n;
 use walicord_presentation::discord_ledger::{
     BusinessDateTime, DiscordLedgerPresenter, ParticipantShareRow, PublicCanonicalMessageModel,
     PublicExpenseMessageModel, PublicSettlementMessageModel, PublicVoidMessageModel,
@@ -148,38 +147,21 @@ pub(super) fn render_public_expense_message(
         })),
     );
 
-    let payer_display_name = labels
-        .member(payer_member_id)
-        .map(|label| label.visible().clone())
-        .unwrap_or_else(|| {
-            SafeLiteralText::from_roster_label(
-                &i18n::unknown_user_label(payer_member_id.0).to_string(),
-            )
-            .expect("unknown_user_label is a fixed fallback that always sanitises")
-        });
+    let payer_display_name = labels.safe_member_label(payer_member_id);
 
     let participant_rows: Vec<ParticipantShareRow> = event
         .owed_by()
         .iter()
         .map(|amount| ParticipantShareRow {
-            display_name: labels
-                .member(amount.member_id)
-                .map(|label| label.visible().clone())
-                .unwrap_or_else(|| {
-                    SafeLiteralText::from_roster_label(
-                        &i18n::unknown_user_label(amount.member_id.0).to_string(),
-                    )
-                    .expect("unknown_user_label is a fixed fallback that always sanitises")
-                }),
+            display_name: labels.safe_member_label(amount.member_id),
             share_amount: format_money_for_modal(amount.amount),
         })
         .collect();
 
-    let note = event.note().map(|note| {
-        // ExpenseNote validates canonical form; SafeLiteralText must accept it.
-        SafeLiteralText::from_note(note.as_str())
-            .expect("validated ExpenseNote should always produce a SafeLiteralText")
-    });
+    let note = event
+        .note()
+        .map(|note| SafeLiteralText::parse_note(note.as_str()))
+        .transpose()?;
 
     let actor_member_id = entry
         .metadata
@@ -189,15 +171,7 @@ pub(super) fn render_public_expense_message(
         actor_member_id,
         display_names.get(&actor_member_id).map(|s| s.as_str()),
     )));
-    let actor_display_name = actor_labels
-        .member(actor_member_id)
-        .map(|label| label.visible().clone())
-        .unwrap_or_else(|| {
-            SafeLiteralText::from_roster_label(
-                &i18n::unknown_user_label(actor_member_id.0).to_string(),
-            )
-            .expect("unknown_user_label is a fixed fallback that always sanitises")
-        });
+    let actor_display_name = actor_labels.safe_member_label(actor_member_id);
 
     let recorded_at = entry
         .metadata
@@ -313,7 +287,7 @@ pub(super) fn render_public_void_message(
         entry_id: entry.id,
         voider_display_name: labels.safe_member_label(actor_member_id),
         voided_at: BusinessDateTime::from_system_time(recorded_at),
-        original_summary: expense_or_settlement_summary(target, labels),
+        original_summary: expense_or_settlement_summary(target, labels)?,
         recorded_at: BusinessDateTime::from_system_time(recorded_at),
         recovery_reference: RecoveryReference {
             ledger_id_short: format!("{ledger_id:08x}"),
