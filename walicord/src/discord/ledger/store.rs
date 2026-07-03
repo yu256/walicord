@@ -25,7 +25,7 @@ use walicord_application::ledger::{
     canonical_write::{CanonicalAppendError, CanonicalThreadAppender},
     observability::LedgerObservabilityEvent,
     projection::{VerifiedEntryTransport, VerifiedLedgerThreadLoadError},
-    replay_verified_snapshot, verify_envelope_sha256_v1,
+    replay_verified_snapshot, verify_envelope_at_previous_hash_sha256_v1,
     verify_envelopes_in_append_order_sha256_v1,
     write_coordinator::{CanonicalMessageProbe, LAZY_RETRY_SCAN_WINDOW},
 };
@@ -643,10 +643,14 @@ impl DiscordCanonicalLedgerStore {
             external_id: send_outcome.id,
             payload: payload.clone(),
         };
-        let verified = verify_envelope_sha256_v1(envelope_with_message_id, payload.ledger_id)
-            .map_err(|error| {
-                StoreWriteError::ReadBack(format!("envelope verification failed: {error:?}"))
-            })?;
+        let verified = verify_envelope_at_previous_hash_sha256_v1(
+            envelope_with_message_id,
+            payload.ledger_id,
+            previous_hash,
+        )
+        .map_err(|error| {
+            StoreWriteError::ReadBack(format!("envelope verification failed: {error:?}"))
+        })?;
         Ok(verified)
     }
 

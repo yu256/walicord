@@ -66,8 +66,8 @@ pub use hash_chain::{
     ChainPositionError, EntryHash, HashedLedgerPayload, LedgerCanonicalEncodeError,
     LedgerHashChainError, LedgerHashSuite, SchemaVersion, UnverifiedLedgerStoreEnvelope,
     VerifiedLedgerStoreEnvelope, append_previous_hash_sha256_v1, ledger_chain_genesis_sha256_v1,
-    make_unverified_envelope_sha256_v1, verify_envelope_sha256_v1,
-    verify_envelopes_in_append_order_sha256_v1,
+    make_unverified_envelope_sha256_v1, verify_envelope_at_previous_hash_sha256_v1,
+    verify_envelope_sha256_v1, verify_envelopes_in_append_order_sha256_v1,
 };
 #[cfg(test)]
 pub(crate) use hash_chain::{

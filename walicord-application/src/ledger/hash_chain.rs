@@ -735,6 +735,24 @@ pub fn verify_envelope_sha256_v1<ExternalId>(
     )
 }
 
+/// Unlike [`verify_envelope_sha256_v1`], this does not assume the envelope is the chain's
+/// first entry — the caller (e.g. an append boundary re-verifying its own just-written
+/// envelope under the per-`LedgerId` write mutex) supplies the `previous_hash` it already
+/// trusts, rather than deriving it from genesis.
+pub fn verify_envelope_at_previous_hash_sha256_v1<ExternalId>(
+    unverified: UnverifiedLedgerStoreEnvelope<ExternalId>,
+    expected_ledger_id: LedgerId,
+    expected_previous_hash: EntryHash,
+) -> Result<VerifiedLedgerStoreEnvelope<ExternalId>, LedgerHashChainError> {
+    verify_envelope(
+        unverified,
+        expected_ledger_id,
+        expected_previous_hash,
+        &DefaultLedgerCanonicalEncoder,
+        &Sha256V1Digest,
+    )
+}
+
 /// Public, suite-locked append-order verifier. Same suite-locking + ledger-id binding
 /// rationale as [`verify_envelope_sha256_v1`]. The first envelope is checked against the
 /// deterministic genesis returned by [`ledger_chain_genesis_sha256_v1`]; adapters do not
@@ -1255,6 +1273,52 @@ mod schema_v1_tests {
         let verified = verify_envelope_sha256_v1(unverified, ledger_id)
             .expect("suite-locked verifier should accept a properly hashed envelope");
         assert_eq!(verified.entry_hash(), entry_hash);
+    }
+
+    #[test]
+    fn verify_envelope_at_previous_hash_sha256_v1_accepts_a_non_genesis_chain_position() {
+        let ledger_id = walicord_ledger::test_fixtures::ledger_id(1);
+        let payload = payload_with_event(2, expense_event(1, 2, 100));
+        let previous = EntryHash([7; 32]);
+        let bytes = encode_schema_v1_unwrap(previous, &payload);
+        let entry_hash = Sha256V1Digest.digest(&bytes);
+
+        let unverified = UnverifiedLedgerStoreEnvelope {
+            previous_hash: previous,
+            entry_hash,
+            external_id: (),
+            payload,
+        };
+        let actual = verify_envelope_at_previous_hash_sha256_v1(unverified, ledger_id, previous)
+            .map(|verified| verified.entry_hash());
+        assert_eq!(actual, Ok(entry_hash));
+    }
+
+    #[test]
+    fn verify_envelope_at_previous_hash_sha256_v1_rejects_previous_hash_mismatch() {
+        let ledger_id = walicord_ledger::test_fixtures::ledger_id(1);
+        let payload = payload_with_event(2, expense_event(1, 2, 100));
+        let declared_previous = EntryHash([7; 32]);
+        let bytes = encode_schema_v1_unwrap(declared_previous, &payload);
+        let entry_hash = Sha256V1Digest.digest(&bytes);
+
+        let unverified = UnverifiedLedgerStoreEnvelope {
+            previous_hash: declared_previous,
+            entry_hash,
+            external_id: (),
+            payload,
+        };
+        let expected_previous = EntryHash([9; 32]);
+        let actual =
+            verify_envelope_at_previous_hash_sha256_v1(unverified, ledger_id, expected_previous);
+
+        assert_eq!(
+            actual,
+            Err(LedgerHashChainError::PreviousHashMismatch {
+                expected: expected_previous,
+                declared: declared_previous,
+            })
+        );
     }
 
     #[test]
