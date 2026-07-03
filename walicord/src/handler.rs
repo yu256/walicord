@@ -980,19 +980,19 @@ where
         match interaction {
             Interaction::Command(command) => {
                 if command
-                    .edit_response(&ctx.http, safe_edit_interaction_response().content(message))
+                    .create_response(
+                        &ctx.http,
+                        CreateInteractionResponse::Message(
+                            safe_interaction_response_message()
+                                .content(message)
+                                .ephemeral(true),
+                        ),
+                    )
                     .await
                     .is_err()
                 {
                     let _ = command
-                        .create_response(
-                            &ctx.http,
-                            CreateInteractionResponse::Message(
-                                safe_interaction_response_message()
-                                    .content(message)
-                                    .ephemeral(true),
-                            ),
-                        )
+                        .edit_response(&ctx.http, safe_edit_interaction_response().content(message))
                         .await;
                 }
             }
